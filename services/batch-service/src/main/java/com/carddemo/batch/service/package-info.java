@@ -44,13 +44,17 @@
  *
  * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
  *
- * <p>Assumptions: every inventory, class name and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, not the set of files
- * present beside this one today. The migration lands its artifacts in plan order and this
- * charter is authored first, so at the checkpoint that authored it this directory holds
- * this charter and nothing else. A class or test named below that has no file yet is
- * therefore <b>planned</b>, not missing, and a count below is a target total rather than a
- * measurement of the directory.</p>
+ * <p>Refactoring Rationale: this section used to say that the directory held this charter and nothing
+ * else, and that every class named below was planned rather than delivered. Measured at this revision
+ * all FOUR are delivered -- {@code PostingValidationService}, {@code CategoryBalanceService},
+ * {@code InterestCalculationService} and {@code DatasetGenerationService} -- alongside
+ * {@code BatchStepLedger}, which is named separately below because it transcribes no paragraph. The
+ * earlier wording was accurate when written and became the single most misleading paragraph in the file
+ * once the classes landed: a reader consulting it to learn whether the posting reject chain existed was
+ * told it did not, and the four rules it governs -- the reject precedence, the two category-balance
+ * arms, the {@code DEFAULT} rate fallback and the retention discipline -- read as descriptions of work
+ * still to do rather than of behaviour under test. Each entry below now carries LANDED or PLANNED
+ * against the directory beside it, which is a claim to be re-measured whenever a file is added.</p>
  *
  * <p>Alternatives Considered: withholding this charter until every class it governs
  * exists. Rejected, because the charter is what the authors of those classes work from --
@@ -78,15 +82,25 @@
  *
  * <dl>
  *   <dt>{@code PostingValidationService}</dt>
- *   <dd>PLANNED, not yet authored. The posting reject chain, transcribed from
+ *   <dd>LANDED. The posting reject chain, transcribed from
  *       {@code app/cbl/CBTRN02C.cbl:370-420}. Three paragraphs carry it:
  *       {@code 1500-VALIDATE-TRAN} at {@code :370} is the entry point,
  *       {@code 1500-A-LOOKUP-XREF} at {@code :380} resolves the card cross-reference and
  *       {@code 1500-B-LOOKUP-ACCT} at {@code :393} resolves the account and applies the
- *       two balance and date tests. Assumptions: the baseline evaluates its four
- *       conditions in a short-circuit order that is itself part of the contract, because a
- *       transaction failing two of them is rejected under the first one reached rather than
- *       under the more severe one. The order is therefore preserved as an order, and the
+ *       two balance and date tests. Assumptions: the baseline's precedence is MIXED and not
+ *       uniformly first-reason-wins, and the mixture is part of the contract. The first two
+ *       conditions short-circuit: the card lookup at {@code :372} guards the account lookup
+ *       at {@code :373}, so reason 100 excludes 101, and the account read's
+ *       {@code NOT INVALID KEY} branch at {@code :400} encloses both boundary tests, so
+ *       reason 101 excludes both 102 and 103. The last two do NOT short-circuit: the two
+ *       boundary blocks at {@code :407} and {@code :414} are sequential and unguarded --
+ *       line 413 closes the first and line 414 opens the second with no test of the reason
+ *       between them -- so a transaction failing BOTH has the second assignment overwrite
+ *       the first and is reported as 103. First-reason-wins over the first two, last-writer-wins
+ *       over the last two. An earlier revision of this entry described the whole chain as
+ *       first-reason-wins, which is exactly the reading a naive transcription produces: it
+ *       yields 102 for a transaction that is both over the limit and late, where the
+ *       reference yields 103. The order is therefore preserved as an order, and the
  *       precedence itself is not decided here -- see the boundary section below for the
  *       type that owns it. The two boundaries those tests guard are inclusive in the
  *       baseline and stay inclusive: a balance landing exactly on the credit limit posts
@@ -94,7 +108,7 @@
  *       expiration date posts while one day past rejects.</dd>
  *
  *   <dt>{@code CategoryBalanceService}</dt>
- *   <dd>PLANNED, not yet authored. The transaction-category-balance maintenance,
+ *   <dd>LANDED. The transaction-category-balance maintenance,
  *       transcribed from {@code app/cbl/CBTRN02C.cbl:467-539}. Three paragraphs carry it:
  *       {@code 2700-UPDATE-TCATBAL} at {@code :467} reads the category row and selects an
  *       arm, {@code 2700-A-CREATE-TCATBAL-REC} at {@code :503} is the create arm and
@@ -107,7 +121,7 @@
  *       branch a test can name.</dd>
  *
  *   <dt>{@code InterestCalculationService}</dt>
- *   <dd>PLANNED, not yet authored. The monthly interest accrual, transcribed from
+ *   <dd>LANDED. The monthly interest accrual, transcribed from
  *       {@code app/cbl/CBACT04C.cbl:415-500}. Four paragraphs carry it:
  *       {@code 1200-GET-INTEREST-RATE} at {@code :415} reads the disclosure group,
  *       {@code 1200-A-GET-DEFAULT-INT-RATE} at {@code :443} is the fallback that re-reads
@@ -124,7 +138,7 @@
  *       per row instead of one per account.</dd>
  *
  *   <dt>{@code DatasetGenerationService}</dt>
- *   <dd>PLANNED, not yet authored. The generation-dataset retention discipline that stands
+ *   <dd>LANDED. The generation-dataset retention discipline that stands
  *       in for the baseline's generation data groups. Ten bases exist, not six, and the
  *       count is the baseline's own across three defining jobs rather than the six of any
  *       one of them: {@code app/jcl/DEFGDGB.jcl} defines six, at lines 25, 31, 37, 43, 49
@@ -144,121 +158,66 @@
  *
  * <h2>Invariants every class in this package inherits</h2>
  *
- * <p>Six rulings, each of which a sibling class depends on and none of which is a
- * preference. They are stated here rather than repeated in four places so that they cannot
- * drift apart across the four.</p>
+ * <p><b>5. Money is {@code BigDecimal} at scale 2 under one rounding contract.</b> The
+ * migration plan's transformation rule T3 fixes the representation at every hop, forbids
+ * {@code double} and {@code float} in the money path -- which the shared architecture test
+ * asserts rather than requests -- and states one mode,
+ * {@code com.carddemo.common.money.Money#GENERAL_ROUNDING}, which is
+ * {@code RoundingMode.HALF_UP}. It governs every monetary reduction in this package,
+ * the accrual included: {@code Money#monthlyInterest} takes no mode parameter, so no call
+ * site can select a different one.</p>
  *
- * <p><b>1. No class here declares {@code Transactional}.</b> The transaction boundary
- * belongs to the job layer. {@code com.carddemo.batch.config.DataSourceConfig} establishes
- * one non-distributed data source with one auto-configured transaction manager over it and
- * no coordinator of any kind, and {@code com.carddemo.batch.config.BatchConfig} owns the
- * chunk transaction that wraps a step. The migration plan places the posting unit of work,
- * at its section 0.5.1.7, under a single boundary on
- * {@code com.carddemo.batch.job.PostTransactionsJob} and not here. A class in this package
- * therefore participates in the caller's transaction and never opens, commits or rolls
- * back one.</p>
+ * <p>Assumptions: the reference accrual truncates where this package rounds half up, and the
+ * difference is recorded here so a later reader does not read it as an oversight. The
+ * baseline statement at {@code app/cbl/CBACT04C.cbl:464-465} reads
+ * {@code COMPUTE WS-MONTHLY-INT} then {@code = ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200} and
+ * carries no {@code ROUNDED} phrase -- nor does any other statement in that program -- and
+ * its target field declared {@code PIC S9(09)V99} at line 168 therefore discards surplus
+ * digits toward zero. That costs at most one cent, and only on a quotient landing exactly on
+ * a half cent; it is registered as divergence C-ROUNDING in
+ * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
  *
  * <p>Assumptions: that unit of work is genuinely three writes and the baseline applies all
  * three or none. {@code app/cbl/CBTRN02C.cbl:440-442} performs
  * {@code 2700-UPDATE-TCATBAL} at line 440, then {@code 2800-UPDATE-ACCOUNT-REC} at line
  * 441, then {@code 2900-WRITE-TRANSACTION-FILE} at line 442, all inside the
- * {@code 2000-POST-TRANSACTION} paragraph. Annotating a method in this package would open
- * a nested boundary inside that one, and a nested boundary is how the three writes stop
- * being one commit: a posted transaction whose category balance has not moved, or an
- * updated account balance with no matching transaction row, are states the baseline cannot
- * produce. A golden-master comparison would report either as a parity failure, and it
- * would be right to.</p>
+ * {@code 2000-POST-TRANSACTION} paragraph.</p>
  *
- * <p><b>2. No retry annotation, and no resilience library.</b> Retry here is durable
- * rather than in-process: {@code com.carddemo.batch.config.BatchConfig} records that the
- * retry tier is the state machine's per-state retry, backed by queue redelivery into a
- * dead-letter queue, and the migration plan records at its section 0.6.1.1 that no
- * resilience library is adopted anywhere in the reactor. So no {@code Retryable}, no
- * {@code EnableResilientMethods} and no circuit breaker appears in this package.</p>
+ * <p>Refactoring Rationale: the reason this rule is stated as a rule is a <b>readability</b> one,
+ * not a correctness one, and an earlier revision of this paragraph got that backwards. It claimed
+ * that annotating a method here "would open a nested boundary inside that one". It would not:
+ * {@code Transactional} defaults to {@code Propagation.REQUIRED}, which JOINS the caller's
+ * transaction and opens nothing, so an ordinary annotation on a method in this package is
+ * behaviourally inert when the job layer has already begun the unit of work. The two propagation
+ * modes that genuinely would split it are {@code REQUIRES_NEW}, which suspends the outer
+ * transaction and commits an inner one independently, and {@code NESTED}, which commits to a
+ * savepoint the outer transaction can still roll back past -- and either one is how the three
+ * writes stop being one commit: a posted transaction whose category balance has not moved, or an
+ * updated account balance with no matching transaction row, are states the baseline cannot produce,
+ * and a golden-master comparison would report either as a parity failure and would be right to.
+ * Trade-offs: the rule stays absolute -- no annotation of any propagation -- even though the
+ * default one is harmless, because "annotate only with the default, never with the other two"
+ * relies on every future author knowing which of eight enum constants is safe here, whereas "no
+ * annotation in this package" is checkable by grep and states where the boundary lives. What is
+ * given up is the ability to annotate a method for documentation value; the boundary is documented
+ * here instead, once.</p>
  *
- * <p>Alternatives Considered: an in-process retry around a rule in this package. Rejected
- * on two concrete grounds. A rule here is a pure decision over data already read, so there
- * is no transient fault for a retry to absorb -- retrying a validation that rejected a
- * transaction rejects it again. And a retry inside the caller's transaction would re-run
- * work inside a boundary already marked for rollback, which produces a second failure
- * rather than a recovery. A breaker was rejected on its own ground: it would add a failure
- * mode without removing one, since the only calls this module makes leave it through a
- * pool and a queue client that already carry bounded timeouts.</p>
+ * <p>Assumptions: a method here reached with <b>no</b> ambient transaction runs each of its
+ * statements in its own implicit one, which is the case a unit test exercises. That is why the job
+ * layer's boundary is a requirement of the production path rather than a convenience: the classes
+ * in this package are correct only as participants, and nothing in them asserts that a caller
+ * supplied a transaction.</p>
  *
- * <p><b>3. No queue type, no web type and no security type.</b>
- * {@code com.carddemo.batch.config.SqsConfig} is publish-only with a listener that does
- * not start with the context, so nothing in this package consumes a message; a class here
- * is reached by a step, never by a message arrival. The module's negative boundary is
- * settled by {@code com.carddemo.batch.config}: there is no {@code api} subpackage, no
- * controller, no published interface contract, no {@code OpenApiConfig} and no
- * {@code SecurityConfig}. Assumptions: this is a compile-time guarantee and not merely a
- * convention, because {@code services/batch-service/pom.xml} declares neither an API
- * documentation starter nor either security starter -- it records the rejection explicitly
- * at line 229 -- so such a reference would not resolve at all.</p>
+ * <p>Assumptions: a business date arrives as a job parameter and is never read from the
+ * clock, so a rerun is reproducible and the golden comparison is stable. The
+ * {@code reference} schema is read-only to this module: its grant carries {@code SELECT}
+ * and nothing further, so a write attempted against it is refused by the database rather
+ * than by a convention.</p>
  *
- * <p>Trade-offs: the layering itself is asserted by a test rather than requested in prose.
- * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java}
- * is scanned into every module by the {@code architecture-rules} execution declared in
- * {@code services/pom.xml}, so a class here reaching for a forbidden type fails a build
- * instead of waiting for a reviewer to notice. The accepted cost is that a layering
- * question is answered by running a test rather than by reading a comment, which is the
- * trade that keeps the answer true as the tree grows.</p>
- *
- * <p><b>4. Every {@code Stream} this package consumes is closed, with try-with-resources.</b>
- * The repository layer returns forward-only cursors rather than materialised lists, and the
- * cursor is real: {@code services/batch-service/src/main/resources/application.yml} sets
- * {@code auto-commit: false} at line 457, without which the driver ignores the fetch size
- * and buffers the entire result. Assumptions: a caller in this package must therefore both
- * close the stream and stay inside the transaction the job opened, because the cursor is
- * only valid for the life of that transaction. A stream left open pins its pooled
- * connection for the remainder of the step, which is why the same file sets
- * {@code leak-detection-threshold} at line 498 -- a leak here presents as a step that
- * stalls waiting for a connection it is itself holding, which is a considerably harder
- * thing to read than a closed cursor would have been.</p>
- *
- * <p><b>5. Money is {@code BigDecimal} at scale 2, and the interest divide is the one site
- * in this package that truncates.</b> The migration plan's transformation rule T3 fixes
- * the representation at every hop and forbids {@code double} and {@code float} in the money
- * path, which the shared architecture test asserts rather than requests. The general mode
- * is {@code com.carddemo.common.money.Money#GENERAL_ROUNDING}, which is
- * {@code RoundingMode.HALF_UP}, and it governs ordinary monetary reduction throughout.</p>
- *
- * <p>Assumptions: the accrual is the documented exception, and it is recorded here so that
- * a later reader does not normalise it away as an oversight. The baseline statement at
- * {@code app/cbl/CBACT04C.cbl:464-465} reads
- * {@code COMPUTE WS-MONTHLY-INT} then {@code = ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200}, and
- * it carries no {@code ROUNDED} phrase -- nor does any other statement in that program's
- * 652 lines. Its target field is declared {@code PIC S9(09)V99} at
- * {@code app/cbl/CBACT04C.cbl:168}, so the store discards surplus digits toward zero. The
- * shared kernel names that behaviour instead of leaving each caller to rediscover it:
- * {@code com.carddemo.common.money.Money#BASELINE_INTEREST_ROUNDING} is
- * {@code RoundingMode.DOWN}, and {@code Money#monthlyInterest} takes the mode as a
- * required parameter with no no-argument overload, so the choice is explicit at the call
- * site by construction. {@code InterestCalculationService} accrues with the baseline mode.</p>
- *
- * <p>Alternatives Considered: applying the general half-up mode to the accrual as well, on
- * the reading that one mode across the whole money path is easier to check. Rejected,
- * because the two modes disagree by a cent whenever the quotient lands exactly on a half
- * cent, and this is the one module measured against committed golden bytes rather than
- * against transcribed prose, so a cent of disagreement is a parity failure rather than a
- * rounding preference. Trade-offs: the accepted cost is that this package carries two
- * modes and a reader has to know which applies where, which is why the two are named
- * constants on one class rather than literals at four call sites. Arithmetic order is a
- * separate and equally binding constraint under transformation rule T4: the product is
- * formed at full precision and only then divided by 1200, because dividing first yields
- * different cents on many balances.</p>
- *
- * <p><b>6. The {@code reference} schema is read-only to this module.</b>
- * {@code com.carddemo.batch.config.DataSourceConfig} records the four schemas this module
- * spans and their differing grants: {@code batch} is the only one it owns, {@code ledger}
- * and {@code account} are reached under narrowly-scoped cross-schema write grants, and
- * {@code reference} carries {@code SELECT} and nothing further -- its grant in
- * {@code data-migration/sql/V0__schemas_and_roles.sql} at line 815 adds no write
- * privilege. Assumptions: {@code InterestCalculationService} therefore reads a disclosure
- * group and never writes one, and the {@code DEFAULT} group it falls back to must already
- * exist as seeded reference data owned by {@code reference-service}. A fallback that tried
- * to create the missing row would fail on the grant rather than on the logic, and it would
- * also invent a rate the baseline never invents.</p>
+ * <p>Assumptions: every collaborator arrives through constructor injection and no class
+ * here holds mutable static state, which is what lets a rule be unit tested without a
+ * database, a queue or a running step. The reference programs kept their equivalents in
+ * shared {@code WORKING-STORAGE}, so this is a structural change with no behavioural one.</p>
  *
  * <h2>Boundaries this package does not cross</h2>
  *
@@ -275,8 +234,14 @@
  *       factory decides which of those failures is reported. Assumptions: the baseline
  *       expresses the same decision numerically, testing
  *       {@code IF WS-VALIDATION-FAIL-REASON = 0} at {@code app/cbl/CBTRN02C.cbl:211} to
- *       select posting on zero and the reject path otherwise, so a first-reason-wins
- *       assignment is the behaviour being preserved.</dd>
+ *       select posting on zero and the reject path otherwise. Assumptions: what that factory
+ *       preserves is a MIXED precedence rather than a uniform first-reason-wins one --
+ *       first-reason-wins across reasons 100 and 101, which short-circuit their successors,
+ *       and last-writer-wins across reasons 102 and 103, whose two assignment blocks at
+ *       {@code :407} and {@code :414} are sequential and unguarded so that 103 overwrites
+ *       102. Stating it as uniformly first-reason-wins, as an earlier revision did, describes
+ *       an implementation that reports 102 for a transaction failing both boundaries, which
+ *       is a divergence on a combination that is ordinary rather than contrived.</dd>
  *
  *   <dt>Reject codes and their message text belong to
  *       {@code com.carddemo.batch.dto.RejectReason}</dt>
@@ -312,13 +277,20 @@
  *
  * <h2>What this package defines for the job layer</h2>
  *
- * <p>{@code com.carddemo.batch.job} orchestrates and this package decides. The division is
- * worth stating in both directions, because either layer can absorb the other's work
- * without any compiler objecting.</p>
+ * <p>{@code com.carddemo.batch.job} orchestrates and this package decides. A job selects
+ * steps, wires readers and writers and reports a status; it never holds a rule. The methods
+ * here are the named decisions a job calls, and each one corresponds to a cited COBOL
+ * paragraph so that the traceability matrix can pair the two.</p>
  *
  * <p>The four classes here define the named methods a job calls, and each such method is
  * the migrated form of a COBOL paragraph, which is what makes the traceability matrix
- * citable. Everything about HOW those methods are driven belongs to the job layer: step
+ * citable. Refactoring Rationale: a fifth class, {@code BatchStepLedger}, sits beside them and is NOT
+ * a fifth transcription -- it transcribes no paragraph, because the baseline has no checkpoint contract
+ * to transcribe: the only {@code RESTART=} anywhere is commented out at
+ * {@code app/jcl/DEFGDGD.jcl:2} and there is no {@code CHKPT=} in the tree at all. It is here rather
+ * than in the job layer because the decision it makes -- whether a step of a run has already finished,
+ * and with what graded outcome -- is a decision and not a wiring concern, and because the job layer is
+ * the layer it exists to be called BY. Everything about HOW those methods are driven belongs to the job layer: step
  * wiring, reader and writer construction, chunk boundaries, the transaction boundary of
  * invariant 1, the process return code, the reject tally, and the end-of-run summary the
  * baseline renders at {@code app/cbl/CBTRN02C.cbl:227-228} -- two {@code DISPLAY}
@@ -352,17 +324,3 @@
  * which is what the invoking state machine state reads. Neither is a build result.</p>
  */
 package com.carddemo.batch.service;
-
-// WHAT: the twin comment form the four classes of this package inherit, shown against the
-//       one declaration this file carries.
-// WHY : Assumptions: Javadoc binds to a package declaration only when it IMMEDIATELY
-//       precedes it, so this pair sits below the declaration rather than between the
-//       charter and it. An earlier revision of this file placed these lines in that gap,
-//       and the documentation gate rejected the file at the declaration's own line --
-//       MissingJavadocPackage read the charter above as an orphaned comment and reported
-//       the package as undocumented, which is the one outcome this file exists to prevent.
-//       Trade-offs: the pair now follows the declaration instead of preceding it, which is
-//       the accepted cost of keeping intact the Javadoc-to-declaration binding that
-//       MissingJavadocPackage audits. Note also that no type, field, annotation or import
-//       belongs in this file, so this declaration is the whole of its code: a member here
-//       would be one the package's own charter does not govern.

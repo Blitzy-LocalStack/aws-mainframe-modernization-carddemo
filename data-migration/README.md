@@ -503,7 +503,7 @@ verified, not asserted** — three independent sources agree on each one:
 Assumptions: the owning schema is the bounded context that owns the target table, and
 it is what `load-dataset` resolves `--dataset` to. `load-dataset` connects as that
 schema's own login role and no other, so a load can only ever write inside the one
-schema the dataset belongs to — the eight roles in
+schema the dataset belongs to — the eight runtime roles in
 [§11](#11-schema-and-role-bootstrap) are what make that a boundary rather than a
 convention.
 
@@ -1139,9 +1139,11 @@ Two consequences of that ordering are worth stating because they look like defec
   applies it on a later run. Trade-offs: reporting an outstanding grant is the right
   direction to fail in, because an outstanding grant is named in the output whereas an
   over-broad one is invisible.
-- The eight login roles are created with **no** credential clause, because a
-  credential written into a committed SQL file is the defect this migration is
-  correcting. `apply-credentials` ([§5.2](#52-subcommands-and-their-arguments)) is the
+- The fifteen login roles — eight runtime and seven migration — are created with
+  **no** credential clause, because a credential written into a committed SQL file
+  is the defect this migration is correcting. The eight `carddemo_<context>_owner`
+  roles get no credential clause either, and for them it is permanent: they are
+  `NOLOGIN`, so schema ownership is unreachable by authentication. `apply-credentials` ([§5.2](#52-subcommands-and-their-arguments)) is the
   delivered mechanism that makes them able to authenticate, and it must run
   immediately after this script and before any loader.
 

@@ -10,12 +10,25 @@
  * encodes what that specification says rather than redefining it.
  *
  * <p>Assumptions: this charter states the package's target contract as the migration plan assigns
- * it, and not a census of the directory holding it. The two are measurably different: the roster
- * below names 2 controllers, while the directory that carries this charter holds 1 Java file, this
- * charter itself. A controller named in a closed roster of 2 that has no file beside this one is
- * therefore assigned rather than absent, and every count quoted below is a contract figure rather
- * than a measurement of the directory. Declaring that difference once, with both figures given, is
- * what lets the rest of the charter be read in the present tense without misleading anyone.
+ * it, and it is now also a census of the directory holding it: the roster below names 2 controllers
+ * and both have landed beside this charter. The two readings coincide, so every count quoted below
+ * is at once a contract figure and a measurement, and the charter reads in the present tense without
+ * qualification.
+ *
+ * <p>Refactoring Rationale: an earlier revision of this paragraph recorded the two readings as
+ * measurably different, because the directory then held this charter and nothing else. That
+ * declaration was correct while it stood and is removed rather than softened now that it is not.
+ * A stated difference between a contract and a measurement is exactly as misleading once the
+ * difference has closed as it would have been if omitted while the difference was open: a reader
+ * would conclude that neither controller existed and would author one beside those that do.
+ *
+ * <p>Assumptions: the surface those two controllers publish is settled by
+ * {@code src/main/resources/openapi/reporting-api.yaml}, the hand-authored contract of record, and
+ * the two are held together by {@code ReportingApiContractTest}. That test compares the published
+ * operation set against the routes the annotations declare, in both directions, so a published route
+ * with no handler and a handled route with no publication are both build failures. It additionally
+ * asserts that no operation carries a path template, which is the machine-checkable form of the
+ * decision that a statement selector travels in a request body rather than in a request line.
  *
  * <h2>Roster</h2>
  *
@@ -71,12 +84,21 @@
  *
  * <h2>Not owned here</h2>
  *
- * <p>This package owns no persistent data, and neither does the context around it. No table, no
- * index and no view of its own is declared anywhere in this module: every figure a response
- * carries is read through read-only cross-schema views, reached by a database role restricted to
- * {@code SELECT}. It follows that this module carries no data-definition script, no
- * schema-migration artifact and no migration directory, and that any one of those appearing under
- * it would itself be a defect.
+ * <p>This package owns no persistent data. No table, no index and no view of its own is declared
+ * anywhere in this module: every figure a response carries is read through read-only cross-schema
+ * views, reached by a database login restricted to {@code SELECT} on those views. It follows that
+ * this module carries no data-definition script, no schema-migration artifact and no migration
+ * directory, and that any one of those appearing under it would itself be a defect.
+ *
+ * <p>Assumptions: that is a statement about this module and about the login role, and not a claim
+ * that the {@code reporting} schema is empty of tables. The schema holds exactly one,
+ * {@code card_grouping_key}, created by {@code data-migration/sql/V1__reporting_views.sql}, owned
+ * by a no-login role and revoked from the login this module authenticates as, because it holds the
+ * secret that keeps the per-card statement grouping token non-invertible. The distinction is drawn
+ * here because the unqualified form reads as "the schema is empty" and would make the revoke that
+ * withholds that table look like dead code. The authority for the model is
+ * {@code docs/architecture/data-model-and-schema-mapping.md} and it is cited rather than
+ * restated.
  *
  * <p>No exception-advice class is declared here either.
  * {@code com.carddemo.common.error.GlobalExceptionHandler} is a {@code @RestControllerAdvice}, and

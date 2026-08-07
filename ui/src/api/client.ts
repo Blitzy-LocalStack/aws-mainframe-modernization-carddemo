@@ -1,6 +1,8 @@
 import axios from 'axios';
 import type { AxiosInstance, InternalAxiosRequestConfig } from 'axios';
 
+import { runtimeApiBaseUrl } from './runtimeConfig';
+
 const ACCESS_TOKEN_STORAGE_KEY = 'carddemo.access-token';
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MIN_TIMEOUT_MS = 1_000;
@@ -24,15 +26,28 @@ const CORRELATION_ID_ENTROPY_BYTES = 12;
 let client: AxiosInstance | undefined;
 
 /**
- * Resolves and validates the API base URL compiled into this build.
- * @returns {string} The normalized absolute API base URL.
- * @throws {Error} If the build omitted the URL or supplied an unsafe value.
+ * Resolves and validates the API base URL for this environment.
+ *
+ * Refactoring Rationale: the runtime document is consulted **before** the build-time variable, and
+ * the order is the point. `VITE_API_BASE_URL` is inlined when the bundle is produced, which is
+ * before the deployment applies the environment that creates the API endpoint, so it is necessarily
+ * empty for a deployed build and this function used to throw on first render. The published
+ * `config.json` is written after the endpoint is known, so it is the authority wherever it exists;
+ * the compiled variable remains the fallback so a local development server configured by `.env`
+ * keeps working unchanged. See `runtimeConfig.ts` for the full reasoning.
+ *
+ * Assumptions: the resolved value INCLUDES the `/api/v1` prefix. Every operation this client calls
+ * is addressed relatively — `/cards`, `/auth/signon` — while the gateway publishes its route keys
+ * under `/api/v1`, so a base URL without that prefix produces a 404 on every request while looking
+ * correct in both the client and the gateway when each is read alone.
+ * @returns {string} The normalized absolute API base URL, without a trailing slash.
+ * @throws {Error} If no source supplied a URL, or the value supplied is unsafe.
  */
 function apiBaseUrl(): string {
-  const configured = import.meta.env.VITE_API_BASE_URL?.trim() ?? '';
+  const configured = (runtimeApiBaseUrl() ?? import.meta.env.VITE_API_BASE_URL)?.trim() ?? '';
   if (configured.length === 0) {
     throw new Error(
-      'CardDemo API configuration is unavailable; VITE_API_BASE_URL was not supplied for this build.',
+      'CardDemo API configuration is unavailable; neither the published runtime configuration nor VITE_API_BASE_URL supplied an API base URL.',
     );
   }
 
@@ -54,6 +69,11 @@ function apiBaseUrl(): string {
       'CardDemo API configuration is invalid; only HTTPS is accepted outside local development.',
     );
   }
+  // WHY : Assumptions: a PATH is permitted here and the other four components are not. The base
+  //       URL is required to carry `/api/v1`, so rejecting a path would reject every correct
+  //       value; user information, a query and a fragment have no meaning on a base URL and each
+  //       would be silently dropped or appended by the client, so refusing them is refusing a
+  //       configuration that cannot work as written.
   if (
     parsed.username.length > 0 ||
     parsed.password.length > 0 ||
@@ -171,6 +191,19 @@ export function getApiClient(): AxiosInstance {
     client.interceptors.request.use(applyRequestHeaders);
   }
   return client;
+}
+
+/**
+ * Discards the memoized client so the next call rebuilds it.
+ *
+ * Assumptions: the client captures its base URL and timeout when it is first constructed, so a
+ * configuration loaded after that point would not reach it. Bootstrap loads the runtime document
+ * before the first render and therefore before any request, but tests construct clients in several
+ * configurations within one module, and without this they would all observe whichever one ran
+ * first.
+ */
+export function resetApiClient(): void {
+  client = undefined;
 }
 
 /**

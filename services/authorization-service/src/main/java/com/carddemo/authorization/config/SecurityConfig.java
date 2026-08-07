@@ -76,10 +76,25 @@ public class SecurityConfig {
      * -- describes the deployment rather than answering a business question, so it belongs to the operator
      * rather than to every holder of a valid token.</p>
      *
-     * <p>Trade-offs: a metrics scraper must now present a token carrying the administrator group. Nothing
-     * working breaks, because the previous rule already required a token for this namespace and no
-     * credential-free scraper could ever have read it; the change narrows WHICH token is accepted, and
-     * the narrower set is the one an operator holds.</p>
+     * <p>Assumptions: this pattern is a DOCUMENTED BOUNDARY rather than a rule the chain installs, and
+     * the distinction is stated because reading it as a rule leads to the wrong conclusion about who may
+     * scrape metrics. No {@code requestMatchers} call below names it. The one endpoint this service
+     * exposes under the namespace beyond health is {@link #METRIC_SCRAPE_PATH}, and it is granted by
+     * {@link #loopbackOnly()} -- a NETWORK-POSITION rule -- so the scraper presents no token at all and
+     * an administrator token would neither be sent nor help. Anything else under the namespace falls to
+     * the terminal {@code denyAll}. What this constant is FOR is the accompanying unit test, which
+     * asserts that the pattern covers the scrape path and covers no business path, so a future edit that
+     * widened it into the business surface fails a build rather than a request.</p>
+     *
+     * <p>Trade-offs: granting telemetry by address rather than by authority means that one rule cannot
+     * be audited from a token, which is a real cost. Both alternatives are worse and were measured
+     * against the deployment rather than assumed: the configured consumer is the task-local collector
+     * sidecar declared in {@code infra/modules/ecs-service/main.tf}, whose scrape configuration carries
+     * no authorization header, so requiring the administrator group would not narrow who may read
+     * metrics -- it would stop the only consumer that exists, and silently, because a failed scrape is
+     * not a failed request anybody sees. Admitting any authenticated principal instead would grant the
+     * endpoint to every token the identity provider will issue, including one carrying no CardDemo
+     * group at all.</p>
      */
     public static final String MANAGEMENT_PATH = "/actuator/**";
 
@@ -420,4 +435,3 @@ public class SecurityConfig {
         return decoder;
     }
 }
-

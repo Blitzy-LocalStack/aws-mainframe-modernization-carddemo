@@ -54,7 +54,47 @@ import org.springframework.security.web.access.intercept.RequestAuthorizationCon
  * documented divergence, and tightening a control is still a change. The management namespace is the one
  * exception, and it is not a business route -- see {@link #MANAGEMENT_PATH}.</p>
  *
+ * <p>Assumptions: three of this context's operations are read by another CardDemo WORKLOAD rather than by
+ * a signed-on user -- the card cross-reference lookup, the account read and the customer existence check,
+ * which the pending-authorization consumer makes while handling a queue message. That message carries no
+ * user and therefore no token, so those calls can present no group authority at all. They are NOT decided
+ * by this chain: {@link InternalApiSecurityConfig} installs an earlier-ordered chain whose security
+ * matcher names those three exact paths and which accepts only a machine token, and the rules below are
+ * reached by everything else.</p>
+ *
+ * <p>Refactoring Rationale: the internal mechanism this chain used to carry has been withdrawn, and both
+ * halves of the decision are recorded because the withdrawal was not a simplification. This chain
+ * previously installed a bespoke workload-assertion filter and three either-or rules over the same three
+ * paths -- an HMAC credential minted per request over its method and path, verified by code in this
+ * repository. Two mechanisms for one hop is one too many, and the surviving one is a signed JWT whose
+ * verification is the framework's {@code NimbusJwtDecoder} rather than ours: re-implementing expiry,
+ * length and MAC checking is re-implementing audited code, which is the reason the shared kernel adds no
+ * resilience library either. What the withdrawn form bought was replay protection bound into the
+ * signature, and that property is not lost -- it is asserted on the VERIFYING side instead, because the
+ * surviving chain's security matcher admits its token on exactly those three paths and nowhere else, so a
+ * captured token replayed against any other route of this service reaches this chain, which knows nothing
+ * about it, and is refused.</p>
+ *
+ * <p>Assumptions: an earlier-ordered chain is workable here only because the internal matcher names three
+ * EXACT paths rather than the {@code /api/v1/accounts/**} subtree. The account subtree is legitimately
+ * reached by a signed-on user as well, and Spring Security serves a request with the first chain whose
+ * matcher accepts it, so a subtree matcher would have captured every user request to that subtree and
+ * refused it for carrying no machine token. Exact matchers are what keep both callers working.</p>
+ *
+ * <p>Alternatives Considered: forwarding the end user's token from the calling workload, which needs no
+ * second chain and no second credential. Rejected twice over -- there is no user token in a queue message
+ * to forward, and if there were, letting a cardholder's session authorize a cross-context read of master
+ * records would grant that session an authority the migration's security mapping gives it nowhere
+ * else.</p>
+ *
+ * <p>Alternatives Considered: publishing the three internal paths through the public edge and relying on
+ * the machine token alone to protect them. Rejected because the edge's route keys and the load balancer's
+ * path patterns are separate lists, and the narrower of the two is the better place to stop a request that
+ * has no business reaching the edge: the environment roots forward these paths on the INTERNAL load
+ * balancer only, and {@code infra/modules/api-gateway-http} publishes no route key for either of them.</p>
+ *
  * @see CognitoAccessTokenValidator
+ * @see InternalApiSecurityConfig
  */
 @Configuration(proxyBeanMethods = false)
 @EnableWebSecurity
@@ -156,6 +196,48 @@ public class SecurityConfig {
     private static final List<String> LOOPBACK_RANGES = List.of("127.0.0.1/32", "::1/128");
 
     /**
+     * The card cross-reference subtree, which only another CardDemo workload reads.
+     *
+     * <p>Assumptions: no user-facing screen reads this address. The baseline resolves a card to its
+     * account inside {@code COPAUA0C} paragraph {@code 5100-READ-XREF-RECORD}, which runs on the
+     * authorization path and nowhere near a terminal, so this subtree is granted to NO group. The one
+     * internal address inside it is matched by {@link InternalApiSecurityConfig}'s earlier chain; the
+     * rest of the subtree is denied by this one.</p>
+     */
+    public static final String CARD_XREF_PATH_PATTERN = "/api/v1/card-xrefs/**";
+
+    /**
+     * The customer subtree, which only another CardDemo workload reads.
+     *
+     * <p>Assumptions: the account-view screen renders customer fields, but it renders them through the
+     * account read below rather than by addressing this subtree, so this subtree too is granted to no
+     * group. {@code COPAUA0C} paragraph {@code 5300-READ-CUST-RECORD} is its only baseline caller, and
+     * that one address is matched by {@link InternalApiSecurityConfig}'s earlier chain.</p>
+     */
+    public static final String CUSTOMER_PATH_PATTERN = "/api/v1/customers/**";
+
+    /**
+     * The account subtree, which BOTH a signed-on user and another CardDemo workload read.
+     *
+     * <p>Assumptions: this one subtree is legitimately reached two ways, and the two are separated by
+     * CHAIN rather than by an either-or rule. The baseline reaches account view from the main menu at
+     * {@code app/cbl/COMEN01C.cbl}, which both user types reach, and {@code COPAUA0C} paragraph
+     * {@code 5200-READ-ACCT-RECORD} reads the same master record to decide an authorization -- so the
+     * operation is the same whether the caller is a person or the posting decision. What differs is the
+     * credential, and {@link InternalApiSecurityConfig} matches the machine caller's exact path ahead of
+     * this chain, leaving the rest of the subtree to the catch-all's business authorities below.</p>
+     *
+     * <p>Assumptions: this constant is retained although no rule below names it, because it states the
+     * subtree's shape once for the tests that assert which addresses fall inside it. Deleting it would
+     * move that statement into each test.</p>
+     *
+     * <p>Alternatives Considered: a second, workload-only address for the same record, so that each rule
+     * named one caller. Rejected because it would mean two published contracts and two handlers for one
+     * query, and the two would drift the first time a field was added to either.</p>
+     */
+    public static final String ACCOUNT_PATH_PATTERN = "/api/v1/accounts/**";
+
+    /**
      * The authorities that satisfy the catch-all rule, in one place because the test reads the same list.
      *
      * <p>Assumptions: an administrator satisfies the rule as well as an ordinary user. The baseline agrees
@@ -254,6 +336,17 @@ public class SecurityConfig {
                         //       sidecar, which presents no token. See LOOPBACK_RANGES.
                         .requestMatchers(BUILD_IDENTITY_PATH, METRIC_SCRAPE_PATH)
                         .access(loopbackOnly())
+                        // WHY : Assumptions: the two internal-only subtrees are DENIED here, and the
+                        //       rule is not dead. The earlier-ordered internal chain matches the two
+                        //       exact internal paths beneath them, so what reaches this rule is every
+                        //       OTHER address in those subtrees -- and no browser client addresses
+                        //       either subtree at all, which ui/src/api/contracts.test.ts asserts by
+                        //       excluding account-api.yaml from its client inventory. Denying is
+                        //       therefore the narrower reading and the correct one: no baseline screen
+                        //       reads a cross-reference or a customer record directly, so granting a
+                        //       group here would ADD a capability rather than preserve one.
+                        .requestMatchers(CARD_XREF_PATH_PATTERN, CUSTOMER_PATH_PATTERN)
+                        .denyAll()
                         .anyRequest()
                         .access(businessAccess()))
                 .oauth2ResourceServer(server -> server

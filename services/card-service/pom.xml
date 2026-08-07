@@ -267,6 +267,31 @@
     </dependency>
 
     <!--
+      WHY : Assumptions: ONE AWS service module, the key-management client, and
+            not the aggregate SDK artifact. This context enciphers exactly one
+            stored value - the card verification value the baseline held as three
+            display digits in the clear at app/cpy/CVACT02Y.cpy line 7 - through
+            com.carddemo.card.service.CardVerificationValueCipher, which obtains a
+            data key per value and enciphers locally. One module per API keeps the
+            image small and keeps the task role's policy legible: the only calls
+            this context can make are the ones this coordinate makes reachable,
+            which is GenerateDataKey and Decrypt on one key and nothing else.
+      WHY : Assumptions: the version is inherited from the AWS SDK bill of
+            material the aggregator imports, so it cannot drift from the other
+            services' SDK modules.
+      WHY : Alternatives Considered: enciphering the value directly under the
+            customer-managed key rather than under a per-value data key, which
+            would need this same coordinate and less code. Rejected because it
+            puts the plaintext on the wire to a second service and into that
+            service's request path, which is the one path this value must not
+            travel; the rationale is recorded in full on the cipher class.
+    -->
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>kms</artifactId>
+    </dependency>
+
+    <!--
       Assumptions: this module carries the one migration that creates the schema
       it owns, src/main/resources/db/migration/V1__card.sql, so schema ownership
       and code ownership live in the same deployable and cannot be applied out of

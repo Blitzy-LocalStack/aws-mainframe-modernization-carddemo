@@ -11,29 +11,12 @@
 #   artifact, and proves every service Dockerfile builds -- WITHOUT publishing an
 #   image.
 #
-#   Refactoring Rationale: this block previously said "invokes" rather than
-#   "asserts" for the layering step, and explained at length that the rule class
-#   the execution's include pattern names was "authored at a later index of the
-#   migration plan, so until it lands the execution matches no test and reports no
-#   architecture result". That has been overtaken and the wording is corrected
-#   here because it understated a live gate, which is the one direction of
-#   inaccuracy that costs something: a reader who believes a boundary is carried by
-#   review has no reason to trust a green run, and no reason to keep the wiring
-#   that produces it. Measured on this reactor:
+#   The word for the layering step is "asserts", not "invokes":
 #   services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java
-#   EXISTS and runs EIGHT tests in each of the eight service modules that consume
-#   the kernel's test artifact -- four boundary assertions
-#   (`domainPackagesAreIsolatedFromFrameworkAndInfrastructure`,
-#   `noRootDependsOnAnotherRootsDomainModel`,
-#   `moneyPathDeclaresNoBinaryFloatingPoint`, `securityChainsRenderRefusals`) and
-#   four guards that stop them passing vacuously
-#   (`importedProductionGraphIsNotVacuous`, `ownershipContractIsExactlyNineFixedRoots`,
-#   `prohibitionListsStillMatchTheConstructsTheyName`,
-#   `moneyRuleRejectsABinaryFloatingPointDeclaration`) that fail if the scanned graph
-#   is empty, the package-root inventory drifts, a prohibition names a construct that
-#   no longer exists, or the money rule stops rejecting a planted double.
-#   Step 4b carries the verifiable detail, including what the execution still does
-#   NOT assert.
+#   is evaluated in every service module that consumes the kernel's test artifact,
+#   and a violated boundary reddens the run. Step 4b enumerates that class by role
+#   -- boundary assertions and anti-vacuity guards -- and deliberately states no
+#   count, for the reason recorded there.
 #
 #   This workflow owns ONLY the migrated trees. The COBOL baseline under app/**,
 #   the parity-oracle suite under tests/**, its runners under scripts/**, and the
@@ -54,7 +37,7 @@
 #   pydocstyle gate; the ETL distribution build/install; the ETL pytest run;
 #   every service image build; the ArchUnit layering execution asserted by step 4b,
 #   which fails the run on a violated boundary AND on a vanished one, because the
-#   execution now carries `failIfNoTests` through an inherited profile in
+#   execution carries `failIfNoTests` through an inherited profile in
 #   services/pom.xml keyed on a module owning `src/main/java`; and the report
 #   uploads, whose `if-no-files-found: error` turns a missing report into a failure.
 #   ADVISORY -- never overrides the authoritative status: the two JUnit
@@ -73,7 +56,7 @@
 #   accommodate, so importing that tolerance would silently swallow real
 #   failures.
 #
-# WHY (non-obvious design decisions):
+# Design decisions:
 #   - Alternatives Considered: one serial job covering both languages. Rejected
 #     because the Java reactor and the ETL package consume none of each other's
 #     build products, so declaring no `needs:` edge between them lets a Java
@@ -100,7 +83,7 @@
 
 name: CardDemo Services CI
 
-# WHY : Assumptions: CONTRIBUTING.md L37 asks contributors to "Pay attention to any automated CI
+# Assumptions: CONTRIBUTING.md L37 asks contributors to "Pay attention to any automated CI
 # failures reported in the pull request", which only works if the gates run on pull_request;
 # running on push as well means the default branch is verified even for a change that reached it
 # without a pull request. CONTRIBUTING.md L26 states contributions are made "against the latest
@@ -135,7 +118,7 @@ on:
       - ".github/workflows/services-ci.yml"
   workflow_dispatch:
     inputs:
-      # WHY : Trade-offs: this input exists because the container-image validation is by far the
+      # Trade-offs: this input exists because the container-image validation is by far the
       # most expensive gate here, and it is the one gate that proves nothing about a change
       # confined to documentation or to a test. Exposing a toggle lets a maintainer re-run every
       # source, test and documentation gate without paying for the image builds again. It defaults
@@ -148,7 +131,7 @@ on:
         type: boolean
         default: true
 
-# WHY : Trade-offs: least privilege -- the workflow-level default is read-only, so any job or step
+# Trade-offs: least privilege -- the workflow-level default is read-only, so any job or step
 # added later starts with no write capability and must ask for it deliberately. `contents: read`
 # is the single scope needed at this level, and it exists for exactly one step per job:
 # actions/checkout, which reads the reviewed revision. Every other scope is granted per job below
@@ -156,7 +139,7 @@ on:
 permissions:
   contents: read
 
-# WHY : Trade-offs: the group key is the workflow plus the ref, so runs are superseded only within
+# Trade-offs: the group key is the workflow plus the ref, so runs are superseded only within
 # one branch and two branches never cancel each other. cancel-in-progress is true because this
 # workflow only reads the repository and writes throwaway build output -- cancelling it mid-flight
 # leaves no remote state, no published image and no deployment half-finished, so rapid pushes
@@ -169,30 +152,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # WHY : Assumptions: this job carries no `needs:` because nothing produces an input it consumes;
+  # Assumptions: this job carries no `needs:` because nothing produces an input it consumes;
   # it and the data-migration job below are deliberately independent so both languages' failures
   # appear in one run (see the header's first WHY).
   java-services:
     name: Build, test and gate the Java services
-    # WHY : Trade-offs: the runner image is pinned rather than drifting silently with
+    # Trade-offs: the runner image is pinned rather than drifting silently with
     # `ubuntu-latest`, because this job depends on the image's Docker daemon and its preinstalled
     # JDK layout; an unreviewed image change could alter either and turn an unrelated week into a
     # build failure with no commit to blame.
     runs-on: ubuntu-24.04
-    # WHY : Trade-offs: a bounded ceiling so a hung Maven resolution or a stalled image build
+    # Trade-offs: a bounded ceiling so a hung Maven resolution or a stalled image build
     # releases the runner instead of occupying a slot until the platform's own limit expires. The
     # value is deliberately well clear of an ordinary run so it acts only as a runaway stop, never
     # as a pass/fail signal -- a timeout here means something is wrong, not that the build needed
     # more room.
     timeout-minutes: 60
-    # WHY : Assumptions: least privilege -- `contents: read` and nothing else. This job runs
+    # Assumptions: least privilege -- `contents: read` and nothing else. This job runs
     # repository-controlled build steps -- Maven with the committed POM graph and
     # its plugin closure, and `docker build` over each committed Dockerfile -- so a
     # change to any of those files executes here. A token that could also write
     # check runs or comment on pull requests would be reachable from that code, and
     # the write scopes are needed by exactly one step, an ADVISORY publisher that
     # only reads an uploaded artifact.
-    # WHY : Refactoring Rationale: the publisher therefore moved out of this job
+    # Refactoring Rationale: the publisher therefore moved out of this job
     # into `publish-java-reports` below, which runs no build step at all. An earlier
     # revision granted `checks: write` and `pull-requests: write` here and relied on
     # the publisher being the last step -- but step ordering is not an isolation
@@ -206,7 +189,7 @@ jobs:
     steps:
       # Step 1: obtain the exact revision under review, so every gate below runs
       # against the reviewed tree rather than a moving branch tip.
-      # WHY : Alternatives Considered: CWE-1357, supply-chain hardening -- even a FIRST-party
+      # Alternatives Considered: CWE-1357, supply-chain hardening -- even a FIRST-party
       # GitHub-authored action is pinned to an immutable full 40-character commit
       # SHA rather than the mutable major tag `@v4`. A floating tag can be
       # silently repointed -- by a tag move, a branch-protection lapse or a
@@ -214,7 +197,7 @@ jobs:
       # token on trusted push and workflow_dispatch runs; a full SHA is
       # content-addressed and cannot be moved. The trailing `# v4.2.2` keeps the
       # pin human-readable and lets Dependabot or Renovate bump it forward.
-      # WHY : Assumptions: CWE-522, `persist-credentials: false` -- by default checkout leaves the
+      # Assumptions: CWE-522, `persist-credentials: false` -- by default checkout leaves the
       # job's `GITHUB_TOKEN` in `.git/config` as an extraheader for the rest of the
       # job, so every later step -- a Maven plugin, a `docker build`, a transitively
       # resolved dependency's build script -- runs with a usable write-capable
@@ -233,23 +216,51 @@ jobs:
           persist-credentials: false
 
       # Step 2a: provide the JDK the reactor targets.
-      # WHY : Assumptions: the version pin -- the reactor's enforcer requires Java 21 and the
+      # Assumptions: the version pin -- the reactor's enforcer requires Java 21 and the
       # Spring Boot parent targets a Java 21 release, so 21 is the toolchain the POM already
       # demands rather than a preference expressed here.
-      # WHY : Assumptions: the distribution -- Corretto matches the vendor each service Dockerfile
+      # Assumptions: the distribution -- Corretto matches the vendor each service Dockerfile
       # uses for BOTH its build and runtime stages, so a vendor-specific or class-file-level
       # behaviour cannot pass CI and then appear only in the shipped image.
-      # WHY : Trade-offs: the cache key -- `cache-dependency-path` narrows the cache to the
+      # Trade-offs: the cache key -- `cache-dependency-path` narrows the cache to the
       # committed POM graph, so the key changes when a declared dependency changes and a stale
       # entry cannot mask a dependency that no longer resolves. A branch-wide key was rejected for
       # exactly that reason.
-      # WHY : Alternatives Considered: a mutable tag (CWE-1357). Pinned to an immutable full
-      # commit SHA for the same supply-chain reason as checkout above. v4.7.1 is deliberately kept
-      # on the v4 major line the workflow already used, so the pin hardens provenance WITHOUT
-      # taking on a major-version behavioural change at the same time; the trailing `# v4.7.1`
+      # Alternatives Considered: a mutable tag (CWE-1357). Pinned to an immutable full
+      # commit SHA for the same supply-chain reason as checkout above; the trailing `# v5.7.0`
       # lets Dependabot bump it forward under review.
+      # WHY : Refactoring Rationale: this pin was v4.7.1, and the note here argued for STAYING on
+      # the v4 line so that hardening provenance would not "take on a major-version behavioural
+      # change at the same time". That argument is withdrawn, because a full SHA freezes the bundle
+      # it names and this particular bundle was vulnerable: the lock committed at
+      # actions/setup-java@v4.7.1 resolves `form-data` 2.5.1 and 4.0.0, both below the 2.5.4/4.0.4
+      # fix line of GHSA-fjxv-7rqg-78g4 (unsafe random boundary selection), reached through
+      # `@azure/core-http` behind `@actions/cache`. The v5.0.0 release notes name the fix
+      # explicitly -- "Upgrade form-data to bring in fix for critical vulnerability" -- and the lock
+      # at v5.7.0 carries no `form-data` entry at all. Measured from the published locks at those
+      # tags rather than inferred from a version number.
+      # WHY : Assumptions: the SAME defect was measured in three further pins this workflow family
+      # used and is fixed the same way, so the four moves are one decision recorded once here:
+      # actions/setup-python v5.3.0 (2.5.1 and 4.0.0) -> v7.0.0, actions/upload-artifact v4.4.3
+      # (4.0.0) -> v7.0.1, actions/download-artifact v4.1.8 (4.0.0) -> v8.0.1. A fifth, unflagged
+      # by review, was found by the same measurement and moved with them: actions/setup-node
+      # v4.4.0 in ui-ci.yml and deploy.yml carried 2.5.1 and 4.0.0 through the same cache
+      # dependency. actions/checkout@v4.2.2 was measured too and resolves NO `form-data`, which is
+      # why it is left where it is rather than moved for symmetry.
+      # WHY : Assumptions: every one of these majors runs on `node24` and therefore requires an
+      # Actions Runner of 2.327.1 or newer. That is satisfied here without action, because every
+      # job in this file runs on the GitHub-hosted `ubuntu-24.04` image, whose runner is updated by
+      # GitHub and has been past that release since 2025. Trade-offs: a SELF-HOSTED runner would
+      # have to be updated before these pins can run, and the failure mode is a startup error
+      # rather than a silent fallback -- recorded because this repository's workflows are otherwise
+      # written to be portable to a self-hosted fleet.
+      # WHY : Assumptions: the inputs used here survive the major change unchanged --
+      # `distribution`, `java-version`, `cache` and `cache-dependency-path` are all still declared
+      # by v5 -- and v5.7.0's only deprecation, the legacy Adopt distributions, does not touch
+      # `corretto`. The v4 line is now formally deprecated in any case: v4.9.1 exists solely to add
+      # a deprecation warning.
       - name: Configure Java 21
-        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           distribution: corretto
           java-version: "21"
@@ -257,16 +268,16 @@ jobs:
           cache-dependency-path: services/pom.xml
 
       # Step 2b: install the exact Maven release the reactor is validated against.
-      # WHY : Alternatives Considered: a pinned release rather than the runner's preinstalled
+      # Alternatives Considered: a pinned release rather than the runner's preinstalled
       # Maven: the reactor's enforcer requires Maven 3.9 or newer, and the runner image's bundled
       # version can move without a commit here; pinning makes the build tool as reviewable as the
       # code it builds.
-      # WHY : Alternatives Considered: another action instead of verifying the checksum --
+      # Alternatives Considered: another action instead of verifying the checksum --
       # comparing against the SHA-512 Apache publishes for this exact artifact makes a direct
       # download as immutable as an action SHA pin -- the bytes are content-verified, so a
       # compromised or substituted mirror fails closed -- while adding no further third-party
       # action to the supply chain.
-      # WHY : Assumptions: two mirrors -- downloads.apache.org serves only the CURRENT release of
+      # Assumptions: two mirrors -- downloads.apache.org serves only the CURRENT release of
       # each line and moves superseded ones to archive.apache.org, so a single-mirror download
       # breaks permanently the day this version is superseded, with no change here to explain it.
       # archive.apache.org retains every release, so it is the durable fallback. Trade-offs: two
@@ -297,7 +308,7 @@ jobs:
           echo "$RUNNER_TEMP/apache-maven-${version}/bin" >> "$GITHUB_PATH"
 
       # Step 2c: prove the toolchain resolved before any gate depends on it.
-      # WHY : Trade-offs: a dedicated step -- a toolchain that is absent or the wrong major
+      # Trade-offs: a dedicated step -- a toolchain that is absent or the wrong major
       # version otherwise surfaces as a confusing compilation or plugin error deep inside the
       # reactor output. Failing here instead names the real cause in a step whose title already
       # says what was being checked.
@@ -313,12 +324,32 @@ jobs:
       # `validate`, the `architecture-rules` Surefire execution, and every module's
       # unit tests. GATING: any of those failing fails this step.
       #
-      # Assumptions: the middle item is the one whose current reach is narrower
-      # than its name suggests, and step 4b records why in full. It runs, and a
-      # plugin error in it fails this step, but the rule class its include pattern
-      # names is authored at a later index of the plan, so it selects no test and
-      # can report no boundary violation yet. Nothing else in this list has that
-      # qualification.
+      # Assumptions: every item in that list gates on real content, the middle one
+      # included, and step 4b records its wiring in full. Measured on this reactor,
+      # the `architecture-rules` execution reports NINE times in a full run -- eight
+      # consumer modules plus the kernel's own `default-test` run -- and the profile
+      # `architecture-rules-fail-if-absent` makes an empty selection fail rather than
+      # pass, so the gate cannot report green on no tests.
+      #
+      # Refactoring Rationale: this paragraph previously qualified that middle item
+      # as having a reach "narrower than its name suggests", because the rule class
+      # its include pattern names was "authored at a later index of the plan" and so
+      # "selects no test". That class has since landed, and step 4b's own rationale
+      # already records the same correction from the other side -- so this file held
+      # both the live description and the superseded one, forty lines apart. The
+      # stale half is the more expensive one to leave: it invites a reader to treat a
+      # green architecture result as meaningless and to remove the wiring that
+      # produces it.
+      #
+      # Assumptions: `verify` reaches the integration tier, and that is why no
+      # separate step invokes Failsafe. Failsafe binds `integration-test` and
+      # `verify`, both of which a `clean verify` lifecycle passes through, and it is
+      # the second goal that ASSERTS the results the first only records -- so a
+      # failing `*IT` fails this step. Trade-offs: the integration tests need a
+      # container runtime, which the `ubuntu-24.04` runner image provides. If a
+      # future runner does not, this step must fail rather than be made conditional:
+      # a repository test tier that silently does not run is the exact condition the
+      # widening from `test` to `verify` was made to end.
       #
       # Refactoring Rationale: this step ran `clean test`, and the reason recorded
       # here was that `verify` additionally runs the Spring Boot `repackage` goal,
@@ -342,9 +373,37 @@ jobs:
       # the ArchUnit `architecture-rules` execution, every module's Surefire suite,
       # Failsafe's integration suite and `repackage` -- and any one of them failing
       # fails this step and therefore this job.
-      # WHY : Assumptions: the flags -- `-B` selects non-interactive batch output and
+      # Assumptions: the flags -- `-B` selects non-interactive batch output and
       # `--no-transfer-progress` suppresses per-artifact download lines, so a
       # failure is findable in the log instead of buried in resolution chatter.
+      # WHY : Assumptions: ONE integration test in this reactor does not run here, and
+      # the omission is deliberate and visible rather than silent.
+      # account-service's AwsStarterRuntimeIT drives a real parameter-store import and
+      # a real queue round trip against the pinned emulator release, which refuses to
+      # start without a licence token; with no LOCALSTACK_AUTH_TOKEN in this
+      # environment it aborts its own assumption and reports as skipped. Trade-offs:
+      # this job therefore verifies that the Spring Cloud AWS starters START under the
+      # pinned Spring Boot -- AwsIntegrationStartupTest needs no network and does run
+      # here -- and not that they reach a real endpoint. A pipeline holding an emulator
+      # token can set CARDDEMO_REQUIRE_LOCALSTACK=1 alongside it, which turns that skip
+      # into a failure so a run that meant to exercise the layer cannot pass having
+      # skipped it. The same two variables carry the same two meanings in the
+      # repository's COBOL harness, so one convention governs both.
+      # WHY : Assumptions: the OPENAPI CONTRACT gates also run inside this step and have
+      # no step of their own, which is recorded here because a reader auditing "which
+      # step enforces the published contract?" would otherwise find no answer. Each
+      # service that publishes one carries a Surefire test holding its committed
+      # document to the metadata its own configuration serves -- for example
+      # com/carddemo/reporting/api/ReportingApiContractTest.java and
+      # com/carddemo/authorization/config/ContractPublicationTest.java -- so a
+      # contract that is absent, unparseable, routed outside the prefix both hops
+      # forward, or disagreeing with its module about the contract's identity fails
+      # this step. What those tests do NOT decide is agreement with the browser
+      # client, because that comparison spans two languages and two packages: it is
+      # the "Check API contract agreement" step in ui-ci.yml, whose path filter
+      # deliberately includes services/*/src/main/resources/openapi/** so that a
+      # change made on THIS side triggers it. Naming both halves keeps a reader from
+      # assuming either one covers the other.
       - name: Run the reactor build, test and packaging gates
         shell: bash
         run: mvn -B --no-transfer-progress -f services/pom.xml clean verify
@@ -361,7 +420,7 @@ jobs:
       # specific failure reports under a step title naming it. A missing Javadoc
       # here reads as "the documentation gate failed" instead of being buried
       # among the reactor's compilation and test output.
-      # WHY : Trade-offs: no skip or tolerance flag -- `-Dcheckstyle.skip`,
+      # Trade-offs: no skip or tolerance flag -- `-Dcheckstyle.skip`,
       # `-Dcheckstyle.failOnViolation=false` and a trailing `|| true` would each turn this gate
       # into a decoration. None is present, and none may be added.
       - name: Run the Checkstyle documentation gate explicitly
@@ -370,178 +429,94 @@ jobs:
 
       # Step 4b: the reactor's ArchUnit layering execution, surfaced on its own.
       #
-      # GATING ON A BOUNDARY. Measured on this reactor rather than described from
-      # the descriptors: the execution runs EIGHT tests in each of the eight service
-      # modules, and it fails this step on a violated boundary. The four
-      # invariants it holds are a domain type may not depend on an AWS SDK, web or
-      # servlet type; no service may depend on another service's domain package;
-      # no money value may be carried as a float or a double; and a security filter
-      # chain must render its own refusals -- asserted by
-      # `domainPackagesAreIsolatedFromFrameworkAndInfrastructure`,
-      # `noRootDependsOnAnotherRootsDomainModel`,
-      # `moneyPathDeclaresNoBinaryFloatingPoint` and `securityChainsRenderRefusals` in
-      # services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java.
-      # Four further tests in the same class are ANTI-VACUITY guards rather than
-      # boundaries: `importedProductionGraphIsNotVacuous` fails if the scanned
-      # class graph is empty, `ownershipContractIsExactlyNineFixedRoots` fails
-      # if the package-root inventory drifts,
-      # `prohibitionListsStillMatchTheConstructsTheyName` fails if a prohibition
-      # names a construct no longer present, and
-      # `moneyRuleRejectsABinaryFloatingPointDeclaration` plants a double and fails
-      # if the money rule accepts it -- so a rule set that silently stopped
-      # seeing any code cannot report a pass.
+      # GATING ON A BOUNDARY: a violated boundary fails this step. The authoritative
+      # roster is the class itself --
+      # services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java
+      # -- and it is described below by ROLE rather than by count. Refactoring
+      # Rationale: a count here is wrong the moment a rule is added, whereas the two
+      # roles are stable and a reader can check the class against them directly.
+      # Every `@Test` in it is one of:
       #
-      # Refactoring Rationale: this comment previously stated at length that the
-      # step was "NOT YET GATING ON A BOUNDARY", that the include "currently
-      # matches no class", and that the three invariants were "still carried by
-      # review at the time of writing". All three statements have been overtaken by
-      # the rule class landing, and they are corrected rather than trimmed because a
-      # comment that understates a live gate is the more expensive error here: it
-      # invites a reader to treat a green architecture result as meaningless, and to
-      # remove the wiring that produces it as dead weight.
+      #   a BOUNDARY assertion over one of the `ArchRule` constants the class
+      #     declares -- A1 a domain type may not reach for an AWS SDK, Spring Web or
+      #     Jakarta Servlet type; A2 no bounded context may reach into another
+      #     context's domain model; A3 no type in the money path may declare binary
+      #     floating point in any member position; A4 every security-chain
+      #     configuration installs the shared refusal renderers; A5 no CardDemo class
+      #     may depend on a retry or resilience library, which is the SOURCE half of
+      #     the decision in docs/adr/ADR-002-compute-platform.md whose MANIFEST half
+      #     is the `bannedDependencies` enforcer rule in services/pom.xml;
       #
-      # Assumptions: the wiring is verifiable from three files and is recorded here
-      # so that no reader has to reconstruct it. services/pom.xml declares the
-      # Surefire execution `architecture-rules`, bound to the `test` phase, whose
-      # `dependenciesToScan` collects test classes from com.carddemo:common-lib and
-      # whose `includes` narrows the scan to `**/LayeringRulesTest.java`.
-      # services/common-lib/pom.xml publishes that artifact through a test-jar
-      # execution narrowed to the architecture package, and skips the inherited
-      # execution in the module that owns the class -- so the rules are evaluated in
-      # the eight CONSUMERS, against each one's own production classpath, which is
-      # the only place a cross-service dependency could exist to be caught. The
-      # kernel still runs the class once through its ordinary `default-test`
-      # execution, which is why a full reactor run reports it NINE times: eight
-      # architecture-rules executions plus the kernel's own. That ninth run is not
-      # redundant -- it is what catches a violation inside the shared kernel itself,
-      # the one module no consumer's classpath covers.
+      #   an ANTI-VACUITY guard, which fails when the boundary assertions have
+      #     stopped being able to see anything -- an empty scanned class graph, a
+      #     drifted package-root inventory, a prohibition list naming a construct no
+      #     longer present, and a planted `double` that the money rule must reject.
+      #     A rule set that silently stopped seeing code therefore cannot pass.
       #
-      # Assumptions: the execution is now FAIL-CLOSED as well as gating, and the
-      # mechanism deliberately does not live in this file. services/pom.xml carries
-      # an inherited profile, `architecture-rules-fail-if-absent`, activated by the
-      # presence of `${basedir}/src/main/java`, which sets `failIfNoTests` to true
-      # on this execution alone. Every one of the nine real modules has that
-      # directory and the `pom`-packaged aggregator does not, which is what lets the
-      # property apply where a missing rule class is a defect and not apply where no
-      # test source exists by design. Verified by drifting the include to a
-      # non-existent class name: the reactor fails with "No tests were executed!"
-      # naming a service module, and restoring it returns the reactor to green.
+      # Assumptions: the rules are evaluated in the CONSUMERS, not in the module
+      # that owns them, which is why this step names an execution and not a class.
+      # services/pom.xml declares the Surefire execution `architecture-rules` whose
+      # `dependenciesToScan` collects the kernel's test classes; services/common-lib
+      # publishes them as a test-jar and skips the inherited execution itself. Each
+      # consumer therefore evaluates the rules against its own production classpath,
+      # which is the only place a cross-service dependency exists to be caught, and
+      # the kernel's ordinary `default-test` run covers the one module no consumer's
+      # classpath reaches.
       #
-      # Refactoring Rationale: an earlier form of this step named the rule class
-      # directly (`-pl common-lib -Dtest=LayeringRulesTest`). That was wrong twice
-      # over: the shared kernel deliberately SKIPS its own `architecture-rules`
-      # execution, and the rules are meant to be evaluated in the eight service
-      # modules via that execution's `dependenciesToScan` of the kernel's test
-      # artifact -- so the invocation targeted the one module that does not run the
-      # gate, and a `-Dtest=` selector that matches nothing aborts Maven outright
-      # rather than reporting an architecture result. Invoking the POM's named
-      # execution instead keeps the selector where it belongs: the reactor decides
-      # which classes constitute the architecture gate, and this file only asks for
-      # it, so renaming or extending the rules needs no edit here.
+      # Assumptions: the execution is FAIL-CLOSED as well as gating, through the
+      # inherited `architecture-rules-fail-if-absent` profile in services/pom.xml --
+      # activated by a module owning `${basedir}/src/main/java`, which every real
+      # module has and the `pom`-packaged aggregator does not. Keeping it there
+      # rather than on this command line is what makes the guarantee hold for a local
+      # `mvn clean test` too; a command-line property would apply to this invocation
+      # alone, and would name the aggregator as the culprit rather than the module
+      # whose rule class went missing.
       #
-      # Alternatives Considered: adding `-Dsurefire.failIfNoSpecifiedTests=false`
-      # to quiet that abort. Rejected -- that converts "the gate did not run" into
-      # a silent pass, which is the precise failure this workflow exists to
-      # prevent.
-      # Alternatives Considered: passing `-DfailIfNoTests=true` from HERE, on this
-      # command line, rather than from services/pom.xml. Rejected on three grounds,
-      # and the rejection is what determined where the fail-closed setting recorded
-      # above actually went. It names the wrong culprit: measured on this reactor,
-      # the run then fails on project `carddemo-services` -- the `pom`-packaged
-      # aggregator, which owns no test source at all and never will -- so the report
-      # reads "No tests were executed!" against the parent descriptor rather than
-      # naming the module whose rule class is missing, and the eight modules the
-      # rules actually concern are skipped before they are reached. It reports the
-      # absence in one place and hides it in another: a command-line property
-      # applies to this command alone, so `mvn clean test` -- which step 3 runs and
-      # which every contributor runs locally -- would keep passing over an empty
-      # execution in silence, and a gate whose status depends on which command
-      # invoked it is worse than one whose status holds everywhere. And it puts a
-      # build-semantics decision in the pipeline, contradicting this step's own
-      # rationale above that the reactor decides what constitutes the architecture
-      # gate while this file only asks for it. The setting therefore lives in
-      # services/pom.xml, on the execution itself, inside a profile activated by a
-      # module owning `src/main/java` -- which is precisely what excludes the
-      # aggregator that broke the naive form, and which makes the guarantee hold for
-      # a local `mvn clean test` exactly as it holds here.
+      # Alternatives Considered: naming the rule class directly, as
+      # `-pl common-lib -Dtest=LayeringRulesTest`. Rejected on two independent
+      # grounds: that invocation targets the one module which skips the gate, and a
+      # `-Dtest=` selector matching nothing aborts Maven rather than reporting an
+      # architecture result. Naming the execution keeps the selector where it belongs
+      # -- the reactor decides what constitutes the gate, this file only asks for it.
+      # Alternatives Considered: adding `-Dsurefire.failIfNoSpecifiedTests=false` to
+      # quiet that abort. Rejected -- that converts "the gate did not run" into a
+      # silent pass, which is the precise failure this workflow exists to prevent.
       - name: Assert the reactor's ArchUnit layering execution
         shell: bash
         run: mvn -B --no-transfer-progress -f services/pom.xml test-compile surefire:test@architecture-rules
-
-      # Step 4b: run the Testcontainers-backed repository integration tests.
-      # GATING: a *RepositoryIT failure fails this step and therefore the job.
-      #
-      # WHY : Alternatives Considered: a separate step invoking Failsafe's goals directly, rather
-      # than widening the phase in Step 3 from `test` to `verify` -- the reactor binds
-      # `spring-boot:repackage` to the package phase, and it fails on every module
-      # with no main class -- the shared kernel and every service whose entry point
-      # is not yet authored. A `verify` run therefore ends at packaging BEFORE
-      # Failsafe executes, so the integration results would be masked by a failure
-      # that has nothing to do with them, and the run would be red for a reason that
-      # is expected at this checkpoint. Naming `failsafe:integration-test` and
-      # `failsafe:verify` after `test-compile` reaches the integration tier without
-      # entering the package phase at all, so the only thing that can fail this step
-      # is an integration test.
-      # WHY : Alternatives Considered: `failsafe:verify` and not `failsafe:integration-test` alone -- the
-      # integration-test goal RECORDS results and deliberately does not fail the
-      # build, so that post-integration teardown can still run. The verify goal is
-      # what asserts those recorded results. Invoking only the first would run every
-      # test and then pass regardless of the outcome -- the unexecuted-but-green
-      # failure mode inverted into an executed-but-ignored one.
-      # Alternatives Considered: `mvn verify -Dspring-boot.repackage.skip=true`.
-      # Rejected: it disables a production packaging gate workflow-wide to work
-      # around a checkpoint condition, so once the missing main classes land the
-      # skip would silently keep repackaging unverified. This step needs no such
-      # flag and needs no revision when they arrive.
-      # Trade-offs: the integration tests need a container runtime, which the
-      # `ubuntu-24.04` runner image provides. If a future runner does not, this step
-      # must fail rather than be made conditional: a repository test tier that
-      # silently does not run is the exact condition this step was added to end.
-      - name: Run the Testcontainers repository integration tests
-        shell: bash
-        run: >-
-          mvn -B --no-transfer-progress -f services/pom.xml
-          test-compile failsafe:integration-test failsafe:verify
 
       # Step 5: prove every service image definition still builds. VALIDATION
       # ONLY -- nothing is pushed, no registry is contacted and no credential is
       # used, which is why this step needs no secret and no AWS permission at all.
       # GATING: a Dockerfile that no longer builds fails this step.
       #
-      # Trade-offs: this repeats work the deployment workflow also performs.
-      # Accepted deliberately, following the repository's existing
-      # intentionally-redundant-step pattern: paying the duplicate build here
-      # catches a broken container definition on the pull request that introduced
-      # it, whereas leaving it to the deployment workflow defers the same failure
-      # to a point where it blocks a release instead of a review.
+      # Trade-offs: this repeats work the deployment workflow also performs, following
+      # the repository's intentionally-redundant-step pattern. Paying the duplicate
+      # build here catches a broken container definition on the pull request that
+      # introduced it, instead of deferring the same failure to a point where it
+      # blocks a release rather than a review.
       #
-      # WHY : Assumptions: the repository root is the build context -- each service Dockerfile
+      # Assumptions: the repository root is the build context -- each service Dockerfile
       # compiles the unpublished common-lib sibling from source and its inherited
       # documentation gate reads config/checkstyle, which sits OUTSIDE the services
       # reactor -- so its COPY paths are repository-root-relative and every one of
       # them fails if the context is narrowed to services/. Each Dockerfile states
       # this contract in its own header; `.` is what satisfies it.
-      # Refactoring Rationale: this step discovered Dockerfiles and guarded only that
-      # the search matched SOMETHING, on the reasoning that an expected count would
-      # turn adding a service into an unrelated CI failure. That reasoning inverted
-      # the risk. With one Dockerfile on disk and eight services in the reactor, the
-      # `-eq 0` guard passed while SEVEN of the eight images were never built, and it
-      # reported success for validating "1 service image definition(s)" -- a message
-      # that reads like a pass. A missing image is not a neutral absence: it is a
-      # service that cannot be deployed, and it is exactly what a gate on image
-      # validation exists to catch. The count is now asserted.
-      # Assumptions: the canonical count is 8 -- one per module in the reactor except
-      # common-lib, which is a library and produces no image. Deriving it at run time
-      # from the reactor was considered and rejected: the derivation would read the
-      # same tree the assertion is checking, so a module and its image disappearing
-      # together would still pass. A literal is what makes that case fail.
-      # Trade-offs: adding or removing a service now requires editing this number in
-      # the same commit. That is the intended cost -- the edit is one line, it appears
-      # in the diff beside the new or deleted module, and a reviewer sees the image
-      # count change deliberately instead of silently.
-      # GATING: a count other than 8, or a `docker build` failure for any one of
-      # them, fails this step.
-      # WHY : Assumptions: the image is tagged locally -- the tag exists only so `docker build` has a stable name to
+      # Alternatives Considered: guarding only that the discovery matched SOMETHING,
+      # on the reasoning that an expected count turns adding a service into an
+      # unrelated CI failure. Rejected because it inverts the risk: a `-eq 0` guard
+      # passes while every image but one goes unbuilt, and reports success for
+      # validating "1 service image definition(s)" -- a message that reads like a
+      # pass. A missing image is not a neutral absence; it is a service that cannot
+      # be deployed, which is precisely what a gate on image validation is for.
+      # Assumptions: the canonical count is 8 -- one per reactor module except
+      # common-lib, which is a library and produces no image. It is a literal because
+      # deriving it at run time would read the same tree the assertion is checking, so
+      # a module and its image disappearing together would still pass. Trade-offs: the
+      # cost is one line to edit when a service is added or removed, in the diff beside
+      # that module, so a reviewer sees the count change deliberately.
+      # GATING: a count other than 8, or any `docker build` failure, fails this step.
+      # Assumptions: the image is tagged locally -- the tag exists only so `docker build` has a stable name to
       # report; it names no registry host and no account, so nothing here can be
       # mistaken for a publishable reference.
       - name: Build all service images without pushing
@@ -565,10 +540,10 @@ jobs:
           done
 
       # Step 6: retain the machine-readable evidence for audit.
-      # WHY : Trade-offs: `if: always()` -- the reports are most valuable precisely when a gate
+      # Trade-offs: `if: always()` -- the reports are most valuable precisely when a gate
       # failed, so this runs even after an earlier failure; skipping it on failure would discard
       # the only record of WHICH assertion broke.
-      # WHY : Assumptions: these three paths -- Surefire and Failsafe write to their default
+      # Assumptions: these three paths -- Surefire and Failsafe write to their default
       # report directories and the reactor's POM records that this pipeline collects from exactly
       # those two, deliberately not relocating either -- moving one would leave the build green
       # while the pipeline published nothing. The Checkstyle result file is included so a
@@ -576,16 +551,24 @@ jobs:
       # directory is absent until the first integration test exists; a multi-pattern upload
       # succeeds while any one pattern matches, so naming it now keeps the collection contract
       # aligned with the POM rather than needing an edit later.
-      # WHY : Trade-offs: `error` and not `warn` -- the reactor always writes Surefire XML, so an
+      # Trade-offs: `error` and not `warn` -- the reactor always writes Surefire XML, so an
       # empty result set means the tests did not run at all -- a genuine breach of the CI
       # contract. `error` fails the upload loudly instead of hiding a missing-report regression
       # behind a green run. GATING for that reason.
-      # WHY : Alternatives Considered: a mutable tag (CWE-1357). Immutable full-SHA pin, same
-      # supply-chain rationale as the actions above; `# v4.4.3` keeps it readable and
+      # Alternatives Considered: a mutable tag (CWE-1357). Immutable full-SHA pin, same
+      # supply-chain rationale as the actions above; `# v7.0.1` keeps it readable and
       # Dependabot-bumpable.
+      # WHY : Refactoring Rationale: advanced from v4.4.3, whose bundle carried the vulnerable
+      # `form-data` 4.0.0. The measurement and the runner requirement are recorded once at the
+      # setup-java pin above and deliberately not restated, because two copies of one verification
+      # claim drift apart and then one of them is false.
+      # WHY : Assumptions: the three inputs below are unchanged by the major move. v7 adds an
+      # `archive` input that turns a single-file upload into a direct, unzipped one; it defaults to
+      # archiving and is not set here, because this step uploads a multi-glob report set and v7
+      # fails a direct upload whose glob resolves to more than one file.
       - name: Upload Java test reports
         if: always()
-        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: carddemo-services-reports
           path: |
@@ -594,14 +577,14 @@ jobs:
             services/*/target/checkstyle-result.xml
           if-no-files-found: error
 
-  # WHY : Assumptions: this job exists at all because it holds the two write scopes the advisory JUnit
+  # Assumptions: this job exists at all because it holds the two write scopes the advisory JUnit
   # publisher needs, in a job that runs NO repository-controlled code. It checks
   # nothing out, resolves no dependency, and builds no image; its only inputs are
   # the artifacts the build job uploaded. That is what makes the narrowing in
   # `java-services` above real rather than positional -- the token that can create
   # a check run is never present in a job where Maven, a Maven plugin or a
   # Dockerfile executes.
-  # WHY : Assumptions: `needs` plus `if: always()` -- the annotations matter most when a gate
+  # Assumptions: `needs` plus `if: always()` -- the annotations matter most when a gate
   # failed, so this must run after a failed build as well as a passing one.
   # `needs` orders it after the build without making it a gate; the authoritative
   # status was already set by Maven's exit code in the job above and nothing here
@@ -611,10 +594,10 @@ jobs:
     needs: java-services
     if: always()
     runs-on: ubuntu-24.04
-    # WHY : Assumptions: a short ceiling -- this job downloads an artifact and calls one action, so
+    # Assumptions: a short ceiling -- this job downloads an artifact and calls one action, so
     # anything beyond a few minutes is a hang rather than a slow run.
     timeout-minutes: 10
-    # WHY : Assumptions: least privilege -- exactly the two scopes the publisher uses, and no
+    # Assumptions: least privilege -- exactly the two scopes the publisher uses, and no
     # `contents` scope at all -- it never reads the repository. `checks: write`
     # creates the check run that carries the annotations and `pull-requests: write`
     # attaches them to the pull request.
@@ -623,19 +606,28 @@ jobs:
       pull-requests: write
 
     steps:
-      # WHY : Assumptions: CWE-1357 -- immutable full-SHA pin, same supply-chain rationale as
-      # every other pin in this file. Assumptions: this is the FIRST use of
-      # `download-artifact` in this repository, so unlike `upload-artifact` -- which
-      # every workflow here already pins to one shared SHA -- it had no in-repo
-      # precedent to be checked against, and its SHA was therefore established
-      # independently before adoption: `fa0a91b85d4f404e444e00e005971372dc801d16`
-      # is the v4.1.8 release commit of `actions/download-artifact`, corroborated by
-      # the identical SHA/tag pairing in two large, independently-audited public
-      # workflow sets (`nodejs/node` and `llvm/llvm-project`). Recorded here rather
-      # than left implicit because the comments around it assert that pins are
-      # verified, and an unverified pin sitting under that assertion would be
-      # precisely the kind of untrue claim these conventions exist to prevent.
-      # WHY : Assumptions: the version differs from this file's `upload-artifact` pin -- the two
+      # Assumptions: CWE-1357 -- immutable full-SHA pin, same supply-chain rationale as
+      # every other pin in this file. Its SHA is verified rather than copied:
+      # `3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c` is the commit the `v8.0.1` tag of
+      # `actions/download-artifact` resolves to, read from that repository's own tag
+      # reference. Recorded here rather than left implicit because the comments
+      # around it assert that pins are verified, and an unverified pin sitting under
+      # that assertion would be precisely the kind of untrue claim these conventions
+      # exist to prevent.
+      # Refactoring Rationale: advanced from v4.1.8, whose bundle carried the
+      # vulnerable `form-data` 4.0.0; the measurement is recorded once at the
+      # setup-java pin above. The previous note corroborated its SHA against the
+      # SHA/tag pairing used by two large public workflow sets, which established
+      # that the pin named the release it claimed to -- and could not establish
+      # anything about what that release BUNDLED. Reading the release's own lock is
+      # what closed the question, and it is the check this pin is now held to.
+      # Assumptions: v8 changes two defaults in this action's favour and neither
+      # affects the inputs below. A digest mismatch on the downloaded artifact now
+      # FAILS the step instead of logging a warning, which is the behaviour this
+      # repository would have chosen anyway; and non-zipped downloads are no longer
+      # unzipped blindly, which does not arise here because the artifact this step
+      # reads is uploaded as an archive.
+      # Assumptions: the version differs from this file's `upload-artifact` pin -- the two
       # actions ship from separate repositories on separate cadences, so matching
       # version numbers would be a coincidence, not a consistency requirement.
       # ADVISORY -- like the publish step below, this step may fail without
@@ -648,7 +640,7 @@ jobs:
       # report already fails there rather than here.
       - name: Download the Java test reports
         continue-on-error: true
-        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: carddemo-services-reports
           path: java-reports
@@ -658,13 +650,13 @@ jobs:
       # cannot red an otherwise-passing run, and equally cannot green a failing one.
       # Annotation is added visibility and must never become the thing that decides
       # the result.
-      # WHY : Assumptions: CWE-1357 -- this is a THIRD-party action, so the immutable full-SHA pin
+      # Assumptions: CWE-1357 -- this is a THIRD-party action, so the immutable full-SHA pin
       # matters more here than anywhere else -- a maintainer-account takeover or a
       # tag move (as happened publicly to another widely-used action) would
       # otherwise execute attacker code with this job's token. It is pinned to a
       # release whose full 40-character SHA was authoritatively verifiable; a later
       # patch is adopted only once the same is true of it.
-      # WHY : Assumptions: both report globs are published -- the build job runs Surefire and Failsafe as separate
+      # Assumptions: both report globs are published -- the build job runs Surefire and Failsafe as separate
       # gates and uploads both directories, so publishing only the Surefire glob
       # would leave the integration results unannotated -- the half most likely to
       # fail for an environmental reason a reader needs to see.
@@ -679,7 +671,7 @@ jobs:
           check_name: CardDemo Services Test Results
           fail_on_failure: false
 
-  # WHY : Assumptions: no `needs:` on this job -- the ETL package consumes nothing the Java
+  # Assumptions: no `needs:` on this job -- the ETL package consumes nothing the Java
   # reactor produces -- it is a separate distribution with its own dependency closure -- so making
   # it wait would only delay Python feedback and hide an ETL failure behind an unrelated Java one.
   # Alternatives Considered: chaining it after java-services to halve peak runner usage; rejected
@@ -687,16 +679,16 @@ jobs:
   # than the saved concurrency.
   data-migration:
     name: Lint and test the data-migration package
-    # WHY : Trade-offs: pinned for the same reason as the Java job -- the ETL gates depend on the
+    # Trade-offs: pinned for the same reason as the Java job -- the ETL gates depend on the
     # image's system Python and build toolchain, so the image is reviewed rather than allowed to
     # drift with `ubuntu-latest`.
     runs-on: ubuntu-24.04
-    # WHY : Trade-offs: a bounded runaway stop, as in the Java job. This job installs a
+    # Trade-offs: a bounded runaway stop, as in the Java job. This job installs a
     # hash-verified closure and runs a fast suite, so the ceiling is lower than the Java job's; it
     # still sits well clear of an ordinary run so that reaching it signals a hang, never merely a
     # slow suite.
     timeout-minutes: 45
-    # WHY : Assumptions: least privilege -- `contents: read` and nothing else, for the same reason
+    # Assumptions: least privilege -- `contents: read` and nothing else, for the same reason
     # as the Java job above. This job installs a dependency closure and runs Ruff
     # and pytest over committed source, so a change to any of those executes here;
     # its advisory publisher moved to `publish-etl-reports` below, which runs no
@@ -706,11 +698,11 @@ jobs:
 
     steps:
       # Step 1: obtain the reviewed revision.
-      # WHY : Alternatives Considered: CWE-1357 -- an immutable full-SHA pin rather than the mutable `@v4` tag,
+      # Alternatives Considered: CWE-1357 -- an immutable full-SHA pin rather than the mutable `@v4` tag,
       # for the same reason as the Java job's checkout -- a movable tag can be
       # repointed to run attacker code with this job's token, a content-addressed
       # SHA cannot.
-      # WHY : Assumptions: CWE-522, `persist-credentials: false` -- by default checkout leaves the
+      # Assumptions: CWE-522, `persist-credentials: false` -- by default checkout leaves the
       # job's `GITHUB_TOKEN` in `.git/config` as an extraheader for the rest of the
       # job, so every later step -- a Maven plugin, a `docker build`, a transitively
       # resolved dependency's build script -- runs with a usable write-capable
@@ -729,16 +721,23 @@ jobs:
           persist-credentials: false
 
       # Step 2: provide the interpreter the ETL is pinned to.
-      # WHY : Assumptions: 3.13 specifically -- the ETL container image is built on a 3.13 base
+      # Assumptions: 3.13 specifically -- the ETL container image is built on a 3.13 base
       # and the repository's existing COBOL harness already runs 3.13, so validating on 3.13 means
       # the fixed-point and EBCDIC codec behaviour under test is the same behaviour that runs in
       # production. An interpreter mismatch here would be the worst kind of drift, because a codec
       # that rounds or decodes differently produces plausible numbers that are quietly wrong.
-      # WHY : Alternatives Considered: a mutable tag (CWE-1357). Immutable full-SHA pin, kept on
-      # the v5 major line the workflow family already uses so provenance hardens without absorbing
-      # a major-version runtime change at the same time.
+      # Alternatives Considered: a mutable tag (CWE-1357). Immutable full-SHA pin.
+      # Refactoring Rationale: advanced from v5.3.0, whose bundle carried the vulnerable
+      # `form-data` 2.5.1 and 4.0.0. The note here previously argued for keeping the v5 line so
+      # provenance would harden "without absorbing a major-version runtime change"; that reasoning
+      # is withdrawn for the reason recorded once at the setup-java pin above -- a full SHA freezes
+      # whatever the named release bundled, so staying put preserved the defect precisely.
+      # Assumptions: the only input this step sets, `python-version`, is unchanged by the two
+      # major moves. v7 removes the `pip-install` input, which this step never set, and drops
+      # end-of-life interpreter versions, which does not touch 3.13 -- the version the ETL image
+      # and the repository's existing harness both run.
       - name: Configure Python 3.13
-        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
 
@@ -747,7 +746,7 @@ jobs:
       # restating it, and adds the pinned Ruff, pytest and coverage releases, so
       # one install produces the complete lint-and-test closure and the two files
       # can never disagree about a version they both hold.
-      # WHY : Trade-offs: `--require-hashes` forces pip to verify every resolved artifact against
+      # Trade-offs: `--require-hashes` forces pip to verify every resolved artifact against
       # the SHA-256 recorded in the manifest and to REJECT any unpinned or unhashed requirement,
       # including transitive ones, so a tampered or substituted dependency fails the install
       # closed instead of installing quietly. This is available only because both manifests are
@@ -758,7 +757,7 @@ jobs:
         run: python -m pip install --require-hashes -r data-migration/requirements-dev.txt
 
       # Step 3b: build and install the distribution itself, then test THAT.
-      # WHY : Assumptions: this step exists because the package uses a src layout, which keeps the
+      # Assumptions: this step exists because the package uses a src layout, which keeps the
       # checkout off the default import path precisely so the import the tests exercise is the one
       # the container performs. Step 3a installs only dependencies, so without this step `import
       # carddemo_migration` cannot resolve and the whole suite fails at collection. Alternatives
@@ -770,11 +769,11 @@ jobs:
       # entry point would pass every test here and fail for the first time in the container. That
       # is the exact failure the src layout exists to expose. Building and installing instead
       # makes distribution correctness something the test run genuinely covers.
-      # WHY : Assumptions: `--no-deps` -- every dependency is already present from the
+      # Assumptions: `--no-deps` -- every dependency is already present from the
       # hash-verified install above, so this invocation must not be allowed to resolve anything
       # itself; without the flag pip could fetch an unhashed artifact and quietly undercut the
       # closure Step 3a just guaranteed.
-      # WHY : Assumptions: the `./` prefix -- `pip install data-migration` would resolve an
+      # Assumptions: the `./` prefix -- `pip install data-migration` would resolve an
       # unrelated distribution of that name from the index; the leading `./` forces pip to treat
       # the argument as this local project directory.
       - name: Build and install the ETL distribution
@@ -782,7 +781,7 @@ jobs:
         run: python -m pip install --no-deps ./data-migration
 
       # Step 3c: smoke-test BOTH declared entry points of the installed distribution.
-      # WHY : Assumptions: this step exists because nothing else in this workflow invokes the package. The
+      # Assumptions: this step exists because nothing else in this workflow invokes the package. The
       # lint gate reads files and the test gate imports modules, so a distribution
       # whose sole documented invocation does not resolve installed cleanly and
       # passed every gate -- which is exactly what happened while
@@ -821,7 +820,7 @@ jobs:
       # package's own rule selection authoritative -- including the pydocstyle `D`
       # family that turns the repository's explainability convention into a
       # build-failing check for Python, the counterpart of Checkstyle for Java.
-      # WHY : Trade-offs: no tolerance -- no `|| true` and no `continue-on-error`, for the same
+      # Trade-offs: no tolerance -- no `|| true` and no `continue-on-error`, for the same
       # reason as the Java documentation gate -- a documentation gate that cannot fail is not a
       # gate.
       - name: Run Ruff and the Python documentation gate
@@ -842,7 +841,7 @@ jobs:
       # was added, against the pinned ruff: 90 of 221 declarations in the package
       # source were invisible to Step 4. Excluding or deselecting that module leaves
       # those declarations enforced by nothing.
-      # WHY : Assumptions: an explicit `--junitxml` into a dedicated directory -- the suite writes
+      # Assumptions: an explicit `--junitxml` into a dedicated directory -- the suite writes
       # no machine-readable report by default, and the upload below is what makes the result
       # auditable. The directory is created first because pytest will not create a missing parent
       # for the report file. It is deliberately NOT the repository's `reports/` directory, which
@@ -855,25 +854,26 @@ jobs:
           python -m pytest data-migration/tests --junitxml=data-migration-reports/pytest.xml
 
       # Step 6: retain the ETL evidence under its own artifact name.
-      # WHY : Assumptions: a distinct artifact name -- the Java job uploads separately, and two
+      # Assumptions: a distinct artifact name -- the Java job uploads separately, and two
       # jobs uploading under one name would collide; keeping them separate also means an ETL-only
       # failure is downloadable without the Java reports.
-      # WHY : Trade-offs: `if: always()` -- as in the Java job, the report matters most when a
+      # Trade-offs: `if: always()` -- as in the Java job, the report matters most when a
       # gate failed, so it is collected even after a failure.
-      # WHY : Trade-offs: `error` and not `warn` -- Step 5 always writes this XML when it runs, so
+      # Trade-offs: `error` and not `warn` -- Step 5 always writes this XML when it runs, so
       # an empty directory means the suite did not execute -- exactly the unexecuted-but-green
       # outcome this gate exists to prevent. GATING for that reason.
-      # WHY : Alternatives Considered: a mutable tag (CWE-1357). Immutable full-SHA pin, same
-      # rationale as every other pin in this file.
+      # Alternatives Considered: a mutable tag (CWE-1357). Immutable full-SHA pin, same
+      # rationale as every other pin in this file, and advanced off the vulnerable v4.4.3 bundle
+      # with the rest -- measured once at the setup-java pin above.
       - name: Upload ETL test reports
         if: always()
-        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: carddemo-data-migration-reports
           path: data-migration-reports/**
           if-no-files-found: error
 
-  # WHY : Alternatives Considered: one publisher shared with the Java reports, rejected -- the two
+  # Alternatives Considered: one publisher shared with the Java reports, rejected -- the two
   # build jobs are deliberately independent -- the ETL consumes nothing the Java
   # reactor produces -- so a shared publisher would have to wait for both and would
   # delay ETL feedback behind an unrelated Java build. Each publisher waits only on
@@ -884,14 +884,14 @@ jobs:
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    # WHY : Assumptions: least privilege -- the same two scopes as the Java publisher, no
+    # Assumptions: least privilege -- the same two scopes as the Java publisher, no
     # `contents` scope, and no repository code in the job.
     permissions:
       checks: write
       pull-requests: write
 
     steps:
-      # WHY : Assumptions: CWE-1357 -- immutable full-SHA pin, same rationale as every other pin.
+      # Assumptions: CWE-1357 -- immutable full-SHA pin, same rationale as every other pin.
       # This is the same `download-artifact` SHA the Java publisher above uses, and
       # the provenance note recorded there covers it -- deliberately not restated,
       # because two copies of one verification claim can drift apart and then one of
@@ -906,7 +906,7 @@ jobs:
       # report already fails there rather than here.
       - name: Download the ETL test reports
         continue-on-error: true
-        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: carddemo-data-migration-reports
           path: etl-reports
@@ -916,9 +916,9 @@ jobs:
       # `fail_on_failure: false` keeps a publisher outage from reddening a passing
       # run and, equally important, keeps it from greening a failing one -- pytest's
       # exit code in the build job already set the authoritative status.
-      # WHY : Assumptions: a distinct check name -- it must not collide with the Java job's check or
+      # Assumptions: a distinct check name -- it must not collide with the Java job's check or
       # with the COBOL suite's, so each of the three reports under its own heading.
-      # WHY : Assumptions: CWE-1357 -- third-party action, immutable full-SHA pin, adopted only at
+      # Assumptions: CWE-1357 -- third-party action, immutable full-SHA pin, adopted only at
       # a release whose full 40-character SHA was authoritatively verifiable.
       - name: Publish ETL JUnit annotations
         if: always()

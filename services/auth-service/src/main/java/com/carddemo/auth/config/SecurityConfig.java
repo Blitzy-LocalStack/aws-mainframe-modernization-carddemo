@@ -87,9 +87,16 @@ public class SecurityConfig {
      * stack presenting either address family satisfies the rule and neither has to be guessed at
      * configuration time.</p>
      *
+     * <p>Refactoring Rationale: this method is VISIBLE rather than private, and the visibility exists
+     * for one reason: {@code SecurityConfigTest} applies the decision object this chain installs
+     * instead of assembling an equivalent one from {@link #LOOPBACK_RANGES}. A test that rebuilt the
+     * manager would agree with itself while the installed rule widened, which is the same drift the
+     * inspectable rule table in this class exists to foreclose; the transaction context exposes its
+     * own catch-all decision for exactly that reason.</p>
+     *
      * @return a manager granting access from any address in {@link #LOOPBACK_RANGES}; never {@code null}
      */
-    private static AuthorizationManager<RequestAuthorizationContext> loopbackOnly() {
+    public static AuthorizationManager<RequestAuthorizationContext> loopbackOnly() {
         @SuppressWarnings("unchecked")
         AuthorizationManager<RequestAuthorizationContext>[] byRange = LOOPBACK_RANGES.stream()
                 .map(IpAddressAuthorizationManager::hasIpAddress)
@@ -109,24 +116,38 @@ public class SecurityConfig {
     public static final String HEALTH_PATH = "/actuator/health/**";
 
     /**
-     * The management namespace, which is reachable only by an operator.
+     * The management namespace, reachable only from inside the task.
      *
-     * <p>Assumptions: this pattern is declared AFTER {@link #HEALTH_PATH} in the rule set below, so the
-     * health group keeps its own more specific rule and stays open. Everything else this service exposes
-     * under {@code /actuator} -- {@code info}, {@code metrics} and {@code prometheus}, per the {@code management}
-     * block of {@code application.yml} -- describes the deployment rather than answering a business
-     * question, so it belongs to the operator rather than to every holder of a valid token.</p>
+     * <p>Assumptions: this pattern is the last entry of {@link #OPERATOR_PATHS} and is therefore
+     * MATCHED by the chain, granted by network position alongside the three endpoints named
+     * individually below. It is matched after {@link #HEALTH_PATH}, so the more specific health
+     * pattern keeps its own permit and the uncredentialed probes still reach it; everything else under
+     * {@code /actuator} describes the deployment rather than answering a business question, so it
+     * belongs to whoever is inside the container rather than to every holder of a valid token.</p>
      *
-     * <p>Refactoring Rationale: the rule table below covers every path this contract publishes, so the
-     * catch-all only ever saw the management namespace and paths that reach no handler. That made the
-     * management endpoints the one published surface authorized by the catch-all alone, which required
-     * merely a valid token; naming them explicitly is what moves them behind the operator authority
-     * without weakening the catch-all's own deliberate 404-preserving behaviour.</p>
+     * <p>Refactoring Rationale: this constant previously existed and was matched by NOTHING. Its own
+     * documentation said so -- "no rule below grants the namespace as a whole" -- on the reasoning
+     * that whatever the namespace covered beyond the three named endpoints "reaches no handler", so
+     * leaving it to the catch-all cost nothing. That reasoning was wrong on a matter of fact:
+     * {@code application-dev.yml} publishes {@code env}, {@code configprops} and {@code flyway}
+     * beyond the base list, each of which DOES reach a handler, and each was therefore authorized by
+     * the catch-all alone. The catch-all then required only {@code authenticated()}, which a validly
+     * signed token carrying no CardDemo group satisfies, so the active profiles, the ordered
+     * property-source list, every property name the task received and the migration history of the
+     * {@code auth} schema were readable by any token the pool would issue.</p>
      *
-     * <p>Assumptions: this constant NAMES the namespace and no rule below grants the namespace as a
-     * whole. The endpoints the module actually publishes are each named and granted by network
-     * position; what remains under this pattern reaches no handler, so it is left to the catch-all
-     * rather than given a rule that would only ever answer for a path that does not exist.</p>
+     * <p>Assumptions: matching the NAMESPACE rather than enumerating those three ids is deliberate,
+     * and it is what makes the rule survive a profile it was not written against. The exposure list is
+     * a per-profile property that REPLACES rather than extends the inherited one, so an id can be
+     * added in one file without this one being edited; a namespace rule authorizes whatever that file
+     * adds, while a list of ids would silently omit it.</p>
+     *
+     * <p>Alternatives Considered: refusing the namespace outright with {@code denyAll()} instead of
+     * granting it to the loopback address. Rejected because it would make the dev profile's own
+     * exposure list unreadable by anything, including an operator with a shell inside the task, which
+     * is the only consumer those three ids have -- publishing an endpoint and then denying every
+     * possible caller states two contradictory intentions in two files. The loopback grant refuses
+     * every caller off the box, which is the property the finding asked for.</p>
      */
     public static final String MANAGEMENT_PATH = "/actuator/**";
 
@@ -162,6 +183,24 @@ public class SecurityConfig {
      * of letting it inherit one.</p>
      */
     public static final String METRIC_SCRAPE_PATH = "/actuator/prometheus";
+
+    /**
+     * The paths granted by network position, in the order the chain applies them.
+     *
+     * <p>Assumptions: the chain is BUILT from this list rather than the list describing the chain, so
+     * a test can assert that the management namespace is covered and the assertion cannot pass while
+     * the chain omits it. That is the same arrangement the route-to-authority table above uses, and
+     * for the same reason: the defect this list closes was a constant that named the namespace while
+     * no rule matched it.</p>
+     *
+     * <p>Assumptions: the three specific endpoints are retained ahead of the namespace even though all
+     * four share one decision, so that the endpoints this module's base exposure list publishes are
+     * readable here as names instead of having to be inferred from a wildcard. The namespace entry is
+     * last because it is the backstop for whatever a profile adds, not the statement of what the base
+     * publishes.</p>
+     */
+    private static final List<String> OPERATOR_PATHS =
+            List.of(BUILD_IDENTITY_PATH, METRICS_PATH, METRIC_SCRAPE_PATH, MANAGEMENT_PATH);
 
     /**
      * The loopback addresses the task-local collector can reach this service from.
@@ -227,8 +266,10 @@ public class SecurityConfig {
      * <p>Trade-offs: opening a third path widens the unauthenticated surface of this service by one
      * operation, which is accepted because the alternative is worse in both directions: gating it
      * makes renewal impossible after expiry, and leaving it ungated but unnamed -- which is what a
-     * missing entry here produced -- let it fall through to the catch-all rule, where it required a
-     * valid access token without any rule saying so.</p>
+     * missing entry here produced -- let it fall through to the catch-all, where it required a valid
+     * access token without any rule saying so. Under the present catch-all the same omission is worse
+     * and louder: {@code denyAll()} refuses renewal outright, so a missing entry breaks the operation
+     * instead of quietly mis-gating it.</p>
      */
     public static final String REFRESH_PATH = "/api/v1/auth/refresh";
 
@@ -238,8 +279,15 @@ public class SecurityConfig {
      * <p>Assumptions: the collection and the subtree beneath it are two patterns rather than one,
      * because a single-segment wildcard does not match an empty segment and a subtree pattern does not
      * match the collection itself. Writing only the subtree form would leave the list and create
-     * operations falling through to the catch-all rule, which requires authentication but no
-     * particular group - so both would have been reachable by any ordinary user.</p>
+     * operations matched by no rule at all.</p>
+     *
+     * <p>Refactoring Rationale: what that omission COSTS changed when the catch-all became
+     * {@code denyAll()}, and both halves are worth recording. Under the previous
+     * {@code authenticated()} catch-all it was a fail-OPEN: both operations stayed reachable by any
+     * ordinary user, silently. Under the present rule it is a fail-CLOSED break: both would answer
+     * 403 to an administrator. The second is a defect the first request that exercises the route
+     * finds, which is the point of the change; the pattern pair is retained because these operations
+     * must WORK, not merely be guarded.</p>
      */
     public static final String USER_COLLECTION_PATH_PATTERN = "/api/v1/auth/users";
 
@@ -353,6 +401,16 @@ public class SecurityConfig {
     }
 
     /**
+     * Returns the paths this context grants by network position, in the order the chain applies them.
+     *
+     * @return the ordered operator paths, the last of which is the management namespace; never
+     *     {@code null} and immutable
+     */
+    public static List<String> operatorPaths() {
+        return OPERATOR_PATHS;
+    }
+
+    /**
      * Reports the authority a caller must hold to reach one concrete request path.
      *
      * <p>Assumptions: an open path reports {@code null} exactly as an unmatched path does, because
@@ -363,7 +421,7 @@ public class SecurityConfig {
      * @param requestPath the concrete path of a request, beginning with a solidus; must not be
      *     {@code null}
      * @return the minimum authority required, or {@code null} when no rule matches, which means the
-     *     path is open or falls through to the chain's catch-all
+     *     path is on the open list, on the operator list, or refused by the chain's catch-all
      * @throws NullPointerException if {@code requestPath} is {@code null}
      */
     public static String requiredAuthorityFor(String requestPath) {
@@ -412,9 +470,40 @@ public class SecurityConfig {
      * confused-deputy condition the protection defends against cannot arise, and the two open paths
      * are protected by a credential in the body rather than by anything ambient.</p>
      *
-     * <p>Assumptions: the catch-all requires authentication rather than denying outright. A path this
-     * service does not publish reaches no handler and answers 404, and answering 403 for it instead
-     * would tell an unauthenticated caller which paths exist.</p>
+     * <p>Refactoring Rationale: the catch-all DENIES rather than requiring authentication. The earlier
+     * rule was {@code authenticated()}, justified on the ground that answering 403 for a path this
+     * service does not publish "would tell an unauthenticated caller which paths exist". That
+     * justification does not hold. An unauthenticated caller is answered by the entry point either
+     * way and learns nothing from a deny; it is an AUTHENTICATED caller that could distinguish paths
+     * under the old rule, receiving 404 for a path this service does not publish and a real answer
+     * for one it does, so a uniform deny discloses strictly LESS. The concrete cost of the old rule
+     * was that every path no rule above matched -- which for this module means whatever management ids
+     * a profile publishes beyond the base four -- was granted to any valid token, including one
+     * carrying no CardDemo group, because membership of neither group still satisfies
+     * {@code authenticated()}.</p>
+     *
+     * <p>Trade-offs: an authenticated caller probing a path this service does not serve now receives
+     * 403 where it previously received 404, so it can no longer tell an unserved path from an
+     * unauthorized one. That is the intended direction -- the disclosure is removed rather than added
+     * -- and the price is that a client debugging a mistyped path reads a refusal instead of a
+     * not-found.</p>
+     *
+     * <p>Assumptions: with the catch-all denying, every reachable path must be granted by a rule ABOVE
+     * it, so the three lists this class publishes -- {@link #unauthenticatedPaths()},
+     * {@link #operatorPaths()} and {@link #authorityRules()} -- are the complete statement of what
+     * this service serves. That is the property being bought: a route added without a rule fails
+     * closed and is found by the first request that exercises it, instead of inheriting the widest
+     * grant in the chain.</p>
+     *
+     * <p>Trade-offs: two paths this module's {@code springdoc} keys publish -- the generated document at
+     * {@code /v3/api-docs} and the browsable view at {@code /swagger-ui.html} -- are matched by no rule
+     * above and are therefore refused, where the previous catch-all admitted them to any validly signed
+     * token. That is a real capability given up, and it is recorded at both ends: the keys publishing
+     * them carry the same note. Restoring them would mean either opening a path that describes every
+     * route of the SIGN-ON service to unauthenticated callers, or adding a fourth list of paths whose
+     * only consumer is a developer's browser. Neither is worth the exposure while the committed contract
+     * at {@code src/main/resources/openapi/auth-api.yaml} is the document of record; the card, reference
+     * and authorization contexts reach the same outcome through the same rule.</p>
      *
      * @param http the chain builder; must not be {@code null}
      * @param authenticationConverter the token-to-authentication translation; must not be
@@ -432,17 +521,23 @@ public class SecurityConfig {
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(requests -> {
                     requests.requestMatchers(HEALTH_PATH).permitAll();
-                    // WHY : Assumptions: the management namespace is named right after the health group
-                    //       and before every other rule, so the more specific health pattern keeps its
-                    //       own permit and the rest of the namespace reaches the operator rule rather
-                    //       than the catch-all. It is placed here rather than left to the catch-all
-                    //       because the catch-all deliberately requires only authentication, which for
-                    //       this namespace would mean any valid token could read deployment internals.
-                    // WHY : Assumptions: the management endpoints this module publishes beyond
-                    //       health are granted by NETWORK POSITION and not by authority, because
-                    //       their only configured consumer is the task-local collector sidecar,
-                    //       which presents no token. See LOOPBACK_RANGES.
-                    requests.requestMatchers(BUILD_IDENTITY_PATH, METRICS_PATH, METRIC_SCRAPE_PATH)
+                    // WHY : Refactoring Rationale: this rule is built from OPERATOR_PATHS, whose last
+                    //       entry is the management NAMESPACE. The preceding revision named only the
+                    //       three endpoints the base exposure list publishes, and the comment here
+                    //       claimed the rest of the namespace "reaches the operator rule rather than
+                    //       the catch-all". It did not: nothing matched the namespace, so the three
+                    //       ids application-dev.yml adds -- env, configprops and flyway -- were
+                    //       authorized by a catch-all requiring only a valid token. Matching the
+                    //       namespace is what makes the claim this comment used to make true.
+                    // WHY : Assumptions: the namespace is matched AFTER the health group, so the more
+                    //       specific health pattern keeps its own permit and the uncredentialed
+                    //       probes still reach it, and BEFORE the open paths and the authority rules,
+                    //       which it cannot shadow because it matches only /actuator.
+                    // WHY : Assumptions: every path in the list is granted by NETWORK POSITION and
+                    //       not by authority, because the only configured consumer of any of them is
+                    //       the task-local collector sidecar, which presents no token, and an
+                    //       operator with a shell inside the task. See LOOPBACK_RANGES.
+                    requests.requestMatchers(OPERATOR_PATHS.toArray(String[]::new))
                             .access(loopbackOnly());
                     // WHY : Assumptions: the open paths are applied BEFORE the authority rules, so
                     //       that an exact open path cannot be shadowed by a broader rule declared
@@ -457,7 +552,13 @@ public class SecurityConfig {
                         requests.requestMatchers(rule.pathPattern())
                                 .hasAnyAuthority(acceptedAuthorities(rule.requiredAuthority()));
                     }
-                    requests.anyRequest().authenticated();
+                    // WHY : Assumptions: denyAll and NOT authenticated, so a validly signed token
+                    //       carrying neither CardDemo group reaches nothing at all. Every path this
+                    //       contract publishes is granted by a rule above: the three open paths and
+                    //       the two user-administration patterns cover all five published paths, and
+                    //       AuthApiContractTest asserts that coverage against the contract itself
+                    //       rather than against this list.
+                    requests.anyRequest().denyAll();
                 })
                 .oauth2ResourceServer(server -> server
                         // WHY : Assumptions: the bearer-token filter answers a request whose token was

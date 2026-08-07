@@ -2,6 +2,7 @@ package com.carddemo.authorization.dto;
 
 import com.carddemo.common.money.Money;
 import com.carddemo.common.security.CardNumberMasker;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.Constraint;
 import jakarta.validation.ConstraintValidator;
 import jakarta.validation.ConstraintValidatorContext;
@@ -350,7 +351,15 @@ import java.lang.annotation.Target;
 public record AuthorizationRequestPayload(
         @NotNull @Size(max = AUTH_DATE_WIDTH) String authDate,
         @NotNull @Size(max = AUTH_TIME_WIDTH) String authTime,
-        @NotNull @Size(max = CARD_NUMBER_WIDTH) String cardNumber,
+        // WHY : Assumptions: the serialised NAME is the contract's and the Java NAME is this
+        //   codebase's, and the two differ on purpose. openapi/authorization-api.yaml declares this
+        //   member as cardNum -- the abbreviation PA-RQ-CARD-NUM at CCPAURQY.cpy L21 uses -- while
+        //   the component is spelled out here so that Java reads as Java. Without this annotation
+        //   the two simply disagreed: a document naming cardNum bound to nothing, and a body this
+        //   record emitted carried a member the contract does not declare. Renaming the component
+        //   instead was the alternative and is rejected, because the abbreviation would then
+        //   propagate into every call site and every test in this module to serve one wire name.
+        @NotNull @Size(max = CARD_NUMBER_WIDTH) @JsonProperty("cardNum") String cardNumber,
         @NotNull @Size(max = AUTH_TYPE_WIDTH) String authType,
         @NotNull @Size(max = CARD_EXPIRY_DATE_WIDTH) String cardExpiryDate,
         @NotNull @Size(max = MESSAGE_TYPE_WIDTH) String messageType,
@@ -368,9 +377,10 @@ public record AuthorizationRequestPayload(
         //   moved. What DOES accompany it is the record's own value domain, argued at the annotation
         //   below: the money type bounds the magnitude and admits a negative, and a negative
         //   authorization amount is not a smaller charge but a credit the requester grants itself.
-        @NotNull @AmountWithinRecordDomain Money transactionAmount,
+        @NotNull @AmountWithinRecordDomain @JsonProperty("transactionAmt") Money transactionAmount,
         @NotNull @Size(max = MERCHANT_CATEGORY_CODE_WIDTH) String merchantCategoryCode,
-        @NotNull @Size(max = ACQUIRER_COUNTRY_CODE_WIDTH) String acquirerCountryCode,
+        @NotNull @Size(max = ACQUIRER_COUNTRY_CODE_WIDTH) @JsonProperty("acqrCountryCode")
+                String acquirerCountryCode,
         @NotNull @Size(max = POS_ENTRY_MODE_WIDTH) @Pattern(regexp = DIGITS_ONLY)
                 String posEntryMode,
         @NotNull @Size(max = MERCHANT_ID_WIDTH) String merchantId,
@@ -500,6 +510,16 @@ public record AuthorizationRequestPayload(
      * executable positions, which is what lets two constraints come to disagree about it.
      */
     private static final String DIGITS_ONLY = "[0-9]+";
+
+    /**
+     * The text this record's rendering emits in place of a component it withholds.
+     *
+     * <p>Assumptions: a NAMED marker rather than an omitted component, so a reader can tell a withheld
+     * value from a value that was absent and from a rendering that forgot the component. The same
+     * spelling is used by {@code com.carddemo.common.codec.CsvAuthCodec} on the two wire carriers of the
+     * same record, so one grep finds every withholding across both layers.</p>
+     */
+    private static final String WITHHELD_MARKER = "<withheld>";
 
     /**
      * Reports whether an amount is inside the domain the pending-authorization record accepts.
@@ -637,22 +657,43 @@ public record AuthorizationRequestPayload(
      * {@code com.carddemo.common.observability.LogSafeText}, applied by the site that writes the log
      * line rather than by the type being written.</p>
      *
-     * <p>Alternatives Considered: (1) omitting the card number entirely, which is what
+     * <p>Alternatives Considered: omitting the card number entirely, which is what
      * {@code com.carddemo.batch.domain.Transaction} does. Rejected here because the transaction
      * identifier alone does not locate an authorization: the persisted composite key is the account
      * and the authorization instant, and an operator reading a consumer failure needs to know which
      * card the message concerned. The last four digits supply that without supplying a usable
-     * number. (2) rendering only the components a failure needs and dropping the merchant block.
-     * Rejected because a consumer failure is usually a validation refusal on one of the eighteen
-     * components, and a rendering that omits fifteen of them cannot say which.</p>
+     * number.</p>
      *
-     * <p>Trade-offs: the money component is rendered in full, and that is deliberate. An amount is
-     * not protected data on its own, it is frequently the reason a message was refused, and this
-     * context's own persisted layouts carry it beside the masked card number for the same reason.</p>
+     * <p>Refactoring Rationale: the rendering is an ALLOWLIST of eleven components rather than all
+     * eighteen, and the seven it withholds are exactly the seven that
+     * {@code com.carddemo.common.codec.CsvAuthCodec} lists as sensitive wire fields for this record:
+     * the card expiry date, the transaction amount, the four merchant identity components and the
+     * transaction identifier. An earlier revision rendered all eighteen and masked only the card
+     * number, on the stated reasoning that a validation refusal is usually on one component and a
+     * rendering that omits some of them cannot say which. That reasoning is answered rather than
+     * overruled: the refusal path names its own offending component -- the mapper that validates this
+     * type reports the payload and the violation count while the violation set travels on the
+     * exception -- so the component a reader needs is supplied by the exception rather than by this
+     * rendering, and this rendering does not have to carry a cardholder's purchase to be useful.</p>
      *
-     * @return a single-line rendering naming this type and all eighteen components, with the card
-     *     number reduced to a mask and its last four digits; the component is labelled as masked so
-     *     that no reader mistakes it for a value that could be replayed onto a queue
+     * <p>Assumptions: the eleven retained components are a date, a time and nine codes from small
+     * closed domains, which is the same line the codec's sensitivity table draws -- cardholder- or
+     * amount-identifying content on one side, closed-domain codes on the other. The merchant STATE is
+     * retained while the merchant name, city, postal code and identifier are withheld, because a
+     * two-character state code names a region rather than a merchant.</p>
+     *
+     * <p>Trade-offs: the amount is now withheld, where an earlier revision rendered it in full on the
+     * ground that "an amount is not protected data on its own". Two things make that ground
+     * insufficient here. The amount is not on its own in this rendering -- it sits beside a masked card
+     * number and a merchant block, and the codec's table withholds {@code PA-RQ-TRANSACTION-AMT} for
+     * precisely that reason. And the two classes that render the same wire record must agree, or the
+     * value reaches the log through whichever of them a failure happens to touch. What is given up is
+     * that a reader reconciling an amount consults the stored decision rather than a log line.</p>
+     *
+     * @return a single-line rendering naming this type, the masked card number and the ten
+     *     closed-domain components, with the seven sensitive components marked as withheld; the card
+     *     component is labelled as masked so that no reader mistakes it for a value that could be
+     *     replayed onto a queue
      */
     @Override
     public String toString() {
@@ -660,19 +701,19 @@ public record AuthorizationRequestPayload(
                 + ", authTime=" + authTime
                 + ", maskedCardNumber=" + CardNumberMasker.mask(cardNumber)
                 + ", authType=" + authType
-                + ", cardExpiryDate=" + cardExpiryDate
+                + ", cardExpiryDate=" + WITHHELD_MARKER
                 + ", messageType=" + messageType
                 + ", messageSource=" + messageSource
                 + ", processingCode=" + processingCode
-                + ", transactionAmount=" + transactionAmount
+                + ", transactionAmount=" + WITHHELD_MARKER
                 + ", merchantCategoryCode=" + merchantCategoryCode
                 + ", acquirerCountryCode=" + acquirerCountryCode
                 + ", posEntryMode=" + posEntryMode
-                + ", merchantId=" + merchantId
-                + ", merchantName=" + merchantName
-                + ", merchantCity=" + merchantCity
+                + ", merchantId=" + WITHHELD_MARKER
+                + ", merchantName=" + WITHHELD_MARKER
+                + ", merchantCity=" + WITHHELD_MARKER
                 + ", merchantState=" + merchantState
-                + ", merchantZip=" + merchantZip
-                + ", transactionId=" + transactionId + ']';
+                + ", merchantZip=" + WITHHELD_MARKER
+                + ", transactionId=" + WITHHELD_MARKER + ']';
     }
 }

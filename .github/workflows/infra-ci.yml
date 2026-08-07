@@ -101,8 +101,13 @@ jobs:
 
       # Assumptions: Python 3.13 is used only to install the exact CI-only
       # Checkov release; it never enters a runtime artifact.
+      # Refactoring Rationale: advanced from setup-python v5.3.0, whose bundle
+      # carried the vulnerable `form-data` 2.5.1 and 4.0.0; the measurement, the
+      # node24 runner requirement and the input-compatibility check are recorded
+      # once at the setup-java pin in services-ci.yml. `python-version` is the only
+      # input set here and v7 still declares it.
       - name: Configure Python for the policy scanner
-        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
 
@@ -380,9 +385,11 @@ jobs:
           assert summary["parsing_errors"] == 0, summary
           PY
 
+      # Assumptions: advanced from upload-artifact v4.4.3 with every other pin in
+      # this workflow family, for the reason measured once in services-ci.yml.
       - name: Upload infrastructure security reports
         if: always()
-        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: carddemo-infra-reports
           path: infra-reports/**
@@ -468,9 +475,12 @@ jobs:
             -var-file=terraform.tfvars -out="$plan_file"
           terraform -chdir="$root" show -no-color "$plan_file" > "$GITHUB_WORKSPACE/infra-reports/${{ inputs.environment }}-plan.txt"
 
+      # Assumptions: the same advanced upload-artifact pin as the static job above,
+      # and the same reason. A plan is audit evidence, so the digest checks the
+      # newer artifact line enforces on retrieval matter here specifically.
       - name: Upload the environment plan
         if: always()
-        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: carddemo-infra-plan-${{ inputs.environment }}
           path: infra-reports/${{ inputs.environment }}-plan.txt

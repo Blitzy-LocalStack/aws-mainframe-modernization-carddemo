@@ -91,7 +91,7 @@ import org.springframework.transaction.annotation.Transactional;
  * <p>Assumptions: the page size is absent from {@link TransactionListRequest} and is therefore not
  * a client's to choose. A different size returns a different set of rows for the same cursor, which
  * is observable behaviour rather than presentation, and every size returns rows that look
- * plausible, so a wrong one would not localise to any test of this class. What is given up is a
+ * plausible, so a mismatched one would not localise to any test of this class. What is given up is a
  * client's ability to ask for fewer rows over a slow link.
  *
  * <p>Refactoring Rationale: each read asks for one row beyond the page, and that surplus row is a
@@ -99,21 +99,21 @@ import org.springframework.transaction.annotation.Transactional;
  * ELEVENTH read whose only purpose is to discover whether anything follows, and lines 309 to 313
  * set the availability condition from that read's outcome alone. The backward path does the same at
  * line 360. Deriving availability from the row count instead would report a further page whenever
- * the page happened to be full, which is wrong for every set whose size is a multiple of ten.
+ * the page happened to be full, which does not hold for any set whose size is a multiple of ten.
  *
  * <p>Refactoring Rationale: the trailing boundary is taken from the LAST ROW THE CALLER RECEIVES
  * and never from that surplus row. The reference proves the distinction rather than merely implying
  * it: the trailing identifier is captured at lines 438 and 439, inside the branch for slot ten of
  * the fill loop, while the probe read at line 308 is never passed to the populating paragraph and
  * so never reaches any slot. Reading the boundary off the probe advances the cursor one row too
- * far, and the row it names is then skipped on the following request -- a defect no test of a
+ * far, and the row it names is then skipped on the following request -- a shortfall no test of a
  * single page can see, because each page is internally consistent and only the seam between two
- * pages is wrong.
+ * pages does not hold.
  *
  * <h2>Comparison by key, never by counted position</h2>
  *
  * <p>Refactoring Rationale: pagination by ordinal position was available and is rejected on a
- * defect rather than a preference. A page positioned by counting rows from the start of an ordered
+ * difference rather than a preference. A page positioned by counting rows from the start of an ordered
  * set moves when a row is inserted before the count, so such a page omits rows it never showed and
  * repeats rows it already showed. The concurrency is attested by the reference material rather than
  * hypothetical: {@code app/cbl/COBIL00C.cbl} mints the next transaction identifier over lines 212
@@ -127,8 +127,9 @@ import org.springframework.transaction.annotation.Transactional;
  * at line 591 names the dataset, the record identification field and the key length at lines 594 to
  * 596, and its greater-or-equal option at line 597 is COMMENTED OUT, so which rows the position
  * admitted came from the access method's default rather than from anything a reader of the source
- * can see. The baseline positions without that option; the Java states the predicate in the query;
- * the divergence is documented here and in the migration traceability register.
+ * can see. The baseline positions without that option; the Java states the predicate in the query; the
+ * divergence is registered as {@code D-BROWSE-PREDICATE-STATED} in
+ * {@code docs/architecture/cobol-to-service-traceability.md}.
  *
  * <p>Trade-offs: the reference expresses inclusion and exclusion as a CONDITIONAL PRIMING READ and
  * this class expresses the same thing as a CHOICE OF FINDER, and the observable page contents are
@@ -147,7 +148,7 @@ import org.springframework.transaction.annotation.Transactional;
  * lines 317 and 318, decrementing it at lines 363 to 366 and resetting it at line 224 before the
  * forward page at line 225. That structure does not travel, and its re-entry discriminator at lines
  * 29 to 31 of that copybook disappears entirely, because a handler that answers one request has no
- * first-entry-versus-re-entry distinction left to make. What was concretely wrong with carrying the
+ * first-entry-versus-re-entry distinction left to make. What carrying the
  * ordinal forward is that it participates in no key comparison anywhere in the program -- its only
  * other use is line 324, which moves it into a display field -- so it could only ever have been a
  * number a client had to be trusted with. This is why {@link TransactionListRequest} carries no
@@ -159,7 +160,7 @@ import org.springframework.transaction.annotation.Transactional;
  * second key part.
  *
  * <p>Assumptions: lexical order over that identifier coincides with numeric order, and that is the
- * property making a character cursor correct. The entity's identity attribute is the {@code String}
+ * property making a character cursor sound. The entity's identity attribute is the {@code String}
  * member {@code tranId} bound to a constant-width character column, not an integer, and every
  * generated identifier fills all sixteen positions: the sequence scheme moves a browsed key into a
  * sixteen-digit numeric work field and back, so a value carries every leading zero. A comparison
@@ -173,7 +174,7 @@ import org.springframework.transaction.annotation.Transactional;
  * of them differ only in how they refer to the top of the page, which is the hazard worth naming:
  * a reader searching for "top of the page" meets {@link #MESSAGE_ALREADY_AT_TOP} at line 248,
  * {@link #MESSAGE_AT_TOP} at line 608 and {@link #MESSAGE_REACHED_TOP} at line 676, and
- * consolidating them would produce output that is plausible and wrong.
+ * consolidating them would produce output that is plausible and unsound.
  *
  * <p>Refactoring Rationale: the boundary condition is detected INSIDE the method that issues the
  * query, not deferred to a caller, because the reference emits the message from inside the browse
@@ -200,7 +201,7 @@ import org.springframework.transaction.annotation.Transactional;
  * screen follows, and the marker never reaches a request.
  *
  * <p>Trade-offs: the partially disabled branch at lines 196 to 202 is reproduced rather than
- * tidied, and it is latent reference behaviour rather than a defect to answer. Line 197 and line
+ * tidied, and it is latent reference behaviour rather than a shortfall to answer. Line 197 and line
  * 202 are both commented out, so an unrecognised row marker moves its message at lines 198 to 200
  * without raising the error switch and without sending the screen, and control FALLS THROUGH to the
  * start-key test at line 206 and on to the forward page at line 225. The observable consequence is
@@ -222,10 +223,10 @@ import org.springframework.transaction.annotation.Transactional;
 public class TransactionListService {
 
     /**
-     * The binding every cursor of this list is sealed and opened under.
+     * The query name every cursor of this list is bound under.
      *
      * <p>Assumptions: the binding is authenticated into a token but is not carried by it, so a
-     * token sealed under this string cannot be redeemed by a query that opens under another. The
+     * token sealed under one binding cannot be redeemed by a query that opens under another. This
      * value names the resource being paged rather than the direction being paged in, because one
      * page's trailing token is replayed forward and its leading token is replayed backward, and two
      * direction-specific bindings would make a token issued by one step unusable by the other.
@@ -234,8 +235,17 @@ public class TransactionListService {
      * a binding differing by a single character between sealing and opening fails authentication
      * and presents as a rejected cursor rather than as a mismatch, which is expensive to diagnose
      * and trivial to prevent.
+     *
+     * <p>Refactoring Rationale: this is the query NAME and no longer the whole binding. An earlier
+     * revision passed it to {@code CursorToken} as the complete binding, which bound every cursor of
+     * this list to the listing and to nothing else -- so a token issued to one authenticated caller
+     * opened for any other, contradicting both this service's published {@code CursorToken} schema
+     * and the shared token's own contract, each of which states that the code covers the query
+     * <em>and the subject</em>. The subject is now folded in by
+     * {@link CursorToken#binding(String, String, String)}, which takes the three parts separately so
+     * that a caller cannot supply a bare constant and get a working token.
      */
-    public static final String CURSOR_BINDING = "transaction-list";
+    public static final String CURSOR_QUERY_NAME = "transaction-list";
 
     /**
      * The message a backward step reports when there is no earlier page to reach.
@@ -378,27 +388,52 @@ public class TransactionListService {
      * profile -- which is exactly how a development default becomes the committed secret the sealed
      * cursor exists to prevent.
      *
+     * <p>Refactoring Rationale: the authenticated subject is a PARAMETER rather than something this
+     * class reaches for, and it is required rather than optional. It is folded into the cursor
+     * binding, so a page's tokens open only for the caller they were issued to; an earlier revision
+     * bound them to the listing alone, which let one authorized caller redeem another's cursor. The
+     * value is supplied by the caller because a service that read it from a thread-bound security
+     * context would be untestable without one and would silently seal an anonymous binding wherever
+     * that context happened to be empty -- a null subject would then be a working token rather than
+     * a refusal.
+     *
+     * <p>Refactoring Rationale: the binding is composed ONCE here and handed to both the opening and
+     * the sealing helper, rather than each of them composing its own from the subject. Composing it
+     * twice is what let the two sides drift apart in the first place, and it also made the blank
+     * subject this method's contract refuses reachable only on the paths that actually touch a
+     * token -- a page that matched no rows composed nothing, so a blank subject was accepted there
+     * and refused everywhere else. Composing eagerly makes the refusal unconditional.
+     *
      * @param request the positioned list request, of type {@code TransactionListRequest}, carrying
      *     an optional start identifier, an optional opaque cursor and the direction that cursor is
      *     read in; must not be {@code null}
      * @param cursorToken the sealer this page's boundary tokens are minted with and the opener an
      *     incoming cursor is redeemed through, of type {@code CursorToken}; must not be
      *     {@code null}
+     * @param subject the authenticated principal this page is produced for, of type {@code String},
+     *     which for a bearer-token caller is the token's subject claim; must not be {@code null} or
+     *     blank
      * @return the page envelope: up to ten list rows in ascending identifier order, the sealed
      *     tokens naming the first and last rows the caller actually receives, and whether a further
      *     page follows; an empty envelope naming no boundary when the position yields no rows
-     * @throws NullPointerException if {@code request} or {@code cursorToken} is {@code null}
+     * @throws NullPointerException if {@code request}, {@code cursorToken} or {@code subject} is
+     *     {@code null}
+     * @throws IllegalArgumentException if {@code subject} is blank, because a cursor bound to no
+     *     subject is redeemable by any authorized caller
      * @throws com.carddemo.common.web.CursorToken.InvalidCursorException if a supplied cursor is not
-     *     a token this sealer issued for this binding, or was issued longer ago than its lifetime
+     *     a token this sealer issued for this query and this subject, or was issued longer ago than
+     *     its lifetime
      */
     @Transactional(readOnly = true)
     public PageResponse<TransactionListItemResponse> listTransactions(TransactionListRequest request,
-            CursorToken cursorToken) {
+            CursorToken cursorToken, String subject) {
         Objects.requireNonNull(request, "request must not be null");
         Objects.requireNonNull(cursorToken, "cursorToken must not be null");
+        Objects.requireNonNull(subject, "subject must not be null");
 
+        String binding = cursorBinding(subject);
         TransactionListRequest.Direction direction = request.effectiveDirection();
-        String cursorKey = openCursor(request, cursorToken);
+        String cursorKey = openCursor(request, cursorToken, binding);
 
         // Assumptions: the direction selects between the two paging paragraphs exactly as the
         //   attention identifier does at lines 125 to 128, where the seventh function key reaches
@@ -410,7 +445,7 @@ public class TransactionListService {
                         ? processPf7Key(cursorKey)
                         : processPf8Key(request, cursorKey);
 
-        return assemblePage(scanned, direction, cursorToken);
+        return assemblePage(scanned, direction, cursorToken, binding);
     }
 
     /**
@@ -436,7 +471,7 @@ public class TransactionListService {
      *     direction, cursor presence and start identifier decide which condition was met; must not
      *     be {@code null}
      * @param page the envelope produced for that request by
-     *     {@link #listTransactions(TransactionListRequest, CursorToken)}, of type
+     *     {@link #listTransactions(TransactionListRequest, CursorToken, String)}, of type
      *     {@code PageResponse<TransactionListItemResponse>}; must not be {@code null}
      * @return the applicable message reproduced verbatim from its originating line, or
      *     {@link #NO_MESSAGE} when the page met no boundary
@@ -486,23 +521,64 @@ public class TransactionListService {
      * this class. The reference carried its browse keys in a communication area the client handed
      * back on the following turn, so continuity depended on the client returning storage intact and
      * nothing prevented it from returning storage it had altered. A sealed token authenticated
-     * against this binding cannot be altered, extended or moved to another query, and what it
-     * carries stays out of the response body.
+     * against this binding cannot be altered, extended or moved to another query OR TO ANOTHER
+     * CALLER, and what it carries stays out of the response body.
+     *
+     * <p>Assumptions: the binding is supplied by the caller of this method rather than read from the
+     * constant, because it names the authenticated caller as well as the query and only
+     * {@link #listTransactions(TransactionListRequest, CursorToken, String)} holds that
+     * caller. A cursor presented by a subject other than the one it was issued to fails
+     * authentication here, which is where a cross-subject replay is refused.
      *
      * @param request the list request whose cursor is to be redeemed, of type
      *     {@code TransactionListRequest}; must not be {@code null}
      * @param cursorToken the opener the token must have been sealed by, of type
      *     {@code CursorToken}; must not be {@code null}
+     * @param binding the binding the token must have been sealed under, of type {@code String}, as
+     *     composed by {@link #cursorBinding(String)} from this listing and the authenticated
+     *     principal; must not be {@code null} or blank
      * @return the raw sixteen-character key the scan resumes from, or {@code null} when the request
      *     supplied no position and the scan is to begin from its start key instead
      * @throws com.carddemo.common.web.CursorToken.InvalidCursorException if the supplied token is
-     *     not one this opener issued for this binding, or was issued longer ago than its lifetime
+     *     not one this opener issued for this query and this subject, or was issued longer ago than
+     *     its lifetime
      */
-    private String openCursor(TransactionListRequest request, CursorToken cursorToken) {
+    private String openCursor(TransactionListRequest request, CursorToken cursorToken,
+            String binding) {
         if (!request.hasCursor()) {
             return null;
         }
-        return cursorToken.open(CURSOR_BINDING, request.cursor());
+        return cursorToken.open(binding, request.cursor());
+    }
+
+    /**
+     * Composes the binding this listing's cursors are sealed and opened under.
+     *
+     * <p>Assumptions: the query scope is {@link CursorToken#SCOPE_NONE} because this listing carries
+     * no narrowing predicate to bind. The one input that could look like a filter is the request's
+     * start identifier, and it is not one: {@code processPf8Key} consults it only when no cursor was
+     * supplied, so it positions the OPENING page and never restricts the set a later page is drawn
+     * from. Binding it would therefore refuse a cursor whose only difference from the sealed one was
+     * that the client stopped resending a value the query had already finished using.
+     *
+     * @param subject the authenticated principal the page is being produced for, of type
+     *     {@code String}; must not be {@code null} or blank
+     * @return the composed binding, never {@code null}
+     * @throws NullPointerException if {@code subject} is {@code null}
+     * @throws IllegalArgumentException if {@code subject} is blank
+     */
+    private static String cursorBinding(String subject) {
+        // WHY : Alternatives Considered: composing the caller's AUTHORITY into the binding as well, so
+        //       that a token minted while a caller held one authority would be refused after that
+        //       authority changed -- for this migration, the administrator and ordinary-user split of
+        //       SEC-USR-TYPE. Rejected on two grounds. The third component of the shared binding is a
+        //       QUERY scope, meaning the narrowing predicate the page was produced under, and putting
+        //       an authority there would give one slot two unrelated meanings that no reader could
+        //       tell apart from the value. And the protection is already in force by a stronger route:
+        //       these handlers are stateless and re-authorise every request from the verified token,
+        //       so a caller whose authority has been withdrawn is refused at the endpoint whatever
+        //       token it presents, rather than only on the pages it had already started.
+        return CursorToken.binding(CURSOR_QUERY_NAME, subject, CursorToken.SCOPE_NONE);
     }
 
     /**
@@ -696,11 +772,20 @@ public class TransactionListService {
      * trailing identifier in the branch for slot ten, while the probe read at line 308 never reaches
      * the populating paragraph at all.
      *
-     * <p>Refactoring Rationale: the trailing boundary names the page actually returned even when
-     * that page is short, where the reference refreshes it only on a full page because its capture
-     * sits inside the branch for slot ten. What was wrong with the reference arrangement is that a
-     * client paging forward from a stale trailing key re-reads rows it has already seen, and does so
-     * silently.
+     * <p>Refactoring Rationale: the two implementations capture the trailing boundary from different
+     * places, and the divergence is deliberate. The reference captures it inside the branch for slot
+     * ten, at lines 438 and 439, so a turn that fills fewer than ten slots leaves the field holding
+     * whatever the previous turn put there; the field is a communication-area member that survives
+     * the turn, so the value is available to be reused. The target seals the boundary from the last
+     * row of the page it is returning, whatever that page's length, because a stateless handler has
+     * no previous turn to inherit a position from and the boundary it returns is the only position
+     * the next request can carry. The observable difference appears on exactly one input -- a forward
+     * step taken from a short page -- where the reference resumes from the earlier full page's
+     * trailing identifier and so returns rows the caller already holds, while the target resumes
+     * after the short page's own last row. The target behaviour is the one the envelope's contract
+     * requires, and the divergence is registered as {@code D-LASTKEY-RECEIVED} in
+     * {@code docs/architecture/cobol-to-service-traceability.md}, alongside the second half of the
+     * same field's story that the card browse shows.
      *
      * <p>Assumptions: a page carrying no rows names no boundary and reports no further page. That is
      * line 315, which sets the no-further-page condition whenever the fill read nothing, and it is
@@ -714,12 +799,15 @@ public class TransactionListService {
      *     and how forward availability is established; must not be {@code null}
      * @param cursorToken the sealer the two boundary tokens are minted with, of type
      *     {@code CursorToken}; must not be {@code null}
+     * @param binding the binding the two boundary tokens are sealed under, of type {@code String},
+     *     as composed by {@link #cursorBinding(String)} from this listing and the authenticated
+     *     principal; must not be {@code null} or blank
      * @return the assembled page envelope, carrying at most the page size in rows
      * @throws NullPointerException if a returned row carries no identifier, which the envelope's own
      *     conversion refuses because such a row could not be paged away from
      */
     private PageResponse<TransactionListItemResponse> assemblePage(List<Transaction> scanned,
-            TransactionListRequest.Direction direction, CursorToken cursorToken) {
+            TransactionListRequest.Direction direction, CursorToken cursorToken, String binding) {
         boolean probeRowFound = hasProbeRow(scanned);
         List<Transaction> displayOrderedRows =
                 transactionMapper.orderForDisplay(retainedRows(scanned), direction);
@@ -729,9 +817,9 @@ public class TransactionListService {
         }
 
         String firstKeyToken =
-                sealBoundaryKey(cursorToken, displayOrderedRows.get(0).getTranId());
+                sealBoundaryKey(cursorToken, displayOrderedRows.get(0).getTranId(), binding);
         String lastKeyToken = sealBoundaryKey(cursorToken,
-                displayOrderedRows.get(displayOrderedRows.size() - 1).getTranId());
+                displayOrderedRows.get(displayOrderedRows.size() - 1).getTranId(), binding);
 
         return transactionMapper.toListPage(displayOrderedRows, firstKeyToken, lastKeyToken,
                 forwardAvailability(direction, probeRowFound));
@@ -816,18 +904,27 @@ public class TransactionListService {
      * client and replayed, so a token authenticated against this binding is what keeps a record key
      * out of the response while still letting the client resume the scan.
      *
+     * <p>Assumptions: the token names the row AND the caller it was issued to, because the binding it
+     * is authenticated under carries both. A client therefore cannot hand a cursor it received to
+     * another client. It does NOT name the caller's authority, for the reason recorded on
+     * {@link #cursorBinding(String)}: a caller whose authority has been withdrawn is refused at the
+     * endpoint on every request, which is a stronger control than refusing only the pages it holds.
+     *
      * @param cursorToken the sealer the token is minted with, of type {@code CursorToken}; must not
      *     be {@code null}
      * @param boundaryKey the raw identifier of the first or last row this page returned, of type
      *     {@code String}; must not be {@code null} and must not be blank
+     * @param binding the binding the token is sealed under, of type {@code String}, as composed by
+     *     {@link #cursorBinding(String)} from this listing and the authenticated principal; must not
+     *     be {@code null} or blank
      * @return the sealed token naming that row, in the shape the envelope requires
      * @throws NullPointerException if {@code boundaryKey} is {@code null}, which would mean a
      *     returned row carried no identifier
      * @throws IllegalArgumentException if {@code boundaryKey} is blank or longer than a sealed
      *     cursor may carry, neither of which a declared-width record key can be
      */
-    private String sealBoundaryKey(CursorToken cursorToken, String boundaryKey) {
-        return cursorToken.seal(CURSOR_BINDING, boundaryKey);
+    private String sealBoundaryKey(CursorToken cursorToken, String boundaryKey, String binding) {
+        return cursorToken.seal(binding, boundaryKey);
     }
 
     /**
@@ -844,4 +941,5 @@ public class TransactionListService {
     private Limit probeBoundedLimit() {
         return Limit.of(TransactionMapper.PAGE_SIZE + 1);
     }
+
 }

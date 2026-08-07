@@ -87,10 +87,9 @@
  * applies half-up to a monthly-interest return value specifically -- state the same mode, so the
  * whole tree now agrees rather than carrying one package that does not.</p>
  *
- * <p>Refactoring Rationale: an earlier revision of this descriptor required {@code RoundingMode.DOWN}
- * on the accrual path, derived from the reference program directly, and that derivation is worth
- * preserving because it is accurate about the baseline and is the reason the divergence has to be
- * recorded rather than merely dropped. Lines 462 to 468 of {@code app/cbl/CBACT04C.cbl} hold the
+ * <p>Assumptions: the reference accrual path truncates toward zero, and that derivation is recorded
+ * here because it is the reason the divergence has to be registered rather than merely dropped.
+ * Lines 462 to 468 of {@code app/cbl/CBACT04C.cbl} hold the
  * accrual paragraph, whose statement is
  * {@code COMPUTE WS-MONTHLY-INT = ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200}. The receiving field is
  * declared at line 168 of the same program as {@code 05 WS-MONTHLY-INT            PIC S9(09)V99.},
@@ -103,8 +102,8 @@
  * behavioural divergence rather than a defect: it is registered as <b>C-ROUNDING</b> in
  * {@code docs/architecture/cobol-to-service-traceability.md}, which is the migration's register of
  * every intentional divergence, alongside the three baseline defects that are likewise not
- * reproduced. A divergence recorded there is auditable; a package contract that contradicts the
- * plan is not, which is the substance of the correction made here.</p>
+ * reproduced. A divergence recorded there is auditable; a package contract that contradicted the
+ * plan would not be.</p>
  *
  * <p>Trade-offs: the accepted cost is precisely one cent, and only on the vectors where a quotient
  * lands exactly on a half cent. The size of it is worth stating so that nobody mistakes the
@@ -120,17 +119,12 @@
  * asserted mechanically instead of a rule with a carve-out that a future caller could apply to the
  * wrong path.</p>
  *
- * <p>Alternatives Considered: keeping {@code RoundingMode.DOWN} for accrual and instead amending the
- * migration plan to admit it was evaluated and rejected outright. The plan is frozen and is the
- * agreed contract for this migration, so a package descriptor that overrode it would not resolve the
- * disagreement -- it would relocate it, leaving the plan, every sibling descriptor and the
- * documentation standard stating one mode while the shared kernel implemented another, with nothing
- * to indicate which a reader should believe. Recording the baseline difference in the divergence
- * register keeps both facts available and gives them one owner. Also considered: exposing both modes
- * and letting the accrual caller select truncation. Rejected because the choice would then live at
- * the call site, where the next accrual-adjacent caller would face a decision with no basis for
- * making it, and because the architecture test could no longer assert a single money rounding
- * contract at all.</p>
+ * <p>Alternatives Considered: exposing a truncating mode for the accrual and letting the caller
+ * select it. Rejected because the choice would then live at the call site, where the next
+ * accrual-adjacent caller would face a decision with no basis for making it, and because the
+ * architecture test could no longer assert a single money rounding contract at all. Also considered:
+ * amending the migration plan to admit truncation. Rejected outright -- the plan is frozen and is the
+ * agreed contract, so overriding it here would relocate the disagreement rather than resolve it.</p>
  *
  * <p>Assumptions: the multiply-before-divide order is part of the same contract and is not an
  * implementation detail, per transformation rule T4. The reference statement multiplies the balance

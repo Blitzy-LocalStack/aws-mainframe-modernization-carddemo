@@ -1,6 +1,5 @@
 package com.carddemo.card.dto;
 
-import com.carddemo.common.validation.DateEditValidator;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -11,8 +10,10 @@ import jakarta.validation.constraints.Size;
  * The body of the card update request, carrying the attributes a caller may change together with the
  * concurrency token last read for the card being changed.
  *
- * <p>This shape serves one operation, {@code PUT /api/v1/cards/{cardNumber}}. The card it changes is
- * named in the request path and is not repeated here, so the body carries three editable attributes
+ * <p>This shape serves one operation, {@code PUT /api/v1/cards/{cardKey}}. The card it changes is
+ * named in the request path -- by the opaque selector the read returned, never by its number -- and is
+ * not repeated here, so the body carries three editable attributes
+
  * and the token, and nothing else. A submission that breaks one of the constraints declared on the
  * components below is refused with 400 and an entry in the per-field array of
  * {@code com.carddemo.common.error.ApiError}, which owns that shape for every context and is never
@@ -22,8 +23,7 @@ import jakarta.validation.constraints.Size;
  *
  * <h2>Why these four members and no others</h2>
  *
- * <p>Assumptions: the count is settled by the baseline rather than chosen. Register CU-01.
- * {@code app/cbl/COCRDUPC.cbl} declares six validation-flag triads across lines 57 to 80, and the
+ * <p>Assumptions: the count is settled by the baseline rather than chosen.  * {@code app/cbl/COCRDUPC.cbl} declares six validation-flag triads across lines 57 to 80, and the
  * first two of them are filters rather than payload: {@code FLG-ACCTFILTER-NOT-OK} and its two
  * companions at lines 58 to 60 qualify the account the operator searched by, and
  * {@code FLG-CARDFILTER-NOT-OK} and its companions at lines 62 to 64 qualify the card number, both of
@@ -38,7 +38,7 @@ import jakarta.validation.constraints.Size;
  * component is the concurrency token. Four either way.</p>
  *
  * <p>Assumptions: where this record and the published contract disagree about a shape, the contract
- * decides and this file is brought to it. Register CU-17. Both artifacts are authored separately and
+ * decides and this file is brought to it. Both artifacts are authored separately and
  * each derives independently from {@code app/cpy/CVACT02Y.cpy} and {@code app/cpy-bms/COCRDUP.CPY}, so
  * a divergence leaves both sides internally consistent and compiles cleanly: nothing in the build
  * reports it, and the contract test at
@@ -49,18 +49,27 @@ import jakarta.validation.constraints.Size;
  * advance. The {@code CardUpdateRequest} schema in
  * {@code services/card-service/src/main/resources/openapi/card-api.yaml} is that side, and the charter
  * of this package fixes the same precedence. Two of its readings are followed here in preference to any
- * other: the expiry travels as one separated date member named {@code expirationDate}, and the
+ * other: the expiry travels as TWO members, {@code expirationMonth} and {@code expirationYear}, and the
  * concurrency token travels in this body.</p>
  *
+ * <p>Refactoring Rationale: the expiry is two members rather than one assembled date, and the baseline
+ * settles it rather than taste. {@code app/cpy-bms/COCRDUP.CPY} declares {@code EXPMONI PIC X(2)} at
+ * L84 and {@code EXPYEARI PIC X(4)} at L90 as separate map fields, and
+ * {@code app/cbl/COCRDUPC.cbl} edits each behind its OWN validation flag -- the
+ * {@code FLG-CARDEXPMON-*} set at L73 to L76 and the {@code FLG-CARDEXPYEAR-*} set at L77 to L80. Two
+ * independent flags produce two independent field errors and two independently highlighted fields, so
+ * one assembled member would collapse a pair of refusals the screen reports separately and no per-field
+ * error could name which half was wrong.</p>
+ *
  * <p>Alternatives Considered: a class with generated accessors, produced by an annotation processor,
- * was evaluated against a Java 21 record with explicit members. Register CU-02. It is rejected because
+ * was evaluated against a Java 21 record with explicit members. It is rejected because
  * a generated accessor has no source line able to carry documentation, so the members whose provenance
  * most needs stating -- a width taken from a copybook, a domain restricted to two values, a year window
  * taken from a condition name -- would be exactly the members with nowhere to state it. The record
  * gives the same brevity and stays documentable, and no code generator participates in this file.</p>
  *
  * <p>Alternatives Considered: the constraints below are declarative, and the alternative was imperative
- * checking inside a compact constructor. Register CU-03. Bean Validation is genuinely available here
+ * checking inside a compact constructor. Bean Validation is genuinely available here
  * rather than conditionally: {@code services/card-service/pom.xml} declares
  * {@code spring-boot-starter-validation} at line 211 with no optional flag. The constructor route is
  * rejected on two independent grounds. It reports by throwing, so it stops at the first fault and
@@ -71,7 +80,7 @@ import jakarta.validation.constraints.Size;
  * and documents no exception.</p>
  *
  * <p>Trade-offs: what the declarative route gives up is real and is named here rather than discovered
- * later. Register CU-03. Annotations express one member at a time, so three things the baseline does
+ * later. Annotations express one member at a time, so three things the baseline does
  * are deliberately left to {@code com.carddemo.card.service}: the first-wins selection of a single
  * aggregate sentence, which the baseline latches behind {@code IF WS-RETURN-MSG-OFF}; any rule that
  * compares one member against another or against stored state; and the calendar-accurate part of the
@@ -81,7 +90,7 @@ import jakarta.validation.constraints.Size;
  * advance from the published document.</p>
  *
  * <p>Assumptions: the three editable members are character strings and none of them is a numeric type.
- * Register CU-04. The screen declares every one of its expiry inputs as character and none as numeric
+ * The screen declares every one of its expiry inputs as character and none as numeric
  * -- {@code EXPMONI PIC X(2)} at {@code app/cpy-bms/COCRDUP.CPY:84}, {@code EXPYEARI PIC X(4)} at line
  * 90 and {@code EXPDAYI PIC X(2)} at line 96 -- and the baseline then validates the month and the year
  * by a class condition evaluated over a numeric {@code REDEFINES} of the character field, at
@@ -97,7 +106,7 @@ import jakarta.validation.constraints.Size;
  * <h2>Six shapes deliberately absent</h2>
  *
  * <p>Assumptions: no representation of the card verification value appears here, in full, masked,
- * truncated or implied by a length. Register CU-05. This preserves an absence the baseline already had
+ * truncated or implied by a length. This preserves an absence the baseline already had
  * rather than withdrawing something it showed. A case-insensitive search for that value returns no
  * match in any of the six presentation files of this context, being
  * {@code app/cpy-bms/COCRDUP.CPY}, {@code app/cpy-bms/COCRDSL.CPY}, {@code app/cpy-bms/COCRDLI.CPY},
@@ -112,7 +121,7 @@ import jakarta.validation.constraints.Size;
  * total absence is the only rendering that discloses none of those three.</p>
  *
  * <p>Refactoring Rationale: there is no standalone day member, and the baseline is the reason.
- * Register CU-06. The program says so in its own words at {@code app/cbl/COCRDUPC.cbl:1119} and 1120,
+ * The program says so in its own words at {@code app/cbl/COCRDUPC.cbl:1119} and 1120,
  * where the comment above the redisplay block records that old values are moved to the non-display
  * fields the user is not allowed to change. Line 1122, which would move the newly entered day to the
  * screen, is commented out, and the active statement on line 1123 moves the pre-edit day instead. The
@@ -128,19 +137,48 @@ import jakarta.validation.constraints.Size;
  * day field at all, {@code app/cpy-bms/COCRDSL.CPY} declaring only {@code EXPMONI} at line 84 and
  * {@code EXPYEARI} at line 90.</p>
  *
- * <p>Assumptions: the one fact that runs the other way is stated rather than omitted. Register CU-06.
- * Line 621 does move the day input into the new-value group, and the record written at lines 1467 to
- * 1474 does compose a day into the stored date; because the field is non-display and is always
- * redisplayed from the pre-edit snapshot, the day written equals the day read. The baseline holds that
- * invariant emergently, as a consequence of how the screen is painted. The Java carries the whole
- * expiry as one separated date, which is the same form line 1467 assembles, so no day member exists
- * here to be validated on its own; whether a submitted day may differ from the stored one is a
- * comparison against stored state and is therefore settled in {@code com.carddemo.card.service}, which
- * makes the invariant explicit instead of emergent. That is a documented divergence, registered in
+ * <p>Assumptions: the one fact that runs the other way is stated rather than omitted. Line 621 does
+ * move the day input into the new-value group, and the record written at lines 1467 to 1474 does compose
+ * a day into the stored date; because the field is non-display and is always redisplayed from the
+ * pre-edit snapshot, the day written equals the day read. The baseline holds that invariant emergently,
+ * as a consequence of how the screen is painted.</p>
+ *
+ * <p>Refactoring Rationale: this body therefore carries the MONTH and the YEAR as two members and
+ * carries no day at all, rather than carrying the whole ten-character date. An earlier revision carried
+ * the whole date, on the reasoning that ten separated characters are the same form line 1467 assembles
+ * and that the day-equals-stored-day invariant could be enforced against stored state in
+ * {@code com.carddemo.card.service}. Two things were wrong with that. The first is a matter of fact:
+ * that service layer does not exist in this context yet, so the invariant was enforced nowhere and the
+ * body published a day a caller could set to any value it liked -- which is not a stricter reading of the
+ * baseline, it is a capability the baseline never offered, on a field the baseline deliberately rendered
+ * non-display. The second is a matter of shape: an invariant that a submitted value must equal the stored
+ * value means the submitted value carries no information, and a member that carries no information should
+ * not be in the request. Removing the day removes the need to enforce anything about it, which is a
+ * smaller and more durable answer than enforcing it correctly.</p>
+ *
+ * <p>Alternatives Considered: keeping the whole date and refusing any submission whose day differs from
+ * the stored one. Rejected because it answers a request that should never have been expressible with a
+ * refusal, so every caller has to first read the card in order to learn the one day value its update will
+ * be allowed to carry -- and a caller that got it wrong would receive a field error naming a field the
+ * screen it is modelled on did not have. Alternatives Considered: keeping the whole date and silently
+ * overwriting the submitted day with the stored one. Rejected because it accepts a value and then ignores
+ * it, which is the least discoverable of the three behaviours.</p>
+ *
+ * <p>Trade-offs: the accepted cost is that this request no longer has the same shape as the response,
+ * which carries the whole date, so a caller cannot round-trip a detail response straight back as an
+ * update. That asymmetry is deliberate and matches the screens: {@code app/cpy-bms/COCRDSL.CPY} declares
+ * {@code EXPMONI} at line 84 and {@code EXPYEARI} at line 90 and no day field, while the stored record
+ * holds a whole date. The response reports what is stored and the request carries what is editable, and
+ * those were never the same set of fields.</p>
+ *
+ * <p>Assumptions: the day the stored date keeps is therefore supplied by whatever applies the update,
+ * from the row's own current value, and no caller can influence it. The two-member form makes that
+ * structurally true rather than dependent on a check. This is a documented divergence from the
+ * baseline's single ten-character stored field, registered as {@code D-CARD-EXPIRY-MONTH-YEAR} in
  * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
  *
  * <p>Refactoring Rationale: no member asks whether this is a confirmation, a second attempt or a
- * repeat turn. Register CU-07. The baseline's two-step save is turn state, not payload:
+ * repeat turn. The baseline's two-step save is turn state, not payload:
  * {@code app/cbl/COCRDUPC.cbl:276} and 277 declare {@code CCUP-CHANGE-ACTION PIC X(1)} initialised to
  * low values, with the condition set at lines 278 to 290 including
  * {@code CCUP-CHANGES-NOT-OK VALUE 'E'} at line 285, {@code CCUP-CHANGES-OK-NOT-CONFIRMED VALUE 'N'}
@@ -154,7 +192,7 @@ import jakarta.validation.constraints.Size;
  * repeat-entry discriminator is eliminated across this migration rather than ported.</p>
  *
  * <p>Assumptions: the convention by which a typed asterisk cleared a field is not carried into this
- * body. Register CU-08. Inbound, a literal asterisk meant clear: {@code app/cbl/COCRDUPC.cbl:588}
+ * body. Inbound, a literal asterisk meant clear: {@code app/cbl/COCRDUPC.cbl:588}
  * carries a comment saying exactly that, and lines 589 to 595 replace the account filter with low
  * values when the operator typed one, with {@code app/cbl/COCRDSLC.cbl} doing the same under the same
  * comment at line 614, for the account at lines 615 to 620 and the card at 622 to 627. That is a
@@ -167,7 +205,7 @@ import jakarta.validation.constraints.Size;
  * {@code com.carddemo.common.validation.FieldValidationFlag}.</p>
  *
  * <p>Alternatives Considered: neither the card number nor the account identifier is a member here, and
- * echoing the card number back for confirmation was the alternative. Register CU-09. It is rejected
+ * echoing the card number back for confirmation was the alternative. It is rejected
  * because the number is already the path variable of the operation, so carrying it in the body as well
  * would create two sources of truth for one identity and leave open which of them wins when they
  * differ. Taking it from the path alone keeps the request self-describing and independently
@@ -175,7 +213,7 @@ import jakarta.validation.constraints.Size;
  * from the fields its change comparison tests, at {@code app/cbl/COCRDUPC.cbl:1503} and following.</p>
  *
  * <p>Assumptions: the concurrency token is a member of this body because the contract puts it here.
- * Register CU-10. The baseline already implements optimistic concurrency, and this is the target's way
+ * The baseline already implements optimistic concurrency, and this is the target's way
  * of saying the same thing: {@code DATA-WAS-CHANGED-BEFORE-UPDATE} at
  * {@code app/cbl/COCRDUPC.cbl:207} and 208 carries the refusal
  * {@code Record changed by some one else. Please review}, whose two-word spelling of the third word
@@ -196,7 +234,7 @@ import jakarta.validation.constraints.Size;
  *
  * <p>Assumptions: this record carries no monetary member and no timestamp member, and the absence is
  * recorded rather than left silent because silence in a shape derived from a financial record reads as
- * an oversight. Register CU-16. The card layout declares exactly seven items and no more, at
+ * an oversight. The card layout declares exactly seven items and no more, at
  * {@code app/cpy/CVACT02Y.cpy} lines 5 to 11, being the card number, the account identifier, the
  * verification value, the embossed name, the expiry date, the active status and one filler, and there
  * is no amount and no timestamp among them. It follows that {@code com.carddemo.common.money.Money} is
@@ -207,7 +245,7 @@ import jakarta.validation.constraints.Size;
  * <h2>How a refusal is reported</h2>
  *
  * <p>Refactoring Rationale: the baseline reports a bad submission on two channels at once, and the
- * target keeps both rather than merging them. Register CU-15. Each field's own flag is set
+ * target keeps both rather than merging them. Each field's own flag is set
  * unconditionally as its edit paragraph runs, so the flags accumulate and several can be set from one
  * submission; the single seventy-five-character aggregate sentence is instead latched first-wins,
  * behind {@code IF WS-RETURN-MSG-OFF}, at fifteen sites in {@code app/cbl/COCRDUPC.cbl} of which
@@ -240,17 +278,22 @@ import jakarta.validation.constraints.Size;
  *     {@code CARD-ACTIVE-STATUS PIC X(01)} at {@code app/cpy/CVACT02Y.cpy:10} and
  *     {@code CRDSTCDI PIC X(1)} at {@code app/cpy-bms/COCRDUP.CPY:78}, restricted to the two upper
  *     case values {@code Y} and {@code N} with no lower case member admitted
- * @param expirationDate the replacement expiry date, exactly ten characters from
- *     {@code CARD-EXPIRAION-DATE PIC X(10)} at {@code app/cpy/CVACT02Y.cpy:9}, written year first with
- *     hyphen separators in the order {@code app/cbl/COCRDUPC.cbl:1467-1474} assembles, whose year lies
- *     in 1950 through 2099 and whose month is two digits in 01 through 12
+ * @param expirationMonth the replacement expiry month, exactly two digits with its leading zero
+ *     present, in 01 through 12, from {@code 88 VALID-MONTH VALUES 1 THRU 12} at
+ *     {@code app/cbl/COCRDUPC.cbl:95} read over the two-character field it redefines and tested at
+ *     line 898
+ * @param expirationYear the replacement expiry year, exactly four digits in 1950 through 2099, from
+ *     {@code 88 VALID-YEAR VALUES 1950 THRU 2099} at {@code app/cbl/COCRDUPC.cbl:99} and tested at
+ *     line 934. There is deliberately no day member: the day the stored date keeps is the day it
+ *     already held, which is the invariant the baseline maintains by rendering its day field
+ *     non-display
  * @param version the concurrency token last read for this card, a whole number no smaller than zero,
  *     echoed unchanged from a previous response and never chosen or incremented by the caller
  */
 public record CardUpdateRequest(
 
         // WHY : Assumptions: the domain is letters of either case and the space character, and not
-        //       blank overall. Register CU-11. 1230-EDIT-NAME at app/cbl/COCRDUPC.cbl:806 sets its
+        //       blank overall. 1230-EDIT-NAME at app/cbl/COCRDUPC.cbl:806 sets its
         //       flag pessimistically to not-OK at line 808, refuses the field at lines 811 to 813
         //       when it equals low values or spaces or zeros, copies it at line 823, replaces every
         //       letter with a space at lines 824 to 826 using the fifty-two-character alphabet
@@ -265,7 +308,7 @@ public record CardUpdateRequest(
         String embossedName,
 
         // WHY : Assumptions: the domain is the two upper case values and nothing else, and one
-        //       sentence answers both ways of missing it. Register CU-12. The value set
+        //       sentence answers both ways of missing it. The value set
         //       88 FLG-YES-NO-VALID VALUES 'Y', 'N' at app/cbl/COCRDUPC.cbl:91 has no lower case
         //       member, the work field it tests is initialised to 'N' at lines 89 to 90, and
         //       1240-EDIT-CARDSTATUS copies the input at line 861 and tests it at 863. The same
@@ -278,7 +321,7 @@ public record CardUpdateRequest(
         String activeStatus,
 
         // WHY : Assumptions: the month is two digits with its leading zero present, and the year is
-        //       four digits inside a fixed window. Registers CU-13 and CU-14. For the month,
+        //       four digits inside a fixed window. For the month,
         //       1250-EDIT-EXPIRY-MON moves the input at app/cbl/COCRDUPC.cbl:896 and tests
         //       IF VALID-MONTH at line 898, which is a class condition over the PIC 9(2) REDEFINES
         //       declared at lines 93 to 94 with its value set at 95; there is no separate numeric
@@ -291,7 +334,7 @@ public record CardUpdateRequest(
         //       it preserves that acceptance exactly.
         // WHY : Assumptions: the two paragraphs are not written identically, and the difference is
         //       recorded as an observation about the baseline rather than as anything to act on.
-        //       Register CU-14. 1250-EDIT-EXPIRY-MON sets its own flag to not-OK at
+        //       1250-EDIT-EXPIRY-MON sets its own flag to not-OK at
         //       app/cbl/COCRDUPC.cbl:880, before its blank test at lines 883 to 885, whereas
         //       1260-EDIT-EXPIRY-YEAR runs its blank test first at lines 916 to 918 and sets its flag
         //       afterwards at line 930; and the comment at line 928 reads the same as the month
@@ -299,8 +342,8 @@ public record CardUpdateRequest(
         //       the set of values either paragraph accepts, which is why one shape above covers both
         //       parts and why nothing here is written to match either ordering.
         // WHY : Trade-offs: this component carries two parts that the baseline answers with two
-        //       different sentences, so it deliberately carries no message of its own. Register
-        //       CU-13. A month outside the window is answered by
+        //       different sentences, so it deliberately carries no message of its own.
+        //       A month outside the window is answered by
         //       'Card expiry month must be between 1 and 12' from app/cbl/COCRDUPC.cbl:197-198 and an
         //       unacceptable year by 'Invalid card expiry year' from lines 199 to 200; naming either
         //       one on a single constraint would misreport the other half of the faults. Choosing
@@ -309,15 +352,26 @@ public record CardUpdateRequest(
         //       12 while the accepted form is zero-padded, because transformation rule T8 forbids
         //       rewording user-visible text to match an implementation detail.
         // WHY : Assumptions: the width is taken from the shared date type rather than written again
-        //       here, so that the separated form has one definition across the migration. Register
-        //       CU-15.
+        //       here, so that the separated form has one definition across the migration.
         @NotBlank
-        @Size(min = DateEditValidator.MASKED_DATE_LENGTH, max = DateEditValidator.MASKED_DATE_LENGTH)
-        @Pattern(regexp = EXPIRATION_DATE_SHAPE)
-        String expirationDate,
+        @Size(min = EXPIRATION_MONTH_WIDTH, max = EXPIRATION_MONTH_WIDTH)
+        @Pattern(regexp = EXPIRATION_MONTH_DOMAIN)
+        String expirationMonth,
+
+        // WHY : Assumptions: the year is a separate member from the month rather than the two being one
+        //       composite, because the baseline answers them with two DIFFERENT sentences -- 'Card
+        //       expiry month must be between 1 and 12' at app/cbl/COCRDUPC.cbl:197-198 and 'Invalid
+        //       card expiry year' at lines 199 to 200 -- and a composite member could carry only one of
+        //       them, misreporting the other half of the faults. Two members let each fault be answered
+        //       with a per-field entry naming the part that was wrong, which is what the baseline's two
+        //       separate edit paragraphs do.
+        @NotBlank
+        @Size(min = EXPIRATION_YEAR_WIDTH, max = EXPIRATION_YEAR_WIDTH)
+        @Pattern(regexp = EXPIRATION_YEAR_DOMAIN)
+        String expirationYear,
 
         // WHY : Assumptions: the token is boxed rather than primitive so that an omitted token is
-        //       refused by name. Register CU-10. A primitive would bind an absent member to zero and
+        //       refused by name. A primitive would bind an absent member to zero and
         //       send a plausible token the caller never supplied, which would be read as a genuine
         //       mismatch and answered with a conflict naming no member; a boxed member arrives null
         //       and is refused with a per-field entry that names it. The lower bound restates the
@@ -371,18 +425,50 @@ public record CardUpdateRequest(
     private static final String ACTIVE_STATUS_DOMAIN = "^[YN]$";
 
     /**
-     * The separated form the expiry date is held to, bounding the year, the month and the day shape.
+     * Declared width of the expiry month, from the two-character field
+     * {@code app/cbl/COCRDUPC.cbl:93-94} declares and its screen input at
+     * {@code app/cpy-bms/COCRDUP.CPY:84}.
      *
-     * <p>Assumptions: the year alternation admits 1950 through 2099 and no other value, from
-     * {@code 88 VALID-YEAR VALUES 1950 THRU 2099} at {@code app/cbl/COCRDUPC.cbl:99}, and the month
-     * alternation admits 01 through 12, from {@code 88 VALID-MONTH VALUES 1 THRU 12} at line 95 read
-     * over the two-character field it redefines. The day is bounded by shape alone, at 01 through 31,
-     * because no paragraph in the baseline validates the day at all; month length and the leap year are
-     * decided by {@code com.carddemo.common.validation.DateEditValidator} in the service layer, which
-     * owns those rules for every context.</p>
+     * <p>Assumptions: this is applied as a lower bound as well as an upper one, because the baseline
+     * tests a class condition over a two-character field and a single digit reaching that field would be
+     * padded rather than refused. Requiring exactly two characters is what keeps the leading zero
+     * mandatory, which is the form the stored date is assembled from at line 1468.</p>
      */
-    private static final String EXPIRATION_DATE_SHAPE =
-            "^(19[5-9][0-9]|20[0-9]{2})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$";
+    private static final int EXPIRATION_MONTH_WIDTH = 2;
+
+    /**
+     * Declared width of the expiry year, from the four-character field
+     * {@code app/cbl/COCRDUPC.cbl:97-98} declares and its screen input at
+     * {@code app/cpy-bms/COCRDUP.CPY:90}.
+     */
+    private static final int EXPIRATION_YEAR_WIDTH = 4;
+
+    /**
+     * The set the expiry month is held to.
+     *
+     * <p>Assumptions: the alternation admits 01 through 12 and nothing else, from
+     * {@code 88 VALID-MONTH VALUES 1 THRU 12} at {@code app/cbl/COCRDUPC.cbl:95} read over the
+     * two-character field it redefines and applied at line 898. Zero-zero is excluded by the alternation
+     * itself as well as by the zeros sentinel of the blank test at lines 883 to 885.</p>
+     *
+     * <p>Assumptions: month LENGTH and the leap year are not decided here. They are properties of a
+     * whole date, so they belong to {@code com.carddemo.common.validation.DateEditValidator}, which owns
+     * those rules for every context; this constraint bounds the month alone, which is all this member
+     * carries.</p>
+     */
+    private static final String EXPIRATION_MONTH_DOMAIN = "^(0[1-9]|1[0-2])$";
+
+    /**
+     * The window the expiry year is held to.
+     *
+     * <p>Assumptions: the alternation admits 1950 through 2099 and no other value, from
+     * {@code 88 VALID-YEAR VALUES 1950 THRU 2099} at {@code app/cbl/COCRDUPC.cbl:99} over the
+     * {@code PIC 9(4)} redefinition at lines 97 to 98, applied at line 934. It is written as an
+     * alternation of two ranges rather than as a numeric comparison because a constraint pattern is a
+     * character test, and expressing the window as characters is what keeps the check identical to the
+     * baseline's class condition over a zero-padded field.</p>
+     */
+    private static final String EXPIRATION_YEAR_DOMAIN = "^(19[5-9][0-9]|20[0-9]{2})$";
 
     /**
      * The refusal carried verbatim when the embossed name is absent or blank, from
@@ -411,4 +497,54 @@ public record CardUpdateRequest(
      * to 869 for a value outside the set.</p>
      */
     private static final String STATUS_MUST_BE_YES_NO = "Card Active Status must be Y or N";
+
+    /**
+     * The placeholder that stands in for a component this record refuses to render.
+     *
+     * <p>Assumptions: a fixed marker is used rather than a truncation, because a truncated name is still
+     * a name. It names the reason rather than being a row of asterisks, so a reader of a log line can
+     * tell the value was withheld deliberately rather than being absent. The literal matches the one
+     * {@link CardDetail} and the response records in {@code com.carddemo.auth.dto} use, so a log store
+     * holding lines from several migrated shapes shows one placeholder vocabulary rather than one per
+     * package.</p>
+     */
+    private static final String REDACTED_PERSONAL = "REDACTED";
+
+    /**
+     * Renders this request for a diagnostic without disclosing the cardholder.
+     *
+     * <p>Refactoring Rationale: a record's generated rendering prints every component, so any log line,
+     * assertion message or exception detail that stringified a rejected update wrote a real cardholder's
+     * name and their card's expiry into a durable store. A REJECTED request is exactly the instance most
+     * likely to be stringified, because a refusal is what gets logged, so the default rendering was worst
+     * on the path it was most often reached from.</p>
+     *
+     * <p>Assumptions: the status and the concurrency token print in full because neither identifies a
+     * person -- one is a single flag from a two-value domain and the other is a row counter -- while the
+     * name and the two expiry parts are withheld. The expiry parts are withheld together rather than
+     * individually, because a month or a year alone still narrows a cardholder when read beside anything
+     * else in the same line, and because {@link CardDetail} withholds the assembled date for the same
+     * reason -- a partial expiry beside a partial card number completes two of the three components of a
+     * card credential.</p>
+     *
+     * <p>Refactoring Rationale: an earlier revision printed the expiry, on the ground that it is a card
+     * attribute carrying no personal content. That is true of the value in isolation and not of the line
+     * it appears in, which is the unit a log store keeps.</p>
+     *
+     * @return a rendering naming the type, the status and the concurrency token, with the embossed name
+     *     and both expiry parts replaced by {@value #REDACTED_PERSONAL}
+     */
+    @Override
+    public String toString() {
+        // Assumptions: the generated form's shape is reproduced deliberately, component order included,
+        //   so that a reader who knows what a record prints is not led to think some other type produced
+        //   this line. Only the withheld values depart from it.
+        return "CardUpdateRequest[embossedName=" + REDACTED_PERSONAL
+                + ", activeStatus=" + activeStatus
+                + ", expirationMonth=" + REDACTED_PERSONAL
+                + ", expirationYear=" + REDACTED_PERSONAL
+                + ", version=" + version
+                + "]";
+
+    }
 }

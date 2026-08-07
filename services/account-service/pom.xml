@@ -338,6 +338,7 @@
             <artifactId>spring-cloud-aws-starter-secrets-manager</artifactId>
         </dependency>
 
+
         <!--
         =============================================================================
          Persistence driver and schema migration
@@ -406,11 +407,26 @@
          Published API contract and metric export
         =============================================================================
         WHY : Assumptions: springdoc serves the OpenAPI 3.1 contract kept at
-              src/main/resources/openapi/account-api.yaml. That contract is the
-              artifact ui/src/api/accounts.ts is written against, so it is a
-              cross boundary commitment rather than documentation, and dropping
-              this dependency would leave the browser client compiling against
+              src/main/resources/openapi/account-api.yaml. That contract is a
+              cross boundary commitment rather than documentation, because its
+              consumer is a separately built and separately deployed artifact:
+              services/authorization-service/src/main/java/com/carddemo/
+              authorization/service/RestAccountContextClient.java, which builds
+              each path itself and deserialises each response into its own
+              record. Dropping this dependency would leave that client calling
               a contract nothing publishes.
+        WHY : Refactoring Rationale: the consumer named above WAS ui/src/api/
+              accounts.ts, a browser client, and no such file exists or will.
+              This contract titles itself an internal read API and its three
+              operations are governed by
+              src/main/java/com/carddemo/account/config/InternalApiSecurityConfig.java,
+              an ordered filter chain requiring a machine token minted by the
+              calling service, which refuses the identity provider token every
+              browser holds. ui/src/api/contracts.test.ts asserts that no
+              browser client addresses any path this contract declares, so the
+              exclusion is enforced rather than merely intended. Naming a
+              browser as the consumer would have sent a reader looking for a
+              module that is deliberately absent.
         WHY : Assumptions: the registry is runtime scope because no application
               class references a Prometheus type directly. Common tags are
               applied centrally by common-lib's MetricsConfig, so the only

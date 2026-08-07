@@ -125,7 +125,7 @@ import org.springframework.transaction.annotation.Transactional;
  * discriminator is {@code CDEMO-PGM-CONTEXT PIC 9(01)} at line 29 of that copybook, with its
  * first-entry and re-entry condition names at lines 30 and 31, and it exists only because a CICS
  * task cannot remember whether it has already sent the screen. A handler that answers one request
- * and returns a field entry has no such question to settle. What would be concretely wrong with
+ * and returns a field entry has no such question to settle. What would not hold for
  * carrying it forward is visible in {@code app/cpy/CSSETATY.cpy}: line 20 gates the whole
  * field-highlight template on that very flag, so keeping the flag would make the presentation of an
  * error depend on a remembered turn count instead of on the response body.
@@ -146,7 +146,7 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <p>Refactoring Rationale: none of that dispatch is implemented here, and the deviation above is
  * recorded because a reader who knows the global table would otherwise expect a save method on this
- * class. What is wrong with carrying the dispatch across is that it puts the choice of the next
+ * class. What does not hold for carrying the dispatch across is that it puts the choice of the next
  * screen on the server: each branch of that selection ends either in a screen send or in a transfer
  * of control naming another program, so a class holding it would be deciding navigation from a
  * destination field the client supplied. Transformation rule T5 maps a transfer of control onto a
@@ -201,7 +201,7 @@ import org.springframework.transaction.annotation.Transactional;
  * included, so a lower-case path does not resolve.
  *
  * <p>Trade-offs: the amount is carried at nine integer digits even though the reference screen
- * renders eight, and the difference is latent reference behaviour rather than a defect being
+ * renders eight, and the difference is latent reference behaviour rather than a shortfall being
  * addressed. {@code app/cbl/COTRN01C.cbl} declares {@code WS-TRAN-AMT PIC +99999999.99} at line 49
  * -- a sign, eight integer digits and two decimals -- and line 177 routes the record amount through
  * that edited field before line 183 writes it to the map, while {@code TRAN-AMT} is declared
@@ -346,7 +346,7 @@ public class TransactionViewService {
         //       use. A container that cannot supply one fails while the context is being built,
         //       naming the member, instead of answering the first request of the day with a null
         //       dereference whose stack trace names a line in this class rather than the wiring
-        //       that is actually wrong.
+        //       that actually differs.
         this.transactions = Objects.requireNonNull(transactions, "transactions must not be null");
         this.transactionMapper =
                 Objects.requireNonNull(transactionMapper, "transactionMapper must not be null");
@@ -394,16 +394,15 @@ public class TransactionViewService {
     @Transactional(readOnly = true)
     public TransactionDetailResponse viewTransaction(String transactionId) {
 
-        // WHAT: the blank guard of the reference selection at lines 146 to 156, which runs before
-        //       anything reaches the table.
-        // WHY : Assumptions: the reference test at line 147 compares the input field against SPACES
-        //       and against LOW-VALUES, and the shared predicate is the exact analogue of that pair:
-        //       it answers true for a null, for an empty value, for a value made wholly of the space
-        //       pad and for one made wholly of the low-value pad, and for nothing else. The
-        //       platform's general blank test is deliberately not used in its place, because it
-        //       would call a tab absent -- a tab equals neither figurative constant -- while calling
-        //       a run of low values present, which is wrong on both counts against the reference
-        //       comparison.
+        // WHY : Assumptions: this guard is the reference selection's own first branch at lines 146 to
+        //       156, so it runs before anything reaches the table rather than alongside the read.
+        //       The reference test at line 147 compares the input field against SPACES and against
+        //       LOW-VALUES, and the shared predicate is the exact analogue of that pair: it answers
+        //       true for a null, for an empty value, for a value made wholly of the space pad and
+        //       for one made wholly of the low-value pad, and for nothing else. The platform's
+        //       general blank test is deliberately not used in its place, because it would call a
+        //       tab absent -- a tab equals neither figurative constant -- while calling a run of low
+        //       values present, which is wrong on both counts against the reference comparison.
         if (FieldValidationFlag.isNeverSupplied(transactionId)) {
 
             // WHY : Assumptions: the state is the blank one rather than the not-acceptable one, and
@@ -431,8 +430,14 @@ public class TransactionViewService {
             //       named here -- the arity the reference paragraph produces, because its selection
             //       leaves on its first matching branch and the read that follows is guarded on the
             //       error flag being off.
-            throw new ClientInputException(
-                    ApiError.CODE_VALIDATION, blankIdentifier.field(), blankIdentifier.message());
+            // WHY : Refactoring Rationale: the never-supplied STATE is passed as well as the field and
+            //       the message, where an earlier arrangement passed only the latter two and left the
+            //       shared advice to assume the rejected-value state. The two states draw different
+            //       markers -- app/cpy/CSSETATY.cpy moves an asterisk into a blank field and only the
+            //       colour attribute into a rejected one -- so a form told this control held a
+            //       rejected value drew no asterisk where the reference draws one.
+            throw new ClientInputException(ApiError.CODE_VALIDATION, blankIdentifier.field(),
+                    blankIdentifier.state(), blankIdentifier.message());
         }
 
         // WHY : Assumptions: the clearing of the thirteen display fields at lines 159 to 171 has no
@@ -442,7 +447,6 @@ public class TransactionViewService {
         //       body at all, so there is nothing retained for a clear to remove.
         Transaction stored = readTransactFile(transactionId);
 
-        // WHAT: the thirteen record fields of lines 176 to 190, rendered by the converter.
         // WHY : Assumptions: the message argument is null and not a blank string, because line 30 of
         //       app/cpy/CVCRD01Y.cpy attaches a message-off condition valued at low values to the
         //       return message alone, making absence representable for that one field. The
@@ -487,7 +491,10 @@ public class TransactionViewService {
             //       lines, so it acquires an exclusive read-for-update lock that no statement ever
             //       uses. This is the plain read-only lookup that replaces it: no lock mode, no
             //       locking annotation. The baseline does one thing, the Java implements another,
-            //       and the divergence is documented in the migration traceability register.
+            //       and the difference is registered as D-VIEW-READ-WITHOUT-LOCK in
+            //       docs/architecture/cobol-to-service-traceability.md -- which states plainly that
+            //       this target holds FEWER locks than the baseline, so a concurrent writer the
+            //       baseline would have blocked now proceeds.
             found = this.transactions.findById(transactionId);
 
         } catch (RuntimeException lookupFailure) {

@@ -130,7 +130,7 @@ import java.util.Optional;
  *
  * <h2>This rule is a floor, and the entry point's contract is stricter</h2>
  *
- * <p><strong>Assumptions: satisfying this record does not mean a container command line will be
+ * <p>Assumptions: <strong>satisfying this record does not mean a container command line will be
  * accepted.</strong> {@code com.carddemo.batch.BatchApplication} requires
  * {@link #BUSINESS_DATE_OPTION} for ALL SEVEN jobs, and its own documentation gives a third ground
  * that this record deliberately does not enforce: it adds the token as an IDENTIFYING job parameter,

@@ -204,9 +204,22 @@ public class UsState {
     //       standard character binding for reads, writes and validation while leaving the physical
     //       definition wholly with V1__reference.sql, and it is the same mechanism the auth,
     //       transaction, batch and authorization contexts use for the identical reason.
+    // WHY : Assumptions: the column is declared NOT UPDATABLE and no method reassigns it. The
+    //       identifier of a seeded lookup row is its identity rather than one of its attributes: this
+    //       two-character code is the value a state-and-ZIP prefix and an address validation are
+    //       matched against, so reassigning it in place would move a row's identity while every
+    //       reference to it stayed pointing at the old value. Withholding the write from both the
+    //       provider and the caller makes that impossible rather than merely discouraged.
+    // WHY : Refactoring Rationale: an earlier revision offered a public setter for this member and
+    //       argued in its own documentation that the method existed for a loader's assignment "and not
+    //       as an invitation to rename a seeded row". That is a rule prose can state and only the type
+    //       can enforce, and the loader never needed the setter: the single-argument constructor below
+    //       assigns the code in one step and refuses a null, which the setter did not. The setter was
+    //       therefore a second assembly route that was strictly weaker than the first, and removing it
+    //       leaves one way to build this row and no way to alter its identity.
     @Id
     @JdbcTypeCode(SqlTypes.CHAR)
-    @Column(name = "state_cd", length = 2, nullable = false)
+    @Column(name = "state_cd", length = 2, nullable = false, updatable = false)
     private String stateCode;
 
     /**
@@ -256,23 +269,6 @@ public class UsState {
      */
     public String getStateCode() {
         return stateCode;
-    }
-
-    /**
-     * Replaces the state or territory code this row is keyed by.
-     *
-     * <p>Assumptions: the member is mutable and reachable because a persistence entity holds its
-     * state in non-final members the provider can write, and this key is a natural one taken from
-     * {@code app/cpy/CSLKPCDY.cpy} L1013 rather than a generated one, so the value arrives from a
-     * caller or a loader instead of from the database. The method exists for that assignment and not
-     * as an invitation to rename a seeded row; {@code V2__seed_reference.sql} owns which codes
-     * exist, as the entries above record. </p>
-     *
-     * @param stateCode the {@code String} carrying the two-character code, drawn from the list
-     *     that {@code app/cpy/CSLKPCDY.cpy} L1013 declares
-     */
-    public void setStateCode(String stateCode) {
-        this.stateCode = stateCode;
     }
 
     /**

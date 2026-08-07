@@ -160,5 +160,28 @@ public interface AccountContextClient {
         public AccountContextUnavailableException(String message, Throwable cause) {
             super(message, cause);
         }
+
+        /**
+         * Creates an exception describing a successful response this contract cannot be built from.
+         *
+         * <p>Refactoring Rationale: this second form exists because the class previously admitted only a
+         * caused failure, on the reading that every unavailability had a transport exception underneath.
+         * That reading missed the case this constructor is for: a dependency that answers 2xx with an
+         * absent or incomplete body has thrown nothing at all, so there is no cause to pass -- and the
+         * only alternative available to a caller was to report the answer as not-found, which turns a
+         * broken contract into a committed wrong decision on the cardholder's account.</p>
+         *
+         * <p>Alternatives Considered: passing {@code null} as the cause to the two-argument form.
+         * Rejected because it reads as an omission at every call site, so a reader cannot tell a
+         * deliberate absence of cause from a forgotten one; a distinct constructor states which it is.
+         * Alternatives Considered: synthesising a cause. Rejected because a fabricated stack trace points
+         * at this file rather than at anything that failed.</p>
+         *
+         * @param message what was read and what the answer was missing; names components rather than
+         *     values, because this message reaches a log
+         */
+        public AccountContextUnavailableException(String message) {
+            super(message);
+        }
     }
 }

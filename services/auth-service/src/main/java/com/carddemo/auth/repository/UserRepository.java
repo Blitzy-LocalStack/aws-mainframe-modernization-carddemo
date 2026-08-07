@@ -2,6 +2,8 @@ package com.carddemo.auth.repository;
 
 import com.carddemo.auth.domain.User;
 import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
 import org.springframework.data.domain.Limit;
 import org.springframework.data.jpa.repository.JpaRepository;
 
@@ -10,9 +12,20 @@ import org.springframework.data.jpa.repository.JpaRepository;
  *
  * <p>Every relational equivalent of a file operation the baseline issues against its {@code USRSEC}
  * dataset is either declared in this interface or inherited into it, and none is expressed anywhere
- * else in this module. Two constants, one cursor sentinel and two keyset browse queries are declared;
- * the keyed operations are inherited. There is no third browse direction and no offset paging of any
- * kind, and both absences are load bearing rather than incidental.</p>
+ * else in this module. Two constants, one cursor sentinel, two keyset browse queries and one
+ * alternate-key lookup are declared; the keyed operations are inherited. There is no third browse
+ * direction and no offset paging of any kind, and both absences are load bearing rather than
+ * incidental.</p>
+ *
+ * <p>Assumptions: the alternate-key lookup is the one member here with NO baseline counterpart, and
+ * saying so is what keeps the sentence above honest. The baseline reaches a user row by one key only,
+ * {@code SEC-USR-ID}, and verifies identity by comparing the plaintext {@code SEC-USR-PWD} the same
+ * record carries, at {@code app/cbl/COSGN00C.cbl} line 223. The target declines parity on exactly
+ * that point -- AAP section 0.7.8 records it, and
+ * {@code V1__auth.sql} declares no password column -- so verification moves to the managed user pool
+ * and the row is reached by the subject the pool issues. That link needs a query the baseline never
+ * had, which is why {@link #findByCognitoSub(UUID)} is documented as net-new rather than cited to a
+ * COBOL line that does not exist.</p>
  *
  * <h2>Four file verbs become two queries</h2>
  *
@@ -349,4 +362,59 @@ public interface UserRepository extends JpaRepository<User, String> {
     //       positioned outcome for this boundary and never an error: an empty list here means the
     //       caller is at an edge, and the layer above chooses which of those five texts to render.
     List<User> findByUserIdLessThanOrderByUserIdDesc(String firstKey, Limit limit);
+
+    /**
+     * Resolves the local user row that an authenticated provider subject identifies.
+     *
+     * <p>This is the token-to-row link the target's identity design depends on: a validated token
+     * carries the provider's subject claim, and the authorities a request is authorised with come from
+     * the {@code user_type} of the row that subject names. It is the only lookup on this boundary that
+     * does not go through the primary key.</p>
+     *
+     * @param cognitoSub the provider's subject reference to resolve, of type {@code UUID}, taken from a
+     *     token that has already been validated; must not be {@code null}
+     * @return the row that subject identifies wrapped in an {@code Optional<User>}, holding at most one
+     *     row because the column is unique, and EMPTY when no row carries that subject -- which is an
+     *     ordinary outcome and not an error, since a subject the pool has issued need not yet have a
+     *     local row
+     */
+    // WHY : Assumptions: at-most-one is a SCHEMA guarantee here rather than a convention this
+    //       signature hopes for, which is what makes a single-valued return type sound.
+    //       services/auth-service/src/main/resources/db/migration/V1__auth.sql declares
+    //       cognito_sub UUID NOT NULL UNIQUE, and com.carddemo.auth.domain.User maps it with
+    //       nullable = false and unique = true, so the two agree and the engine refuses a second row
+    //       carrying one subject. Were the column merely indexed, a duplicate would make this method
+    //       throw at runtime on data the database had accepted -- a failure mode the constraint
+    //       removes rather than one this signature papers over. UserRepositoryIT asserts both halves:
+    //       that one subject resolves to its row, and that inserting a second row with the same
+    //       subject is refused.
+    // WHY : Alternatives Considered: returning User directly and returning List<User> were both
+    //       rejected, and for opposite reasons. A bare User would express absence as null, and the
+    //       absent case here is ORDINARY -- a subject with no local row is the state a
+    //       just-provisioned pool user is in -- so the type has to make the caller handle it rather
+    //       than let one forget to. A List would express a cardinality the unique constraint has
+    //       already excluded, and every caller would then need a size check that can never fail,
+    //       which is exactly the dead branch a reader cannot tell from a live one. Optional states
+    //       zero-or-one, which is precisely what the constraint guarantees.
+    // WHY : Alternatives Considered: a declared @Query was rejected in favour of deriving the query
+    //       from the method name. The predicate is a single equality on one mapped property, so a
+    //       declared query would restate in JPQL what the property name already says, and it would
+    //       additionally hard-code a column or entity name that the entity mapping owns. Deriving it
+    //       also fails LOUDLY and early on a typo: Spring Data resolves the property against the
+    //       entity while the context starts, so a misspelled name aborts startup with a message
+    //       naming the property, whereas a hand-written query naming a wrong column would compile and
+    //       fail at first execution.
+    // WHY : Assumptions: the parameter is java.util.UUID and NOT String, matching the entity member
+    //       and the native uuid column. Accepting a String here would push a parse or a text
+    //       comparison onto this boundary and would let two spellings of one subject -- differing only
+    //       in letter case or in hyphenation -- reach the database as different values, which is the
+    //       comparison the uuid type exists to canonicalise. The entity's own rationale records the
+    //       same choice for the same reason, so the two do not drift.
+    // WHY : Trade-offs: this member has no baseline citation, and that is stated rather than
+    //       disguised. Every other member of this interface names the COBOL verb it replaces; this one
+    //       replaces a plaintext comparison that the target deliberately does not carry forward, so
+    //       there is no verb to cite. The cost is that a reader auditing this file against the
+    //       baseline finds one member with no source line; what is bought is that the audit reaches
+    //       the recorded divergence instead of a fabricated citation.
+    Optional<User> findByCognitoSub(UUID cognitoSub);
 }

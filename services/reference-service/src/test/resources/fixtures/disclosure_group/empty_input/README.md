@@ -503,7 +503,7 @@ each item below the alternative is named rather than merely implied.
   scenario: `tests/fixtures/posting/empty_input/dailytran.txt` is 0 bytes, all
   four files in `tests/fixtures/provisioning/empty_input/` are 0 bytes, and
   `tests/fixtures/statement/empty_input/trnxfile.txt` is 0 bytes. So does this
-  tree, where five of the fifteen record files are genuinely zero-byte, one per
+  tree, where five of the eighteen record files are genuinely zero-byte, one per
   `empty_input` scenario.
 
 - **Only the file under test is emptied.** That is the house pattern -- the

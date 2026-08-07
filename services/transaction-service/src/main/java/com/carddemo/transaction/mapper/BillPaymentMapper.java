@@ -117,8 +117,8 @@ import org.springframework.stereotype.Component;
  *
  * <p>Assumptions: every name beneath this class matches its copybook exactly, and the absence of a
  * rename is a decision rather than an oversight. A reader who knows the neighbouring services will
- * arrive expecting a spelling change, because the wider migration does correct three misspelled
- * baseline names in its target columns -- {@code ACCT-EXPIRAION-DATE} in the account context,
+ * arrive expecting a spelling change, because the wider migration does carry three misspelled
+ * baseline names across under corrected target spellings -- {@code ACCT-EXPIRAION-DATE} in the account context,
  * {@code CARD-EXPIRAION-DATE} in the card context and {@code PA-MERCHANT-CATAGORY-CODE} in the
  * authorization context. None of the three occurs in {@code app/cpy/CVTRA05Y.cpy} or in
  * {@code app/cpy-bms/COBIL00.CPY}, which are the only layouts this class reads, so there is nothing
@@ -482,7 +482,7 @@ public class BillPaymentMapper {
                 //       records whose amount occupies the eleven characters at positions 133 to
                 //       143, and the second of those records ends that field in a sign overpunch
                 //       that decodes to a NEGATIVE amount. An amount path that lost the overpunch
-                //       would read that record as positive and post it the wrong way.
+                //       would read that record as positive and post it in the opposite direction.
                 currentBalance.amount(),
                 MERCHANT_ID,
                 MERCHANT_NAME,
@@ -613,12 +613,12 @@ public class BillPaymentMapper {
 
         // WHY : Assumptions: the acknowledgement is built through the record's own posted factory
         //       rather than through its canonical constructor, because the shape carries a paid
-        //       discriminator whose only correct value on this path is the affirmative one.
+        //       discriminator whose only admissible value on this path is the affirmative one.
         //       Constructing it directly would put that value at this call site, where a later edit
         //       could publish a body reporting that no payment was made about a transaction row that
         //       demonstrably exists -- and, to a client reading the body without its status code,
         //       that body is indistinguishable from a preview. The factory fixes the value, so this
-        //       method cannot express the wrong state at all.
+        //       method cannot express the other state at all.
         // WHY : Trade-offs: the two identifiers on this shape are treated differently and the split
         //       is deliberate. The account identifier is caller-supplied, so it is guarded and
         //       normalised to its declared width on the way out, which is what lets a client compare
@@ -627,7 +627,7 @@ public class BillPaymentMapper {
         //       wrote it that way, so it is echoed exactly as stored: re-normalising a stored key
         //       would report a value that differs from the one the row is addressed by, and the
         //       column is declared as a fixed-width character type, so a padded value read back
-        //       would be refused by the digit guard rather than corrected by it.
+        //       would be refused by the digit guard rather than normalised by it.
         return BillPaymentResponse.posted(
                 zeroPaddedDigits(request.accountId(), ACCOUNT_ID_WIDTH, ACCOUNT_ID_FIELD),
                 requiredAmount(transaction.getTranAmt()),
@@ -676,7 +676,7 @@ public class BillPaymentMapper {
      * a refused submission answers with.
      *
      * <p>Refactoring Rationale: the mechanism being replaced is the reference's field-highlight
-     * template, and what was wrong with it is that it depended on remembered turn state supplied by
+     * template, and the difference that matters is that it depended on remembered turn state supplied by
      * the client. {@code app/cpy/CSSETATY.cpy} is a templated copybook expanded once per validated
      * field: lines 18 and 19 form one disjunctive test over that field's not-ok and blank flags, and
      * line 20 conjoins the pseudo-conversational re-entry discriminator, so the highlight fires only
@@ -743,12 +743,37 @@ public class BillPaymentMapper {
         Objects.requireNonNull(accountIdState, "accountIdState must not be null");
         Objects.requireNonNull(confirmationState, "confirmationState must not be null");
 
+        // WHY : Refactoring Rationale: the account identifier is settled BEFORE the confirmation is
+        //       looked at, and the earlier arrangement looked at the confirmation first. The reference
+        //       catches a never-supplied account identifier at line 159 of app/cbl/COBIL00C.cbl and
+        //       answers it at line 161, and only a submission that survives that test reaches the
+        //       four-way confirmation evaluation at lines 173 to 191 at all. Evaluating the
+        //       confirmation first inverted that order, and the inversion was not cosmetic: the
+        //       commonest first-turn submission leaves BOTH fields empty, and that submission raised
+        //       from the guard below instead of returning the one entry the reference reports.
+        // WHY : Assumptions: a blank account identifier therefore returns its own entry alone, whatever
+        //       the confirmation holds. This is not a claim that the confirmation was acceptable; it is
+        //       that the reference never formed an opinion about it on this turn, so reporting one
+        //       would put a marker on a control the reference leaves untouched.
+        if (accountIdState == FieldValidationFlag.BLANK) {
+            return ApiError.FieldError.fromAll(accountIdState
+                    .toFieldError(ACCOUNT_ID_FIELD, accountIdMessage(accountIdState))
+                    .map(List::of)
+                    .orElseGet(List::of));
+        }
+
         // WHY : Assumptions: the state is compared to the never-supplied constant rather than asked
         //       whether it carries a screen marker. The two predicates coincide today, because the
         //       marker belongs to that one state, but they answer different questions -- one is about
         //       which reference branch a submission took and the other about how a client renders a
         //       field -- and a guard written against the rendering question would change meaning if
         //       the marker's ownership ever did.
+        // WHY : Assumptions: this guard is reachable only once the account identifier has been
+        //       established as supplied, which is what makes it a statement about the confirmation
+        //       alone. With an acceptable account identifier a never-supplied confirmation is the
+        //       reference's prompt branch at lines 182 to 183, answered at line 237 with the
+        //       confirm-to-pay prompt and no field marker at all, so a caller asking for it to be
+        //       rendered as a refusal is asking for a shape this screen does not produce.
         if (confirmationState == FieldValidationFlag.BLANK) {
             throw new IllegalArgumentException("confirmationState must not be the blank state:"
                     + " a never-supplied confirmation drives the prompt branch rather than a"
@@ -814,7 +839,7 @@ public class BillPaymentMapper {
      * declared without a not-null constraint, yet the reference record has no absent state for it:
      * {@code TRAN-AMT PIC S9(09)V99} at line 10 of {@code app/cpy/CVTRA05Y.cpy} occupies eleven bytes
      * of every 350-byte record and a zoned-decimal field always decodes to a number. An absent amount
-     * is therefore a defect in the row rather than a state the reference can produce, and refusing
+     * is therefore a shape outside the domain the reference produces, and refusing
      * here names the row that carries it instead of emitting a null into a component documented as
      * always present.
      *
@@ -827,14 +852,14 @@ public class BillPaymentMapper {
     private static Money requiredAmount(BigDecimal storedAmount) {
         return Money.of(Objects.requireNonNull(storedAmount,
                 "tranAmt must not be null: the reference record has no absent amount, so an absent"
-                        + " value is a defect in the row rather than a state to report"));
+                        + " value is outside the domain the reference produces rather than a state to report"));
     }
 
     /**
      * Collapses every spelling of an absent message onto no value, and refuses one too wide to render.
      *
      * <p>Refactoring Rationale: the message regime being replaced is this program's own, and it has
-     * two specific faults. The reference carries {@code WS-MESSAGE PIC X(80)} at line 39 of
+     * two specific differences from the target form. The reference carries {@code WS-MESSAGE PIC X(80)} at line 39 of
      * {@code app/cbl/COBIL00C.cbl} and renders it at line 293 into {@code ERRMSGO PIC X(78)} at line
      * 140 of {@code app/cpy-bms/COBIL00.CPY}: eighty characters into seventy-eight, so the final two
      * disappear on every send with no signal that anything was lost. And a message field of declared
@@ -865,7 +890,7 @@ public class BillPaymentMapper {
         // WHY : Assumptions: the shared absence predicate is called rather than a local blank test.
         //       It folds a null, an empty value, a run of spaces AND a run of low values onto one
         //       answer, which the platform's general blank test does not: that test would treat a tab
-        //       as absent and a run of low values as present, wrong on both counts against the
+        //       as absent and a run of low values as present, at odds with the reference on both counts against the
         //       figurative constants the reference compares against.
         if (FieldValidationFlag.isNeverSupplied(message)) {
             return null;

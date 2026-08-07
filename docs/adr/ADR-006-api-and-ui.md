@@ -162,17 +162,24 @@ matter, and the second one has a security consequence that
 
 Two halves, decided together because neither is usable without the other.
 
-**Protocol.** Each service publishes **REST over JSON**, described by an
-**OpenAPI 3.1** contract held with the service under
-`services/*/src/main/resources/openapi/`. Requests arrive through an **API
+**Protocol.** Each service **with an HTTP surface** publishes **REST over JSON**,
+described by an **OpenAPI 3.1** contract held with the service under
+`services/*/src/main/resources/openapi/`. That qualifier is load-bearing: one of
+the eight service modules, `batch-service`, publishes no HTTP surface at all, and
+the census is set out under [Consequences](#seven-openapi-contracts-one-per-service-with-an-http-surface-held-with-the-service).
+Requests arrive through an **API
 Gateway HTTP API** that validates a bearer token at the edge and forwards to an
 **internal** application load balancer, which routes per service. Every service
 additionally validates the token itself as a resource server, so no service
 depends on the front door having done it.
 
-**Interface.** The **21** screens are re-implemented as one **React 19 +
+**Interface.** The **21** screens are **to be** re-implemented as one **React 19 +
 TypeScript** single-page application, one route per mapset, using **Ant Design**
-for every interactive element. The built assets are static files served from
+for every interactive element. Assumptions: this paragraph and the inventory below
+state the **decision**, which is normative and complete; what is **authored so far**
+is a strict subset and is stated separately under
+[Honest boundary](#honest-boundary--what-this-record-does-not-establish), so that
+neither reading has to be inferred from the other. The built assets are static files served from
 **S3 behind CloudFront**; no application server participates in delivering them.
 
 ```mermaid
@@ -180,11 +187,14 @@ graph LR
     B["Browser<br/>React 19 + TypeScript SPA"] -->|"immutable static assets"| CF["CloudFront + S3<br/>origin access control"]
     B -->|"REST/JSON + bearer token"| AG["API Gateway HTTP API<br/>token authorizer"]
     AG -->|"private integration"| ALB["Internal ALB<br/>per-service routing"]
-    ALB --> S["Eight stateless services<br/>OpenAPI 3.1 contract each"]
+    ALB --> S["Seven stateless services<br/>OpenAPI 3.1 contract each"]
     S --> DB[("Aurora PostgreSQL<br/>see ADR-003")]
 %% Two independent paths from one browser: immutable assets from the edge cache,
 %% and API calls through the authorizing front door. Neither path carries session
 %% state, which is what ADR-002 relies on to scale the service tier horizontally.
+%% SEVEN services sit behind the load balancer, not eight: batch-service has no
+%% HTTP surface and therefore no ALB target and no contract. See the Consequences
+%% section for the measured census and the reason.
 ```
 
 The screen inventory is one route per mapset. It is summarised by group rather
@@ -322,9 +332,21 @@ the property that decided between them are recorded rather than implied.
   applications, where generous spacing and prominent motion serve the goal. Applied
   to a 128-field form the same choices work against the reading task, and the
   table and detail-view primitives would carry more of the layout in bespoke code.
-- **Shadcn/ui — rejected on two concrete grounds.** It requires a utility-CSS
-  toolchain plus hand-assembly of each component into the repository, and it ships
-  no `Table` or `Descriptions` equivalent. Both grounds converge on the same
+- **Shadcn/ui — rejected on ownership, assembly depth and one genuine gap.** It
+  requires a utility-CSS toolchain plus hand-assembly of each component into the
+  repository: components are copied into the codebase and owned there rather than
+  consumed from a versioned package. Refactoring Rationale: this entry previously
+  claimed the catalog ships **no `Table`**, which is wrong — the catalog does
+  publish `Table`, and a `Data Table` alongside it — so the rejection is re-grounded
+  on what is actually true of them. `Table` is a set of unstyled structural
+  primitives (`Table`, `TableHeader`, `TableRow`, `TableHead`, `TableBody`,
+  `TableCell`, `TableCaption`), and `Data Table` is **a documented recipe rather
+  than a component**: sorting, filtering, pagination, column visibility and row
+  selection are assembled here against `@tanstack/react-table`, which is an
+  additional dependency to pin and a body of first-party code to own. The one
+  outright gap is **`Descriptions`**, which the catalog has no equivalent of, and
+  which the account, card, transaction and authorization detail views all use. Both
+  grounds converge on the same
   outcome: a large amount of table and detail-view behaviour would become
   first-party code, and the zero-hardcoded-values rule that
   [`docs/architecture/design-token-reference.md`](../architecture/design-token-reference.md)
@@ -336,9 +358,13 @@ What separated them is **how much of the table and detail-view behaviour each on
 leaves to be written here.** That is measurable against this inventory rather than
 in the abstract: the three screens with the largest field counts are a 128-field
 form, a 100-field detail view and an 89-field paged list, and a library shipping
-`Form`, `Descriptions` and `Table` covers all three shapes directly, whereas a
-library missing two of the three converts them into first-party code that has to
-carry its own accessibility, keyboard and paging behaviour.
+`Form`, `Descriptions` and `Table` as **finished, prop-configured components**
+covers all three shapes directly. The distinction that decides it is therefore
+**assembled versus supplied**, not present versus absent: a catalog offering table
+primitives plus a data-table recipe, and no detail-view component at all, converts
+the paged list's sorting, paging and selection wiring and the whole of the
+100-field detail view into first-party code that has to carry its own
+accessibility, keyboard and paging behaviour.
 
 Trade-offs: the accepted library is the most opinionated of the three, so its
 visual language is inherited rather than composed, and stepping outside it costs
@@ -361,7 +387,7 @@ zero-hardcoded-values rule mechanically checkable instead of a review habit.
 | 6 | 3270 emulator over a bridge | Rejected | Needs a transaction runtime the target does not have; reintroduces the coupling ADR-001 removes |
 | 7 | Server-rendered pages | Rejected | Returns presentation and view state to the service tier |
 | 8 | Defer the interface | Rejected | Would leave every online transaction without a consumer |
-| 9 | Ant Design, over Material UI and Shadcn/ui | **ACCEPTED** | Density: `Table`, `Descriptions` and `Form` as primitives for 128-field screens |
+| 9 | Ant Design, over Material UI and Shadcn/ui | **ACCEPTED** | Density: `Table`, `Descriptions` and `Form` supplied as finished components, not assembled here |
 
 ## Rationale
 
@@ -377,14 +403,83 @@ than implying more deliberation than actually occurred.
 
 ### 2. The OpenAPI contract is what stops the client and the service drifting apart
 
-Each service holds its own OpenAPI 3.1 document. The typed client layer under
-[`ui/src/api`](../../ui/src/api) is built against those documents, so a field that
-is renamed, retyped or removed on one side is a compile-time failure on the other
-rather than a runtime surprise on one screen.
+Each service with an HTTP surface holds its own OpenAPI 3.1 document, and the typed
+client layer under [`ui/src/api`](../../ui/src/api) is hand-authored against those
+documents — one client module per browser-facing contract, its interfaces
+transcribed property by property and each naming the contract schema it mirrors.
+
+Agreement between the two halves is enforced by
+[`ui/src/api/contracts.test.ts`](../../ui/src/api/contracts.test.ts), which runs as
+the named `Check API contract agreement` step in
+[`ui-ci.yml`](../../.github/workflows/ui-ci.yml) and again inside the full suite.
+It asserts four things: that the on-disk inventory of contracts equals the one the
+SPA knows about, so a contract added to a service without a client fails the build;
+that each client module implements **exactly** the operations its contract
+declares, in both directions; that no client addresses the one contract that is
+internal-only; and that every operation resolves to a versionless target with no
+placeholder left unsubstituted. Each client module exports its operation manifest
+and derives every request target from it, so the manifest the gate reads and the
+address the code sends cannot disagree.
+
+Refactoring Rationale: this record previously said that a renamed, retyped or
+removed field "is a compile-time failure on the other" side. That described a
+**generated** client, and it was not merely unimplemented — it was unimplementable
+with the dependency set this project pins. [`ui/package.json`](../../ui/package.json)
+declares 7 runtime and 15 development dependencies and names no OpenAPI code
+generator; the migration plan's dependency inventory fixes that set, and adding to
+it is not a decision this record may take. No build step could therefore ever have
+turned a YAML edit into a TypeScript type error. Writing more hand-authored clients
+would not have made the claim true either. What is delivered instead is the
+operation-level gate described
+above, and it is recorded here in those terms because a decision record that
+overstates its own mechanism is worse than one that understates it: a reader trusts
+the overstatement and stops checking.
+
+Trade-offs: the gate decides which operations exist on each side; it does **not**
+decide field-level agreement, which a generator would have. That is the residual
+risk and it is stated rather than left implied. Two things bound it. Each client
+interface names the contract schema it transcribes, so a disagreement is locatable
+by reading two named artifacts instead of searching the tree; and each service's
+own contract test — for example
+[`ReportingApiContractTest`](../../services/reporting-service/src/test/java/com/carddemo/reporting/api/ReportingApiContractTest.java)
+— holds its committed document to the metadata its running configuration serves, so
+neither side is unchecked even where the two are not compared to each other.
 
 Assumptions: the contract is authoritative for the client. Where a service's
-handler and its contract disagree, the contract is the defect — not the client
-that believed it.
+handler and its contract disagree, the contract governs — not the client that
+believed it.
+
+**What is mechanically enforced, and what is not.** Refactoring Rationale: this
+section previously said that renaming or retyping a field on one side is "a
+compile-time failure on the other". That overstated the coupling and is corrected
+here, because a reader would otherwise trust a compiler to catch a class of drift
+that no compiler sees. The client's request and response types are **hand-written
+TypeScript, not generated from the contracts**, so nothing links the two at compile
+time. What does hold the line is enforced on the service side and in tests:
+
+| Boundary | Enforcement | Mechanism |
+|---|---|---|
+| Contract ↔ handler routes, **where handlers exist** | **Mechanical** | `transaction`, `reference` and `reporting` each assert in **both** directions that every published path is served and every served path is published |
+| Contract ↔ published authority and schema rules | **Mechanical** | Every one of the six contract tests asserts the authority model, the paging envelope and the path-shape rules the contract declares — including for the three services whose handlers are not yet authored |
+| Contract ↔ DTO wire shape | **Mechanical** | Per-service wire and DTO contract tests assert declared field names, types and money-as-string |
+| Contract ↔ TypeScript client types | **Manual** | No code generation; a contract change and its client change are two edits a reviewer must keep together |
+
+Assumptions: the first two rows are deliberately separate because they cover
+different services. `auth`, `card` and `authorization` publish a contract but have
+no controllers yet, so there is no route set to compare theirs against — their tests
+bind the contract to its own declared rules rather than to handlers, and claiming a
+handler-binding for them would be a verification claim this record cannot support.
+
+Trade-offs: the third row is a real residual risk and it is recorded as one under
+[Risk — the typed client is hand-written, so contract drift is not a compile error](#risk--the-typed-client-is-hand-written-so-contract-drift-is-not-a-compile-error)
+rather than being presented as solved. Alternatives Considered: generating the
+client from each contract, which would make that row mechanical too. It is not
+adopted in this record because the generator, its pinned version and its output
+location are themselves decisions with a review surface, and adopting one here
+while the majority of screens are unauthored would fix the output shape of a client
+that is still being designed. Assumptions: this is a deferral with a named cost,
+not a claim that generation is unnecessary — the obligation is carried in
+[Downstream obligations this decision creates](#downstream-obligations-this-decision-creates).
 
 ### 3. A signed claim cannot be asserted by the client, and the baseline field could be
 
@@ -428,6 +523,39 @@ four destinations are named. The source is
    request that carries its own subject can be authorized on its own terms. In the
    baseline the subject arrives in returned storage, so the authorization decision
    and the subject have different provenance.
+
+   **The subject travels as an opaque selector wherever it is a primary account
+   number, and not as the number itself.** Assumptions: this is a consequence of the
+   transport rather than a preference. The baseline's card number reaches its program
+   in the terminal's own data stream, which travels between the terminal and the
+   region and is written nowhere else; a REST path segment is written to the
+   browser's own history, sent onward in a referrer header, and recorded in the
+   access log of every intermediary between the browser and the service. Those are
+   durable, searchable stores outside this system's control.
+
+   Refactoring Rationale: an earlier revision of this record mapped
+   `CDEMO-CARD-NUM` straight onto a path segment and answered the exposure by
+   redacting sixteen-digit runs from the operational records the services write. That
+   redaction is real and it does not reach far enough — a service can redact what IT
+   writes and cannot redact what a content distribution or a load balancer wrote
+   before the request arrived — so the number is kept out of the request line
+   instead. The three single-card card operations take a **sealed selector**: an
+   authenticated, deployment-keyed sealing of the primary key, carried on every list
+   row and every detail response so a client can act on what it was shown, with one
+   `POST` operation exchanging a number a user typed for a selector in a request
+   **body**. Alternatives Considered: a keyed one-way token, which is genuinely
+   non-reversible and therefore stronger — rejected because it cannot be resolved
+   back to a row without a stored column, a unique index, a migration and a populate
+   step in the extract-and-load path. Trade-offs: a user arriving with a number pays
+   one extra round trip, and rotating the key invalidates outstanding bookmarks. The
+   divergence is registered as **D-CARD-SELECTOR** in
+   [the divergence register](../architecture/cobol-to-service-traceability.md#d-card-selector--a-card-is-addressed-by-an-opaque-selector-and-the-list-no-longer-narrows-by-card-number).
+
+   Assumptions: an account identifier and a customer identifier continue to travel
+   as themselves. They are not primary account numbers, they are not sensitive
+   authentication data, and no disclosure rule in
+   [ADR-008](ADR-008-security-and-identity.md) masks them, so sealing them would add
+   a lookup for every account route and remove nothing.
 4. **Re-entry discriminator** — `CDEMO-PGM-CONTEXT` (**L29**) with
    `88 CDEMO-PGM-ENTER VALUE 0` (**L30**) and `88 CDEMO-PGM-REENTER VALUE 1`
    (**L31**) → **it disappears entirely.** A stateless handler that answers each
@@ -486,13 +614,16 @@ deferred.** This section is that decision, recorded with its reason so that it i
 never read as an assumption.
 
 **The decision is to bring the interface explicitly into scope.** All **21**
-screens are re-implemented, one route per mapset.
+screens are to be re-implemented, one route per mapset — the decision covers the
+full inventory, and
+[Honest boundary](#honest-boundary--what-this-record-does-not-establish) records how
+much of it is authored.
 
 The reason is a consequence, not a preference. **Leaving the screens unreplaced
 would strand every online transaction.** The baseline's online half is reached
 exclusively through the 3270 presentation layer; the target has no terminal. Defer
 the interface and the outcome is not a smaller delivery but an unreachable one —
-the eight services and their OpenAPI contracts would exist with nothing calling
+the services and their OpenAPI contracts would exist with nothing calling
 them, and the acceptance criteria in AAP §0.9.4 that name sign-on, account
 view/update, card list/update, transaction add/list and bill pay as flows that must
 work end to end could not be satisfied by any means.
@@ -716,7 +847,7 @@ none — it gets cited and then goes stale silently, since a price list can chan
 without anything in this repository changing. A charge dimension and its driver
 stay true across a price revision, so that is what is recorded.
 
-### The API tier is charged per request, with no idle charge
+### The API tier is charged per request, over a continuously billed load-balancer floor
 
 | Dimension | What drives it |
 |---|---|
@@ -731,6 +862,33 @@ charge means **cost tracks use** rather than tracking a provisioned size and a
 clock. That shape is the reason a request-priced front door suits this workload
 specifically, rather than being a general preference: the same choice would be far
 less advantageous for a continuously saturated public API.
+
+**The third row is a floor, and the two rows must not be conflated.** Refactoring
+Rationale: this section was headed "with no idle charge" while its own third row
+recorded a component that runs continuously — the record contradicted itself, and
+the heading is the half that was wrong. The distinction now stated explicitly:
+
+- **API Gateway** is charged per request. Its idle charge genuinely is zero: no
+  request, no charge.
+- **The internal application load balancer** is charged for **every hour it
+  exists, plus capacity units**, in both environments. It is not scaled to zero and
+  is not request-priced, so it is a **standing charge that accrues overnight, at
+  weekends and through any period of no traffic**.
+
+Assumptions: this floor is **not** in the same class as the small fixed charges
+[ADR-004](ADR-004-messaging.md#the-accepted-options-floor-is-small-but-not-zero)
+records for the messaging tier — an always-on load balancer is a materially larger
+standing cost than a key and a few alarms, and describing it as minor would repeat
+the error being corrected. It is accepted because the load balancer is what
+[Decision](#decision) relies on for per-service routing and health checking behind
+one front door, and because the alternative shapes were worse: exposing each
+service through its own public front door would multiply the edge surface that
+[ADR-008](ADR-008-security-and-identity.md) exists to narrow, and putting the
+services directly behind the gateway with no balancer would move routing and
+health checking into the gateway configuration and lose the private-integration
+boundary. Trade-offs: `dev` therefore has a non-zero cost while completely idle,
+and the lever is the environment's task and capacity sizing rather than the
+balancer's existence.
 
 ### Static delivery is charged on storage, transfer and requests — and the cache moves the largest one
 
@@ -870,6 +1028,36 @@ string is declared twice, plus per-screen tests asserting the rendered text. The
 two thank-you strings are the worked example of why this matters — they are similar
 enough that a catalog holding one of them would look complete.
 
+### Risk — the typed client is hand-written, so contract drift is not a compile error
+
+The client's request and response types under [`ui/src/api`](../../ui/src/api) are
+authored by hand rather than generated from the OpenAPI documents, as
+[Rationale 2](#2-the-openapi-contract-is-what-stops-the-client-and-the-service-drifting-apart)
+now states exactly. The consequence is specific: a service may rename, retype or
+remove a field, keep its own contract test green by updating the contract in the
+same change, and leave the client compiling against a field that no longer exists.
+The failure surfaces at runtime, on one screen, as an undefined value rather than a
+build error.
+
+The controls that do exist are named so the residual risk is visible rather than
+implied. Each service's contract test binds the contract to its handlers in both
+directions, so the contract cannot silently disagree with the service. The
+per-screen tests assert the exact strings and field widths a screen renders, so a
+client type that stops matching what the screen needs fails there. What neither
+control covers is the join between the contract and the client type, and that is
+the gap.
+
+Trade-offs: accepting this keeps the client free of a generator and its pinned
+version while the majority of screens are still unauthored, at the cost of a
+review-time obligation that
+[Downstream obligations this decision creates](#downstream-obligations-this-decision-creates)
+carries — a contract change and its client change land together. Alternatives
+Considered: generating the client types in the build, which converts this risk into
+a build failure and is the right move once the client surface stops changing shape;
+and asserting the client types against the contracts in a test without generating
+them, which was judged to duplicate a generator's work while providing weaker
+coverage than the generator itself.
+
 ### Risk — field-width drift
 
 An input whose maximum length does not match the copybook picture width lets an
@@ -891,10 +1079,29 @@ at the edge, and each service additionally validates as a resource server, so no
 service depends on its caller having checked. The token's issuance, claims and
 group mapping belong to [ADR-008](ADR-008-security-and-identity.md).
 
+**A third divergence is possible on the browser side, and it is closed the same
+way.** The interface reads the `cognito:groups` claim to decide which routes to
+offer, which means the browser holds an opinion about authority. Assumptions: that
+opinion is a presentation control and never a boundary — the claim is read from a
+signed token the browser cannot mint, and every service re-derives authority from
+the same claim on every request, so a caller who misleads the interface gains a
+rendered link and then an HTTP 403. Refactoring Rationale: this is recorded here
+because the browser's group read looks like a fourth place authority is decided,
+and a reader who took it for one would reasonably conclude the guard needed
+hardening. It does not: the guard exists so that a refusal is not the first thing
+an operator meets, and hardening it would add no privilege boundary that the
+services do not already enforce.
+
 ### The assumptions this decision rests on
 
 - The OpenAPI contract per service is authoritative for the typed client; where a
-  handler and its contract disagree, the contract is the defect.
+  handler and its contract disagree, the contract governs.
+- The interface obtains its API base URL at **runtime**, from a configuration
+  document published beside the bundle, rather than from a value compiled into it.
+  Assumptions: this is what allows one reviewed bundle to serve every environment,
+  and it is a consequence of ordering rather than preference — the endpoint is
+  created by the same apply that provisions the environment, so it cannot be known
+  when the bundle is built.
 - The component library's peer requirement of React 18 or later is satisfied by
   the pinned React 19 runtime, verified against the lock file.
 - Money crosses the API boundary as a string, never as a JSON number.
@@ -940,11 +1147,54 @@ their absence from this record for an omission in it.
 
 ### Honest boundary — what this record does not establish
 
-The interface and its infrastructure are **authored and statically validated**:
-type-checked, linted against the documentation gate, and unit-tested at component
-level, with the infrastructure formatted, validated, linted and planned. What has
-**not** happened is stated plainly:
+What exists is **authored and statically validated**: type-checked, linted against
+the documentation gate, and unit-tested at component level, with the infrastructure
+formatted, validated, linted and planned. What has **not** happened is stated
+plainly, and the first item is the largest:
 
+- **The screen inventory is decided in full but authored in part.** Four routes of
+  the 21 are authored — sign-on, plus the card list, card detail and card update
+  screens — each covered by a component test:
+  [`ui/src/screens/signon/signon.test.tsx`](../../ui/src/screens/signon/signon.test.tsx)
+  for the first and
+  [`ui/src/screens/cardScreens.test.tsx`](../../ui/src/screens/cardScreens.test.tsx)
+  and
+  [`ui/src/screens/cardScreenShell.test.tsx`](../../ui/src/screens/cardScreenShell.test.tsx)
+  for the other three together. The remaining 17 routes are **not authored**, but the
+  service clients they will call are: [`ui/src/api`](../../ui/src/api) holds six client
+  modules — `auth`, `authorization`, `cards`, `reference`, `reporting` and
+  `transactions` — one for each of the six browser-facing contracts, so the boundary is
+  a screen boundary and no longer a client boundary. Refactoring Rationale: this
+  sentence named `auth.ts` and `cards.ts` as the only authored clients and reported the
+  rest as outstanding. That is measurably no longer true, and the correction is stated
+  rather than the sentence deleted, because which half of the gap closed is the useful
+  fact: the typed client layer is complete against the published contracts while the
+  screens that consume it are not, so what remains is composition rather than
+  transcription. The
+  shared shell, the key-binding hook, the message catalog and the token module are
+  authored, and **all four authored screens compose the shell in full** — screen
+  header, message band, and key bar driven by the key-binding hook.
+  Refactoring Rationale: this bullet previously recorded that only the sign-on screen
+  composed the shell and that the three card screens composed the message band alone,
+  tracked as an obligation below. That is no longer the delivered state and the
+  sentence is corrected rather than deleted, because the obligation it pointed at is
+  still standing for the 17 unauthored routes — what changed is that the four
+  authored ones now satisfy it, and a per-screen test asserts each one does.
+  Assumptions: the decision above is deliberately written as a decision and not as a
+  report — an ADR records what is chosen, and the delivery boundary belongs here,
+  where a reader looking for it will find it rather than discovering it by counting
+  files.
+- **`account-service` publishes a contract and controllers, but no contract test.**
+  Refactoring Rationale: this bullet recorded that the service published neither, and
+  both halves are now measurably wrong — `account-api.yaml` declares three operations
+  and `api/` holds `AccountController`, `CustomerController` and `CardXrefController`.
+  What is genuinely still outstanding is narrower and is stated in its place: six of
+  the seven contracts have a contract test holding the committed document to the
+  metadata the service serves, and `account-service` is the one that does not. The
+  boundary is kept rather than removed because the reason it existed — that a
+  published document is only as trustworthy as the test that pins it — applies to
+  exactly one service now instead of to two. Every claim in this record about eight
+  services still describes the decided architecture and not eight running APIs.
 - **No `terraform apply` against a live AWS account.** That is an operator action
   outside this scope, so no distribution, no front door and no user pool exists as
   a running resource.
@@ -956,6 +1206,16 @@ level, with the infrastructure formatted, validated, linted and planned. What ha
   behaviour and the design system, not against observed operator performance. Where
   this record claims a difference is acceptable — the masked entry field, for
   instance — that is a reasoned judgement, and it is not presented as a tested one.
+- **The contract census is complete, and it is seven rather than eight.** Refactoring
+  Rationale: this bullet reported five of eight documents authored with the account,
+  batch and reporting contracts outstanding. All three cases have since resolved and
+  none resolved the way the bullet predicted: the account and reporting contracts are
+  authored, and `batch-service` publishes no HTTP surface at all, so its contract was
+  never outstanding but absent by design. The measured census and the reasoning behind
+  the count are in
+  [Consequences](#seven-openapi-contracts-one-per-service-with-an-http-surface-held-with-the-service).
+  The decision that each service holds its own contract is settled and delivered; what
+  remains outstanding is the one missing contract test named above.
 
 Assumptions: naming these boundaries is more useful than a confident summary would
 be. A reader who needs to know whether a screen has been driven through a real
@@ -963,20 +1223,59 @@ front door can find the answer here instead of inferring it from silence.
 
 ## Consequences
 
-### Eight OpenAPI contracts, one per service, held with the service
+### Seven OpenAPI contracts, one per service with an HTTP surface, held with the service
 
-Each service publishes its own contract under
+Each service that publishes an HTTP surface holds its own contract under
 `services/*/src/main/resources/openapi/`, versioned with the code that implements
 it rather than in a central registry. Assumptions: co-locating the contract with
 the handler is what keeps the two in step — a contract in a separate tree drifts
 from its implementation because nothing fails when it does.
 
+The census is **seven contracts across eight service modules**, and the arithmetic
+is worth stating because "one per service" is the shape but not the count:
+
+| Contract | Operations | Reachable from the browser |
+|---|---|---|
+| `auth-service/…/auth-api.yaml` | 8 | yes |
+| `account-service/…/account-api.yaml` | 3 | **no — internal only** |
+| `card-service/…/card-api.yaml` | 5 | yes |
+| `transaction-service/…/transaction-api.yaml` | 4 | yes |
+| `reference-service/…/reference-api.yaml` | 19 | yes |
+| `authorization-service/…/authorization-api.yaml` | 3 | yes |
+| `reporting-service/…/reporting-api.yaml` | 5 | yes |
+| `batch-service` | — | **no HTTP surface at all** |
+
+Refactoring Rationale: this heading read "Eight OpenAPI contracts, one per
+service", and the container diagram above said "Eight stateless services, OpenAPI
+3.1 contract each". Both were wrong in the same way and the correction is the same
+one. **`batch-service` publishes no HTTP surface and is not an oversight**: its
+[`pom.xml`](../../services/batch-service/pom.xml) records that no business
+controller, administrative trigger or API contract is introduced and that its web
+listener is bound to loopback solely so the container health probe can reach it;
+its module README says the same; and
+[`infra/modules/api-gateway-http/variables.tf`](../../infra/modules/api-gateway-http/variables.tf)
+both omits it from the route-key default and carries a validation that **rejects**
+any `/batch` route outright. Three artifacts already agreed that this module has no
+contract, and this record was the only one that disagreed.
+
+Assumptions: `account-api.yaml` is counted as a contract and not as a
+browser-facing one, and the distinction is load-bearing rather than pedantic. It
+titles itself an internal read API; its three operations are governed by
+`InternalApiSecurityConfig` in account-service, an ordered filter chain requiring a
+machine token minted by the calling service, and that chain refuses the
+identity-provider token every browser holds. Its only consumer is the
+pending-authorization context. The SPA therefore has **six** client modules for
+seven contracts, and [`ui/src/api/contracts.test.ts`](../../ui/src/api/contracts.test.ts)
+asserts that the internal one has none rather than leaving the exclusion to prose.
+
 ### Twenty-one routes, and three transactions with no route
 
-The interface implements one route per mapset, 21 in total. **`CP00`, `CDRD` and
-`CDRA` have no route**, because they have no map: each is driven by a message and
-belongs to [ADR-004](ADR-004-messaging.md). A reader auditing routes against the
-transaction inventory should expect exactly that difference and no other.
+The interface is to implement one route per mapset, 21 in total. **`CP00`, `CDRD`
+and `CDRA` have no route**, because they have no map: each is driven by a message
+and belongs to [ADR-004](ADR-004-messaging.md). A reader auditing routes against
+the transaction inventory should expect exactly that difference and no other — and
+should expect, separately, that only three of the 21 are authored today, per
+[Honest boundary](#honest-boundary--what-this-record-does-not-establish).
 
 ### A shared shell, authored once
 
@@ -1009,8 +1308,50 @@ available unchanged — the migration adds a path, it does not remove one.
 ### Downstream obligations this decision creates
 
 - Every input's maximum length equals its copybook picture width, and every
-  user-visible string is taken verbatim from the catalog. Both are assertable, and
-  both are asserted by per-screen tests.
+  user-visible string a baseline source holds is rendered verbatim from that source.
+  Both are assertable, and both are asserted by a per-screen test **for every screen
+  that is authored** — the obligation attaches to each new screen as it lands, and is
+  not a claim that all 21 are covered today.
+  Assumptions: "from that source" is deliberately not "from the catalog", and the
+  distinction is the ownership boundary
+  [`ui/src/messages/messages.ts`](../../ui/src/messages/messages.ts) draws for itself
+  in its own module header. The catalog holds the text a copybook or a program holds —
+  every message, title and menu option — and deliberately holds no `INITIAL=` literal
+  from a `.bms` file, on the ground that a field label is positional and centralising
+  it separates it from the control that gives it meaning. So a screen's title, its
+  field labels and its legend parts are declared in the screen module with the mapset
+  line they were read from, and its messages come from the catalog. Both classes are
+  named constants and both are asserted; neither is a literal in the markup.
+  Assumptions: a small number of controls have no baseline counterpart at all — the
+  ones that exist because a browser has a pointer where the terminal had an unpainted
+  Enter key, and the ones that report a target-only condition such as a malformed
+  sealed selector. Their labels are new, and they are held in the module that renders
+  them for the reason the catalog states: it carries only text a COBOL source holds.
+  Each such constant records at its declaration that it is new and why no baseline
+  string could be carried across instead.
+- Each remaining route is authored with its component test and its typed client in
+  the same change, so the delivered state and this record's inventory converge
+  rather than drift further apart.
+- Every screen composes the shared shell in full — screen header, message band and
+  key bar with the key-binding hook — so the function-key contract in
+  [The function-key contract](#the-function-key-contract) is reachable from every
+  route and not merely authored beside it. All four authored screens satisfy this
+  today; the obligation attaches to each remaining route as it lands.
+  Assumptions: a screen's bindings are the attention identifiers **its own program
+  accepts**, and its legend labels are split from **its own mapset's** legend
+  literal — the uniform set in
+  [`ui/src/layout/PfKeyBar.tsx`](../../ui/src/layout/PfKeyBar.tsx) covers only the
+  three keys whose wording is byte-identical wherever they appear. The measured
+  legends differ in which keys they name, in their wording, and in how many legend
+  fields a mapset paints, so a screen that assumed the uniform set would bind a key
+  its program refuses. Two delivered screens are the worked examples: the card browse
+  accepts Enter and paints no legend for it, and the card update screen's second
+  legend field is non-display until its confirmation state is reached.
+- `account-service` gains the contract test that every other HTTP service already
+  has. Refactoring Rationale: this obligation formerly also required the contract and
+  the first controller, and both have landed, so only the test remains. It is narrowed
+  rather than struck out because an obligation that is partly met is still an
+  obligation, and the residual half is the half that keeps the other two honest.
 - Every list screen pages by key. Offset pagination is not reintroduced, in any
   screen, for any reason short of a superseding record.
 - Every route is independently authorizable, and no route infers authorization

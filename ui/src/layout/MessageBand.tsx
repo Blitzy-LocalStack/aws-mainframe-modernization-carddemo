@@ -3,44 +3,36 @@
  *
  * Purpose
  * -------
- * This is the browser target of the 3270 row-23 `ERRMSG` field and the one
- * place the 75-character message contract is enforced. Every screen renders
- * exactly one band. A screen-level outcome — a rejected sign-on, a completed
- * update, an unsupported function key — arrives here as text plus a severity,
- * and nothing else about the request reaches this module.
+ * This is the browser target of the 3270 row-23 `ERRMSG` field. Every screen
+ * renders exactly one band. A screen-level outcome — a rejected sign-on, a
+ * completed update, an unsupported function key — arrives here as text, a
+ * severity and the mapset it stands in, and nothing else about the request
+ * reaches this module.
  *
- * Provenance (reference-only sources; `app/**` is never modified)
- * --------------------------------------------------------------
- * - `app/cpy/CVCRD01Y.cpy` L28-L30 — the contract itself. L28
- *   `CCARD-ERROR-MSG PIC X(75)`, L29 `CCARD-RETURN-MSG PIC X(75)`, and L30
- *   `88 CCARD-RETURN-MSG-OFF VALUE LOW-VALUES`, which is the *declared*
- *   no-message state rather than an inferred one.
- * - `app/cpy/CSMSG01Y.cpy` L18-L21 — the two shared message texts,
- *   `CCDA-MSG-THANK-YOU` and `CCDA-MSG-INVALID-KEY`, both `PIC X(50)`. They
- *   are owned by `ui/src/messages/messages.ts` and are deliberately not
- *   restated here; this module renders whatever text it is handed.
- * - `app/bms/COSGN00.bms` L197-L200 — the row-23 field:
- *   `ERRMSG DFHMDF ATTRB=(ASKIP,BRT,FSET), COLOR=RED, LENGTH=78, POS=(23,1)`.
- *   Measured across all 21 mapsets that definition is identical every time:
- *   `COLOR=RED`, `ATTRB=(ASKIP,BRT,FSET)` and `POS=(23,1)` on 21 of 21, with
- *   only `LENGTH=` varying (78 on 19, 80 on 2).
- * - `app/cbl/COSGN00C.cbl` L89 and L149, `app/cbl/COMEN01C.cbl` L100-L101,
- *   `app/cbl/COTRN00C.cbl` L130-L132 — the write path. A program moves a
- *   message constant into its own buffer, moves that into the map's `ERRMSGO`
- *   field, and re-sends the screen. The band is a sink: it never decides what
- *   the message is, and this component mirrors that exactly.
+ * The message contract has two halves and this module enforces the second.
+ * `CCARD-ERROR-MSG`/`CCARD-RETURN-MSG` are `PIC X(75)`, so 75 is the CONTENT
+ * limit for any message that crosses the shared work area; the region a message
+ * is RENDERED in is the `ERRMSGI`/`ERRMSGO` display field, which is 78
+ * characters on 19 mapsets and 80 on `COCRDSL` and `COCRDUP`. The band is sized
+ * to the display width of the mapset it is standing in, so a message composed
+ * straight into the 80-byte `WS-MESSAGE` buffer — which 14 online programs do,
+ * the authorization and transaction-type extension screens among them — is
+ * never clipped to the narrower work-area figure.
  *
- * What this module deliberately does not own
- * -----------------------------------------
- * Per-field validation errors are a different baseline mechanism and belong
- * elsewhere. `app/cpy/CSSETATY.cpy` L17-L27 moves `DFHRED` into an individual
- * field's colour subfield and a literal `'*'` into that field's data subfield;
- * that is rendered as `Form.Item validateStatus="error"` with `help` text on
- * the owning screen, never as a band message. Message *text* belongs to
- * `ui/src/messages/messages.ts`, every design value to
- * `ui/src/theme/tokens.ts`, and the single theme injection to
- * `ui/src/App.tsx` — so this file contains no user-visible string, no colour
- * literal and no `ConfigProvider`.
+ * Provenance (reference-only; `app/**` is never modified): the contract is
+ * `app/cpy/CVCRD01Y.cpy` L28-L30, including the declared no-message state
+ * `88 CCARD-RETURN-MSG-OFF VALUE LOW-VALUES`; the rendered field is
+ * `app/bms/COSGN00.bms` L197-L200, whose definition is identical on 21 of 21
+ * mapsets apart from `LENGTH=`; the write path is `app/cbl/COSGN00C.cbl` L89 and
+ * L149. `docs/architecture/service-catalog.md` records the mapset inventory.
+ *
+ * Assumptions: the band is a SINK, exactly as the baseline's `ERRMSGO` field is.
+ * It never decides what a message says, so this file contains no user-visible
+ * string, no colour literal and no `ConfigProvider` — text belongs to
+ * `ui/src/messages/messages.ts`, design values to `ui/src/theme/tokens.ts`, the
+ * theme injection to `ui/src/App.tsx`. Per-field validation errors are a
+ * different baseline mechanism (`app/cpy/CSSETATY.cpy` L17-L27) rendered as
+ * `Form.Item validateStatus="error"` on the owning screen, never here.
  */
 
 import { useEffect, useState } from 'react';
@@ -48,56 +40,59 @@ import type { CSSProperties, ReactElement } from 'react';
 
 import { Alert, Flex, Tooltip, Typography, theme } from 'antd';
 
-import { MESSAGE_BAND, isMessageBandEmpty, normaliseMessageBandValue } from '../messages/messages';
+import {
+  MESSAGE_BAND,
+  isMessageBandEmpty,
+  messageBandWidthForMapset,
+  normaliseMessageBandValue,
+} from '../messages/messages';
+import type { MapsetName } from '../messages/messages';
 import type { AntdTokenName } from '../theme/tokens';
 import { BMS_COLOR_TOKENS, TYPOGRAPHY_TOKENS } from '../theme/tokens';
 
 /*
- * Alternatives Considered: 78 and 80 were both evaluated as the band width and
- * both were rejected. They are the `ERRMSGI`/`ERRMSGO` display-field widths,
- * and widening the contract to either looks like the obvious correction: 78
- * appears on 15 of the 17 base mapsets (30 declarations) and 80 on exactly 2 —
- * `app/cpy-bms/COCRDSL.CPY` L102/L194 and `app/cpy-bms/COCRDUP.CPY` L108/L212
- * (4 declarations). 15 + 2 accounts for all 17, and across all 21 mapsets the
- * split is 19 to 2, so no mapset is unaccounted for and neither figure is an
- * estimate. Those widths describe how much the screen region can *hold*, not
- * how much content a message may *carry*. The decisive evidence is that the
- * two mapsets with the widest field belong to `COCRDSLC` and `COCRDUPC`, and
- * both of those programs compose their message into a `PIC X(75)` field — as
- * do all five programs that copy `CVCRD01Y` (`COACTUPC`, `COACTVWC`,
- * `COCRDLIC`, `COCRDSLC`, `COCRDUPC`). The widest display field in the whole
- * baseline is therefore driven by 75-character content, which is what makes 75
- * the contract and 78/80 display slack.
+ * Alternatives Considered: sizing the band to the 75-character work area instead of
+ * to the mapset's DISPLAY width. Rejected on a measurement of the `ERRMSGI`/`ERRMSGO`
+ * declarations: 19 mapsets declare `PIC X(78)` and two — `app/cpy-bms/COCRDSL.CPY`
+ * and `app/cpy-bms/COCRDUP.CPY` — declare `PIC X(80)`, with every `DFHMDF LENGTH=`
+ * operand agreeing. A 75-character band would clip characters the baseline itself
+ * renders, and would clip them on exactly the messages that reach the screen without
+ * passing through the work area: 14 online programs compose straight into an 80-byte
+ * `WS-MESSAGE` buffer. Both limits are real; only the display half is a rendering
+ * constraint.
  *
- * Refactoring Rationale: the contract is attributed to `CVCRD01Y.cpy` and not
- * to `COCOM01Y.cpy`. The migration plan cites `COCOM01Y.cpy` as this file's
- * source and that citation is wrong — `COCOM01Y.cpy` declares no `PIC X(75)`
- * field at all. It carries navigation, identity and selection context
- * (`CDEMO-FROM-TRANID`, `CDEMO-USER-TYPE`, `CDEMO-LAST-MAPSET` and the
- * customer/account/card groups) and no message field of any width. Searching
- * `app/cpy/` for `X(75)` returns exactly two lines, both in `CVCRD01Y.cpy`.
- * This is recorded because a reader following the plan would otherwise open
- * the wrong copybook, find nothing, and have no way to tell whether the
- * contract or the citation was at fault.
+ * Assumptions: every width is read from `ui/src/messages/messages.ts`, which holds
+ * the exhaustive per-mapset display table. A second literal here would give one
+ * contract two sources that could drift apart with no build failure to catch it.
  *
- * Assumptions: the numeral is read from `MESSAGE_BAND.workAreaWidth` rather
- * than written again here. `ui/src/messages/messages.ts` already derives that
- * value from `CVCRD01Y.cpy` L28-L29 and records the four other widths a band
- * message passes through. A second literal `75` would give one contract two
- * sources that could drift apart with no build failure to catch it.
+ * Assumptions: the contract is attributed to `CVCRD01Y.cpy`, not to the
+ * `COCOM01Y.cpy` the migration plan cites — that copybook declares no `PIC X(75)`
+ * field at all, carrying navigation, identity and selection context instead. Noted
+ * because a reader following the plan would open the wrong copybook, find nothing,
+ * and have no way to tell whether the contract or the citation was at fault.
  */
 
 /**
- * Width, in characters, of the message-band content contract: 75.
+ * Width, in characters, of the message-band CONTENT contract: 75.
  *
  * This is the width of `CCARD-ERROR-MSG` and `CCARD-RETURN-MSG`
- * (`app/cpy/CVCRD01Y.cpy` L28-L29), the two `PIC X(75)` fields that carry
- * every band message across the baseline's pseudo-conversational boundary. The
- * band is sized to hold this many characters. It is explicitly *not* the
- * display-field width, which is 78 or 80 depending on the mapset and which
- * `ui/src/messages/messages.ts` models per screen.
+ * (`app/cpy/CVCRD01Y.cpy` L28-L29), the two `PIC X(75)` fields that carry a band
+ * message across the baseline's pseudo-conversational boundary. It bounds what a
+ * message crossing the work area may CARRY. It is explicitly not the width the
+ * band is sized to — see {@link MESSAGE_BAND_DEFAULT_DISPLAY_WIDTH}.
  */
 export const MESSAGE_BAND_CONTENT_WIDTH = MESSAGE_BAND.workAreaWidth;
+
+/**
+ * Display width, in characters, used when a caller names no mapset: 78.
+ *
+ * This is the `ERRMSGI`/`ERRMSGO` width on 19 of the 21 mapsets, so it is the
+ * regime that applies unless a screen names itself as one of the two exceptions.
+ * Defaulting to the narrower of the two figures is deliberate: a screen that
+ * forgets its mapset renders at the width nineteen of them use rather than at the
+ * width only two do.
+ */
+export const MESSAGE_BAND_DEFAULT_DISPLAY_WIDTH = MESSAGE_BAND.displayWidthStandard;
 
 /*
  * Alternatives Considered: including `"warning"`, which antd's `Alert`
@@ -119,14 +114,12 @@ export const MESSAGE_BAND_CONTENT_WIDTH = MESSAGE_BAND.workAreaWidth;
 export type MessageBandSeverity = 'error' | 'success' | 'info';
 
 /*
- * Assumptions: the empty band is deliberately contentless, so it exposes no
- * text, role or accessible name that a query could find. That makes a stable
- * data attribute the only way to assert the invariant this component exists to
- * guarantee — that the band occupies the same space whether or not a message
- * is present. Exporting the value rather than inlining the string keeps the
- * assertion and the element on one definition; a copy in each test file could
- * drift from the component and would fail as a "missing element" rather than
- * as the contract change it actually was.
+ * Assumptions: the empty band is deliberately contentless, exposing no text, role
+ * or accessible name a query could find, so a stable data attribute is the only way
+ * to assert the invariant this component exists to guarantee — that the band
+ * occupies the same space whether or not a message is present. It is exported
+ * rather than inlined so a drifting copy in a test file cannot fail as a "missing
+ * element" rather than as the contract change it actually is.
  */
 
 /**
@@ -136,27 +129,19 @@ export type MessageBandSeverity = 'error' | 'success' | 'info';
 export const MESSAGE_BAND_TEST_ID = 'message-band';
 
 /*
- * Alternatives Considered: making the always-present band element a live
- * region of its own with `aria-live`. That was rejected on evidence rather
- * than on taste: antd's `Alert` already renders `role="alert"` on its root
- * element, so a live region on the wrapper would nest two of them and a single
- * message would be announced twice. Leaving the `Alert` as the only live
- * region and choosing the role it renders per severity gives one announcement
- * with the right urgency — `alert` is assertive and interrupts, which suits a
- * rejection the operator must act on, while `status` is polite and suits a
- * confirmation that should not cut across whatever a screen reader is already
- * reading. `AlertProps.role` is a declared prop that antd spreads after its
- * own default, so this overrides the default rather than fighting it.
+ * Alternatives Considered: making the always-present band element a live region of
+ * its own with `aria-live`. Rejected because antd's `Alert` already renders
+ * `role="alert"` on its root, so a live region on the wrapper would nest two and
+ * announce one message twice. Choosing the role the `Alert` renders per severity
+ * gives one announcement with the right urgency: `alert` is assertive and
+ * interrupts, which suits a rejection the operator must act on, while `status` is
+ * polite and suits a confirmation.
  *
- * Assumptions: announcing at all is fidelity rather than embellishment for
- * most screens, but not for all, and the difference is measured. 14 of the 21
- * mapsets set `CTRL=(ALARM,FREEKB)` on their `DFHMSD`, which sounded the
- * terminal alarm as the screen was re-sent; the remaining 7 — `COACTUP`,
- * `COACTVW`, `COCRDLI`, `COCRDSL`, `COCRDUP`, `COTRTLI` and `COTRTUP` — set
- * only `FREEKB` and were silent. A band cannot know which mapset it stands in,
- * so it announces uniformly. The alternative, staying silent to match the
- * quieter 7, would drop the alarm on the 14 that had one, which is the larger
- * fidelity loss of the two.
+ * Trade-offs: the band announces uniformly, although the baseline did not — 14 of
+ * the 21 mapsets set `CTRL=(ALARM,FREEKB)` and sounded the terminal alarm, and 7
+ * set only `FREEKB` and were silent. A band cannot know which mapset it stands in
+ * for this purpose, and staying silent to match the quieter 7 would drop the alarm
+ * on the 14 that had one, which is the larger fidelity loss of the two.
  */
 const SEVERITY_ALERT_ROLES = {
   error: 'alert',
@@ -194,25 +179,14 @@ const SEVERITY_COLOR_TOKENS = {
 const DEFAULT_SEVERITY: MessageBandSeverity = 'error';
 
 /*
- * Trade-offs: the `Alert` is a flex item with a zero basis and a zero minimum
- * inline size rather than a full-width block. `flex: 1 1 0` lets it fill the
- * band, and `minInlineSize: 0` is what allows it to shrink below its own
- * content width — without it a flex item refuses to go under its min-content
- * size, the text never becomes narrower than the message, and the ellipsis
- * below can never engage. The cost is two structural declarations that look
- * redundant next to a plainer full-width rule; the benefit is that the
- * over-long-message policy actually takes effect at every viewport.
- *
- * Assumptions: these two are STRUCTURAL values and not design values, so the
- * zero-hardcoded-values rule is not in play here — the rule governs colour,
- * spacing, radius and typography, and permits `0` explicitly. They are written as
- * a style object because the design system offers no route to them: its layout
- * primitive does expose a `flex` prop, but that prop sets the shorthand on the
- * primitive ITSELF, and the element that needs it here is the alert inside the
- * primitive. Reaching it through a prop would mean nesting the alert in a second
- * layout primitive whose only purpose is to carry one declaration, which this
- * tree's component rules flatten away. Two declarations on the item are the
- * smaller of the two costs.
+ * Trade-offs: `minInlineSize: 0` is what lets the `Alert` shrink below its own
+ * content width — without it a flex item refuses to go under its min-content size,
+ * the text never becomes narrower than the message, and the ellipsis can never
+ * engage. Both declarations are STRUCTURAL rather than design values, so the
+ * zero-hardcoded-values rule is not in play; it governs colour, spacing, radius and
+ * typography and permits `0` explicitly. They are a style object because the layout
+ * primitive's `flex` prop sets the shorthand on the primitive ITSELF, and the
+ * element that needs it is the alert inside it.
  */
 const ALERT_STYLE: CSSProperties = { flex: '1 1 0', minInlineSize: 0 };
 
@@ -238,21 +212,18 @@ export { isMessageBandEmpty };
  */
 export interface MessageBandProps {
   /*
-   * Alternatives Considered: accepting the API error object directly, so a
-   * screen could hand a failed response straight to the band. Rejected because
-   * it would blur the split the design-system mapping draws: per-field
-   * validation errors belong to `Form.Item validateStatus="error"` with `help`
-   * text, and only a screen-level message belongs here. A band that understood
-   * the transport type would invite callers to pour a field-error array into
-   * the one line reserved for the screen's own message, so callers map an
-   * error to text and this module never imports from `ui/src/api`.
+   * Alternatives Considered: accepting the API error object directly, so a screen
+   * could hand a failed response straight to the band. Rejected because it would
+   * blur the split the design-system mapping draws — per-field validation errors
+   * belong to `Form.Item validateStatus="error"`, only a screen-level message
+   * belongs here — and would invite callers to pour a field-error array into the
+   * one reserved line. Callers map an error to text, and this module never imports
+   * from `ui/src/api`.
    *
-   * Assumptions: `null` and `undefined` are both admitted, and the union is
-   * written out rather than left to the optional marker because
-   * `exactOptionalPropertyTypes` is enabled — under that setting an omitted
-   * property and an explicitly `undefined` one are different, and a caller
-   * holding `string | null | undefined` from a response body could not pass it
-   * through without the explicit `undefined`.
+   * Assumptions: the `undefined` arm is written out rather than left to the
+   * optional marker because `exactOptionalPropertyTypes` is enabled, under which an
+   * omitted property and an explicitly `undefined` one differ — so a caller holding
+   * `string | null | undefined` from a response body could not otherwise pass it.
    */
 
   /**
@@ -266,6 +237,22 @@ export interface MessageBandProps {
    * role. Defaults to `"error"`, the appearance the source field always had.
    */
   readonly severity?: MessageBandSeverity | undefined;
+
+  /*
+   * Alternatives Considered: deriving the width from the route instead of taking the
+   * mapset as a prop. Declined because a route is a target shape this migration
+   * chose, whereas the mapset is the reference identity the width is a property of —
+   * so a renamed route would silently change a rendering contract. The two widths
+   * follow no rule either: `COCRDSL` and `COCRDUP` simply declare a wider field, so
+   * the table in `ui/src/messages/messages.ts` is exhaustive rather than computed.
+   */
+
+  /**
+   * Mapset the band is standing in, which selects the display width the band is
+   * sized to: 78 characters on 19 of the 21 mapsets and 80 on `COCRDSL` and
+   * `COCRDUP`. Omit it to render at {@link MESSAGE_BAND_DEFAULT_DISPLAY_WIDTH}.
+   */
+  readonly mapset?: MapsetName | undefined;
 }
 
 /**
@@ -283,44 +270,34 @@ export interface MessageBandProps {
  *   message.
  * @param {MessageBandSeverity} props.severity - Severity to render with;
  *   defaults to `"error"`.
+ * @param {MapsetName} props.mapset - Mapset the band stands in, selecting the
+ *   display width it is sized to; omitted, the band renders at the 78-character
+ *   width nineteen of the twenty-one mapsets use.
  * @returns {ReactElement} The band element: reserved space alone when there is
  *   no message, otherwise reserved space containing the alert.
  */
 export function MessageBand({
   message,
   severity = DEFAULT_SEVERITY,
+  mapset,
 }: MessageBandProps): ReactElement {
   /*
    * Alternatives Considered: the `token` member of the same hook, which is the
-   * obvious one to reach for and is what this component used until the accessor
-   * contract was checked against the package. It returns RESOLVED values — the
-   * error colour comes back as a hex string and the large control height as a
-   * number — so writing one into a `style` attribute bakes today's palette into
-   * the element. Under CSS-variable theming that is a literal in every sense that
-   * matters: it opts the element out of the theme silently, and a later token
-   * change leaves this one band behind with nothing failing to say so. Verified
-   * from the pinned package rather than assumed: the public hook destructures the
-   * library's internal tuple positionally, so its `token` is the resolved token
-   * object and its `cssVar` is the `var(--…)` reference form of the same names,
-   * typed identically.
+   * obvious one to reach for. Rejected because it returns RESOLVED values — a hex
+   * string, a number — so writing one into a `style` attribute bakes today's
+   * palette into the element. Under CSS-variable theming that is a literal in every
+   * sense that matters: it opts the element out of the theme silently, and a later
+   * token change leaves this one band behind with nothing failing to say so.
+   * `cssVar` returns the `var(--…)` reference form of the same names, typed
+   * identically.
    *
-   * Assumptions: the reference form is safe for the two numeric tokens this
-   * component reads, and that is a property of how the variables are emitted
-   * rather than a hope. The style layer appends `px` to a numeric token when it
-   * writes the custom property, unless the token is on its unitless list — so the
-   * large control height and the body font size arrive as lengths, while the
-   * strong font weight is on that list and arrives as a bare number, which is
-   * exactly what the weight property needs. A token whose declaration carried no
-   * unit would produce an invalid length and be dropped silently, which is why
-   * this was checked before switching rather than after.
-   *
-   * Trade-offs: `ui/src/layout/ScreenHeader.tsx` already resolves its two design
-   * values this way, so standardising here removes a split in which two sibling
-   * shell components read the same bridge through two different mechanisms. The
-   * cost is that a value read this way cannot be inspected in a test that has no
-   * browser to resolve the variable, which is why the assertions that matter for
-   * this component are the reserved-height and empty-state ones rather than colour
-   * equality.
+   * Assumptions: the reference form is safe for the numeric tokens read here. The
+   * style layer appends `px` to a numeric token unless it is on its unitless list,
+   * so the control height and font size arrive as lengths while the strong font
+   * weight arrives as a bare number, which is what the weight property needs.
+   * Trade-offs: a value read this way cannot be inspected in a test with no browser
+   * to resolve the variable, which is why this component's assertions are the
+   * reserved-height and empty-state ones rather than colour equality.
    */
   const { cssVar } = theme.useToken();
 
@@ -333,26 +310,19 @@ export function MessageBand({
   const text = normaliseMessageBandValue(message);
 
   /*
-   * Refactoring Rationale: the truncation state is measured here rather than
-   * delegated to the text component's own ellipsis tooltip, and the reason is a
-   * measured limitation of the pinned version rather than a preference. That
-   * configuration does gate its reveal on real truncation, which is the half of
-   * this that matters most - but it drives the reveal from its own pointer state
-   * and does not forward a trigger list to the tooltip it renders, so a `focus`
-   * trigger is silently dropped. Confirmed in a browser three ways: a programmatic
-   * focus and a dispatched focus event both produced no tooltip while a pointer
-   * event on the same element at the same instant produced one; the tooltip hid
-   * the moment the pointer left even though focus was retained; and a real
-   * Shift+Tab/Tab back onto the truncated text produced no tooltip and no
-   * `aria-describedby`. A reveal a keyboard cannot summon does not answer the
-   * finding, because the 3270 original was operated entirely from the keyboard.
-   *
-   * Alternatives Considered: passing `open` through the ellipsis configuration's
-   * tooltip props, which does override the component's internal state because
-   * those props are spread after it. Rejected because taking over `open` also
-   * takes over the truncation gate the configuration was being used for, leaving
-   * exactly the measurement below to be written anyway - with the reveal now
-   * fighting the component for control of the same state.
+   * Alternatives Considered: delegating to the text component's own ellipsis
+   * tooltip. Rejected on a measured limitation of the pinned version: it gates its
+   * reveal on real truncation, which is the half that matters most, but drives the
+   * reveal from its own POINTER state and forwards no trigger list, so a `focus`
+   * trigger is silently dropped — confirmed in a browser, where a programmatic
+   * focus produced no tooltip while a pointer event on the same element did. A
+   * reveal a keyboard cannot summon is a fidelity loss, because the 3270 original
+   * was operated entirely from the keyboard.
+   * Alternatives Considered: passing `open` through that configuration's tooltip
+   * props, which does override its internal state. Rejected because taking over
+   * `open` also takes over the truncation gate the configuration was being used
+   * for, leaving the measurement below to be written anyway with the reveal now
+   * fighting the component for the same state.
    */
   const [messageTextElement, setMessageTextElement] = useState<HTMLSpanElement | null>(null);
   const [isMessageTruncated, setIsMessageTruncated] = useState(false);
@@ -361,28 +331,21 @@ export function MessageBand({
     /**
      * Tracks whether the rendered message is actually clipped.
      *
-     * Assumptions: the comparison is the element's scroll width against its
-     * client width, which is the only reliable read of single-line ellipsis
-     * state - the ellipsis is applied by the stylesheet, so no event announces
-     * it. The observer re-measures on every size change because the band's
-     * inline size is capped in character units and therefore moves with the
-     * viewport: a message that fits at one width clips at another, and a reveal
-     * that measured once at mount would be wrong for the rest of the session.
+     * Assumptions: scroll width against client width is the only reliable read of
+     * single-line ellipsis state, because the ellipsis is applied by the stylesheet
+     * and no event announces it. The observer re-measures on every size change
+     * because the band's inline size is capped in CHARACTER units and therefore
+     * moves with the viewport, so a measurement taken once at mount would be wrong
+     * for the rest of the session; it is created only when the platform provides
+     * one, so a non-browser environment falls back to that mount-time read.
      *
-     * Assumptions: the observer is created only when the platform provides one,
-     * so a non-browser environment falls back to the mount-time measurement
-     * rather than throwing. The measurement itself needs no observer to be
-     * correct at the width it was taken.
-     *
-     * Assumptions: a zero client width is treated as "not measurable" rather than
-     * as truncation, and the distinction is not theoretical. Any scroll width
-     * beyond zero exceeds a zero client width, so an element that has no laid-out
-     * inline size at the moment it is read - because an ancestor is not displayed,
-     * or because the viewport is mid-change and the browser has produced an
-     * intermediate frame - would otherwise report every message as clipped and
-     * give the band a tab stop and a reveal it does not need. Observed in a
-     * browser during an abrupt two-step viewport change, where all three
-     * unclipped messages briefly flipped to clipped and back within about 50ms.
+     * Assumptions: a zero client width means "not measurable", not truncation. Any
+     * scroll width beyond zero exceeds a zero client width, so an element with no
+     * laid-out inline size — an undisplayed ancestor, or an intermediate frame
+     * mid-viewport-change — would otherwise report every message as clipped and give
+     * the band a tab stop and a reveal it does not need. Observed in a browser
+     * during an abrupt viewport change, where unclipped messages briefly flipped to
+     * clipped and back.
      * @returns {(() => void) | undefined} Observer teardown, or `undefined` when
      * nothing was observed.
      */
@@ -427,63 +390,40 @@ export function MessageBand({
   );
 
   /*
-   * Trade-offs: the reserved height is fixed rather than a minimum, so the
-   * band's outer height is constant by construction instead of by measurement.
-   * A minimum would leave the two states equal only while the alert's
-   * intrinsic height happened to stay under it, making zero layout shift a
-   * property that held by coincidence and could regress on a theme change
-   * without any test noticing. What is given up is tolerance: under a theme
-   * whose font makes the alert taller than one large control, the overflow
-   * rule clips a few pixels rather than letting the band grow. That is the
-   * right way round for this element, because growth would move every screen's
-   * content and clipping does not.
+   * Trade-offs: the reserved height is FIXED rather than a minimum, so the band's
+   * outer height is constant by construction. A minimum would make zero layout
+   * shift hold by coincidence — only while the alert's intrinsic height stayed
+   * under it — and regress silently on a theme change. The cost is that a taller
+   * theme clips a few pixels instead of growing, which is the right way round
+   * here: growth moves every screen's content, clipping does not. The value is
+   * the design system's large-control token, its nearest expression of "one
+   * single-line control", because the fixed 24x80 grid is a documented deviation
+   * and leaves no measured BMS height to bridge.
    *
-   * Assumptions: the height comes from the design system's own large-control
-   * token. `ui/src/theme/tokens.ts` declares no height token because the fixed
-   * 24x80 character grid is a documented, deliberate deviation, so there is no
-   * measured BMS height to bridge — and a pixel literal is not an option. A
-   * control-height token is the system's nearest expression of "one
-   * single-line control", which is exactly what one terminal row became.
+   * Assumptions: `display` is NOT redundant on a `Flex`. antd's Flex stylesheet
+   * ships an `.ant-flex:empty{display:none}` rule, and the empty branch below
+   * renders a `Flex` with no children, so without this the reserved band collapses
+   * to zero height — the exact failure this component exists to prevent. Only real
+   * laid-out geometry catches it: the inline `blockSize` a jsdom test can see is
+   * correct all along and only the cascade suppresses the box.
    *
-   * Refactoring Rationale: `display` is declared here even though a `Flex` is
-   * already a flex container, and it is not redundant — without it the empty
-   * band collapsed to zero height and reserved nothing, which is the exact
-   * failure this component exists to prevent. antd's own Flex stylesheet ships
-   * `:where(.css-dev-only-do-not-override-<hash>).ant-flex:empty{display:none}`,
-   * and the empty branch below renders a `Flex` with no children, so it matched
-   * that selector. Setting the property inline outranks a stylesheet rule that
-   * carries no `!important`, so the band keeps its box in both states. This was
-   * found by measuring real laid-out geometry in a browser: a jsdom test cannot
-   * catch it, because the inline `blockSize` it can see was correct all along
-   * and only the CSS cascade suppressed the box.
+   * Assumptions: the `ch` basis is pinned to the design system's body font rather
+   * than inherited, because `ch` is the advance measure of the font's own `0` glyph
+   * — an inherited face resolves the character cap against whatever ancestor
+   * typography happens to apply. Pinning family and size to the tokens the message
+   * text renders in makes the cap mean that many characters OF THAT TEXT.
    *
-   * Assumptions: the `ch` basis is pinned to the design system's body font
-   * rather than inherited. `ch` is the advance measure of the font's own `0`
-   * glyph, so an inherited face makes the 75-character cap resolve against
-   * whatever ancestor typography happens to apply: measured in a browser, the
-   * cap came out at 600px purely because a 16px serif fallback was inheriting
-   * in, and it would land somewhere else again under any other shell. Pinning
-   * the family and size to the same tokens the message text renders in makes
-   * the cap mean 75 characters of that text — measured at 590.1px, the antd
-   * body font's 7.87px `0` advance times 75 — deterministically, wherever the
-   * band is mounted.
-   *
-   * Assumptions: the three declarations that carry no token — the display mode,
-   * the full inline size and the overflow rule — are STRUCTURAL rather than
-   * design values, and none of them has a prop on the layout primitive to go
-   * through instead. Its props cover direction, wrapping, main-axis and
-   * cross-axis alignment, the gap, the rendered element, and the flex shorthand
-   * the primitive applies to itself as an item; a container's own inline size, its
-   * overflow behaviour and an override of the library's own empty-container rule
-   * are outside that set. They are recorded here so that a reader looking for the
-   * prop equivalent knows the search has already been done, and so that the four
-   * declarations this object no longer carries — the single-line ellipsis
-   * treatment, now the text component's own — are not put back by hand.
+   * Assumptions: the width is resolved per render from the mapset the caller named,
+   * through the accessor rather than by indexing the table, so the two permitted
+   * figures stay typed as `78 | 80` and an unknown mapset name fails to compile.
    */
+  const displayWidth: 78 | 80 =
+    mapset === undefined ? MESSAGE_BAND_DEFAULT_DISPLAY_WIDTH : messageBandWidthForMapset(mapset);
+
   const bandStyle: CSSProperties = {
     display: 'flex',
     inlineSize: '100%',
-    maxInlineSize: `${MESSAGE_BAND_CONTENT_WIDTH}ch`,
+    maxInlineSize: `${displayWidth}ch`,
     blockSize: cssVar.controlHeightLG,
     fontFamily: cssVar.fontFamily,
     fontSize: cssVar.fontSize,
@@ -510,47 +450,21 @@ export function MessageBand({
   }
 
   /*
-   * Assumptions: colour and weight are both applied explicitly, overriding
-   * antd's defaults, because the source field states both. The row-23 field is
-   * `COLOR=RED` with `ATTRB=(ASKIP,BRT,FSET)` on 21 of 21 mapsets, and antd's
-   * alert renders its title in the ordinary text colour at the ordinary
-   * weight — so accepting the component defaults here would silently drop two
-   * attributes the baseline sets on every screen. Both values are resolved
-   * from the live theme by the token names above rather than written as
-   * literals.
+   * Assumptions: colour and weight are BOTH applied explicitly, overriding antd's
+   * defaults, because the source field states both — the row-23 field is
+   * `COLOR=RED` with `ATTRB=(ASKIP,BRT,FSET)` on 21 of 21 mapsets, and the alert
+   * renders its title in the ordinary colour at the ordinary weight. This object
+   * carries those two DESIGN values and nothing else; the overflow, white-space,
+   * text-overflow and display declarations belong to the text component's own
+   * ellipsis treatment.
    *
-   * Trade-offs: an over-long message is truncated visually and never in the
-   * data. The full string stays the element's child, so it remains intact in
-   * the DOM and is announced in full, while the component's own single-line
-   * ellipsis treatment confines it to the reserved line. Slicing the value at 75
-   * was the alternative and was rejected: the display region is 78 or 80
-   * characters wide depending on the mapset, so cutting the string at the
-   * 75-character content contract would discard characters the baseline itself
-   * can render, and it would discard them irreversibly rather than merely
-   * off-screen. What is given up is that a clipped tail is not visible at a
-   * glance, which the reveal configured below mitigates.
-   *
-   * Refactoring Rationale: the overflow, white-space and text-overflow
-   * declarations that used to sit in this object are gone, and so is the
-   * `display` declaration that made them apply to an inline element. The
-   * component's own single-line ellipsis treatment sets all four - it renders the
-   * text element as an inline block capped at the container's inline size and
-   * applies the three overflow properties - so writing them here restated the
-   * component's own styling while also making this object look like the authority
-   * on truncation, which it was not. Only the two design values remain, which is
-   * what this object is for.
-   *
-   * Trade-offs: the 75-character cap sizes the band, so the text itself gets
-   * that width less the alert's icon and padding — measured at 542px of a
-   * 590px band, a 48px difference. A typical 75-character message needs about
-   * 460px and fits with room to spare, but one made entirely of the widest
-   * glyphs would ellipsize a few characters early. Widening the band by the
-   * alert's chrome was the alternative and was rejected because that chrome is
-   * a component internal with no token to read it from, so the correction would
-   * have had to be a hard-coded pixel figure that silently rots the next time
-   * the component's padding changes. Sizing the band to the contract and
-   * letting the documented clipping policy above cover the worst case keeps
-   * every value tokenised.
+   * Trade-offs: an over-long message is truncated VISUALLY and never in the data —
+   * the full string stays the element's child, so it is intact in the DOM and
+   * announced in full. Alternatives Considered: slicing the value at the
+   * 75-character work-area figure. Rejected because every mapset's display field is
+   * wider than 75, so that would discard characters the baseline itself renders,
+   * and discard them irreversibly rather than merely off-screen. The clipped tail
+   * is not visible at a glance, which the reveal below mitigates.
    */
   const messageTextStyle: CSSProperties = {
     color: cssVar[SEVERITY_COLOR_TOKENS[severity]],
@@ -558,117 +472,80 @@ export function MessageBand({
   };
 
   /*
-   * Refactoring Rationale: the reveal is driven by MEASURED truncation rather
-   * than by a character count, and the count is what was wrong before. A native
-   * `title` was attached only when the text exceeded the 75-character content
-   * contract, on the assumption that 75 characters is where clipping begins. It is
-   * not: the band is sized to 75 characters, and the alert's icon and padding then
-   * take roughly 48px of that, so the text region holds about 69 characters of
-   * average width and fewer of wide ones. The reveal was therefore absent for
-   * exactly the messages that had begun to clip. The component's ellipsis
-   * configuration measures the rendered element instead and opens the reveal only
-   * while the text is actually ellipsized, so the trigger condition is the
-   * condition itself rather than a proxy for it.
+   * Refactoring Rationale: the reveal is driven by MEASURED truncation, not by a
+   * character count. A count is the wrong instrument because the text region is
+   * narrower than the band by the alert's chrome and narrower again for wide
+   * glyphs, so any character threshold is absent for exactly the messages that
+   * have begun to clip. Measuring the rendered element makes the trigger condition
+   * the condition itself rather than a proxy for it.
    *
-   * Alternatives Considered, both rejected: widening the band by the alert's
-   * chrome so that 75 characters always fit, which would require a hard-coded
-   * pixel figure for a component internal that exposes no token and would rot the
-   * next time that component's padding changed; and rendering the run of text as
-   * the paragraph component instead, whose ellipsis configuration additionally
-   * offers an expandable affordance - a real button, and the more discoverable
-   * control of the two. The text component deliberately omits `expandable` and
-   * `rows` from its own ellipsis type, so that alternative is a component swap
-   * rather than a prop, and it is rejected on the band's shape: expanding puts the
-   * text on further lines, and this band has a fixed reserved height with
-   * `overflow: hidden`, so the expanded tail would be clipped by the very rule
-   * that stops a message moving every screen's content.
+   * Trade-offs: the reveal is a design-system tooltip triggered by hover AND focus,
+   * with a tab stop so focus can reach it. A native `title` needs no tab stop but is
+   * offered to a pointer only, and the 3270 original was operated entirely from the
+   * keyboard, so a message whose tail only a mouse can read is a fidelity loss.
+   * Alternatives Considered: the paragraph component, whose ellipsis configuration
+   * also offers an expandable affordance. Rejected on the band's shape — expanding
+   * puts the text on further lines, and the fixed reserved height with
+   * `overflow: hidden` would clip the expanded tail by the very rule that stops a
+   * message moving every screen's content.
    *
-   * Trade-offs: the reveal is a design-system tooltip triggered by hover AND by
-   * focus, and the element is given a tab stop so that focus can reach it. Two
-   * costs are accepted for that. A native `title` needs no tab stop, but it is
-   * offered to a pointer only - a keyboard user cannot summon it and a touch user
-   * cannot hover - and the 3270 original was operated entirely from the keyboard,
-   * so a status message whose tail only a mouse can read is a fidelity loss rather
-   * than a cosmetic one. The second cost is the tab stop itself, and it is bounded:
-   * the empty branch above renders no text element at all, so the band adds a stop
-   * only while it is actually carrying a message, and the message is the one thing
-   * on the screen the operator is most likely to want to read. The full string is
-   * in the DOM either way, so a screen reader was never the audience this fixes.
-   */
-  /*
-   * Assumptions: the trigger list is declared with its element type written out
-   * rather than inferred, because the design system's tooltip declares the prop
-   * as a mutable array of its own action union. An inferred literal array widens
-   * to `string[]`, which that prop rejects, and a read-only tuple is rejected for
-   * being read-only - so naming the two members is the only form that compiles
-   * without a type assertion.
+   * Assumptions: the trigger list's element type is written out rather than
+   * inferred, because the tooltip declares the prop as a MUTABLE array of its own
+   * action union — an inferred literal array widens to `string[]` and a read-only
+   * tuple is rejected, so naming the members is the only form that compiles without
+   * a type assertion.
    */
   const messageRevealTriggers: ('hover' | 'focus')[] = ['hover', 'focus'];
 
   /*
-   * Refactoring Rationale: the tooltip is always in the tree and is held closed
-   * when there is nothing to reveal, rather than being wrapped around the text
-   * only while the text is clipped. Conditional wrapping was written first and
-   * rejected on a real failure mode: adding or removing a parent changes the
-   * element tree, so the text element unmounts and remounts, which fires the
-   * measuring ref with `null` and then with a new node - and since the measurement
-   * is what decides whether to wrap, the two would drive each other. Keeping the
-   * tree shape fixed and controlling the open state instead makes the reveal a
-   * function of the measurement rather than a cause of it.
+   * Alternatives Considered: wrapping the text in the tooltip only while it is
+   * clipped, rather than keeping the tooltip always in the tree and held closed.
+   * Rejected on a real failure mode — adding or removing a parent changes the
+   * element tree, so the text element unmounts and remounts, firing the measuring
+   * ref with `null` and then a new node; since the measurement is what decides
+   * whether to wrap, the two would drive each other. A fixed tree shape makes the
+   * reveal a function of the measurement rather than a cause of it.
    *
    * Assumptions: both props are supplied by spreading an object that either holds
-   * them or is empty, because `exactOptionalPropertyTypes` is enabled: an explicit
-   * `undefined` is not the same as an absent property, and only absence leaves the
-   * tooltip uncontrolled so that its own trigger handling applies.
+   * them or is empty, because `exactOptionalPropertyTypes` is enabled and only
+   * ABSENCE leaves the tooltip uncontrolled so its own trigger handling applies.
    *
-   * Trade-offs: leaving the open state to the design system means inheriting one
-   * behaviour of its trigger handling, and it is recorded rather than worked
-   * around. It keeps a single open state for the whole trigger set, so the most
-   * recent trigger event decides: sweeping the pointer across a message that is
-   * already keyboard-focused, and then off it, closes the reveal even though focus
-   * has not moved - tabbing away and back re-opens it. Observed in a browser and
-   * accepted, because the alternative is to take over `open` entirely and rebuild
-   * the component's own focus-and-hover state machine here, which would put a
-   * second implementation of it in the tree to keep in step with the first. A
-   * keyboard-only operator, which is the audience this reveal exists for, never
-   * produces the pointer event that triggers it.
+   * Trade-offs: the design system keeps a single open state for the whole trigger
+   * set, so the most recent event decides — sweeping a pointer across an
+   * already-focused message and off it closes the reveal even though focus has not
+   * moved, and tabbing away and back re-opens it. Accepted because the alternative
+   * is to take over `open` and rebuild the component's own focus-and-hover state
+   * machine here, and a keyboard-only operator, the audience this reveal exists
+   * for, never produces the pointer event that triggers it.
    */
   const messageRevealProps: { open?: false } = isMessageTruncated ? {} : { open: false };
 
   /*
-   * Trade-offs: the tab stop exists only while the message is clipped, so the
-   * band adds one to the screen exactly when it has something a pointer-free user
-   * cannot otherwise read, and none at all the rest of the time. What is given up
-   * is that the tab order changes when the viewport is resized across the width at
-   * which a particular message starts to clip. That is accepted because the
-   * alternative - a permanent stop on every message band on all 21 screens - is a
-   * cost paid on every screen for a case that arises on few, and because a stop
-   * that reveals nothing is the defect the finding described rather than a
-   * mitigation of it.
+   * Trade-offs: the tab stop exists only while the message is clipped, so the band
+   * adds one exactly when it holds something a pointer-free user cannot otherwise
+   * read. The cost is that the tab order changes when the viewport is resized across
+   * the width at which a message starts to clip; the alternative, a permanent stop
+   * on every band on every screen, pays that cost everywhere for a case that arises
+   * on few, and a stop that reveals nothing is a defect rather than a mitigation.
    */
   const messageFocusProps: { tabIndex?: 0 } = isMessageTruncated ? { tabIndex: 0 } : {};
 
   return (
     <Flex align="center" data-testid={MESSAGE_BAND_TEST_ID} style={bandStyle}>
       {/*
-       * Alternatives Considered: `Typography.Text` alone for the whole band,
-       * which the fixed-width source field superficially resembles. Rejected
-       * because the design-system mapping names `Alert` for the message line
-       * and supplies the three severities through its `type`, and because
-       * `Text` carries neither a severity treatment nor an ARIA role — the
-       * announcement and the icon would both have had to be rebuilt by hand.
-       * `Text` is still used, but for what it is good at: the styled run of
-       * text inside the alert's title slot.
+       * Alternatives Considered: `Typography.Text` alone for the whole band, which
+       * the fixed-width source field superficially resembles. Rejected because the
+       * design-system mapping names `Alert` for the message line and supplies the
+       * three severities through its `type`, and because `Text` carries neither a
+       * severity treatment nor an ARIA role. `Text` is still used for what it is
+       * good at: the styled run of text inside the alert's title slot.
        *
-       * Assumptions: the text is passed as `title` rather than `message`.
-       * antd 6.4 renamed the slot and warns on `message` as deprecated, so the
-       * older prop would emit a console deprecation on every render while
-       * resolving to the same slot.
-       *
-       * Assumptions: `showIcon` is enabled so severity is not carried by
-       * colour alone. The icon is additive — the terminal had none — and it is
-       * what keeps a red, a green and a turquoise message distinguishable to a
-       * reader who cannot separate those hues.
+       * Assumptions: the text is passed as `title`, not `message` — antd 6.4 renamed
+       * the slot and warns on the older prop, which would emit a console deprecation
+       * on every render while resolving to the same slot. `showIcon` is enabled so
+       * severity is not carried by colour alone: the icon is additive, the terminal
+       * had none, and it is what keeps a red, a green and a turquoise message
+       * distinguishable to a reader who cannot separate those hues.
        */}
       <Alert
         role={SEVERITY_ALERT_ROLES[severity]}

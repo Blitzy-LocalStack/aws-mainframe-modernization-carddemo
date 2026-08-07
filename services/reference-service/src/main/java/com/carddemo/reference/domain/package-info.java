@@ -42,12 +42,23 @@
  *
  * <h2>The target contract, and the state of this directory</h2>
  *
- * <p>Assumptions: every entity name, table name and count below describes this package's
- * <b>target contract</b>, not the set of files present beside this charter. At the point this
- * charter was authored the directory holds this descriptor alone, so each of the six types named
- * below is <b>planned rather than missing</b>, and a reader who cannot open one has found the
- * expected state rather than a gap. The closed set is seven compilation units: this descriptor and
- * the six entities. Nothing else belongs here.</p>
+ * <p>Assumptions: every entity name, table name and column list below describes both this package's
+ * target contract and the state of the directory, because the two now agree. All six entities are
+ * <b>landed</b>: {@code TransactionType}, {@code TransactionCategory}, {@code DisclosureGroup},
+ * {@code UsPhoneAreaCode}, {@code UsState} and {@code UsStateZipPrefix} each exist as a compilation
+ * unit beside this charter, so a reader who cannot open one of them has found a gap rather than the
+ * expected state. The closed set is seven compilation units: this descriptor and the six entities.
+ * Nothing else belongs here, and nothing named here is outstanding.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph previously said the directory held this descriptor alone
+ * and that all six entities were therefore <b>planned rather than missing</b>. That reading was
+ * written before any entity landed and was left unrevised as they arrived, so it under-stated the
+ * package twice over: four entities were already present when it was last read, and the two with
+ * composite keys have since joined them. The wording mattered more than a stale count usually does,
+ * because it instructed a reader to treat an absent entity as expected -- which is precisely the
+ * instruction that lets a genuine gap go unnoticed. It is replaced with a statement of what is
+ * present, and the two markers are kept distinct so that any future entry can be marked outstanding
+ * without reintroducing a blanket claim over the whole package.</p>
  *
  * <h2>The six entities and the tables they map</h2>
  *
@@ -116,7 +127,7 @@
  *       zero.</dd>
  * </dl>
  *
- * <h2>Four rulings that bind every type in this package</h2>
+ * <h2>Five rulings that bind every type in this package</h2>
  *
  * <p>Each ruling below is recorded once, here, so that the six entities can cite this descriptor
  * instead of restating the argument six times and risking six variants of it.</p>
@@ -195,6 +206,30 @@
  * lookup entities hold 490 plus 56 plus 240 distinct rows, which is the 786 that, with the 76 rows
  * of the three reference tables, makes up the 862 rows the seed migration loads.</p>
  *
+ * <p>Assumptions: <b>ruling five, an identifier is assigned once at construction and is never
+ * reassigned.</b> Every {@code @Id} member in this package is declared {@code updatable = false} and
+ * has no setter; the value arrives through a constructor that refuses a null, and after that nothing
+ * in application code can change it. The reason is that these keys are NATURAL rather than generated:
+ * the two-character type code, the three-character area code, the two-character state code and the
+ * four-character state-and-postal combination are all values read out of the baseline, and each is
+ * pointed at by something else -- a category's foreign key at {@code V1__reference.sql} L267 for the
+ * first, and seed data for the other three. Reassigning one would move a row's identity while every
+ * reference to it stayed pointing at the old value, and on the single-column state-and-postal table it
+ * would not modify a row at all but replace it with a different one while the provider believed it was
+ * updating the first.</p>
+ *
+ * <p>Refactoring Rationale: <b>ruling five is recorded because the package did not previously hold it.</b>
+ * All four keyed lookup types offered a public setter for the identifier, and one of them argued in its
+ * own documentation that the method existed for a loader's assignment "and not as an invitation to
+ * rename a seeded row" -- which is a rule prose can state and only the type can enforce. No caller
+ * anywhere in the repository used any of the four, and none needed to: each constructor assigns the key
+ * in one step and refuses a null the setter accepted. Removing them left one assembly route per type and
+ * no route at all to alter an identity. Trade-offs: the members stay non-final and the no-argument
+ * constructor stays public, because the provider writes a loaded row's fields directly and the
+ * specification requires that constructor; {@code updatable = false} is what withholds the column from
+ * an {@code UPDATE} statement, and the absent setter is what withholds it from application code. Neither
+ * alone would be sufficient, which is why both are applied.</p>
+ *
  * <h2>Package-scope decisions</h2>
  *
  * <p>Alternatives Considered: <b>a composite primary key is a nested type, not a separate file.</b>
@@ -235,10 +270,22 @@
  * chose to echo, so a column added later would fall silently outside the check whereas a counter
  * covers the whole row by construction. The compromise accepted is that two entities in this
  * package behave differently from the other four, which is a genuine inconsistency and is the
- * reason it is recorded here rather than left for a reader to notice. This service runs with
+ * reason it is recorded here rather than left for a reader to notice.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph previously closed by stating that the service runs with
  * Hibernate schema management disabled, so no startup check compares these mappings against the
- * tables; alignment between the two rests on this charter and on review, which is why the column
- * list above is stated per entity rather than summarised.</p>
+ * tables. That is true of one profile and not of the other, and stated without the qualifier it
+ * discourages exactly the check that does exist. The production profile sets {@code ddl-auto} to
+ * {@code none}, because Flyway owns every statement in this module and three things
+ * {@code V1__reference.sql} declares cannot be derived from an entity at all -- the
+ * {@code ON DELETE RESTRICT} foreign key, the check constraints on the fixed-width code columns and
+ * the {@code NUMERIC(6,2)} scale that keeps the rate exact. The integration-test profile at
+ * {@code src/test/resources/application-test.yml} sets it to {@code validate} for the opposite
+ * reason: a migration test that asserted nothing about entity drift would let a mapping and its
+ * table diverge silently, and there a mismatch aborts context startup and names the object that
+ * disagrees. So these mappings <b>are</b> compared against the Flyway output, in the test profile
+ * rather than in production, and the per-entity column lists above are stated exhaustively so that
+ * review can carry the part no profile checks.</p>
  *
  * <p>Alternatives Considered: <b>every mapping names its schema explicitly.</b> Each
  * {@code @Table} in this package declares {@code schema = "reference"} rather than omitting the
@@ -338,4 +385,3 @@
  * referenced from here rather than reproduced.</p>
  */
 package com.carddemo.reference.domain;
-

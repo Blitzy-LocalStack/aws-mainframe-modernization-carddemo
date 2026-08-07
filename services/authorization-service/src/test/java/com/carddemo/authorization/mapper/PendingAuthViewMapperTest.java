@@ -53,6 +53,18 @@ final class PendingAuthViewMapperTest {
     /** The unmasked primary account number the persistent row carries. */
     private static final String CARD_NUMBER = "4111111111111111";
 
+    /**
+     * The authenticated operator every selector in this class is issued to.
+     *
+     * <p>Assumptions: a selector's binding names the subject as well as the resource, so every conversion
+     * that seals one has to be told who it is for. A fixed value is used rather than a generated one so a
+     * failing case is reproducible from the source alone.</p>
+     */
+    private static final String SUBJECT = "11111111-2222-3333-4444-555555555555";
+
+    /** A second authorized operator, who must not be able to redeem the first one's selector. */
+    private static final String OTHER_SUBJECT = "99999999-8888-7777-6666-555555555555";
+
     /** The adapter under test. */
     private PendingAuthViewMapper mapper;
 
@@ -80,6 +92,16 @@ final class PendingAuthViewMapperTest {
     }
 
     /**
+     * The response code the reference program moves on an approval.
+     *
+     * <p>Assumptions: {@code '00'} is what {@code cbl/COPAUA0C.cbl} L693 moves on the approval branch,
+     * and it is the discriminator this fixture uses to choose the match status a real insert would have
+     * stored. It is named rather than repeated inline so that the fixture's mapping from response code
+     * to match status is stated once.</p>
+     */
+    private static final String APPROVED_RESPONSE_CODE = "00";
+
+    /**
      * Builds one persistent authorization row with the response code supplied.
      *
      * @param authRespCode the response code to store, which may be {@code null}
@@ -95,6 +117,12 @@ final class PendingAuthViewMapperTest {
      * <p>Assumptions: the two amounts are separate parameters because they differ on a decline, and the
      * assertion that the list row carries the approved one is only meaningful when they are not equal.</p>
      *
+     * <p>Assumptions: the match status follows the response code the same way the baseline's own two
+     * branches at {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} lines 902 to 906 do, so a
+     * row built here with the approval code is pending and a row built with any other code is
+     * declined. Passing one fixed status for both would build a row combination the reference system
+     * never writes, and the view assertions would then be made against an impossible row.</p>
+     *
      * @param authRespCode the response code to store, which may be {@code null}
      * @param requested the amount the acquirer asked for
      * @param approved the amount actually granted
@@ -102,12 +130,23 @@ final class PendingAuthViewMapperTest {
      */
     private static PendingAuthDetail detailWith(
             String authRespCode, BigDecimal requested, BigDecimal approved) {
+        // WHY : Assumptions: the entry mode is (short) 5 rather than a two-digit value on purpose. The
+        //       segment's PIC 9(02) admits single-digit quantities, and this fixture is what proves the
+        //       view mapper restores the leading zero the picture implies rather than emitting the
+        //       shortest decimal spelling of the stored number.
         return new PendingAuthDetail(
                 new PendingAuthDetailKey(ACCOUNT_ID, AUTH_DATE, AUTH_TIME),
                 "260806", "091644", CARD_NUMBER, "0100", "2712", "0100", "0000",
                 "AUTH01", authRespCode, "0000", "003000", requested, approved,
                 "5411", "840", (short) 5, "MERCHANT000001", "ACME HARDWARE",
-                "SPRINGFIELD", "IL", "627040000", "TX0000000000001");
+                "SPRINGFIELD", "IL", "627040000", "TX0000000000001",
+                // WHY : Assumptions: the match status is derived from the response code the caller
+                //       supplied, so a row built with the declined code carries the declined status.
+                //       Hard-coding the pending value here would let a regression in the mapper's
+                //       treatment of a declined row pass, since every fixture would be pending.
+                APPROVED_RESPONSE_CODE.equals(authRespCode)
+                        ? PendingAuthDetail.MATCH_STATUS_PENDING
+                        : PendingAuthDetail.MATCH_STATUS_DECLINED);
     }
 
     /**
@@ -168,21 +207,51 @@ final class PendingAuthViewMapperTest {
      *
      * <p>Assumptions: the deterministic replacement states the property directly. The cleartext selector
      * {@code accountId:authDate:authTime} must not appear in the published token, and opening that token
-     * under {@link PendingAuthViewMapper#CURSOR_BINDING} must return exactly that selector -- so the row's
-     * identity travels only through the sealer, which is the property the weaker probe was reaching for.</p>
+     * under the binding {@link PendingAuthViewMapper#cursorBinding(String)} composes for the ISSUING SUBJECT
+     * must return exactly that selector -- so the row's identity travels only through the sealer, which is
+     * the property the weaker probe was reaching for.</p>
      */
     @Test
     @DisplayName("masks the card number and seals the selector on a list row")
     void rowMasksAndSeals() {
-        PendingAuthRowView row = this.mapper.toRowView(detailWith("00"));
+        PendingAuthRowView row = this.mapper.toRowView(detailWith("00"), SUBJECT);
         String cursorKey = ACCOUNT_ID + String.valueOf(PendingAuthViewMapper.KEY_PART_SEPARATOR)
                 + AUTH_DATE + String.valueOf(PendingAuthViewMapper.KEY_PART_SEPARATOR) + AUTH_TIME;
 
         assertThat(row.cardNum()).isEqualTo("************1111").doesNotContain("4111");
         assertThat(CursorToken.hasSealedShape(row.key())).isTrue();
         assertThat(row.key()).isNotEqualTo(cursorKey).doesNotContain(cursorKey);
-        assertThat(this.cursor.open(PendingAuthViewMapper.CURSOR_BINDING, row.key()))
+        assertThat(this.cursor.open(PendingAuthViewMapper.cursorBinding(SUBJECT), row.key()))
                 .isEqualTo(cursorKey);
+    }
+
+    /**
+     * A selector issued to one operator does not open for another, and one issued to no operator is not
+     * issued at all.
+     *
+     * <p>Refactoring Rationale: the binding was the bare query name {@code "authorization-row"} until this
+     * case existed, so a selector authenticated the ROW and nothing about who asked for it. Any authorized
+     * operator could take a selector out of their own list body and replay it -- and the published cursor
+     * contract at {@code common-lib}'s {@code PageResponse} states that a token is bound to the subject it
+     * was issued for, which made that contract untrue rather than merely weak. Two operators are asserted
+     * rather than one, because a single-subject case passes just as readily against the defective binding.</p>
+     */
+    @Test
+    @DisplayName("seals a selector to its issuing operator and to no other")
+    void selectorIsBoundToItsIssuingOperator() {
+        String issued = this.mapper.toRowView(detailWith("00"), SUBJECT).key();
+        String issuedToOther = this.mapper.toRowView(detailWith("00"), OTHER_SUBJECT).key();
+
+        assertThat(issued).isNotEqualTo(issuedToOther);
+        assertThatThrownBy(
+                () -> this.cursor.open(PendingAuthViewMapper.cursorBinding(OTHER_SUBJECT), issued))
+                .isInstanceOf(CursorToken.InvalidCursorException.class);
+        assertThatThrownBy(() -> this.mapper.toRowView(detailWith("00"), "  "))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("subject");
+        assertThatThrownBy(() -> this.mapper.toListView(summaryRow(), List.of(), false, null, ""))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("subject");
     }
 
     /**
@@ -195,11 +264,11 @@ final class PendingAuthViewMapperTest {
     @Test
     @DisplayName("derives the approval character from the response code, declining on anything else")
     void approvalStatusIsDerived() {
-        assertThat(this.mapper.toRowView(detailWith("00")).approvalStatus())
+        assertThat(this.mapper.toRowView(detailWith("00"), SUBJECT).approvalStatus())
                 .isEqualTo(PendingAuthRowView.APPROVAL_STATUS_APPROVED);
-        assertThat(this.mapper.toRowView(detailWith("05")).approvalStatus())
+        assertThat(this.mapper.toRowView(detailWith("05"), SUBJECT).approvalStatus())
                 .isEqualTo(PendingAuthRowView.APPROVAL_STATUS_DECLINED);
-        assertThat(this.mapper.toRowView(detailWith(null)).approvalStatus())
+        assertThat(this.mapper.toRowView(detailWith(null), SUBJECT).approvalStatus())
                 .isEqualTo(PendingAuthRowView.APPROVAL_STATUS_DECLINED);
         assertThat(PendingAuthViewMapper.approvalStatusOf("99"))
                 .isEqualTo(PendingAuthRowView.APPROVAL_STATUS_DECLINED);
@@ -214,10 +283,10 @@ final class PendingAuthViewMapperTest {
         PendingAuthDetail declined =
                 detailWith("05", new BigDecimal("250.00"), BigDecimal.ZERO.setScale(2));
 
-        PendingAuthRowView row = this.mapper.toRowView(declined);
+        PendingAuthRowView row = this.mapper.toRowView(declined, SUBJECT);
         assertThat(row.amount()).isEqualTo(Money.ZERO);
 
-        PendingAuthDetailView detail = this.mapper.toDetailView(declined);
+        PendingAuthDetailView detail = this.mapper.toDetailView(declined, SUBJECT);
         assertThat(detail.transactionAmt()).isEqualTo(Money.of(new BigDecimal("250.00")));
         assertThat(detail.approvedAmt()).isEqualTo(Money.ZERO);
     }
@@ -228,13 +297,18 @@ final class PendingAuthViewMapperTest {
     @Test
     @DisplayName("publishes stored values on the detail body and composes nothing")
     void detailPublishesStoredValues() {
-        PendingAuthDetailView view = this.mapper.toDetailView(detailWith("00"));
+        PendingAuthDetailView view = this.mapper.toDetailView(detailWith("00"), SUBJECT);
 
         assertThat(view.cardExpiryDate()).isEqualTo("2712").doesNotContain("/");
         assertThat(view.authOrigDate()).isEqualTo("260806").hasSize(6);
         assertThat(view.authRespCode()).isEqualTo("00");
         assertThat(view.authRespReason()).isEqualTo("0000");
-        assertThat(view.posEntryMode()).isEqualTo("5");
+        // WHY : Refactoring Rationale: the expectation is "05" and not "5". An earlier revision of this
+        //       assertion codified the shortest decimal spelling of the stored short, which silently
+        //       accepted a body that had dropped the leading zero the copybook's PIC 9(02) declares. The
+        //       fixture stores 5, so this line is the one that distinguishes a two-digit fixed-width
+        //       rendering from Short.toString.
+        assertThat(view.posEntryMode()).isEqualTo("05").hasSize(2);
         assertThat(view.transactionAmt()).isEqualTo(Money.of(new BigDecimal("250.00")));
         assertThat(view.approvedAmt()).isEqualTo(Money.of(new BigDecimal("250.00")));
         assertThat(view.authDate()).isEqualTo(AUTH_DATE);
@@ -252,7 +326,7 @@ final class PendingAuthViewMapperTest {
     @DisplayName("assembles the list body with boundaries taken from the rows returned")
     void listViewCarriesTheEnvelope() {
         PendingAuthListView view = this.mapper.toListView(
-                summaryRow(), List.of(detailWith("00")), true, null);
+                summaryRow(), List.of(detailWith("00")), true, null, SUBJECT);
 
         assertThat(view.summary().accountId()).isEqualTo("00000000011");
         assertThat(view.page().items()).hasSize(1);
@@ -269,7 +343,7 @@ final class PendingAuthViewMapperTest {
     @DisplayName("returns an empty page with no boundary tokens")
     void emptyPageCarriesNoBoundaries() {
         PendingAuthListView view = this.mapper.toListView(
-                summaryRow(), List.of(), false, PendingAuthListView.MESSAGE_BOTTOM_OF_PAGE);
+                summaryRow(), List.of(), false, PendingAuthListView.MESSAGE_BOTTOM_OF_PAGE, SUBJECT);
 
         assertThat(view.page().items()).isEmpty();
         assertThat(view.page().firstKey()).isNull();
@@ -288,7 +362,7 @@ final class PendingAuthViewMapperTest {
     @DisplayName("refuses a navigation sentence outside the three reference strings")
     void authoredBoundarySentenceIsRefused() {
         assertThatThrownBy(() -> this.mapper.toListView(
-                summaryRow(), List.of(), false, "You are already at the bottom of the page."))
+                summaryRow(), List.of(), false, "You are already at the bottom of the page.", SUBJECT))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("reference navigation sentences");
     }

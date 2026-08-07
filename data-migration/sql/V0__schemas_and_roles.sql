@@ -49,13 +49,28 @@
 --
 -- Post-state established:
 --   - Eight schemas exist -- auth, account, card, ledger, reference, batch,
---     authorization, reporting -- each owned by its matching carddemo_* role.
---   - Eight login roles exist -- carddemo_auth, carddemo_account,
---     carddemo_card, carddemo_ledger, carddemo_reference, carddemo_batch,
---     carddemo_authorization, carddemo_reporting -- each holding the credential
---     section 6 applied to it. These names are the source of truth: the
---     datasource username each service resolves, and the secret store entry
---     each credential is written to, must match them character for character.
+--     authorization, reporting -- each owned by its matching NOLOGIN
+--     carddemo_<context>_owner role, never by the role a service connects as.
+--   - THREE tiers of role exist, and the separation between them is the point:
+--       * Eight NOLOGIN owner roles -- carddemo_auth_owner and its seven
+--         siblings. Each owns one schema and, through the migration mechanism
+--         below, every object in it. None can log in, so none has a credential
+--         and none can be authenticated as.
+--       * Seven LOGIN migration roles -- carddemo_auth_migrator and its six
+--         siblings; reporting has none because it runs no migration. Each is a
+--         member of its own owner WITH INHERIT FALSE, SET TRUE, so it can
+--         `SET ROLE` to that owner and holds no privilege of its own otherwise.
+--         Flyway connects as one of these and issues that SET ROLE first, which
+--         is what makes migration-created objects owned by the owner.
+--       * Eight LOGIN runtime roles -- carddemo_auth, carddemo_account,
+--         carddemo_card, carddemo_ledger, carddemo_reference, carddemo_batch,
+--         carddemo_authorization, carddemo_reporting. These names are the source
+--         of truth for the datasource username each service resolves. Each holds
+--         USAGE on its schema and SELECT/INSERT/UPDATE plus sequence usage on its
+--         tables, and NOTHING else -- no CREATE, no DELETE, no TRUNCATE, no
+--         ownership, so it cannot alter, drop or replace the objects it reads.
+--   - FIFTEEN credentials are applied by section 6: the eight runtime roles and
+--     the seven migrators. The eight owners get none, by construction.
 --   - CREATE on schema public is revoked from PUBLIC.
 --   - carddemo_batch holds USAGE on ledger, account, card and reference, and
 --     default privileges that grant it SELECT/INSERT/UPDATE on ledger tables,
@@ -69,8 +84,8 @@
 --   - The connecting role cannot create roles. CREATE ROLE reports
 --     "permission denied to create role", detailing that only roles with the
 --     CREATEROLE attribute may create roles.
---   - The eight roles already exist and the connecting role is neither a
---     superuser nor an administrator of them. Section 1's membership grant
+--   - The roles already exist and the connecting role is neither a superuser nor
+--     an administrator of them. Section 1's membership grant
 --     reports "permission denied to grant role", and the refusal is correct: a
 --     principal that does not administer these roles has no business setting
 --     the default privileges of the schemas they own, nor their credentials.
@@ -253,6 +268,85 @@ DECLARE
     -- context is entitled to. A dedicated owner holds exactly the SELECT it
     -- needs on exactly the four source schemas and nothing else.
     reporting_owner_role constant text := 'carddemo_reporting_owner';
+
+    -- WHY : Refactoring Rationale: the ownership split described above for the
+    -- reporting context was, for a long time, the ONLY place it was applied. Every
+    -- other schema was owned by the LOGIN role its service connects as, which gave
+    -- each runtime identity the full authority of an owner over its own data: an
+    -- owner may ALTER, DROP and TRUNCATE any table in its schema, may create new
+    -- objects there, and may grant its own privileges onward. A compromised task
+    -- therefore did not need to escalate to destroy or rewrite its context's data,
+    -- and the reasoning recorded above -- that a compromised reporting task must
+    -- not be able to replace a masking view -- applies with equal force to a
+    -- compromised ledger task and a table. The split is now universal: eight
+    -- NOLOGIN owner roles hold every schema and every object in it, and no service
+    -- connects as one.
+    -- WHY : Assumptions: NOLOGIN is what makes the separation real rather than
+    -- procedural. A LOGIN owner would need a credential, that credential would be
+    -- generated and stored beside the runtime one, and anything able to read the
+    -- secret store would hold owner authority. With NOLOGIN there is no credential
+    -- to steal and no way to authenticate as an owner at all -- ownership is
+    -- reachable only by SET ROLE, and only by a role that has been made a member.
+    -- It also means eight fewer credentials to generate, store and replace.
+    -- WHY : Assumptions: carddemo_reporting_owner is an element of this array and no
+    -- longer a separate constant, so the eight owners are created by one loop under
+    -- one set of rules. reporting_owner_role above is retained because sections 2
+    -- and 5 name it, and keeping the name in one place is what stops the two
+    -- spellings drifting.
+    owner_role  text;
+    owner_roles text[] := ARRAY[
+        'carddemo_auth_owner',
+        'carddemo_account_owner',
+        'carddemo_card_owner',
+        'carddemo_ledger_owner',
+        'carddemo_reference_owner',
+        'carddemo_batch_owner',
+        'carddemo_authorization_owner',
+        'carddemo_reporting_owner'
+    ];
+
+    -- WHY : Assumptions: SEVEN migration roles, not eight. A migration role exists
+    -- so that Flyway can create objects in a schema whose owner cannot log in, and
+    -- the reporting context has no migration to run -- reporting-service owns no
+    -- db/migration directory at all, by a decision its own pom.xml records, because
+    -- it stores nothing and reads other contexts through views. Issuing it a
+    -- migration credential would create an identity with no work to do.
+    -- WHY : Assumptions: a migration role has LOGIN and is a MEMBER of its owner,
+    -- and that pairing is the whole mechanism. Flyway connects as the migration
+    -- role and its first statement on every connection is
+    -- `SET ROLE carddemo_<context>_owner`, configured as spring.flyway.init-sqls in
+    -- each service -- the property name is PLURAL, and the singular form binds
+    -- nothing, so a migration configured with it would silently run as the migrator.
+    -- With the statement in place every table, index, constraint and sequence a
+    -- migration creates is owned by the OWNER rather than by the migrator. Without the
+    -- SET ROLE the migrator would own what it created, the owner would own nothing,
+    -- and the default privileges in sections 2b, 4 and 5 -- which are keyed on the
+    -- creating role -- would never fire.
+    -- WHY : Alternatives Considered: running Flyway as the runtime role, which is
+    -- what the previous arrangement did and needed no extra role. Rejected, because
+    -- it requires CREATE on the schema and that is exactly the privilege this
+    -- change removes; the two cannot both be true.
+    -- WHY : Alternatives Considered: running Flyway as the cluster master through a
+    -- separate migration task, which needs no migration role either. Rejected as
+    -- the wider blast radius: a master-authenticated migration step can reach every
+    -- schema in the cluster, whereas a per-context migrator can become exactly one
+    -- owner and nothing else, so a defect in one service's migration cannot touch
+    -- another context's data.
+    -- WHY : Trade-offs: seven additional credentials to generate and store. That is
+    -- the accepted cost, and it is bounded: each is used only during a startup
+    -- migration, each can become exactly one owner, and none of them can be used to
+    -- read or write application data outside a migration because a migrator holds
+    -- no privilege of its own on any table.
+    migrator_role  text;
+    migrator_roles text[] := ARRAY[
+        'carddemo_auth_migrator',
+        'carddemo_account_migrator',
+        'carddemo_card_migrator',
+        'carddemo_ledger_migrator',
+        'carddemo_reference_migrator',
+        'carddemo_batch_migrator',
+        'carddemo_authorization_migrator'
+    ];
 BEGIN
     -- WHY : Assumptions: three constructs below exist only from PostgreSQL 16 --
     -- the INHERIT and SET membership options, the SET privilege type accepted by
@@ -299,21 +393,33 @@ BEGIN
             -- credential: it lands in a shell history, in a psql history file,
             -- and in the server log whenever log_statement is not none.
             --
-            -- The mechanism is therefore named, and there are THREE of them because a
-            -- deployed environment, a locally provisioned database and this script's own
-            -- bootstrap session need different ones. infra/modules/secrets generates each
-            -- service role's credential at apply time -- one Secrets Manager entry per
-            -- role, its element set exactly the role list above -- through the provider's
+            -- The mechanism is therefore named, and there are TWO of them because a
+            -- deployed environment and this script's own bootstrap session need
+            -- different ones. infra/modules/secrets generates each service role's
+            -- credential at apply time -- one Secrets Manager entry per role, its
+            -- element set exactly the role list above -- through the provider's
             -- write-only argument, so the generated value appears in neither source nor
             -- Terraform state. Which mechanism then APPLIES it to the role follows from
-            -- HOW the database was provisioned, and all three are delivered so that no
-            -- case is left with roles that exist and cannot authenticate:
+            -- HOW the database was provisioned, and both are delivered so that no case
+            -- is left with roles that exist and cannot authenticate:
             --
-            --   section 6 of THIS script -- the bootstrap path. The caller opens ONE
-            --   session, sets one session setting per role -- carddemo.credential.<role>,
-            --   the role spelled exactly as in the array above -- passing the value it
-            --   read from that role's Secrets Manager entry as a BOUND parameter, and
-            --   then sends this script in that session. Section 6 reads each setting,
+            --   section 6 of THIS script -- the bootstrap path, and the one each
+            --   environment root composes. The caller opens ONE session, sets one session
+            --   setting per role -- carddemo.credential.<role>, the role spelled exactly
+            --   as in the array above -- passing the value it read from that role's
+            --   Secrets Manager entry as a BOUND parameter, and then sends this script in
+            --   that session. The delivered caller is infra/lambda/database_admin.py:
+            --   it opens one RDS Data API transaction, issues
+            --   `SELECT set_config(:setting_name, :setting_value, false)` once per role
+            --   with both values bound, and only then sends the statements of this file
+            --   on that same transaction -- which is what keeps them on one session,
+            --   because the Data API pins a connection for the life of a transaction and
+            --   is free to use a different one per call outside of one. Its calling root
+            --   creates the credential entries FIRST and orders the invocation after
+            --   them; the reverse order was the shipped defect, and it made a fresh
+            --   apply unrunnable rather than merely untidy, because section 6 refuses to
+            --   commit when a login role has no value and on a first apply there was no
+            --   entry to read. Section 6 reads each setting,
             --   applies it with ALTER ROLE ... PASSWORD, clears the setting, and REFUSES
             --   TO COMMIT if any login role is left without one. Two properties are why
             --   this shape was chosen over any other: the binding happens on a separate
@@ -326,21 +432,41 @@ BEGIN
             --   exposure, and section 6 refuses an unencrypted connection outright
             --   because the same value crosses that transport as statement text.
             --
-            --   the module-owned rotation function -- the deployed path for REPLACEMENT,
-            --   and not an option a root has to select: infra/modules/secrets declares
-            --   the function, its role, its encrypted log group, the invocation
-            --   permission for exactly the eight service secrets, and the rotation
-            --   attachment that triggers the first application. It reaches Aurora
-            --   through the RDS Data API using the RDS-managed master secret, which is
-            --   what lets it perform a FIRST application at all, and it can either
-            --   converge a passwordless role created by this script or create an absent
-            --   base role and its bounded `_clone` login before this script runs -- so
-            --   schema, grant and default-privilege convergence here is independent of
-            --   first-deployment ordering. Three properties make it the deployed choice
-            --   for every rotation after the first: the credential is never on an
-            --   operator terminal; CloudTrail and the function's own logs audit each
-            --   invocation without recording the value; and replacement follows the same
-            --   path every time, so there is one code path rather than two.
+            -- WHY : Refactoring Rationale: a SECOND mechanism was listed here, described
+            -- as "the module-owned rotation function ... not an option a root has to
+            -- select", and asserted that infra/modules/secrets declares the function,
+            -- its role, its encrypted log group, the invocation permission for exactly
+            -- the eight service secrets, and a rotation attachment. Every clause of that
+            -- was false, and it contradicted the correction recorded immediately above
+            -- it in this same comment. What that module actually declares is ONE
+            -- conditional resource, aws_secretsmanager_secret_rotation, whose for_each
+            -- is an empty map unless a calling root supplies both rotation_lambda_arn
+            -- and rotation_automatically_after_days; both default to null, neither
+            -- environment root passes either, and there is no function, role, log group
+            -- or invoke permission anywhere in the package to attach. The enumeration is
+            -- therefore TWO mechanisms, and the second one below is what performs a
+            -- REPLACEMENT as well as a first application.
+            --
+            -- WHY : Assumptions: replacing a stored credential is DELIVERED and SCRIPTED;
+            -- what is NOT delivered is a SCHEDULE that decides when to do it. Those are
+            -- separate properties and the distinction is the whole content of this note.
+            -- Re-running the applicator below against a Secrets Manager entry whose value
+            -- has been changed replaces the role's stored verifier, so no operator has to
+            -- type a credential and none reaches a shell history, a psql history file or
+            -- the server log. Scheduling that run is operator-managed: the two rotation
+            -- inputs on infra/modules/secrets are a pass-through hook for a root that
+            -- brings a function of its own, and the operator-managed procedure -- who
+            -- runs it, in what order, and how it is verified -- is documented in
+            -- docs/runbooks/deploy.md rather than implied by an input that defaults to
+            -- null. Trade-offs: the accepted cost is that a credential is not re-issued
+            -- automatically at an interval. Alternatives Considered: authoring a rotation
+            -- function here to close that gap, rejected because the AWS-published
+            -- PostgreSQL rotation functions cannot perform a FIRST application against
+            -- these roles at all (single-user rotation authenticates with the credential
+            -- it is replacing, and a freshly created role has none), so the function
+            -- would have to be a bespoke Data-API escalation path -- which is precisely
+            -- the out-of-scope component that was removed from that module, and which
+            -- claiming without shipping is the defect this note corrects.
             --
             --   the authored Python entry points -- the path for a local or partially
             --   provisioned cluster, and the one a reader with a psql prompt can run.
@@ -368,9 +494,10 @@ BEGIN
             -- PostgreSQL cannot perform a first application under single-user rotation,
             -- since they authenticate with the credential they are replacing and these
             -- roles have none. A rotation function is therefore only an answer here
-            -- because the one deployed authenticates as the master through the Data API
-            -- instead. Section 6 of this script both APPLIES what it was given and
-            -- REPORTS anything still outstanding, so no path is silent.
+            -- if it authenticates as the master through the Data API instead -- which
+            -- is a bespoke function nobody has written, not the one this comment once
+            -- claimed was deployed. Section 6 of this script both APPLIES what it was
+            -- given and REPORTS anything still outstanding, so no path is silent.
             --
             -- Alternatives Considered: a two-tier scheme -- NOLOGIN group roles
             -- holding the privileges, plus separately created LOGIN users
@@ -438,26 +565,82 @@ BEGIN
         END IF;
     END LOOP;
 
-    -- WHY : Assumptions: the reporting owner is created here, beside the eight
-    -- service roles, but outside the loop and without LOGIN. Keeping it out of
-    -- the array is what stops it being swept into anything the array drives:
-    -- infra/modules/secrets generates one credential per element of the same
-    -- inventory, and a NOLOGIN role that appeared there would be issued a
-    -- credential it can never use and that would then have to be rotated
-    -- forever. The membership grant that follows is the same one the loop
+    -- WHY : Assumptions: the eight owner roles are created in their own loop and
+    -- WITHOUT LOGIN. Keeping them out of service_roles is what stops them being
+    -- swept into anything that array drives: infra/modules/secrets generates one
+    -- credential per element of the same inventory, and a NOLOGIN role appearing
+    -- there would be issued a credential it can never use and that would then have
+    -- to be replaced forever. The membership grant is the same one the loop above
     -- issues, and for the same reason -- CREATE SCHEMA ... AUTHORIZATION and
-    -- ALTER DEFAULT PRIVILEGES both require the caller to be able to SET ROLE
-    -- to the target, and creating a role does not by itself confer that.
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = reporting_owner_role) THEN
-        EXECUTE format('CREATE ROLE %I NOLOGIN', reporting_owner_role);
-    END IF;
+    -- ALTER DEFAULT PRIVILEGES both require the caller to be able to SET ROLE to
+    -- the target, and creating a role does not by itself confer that.
+    -- WHY : Assumptions: an existing role is converted with ALTER ROLE ... NOLOGIN
+    -- rather than left as found. A cluster bootstrapped before this change has
+    -- these names absent, so the branch is normally the CREATE; but a cluster
+    -- where someone created one WITH LOGIN would otherwise keep a credentialed
+    -- owner, which is precisely the arrangement this section exists to remove, and
+    -- it would keep it silently.
+    FOREACH owner_role IN ARRAY owner_roles
+    LOOP
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = owner_role) THEN
+            EXECUTE format('CREATE ROLE %I NOLOGIN', owner_role);
+        ELSIF EXISTS (
+            SELECT 1 FROM pg_roles WHERE rolname = owner_role AND rolcanlogin
+        ) THEN
+            EXECUTE format('ALTER ROLE %I NOLOGIN', owner_role);
+        END IF;
 
-    IF NOT pg_has_role(CURRENT_USER, reporting_owner_role, 'USAGE')
-       OR NOT pg_has_role(CURRENT_USER, reporting_owner_role, 'SET') THEN
-        EXECUTE format(
-            'GRANT %I TO CURRENT_USER WITH INHERIT TRUE, SET TRUE',
-            reporting_owner_role);
-    END IF;
+        IF NOT pg_has_role(CURRENT_USER, owner_role, 'USAGE')
+           OR NOT pg_has_role(CURRENT_USER, owner_role, 'SET') THEN
+            EXECUTE format(
+                'GRANT %I TO CURRENT_USER WITH INHERIT TRUE, SET TRUE',
+                owner_role);
+        END IF;
+    END LOOP;
+
+    -- WHY : Assumptions: each migration role is created WITH LOGIN and is then made
+    -- a member of its own owner WITH INHERIT FALSE, SET TRUE. The two options are
+    -- chosen deliberately and the choice is the security property: SET TRUE lets
+    -- Flyway's `SET ROLE <owner>` succeed, while INHERIT FALSE means the migrator
+    -- does NOT passively hold the owner's privileges on any object. So a connection
+    -- that authenticates as a migrator and does not issue the SET ROLE can read and
+    -- write nothing at all, and every privileged action a migration takes is
+    -- explicitly scoped by that one statement rather than implicit in the login.
+    -- WHY : Assumptions: the owner name is derived by replacing the _migrator suffix
+    -- with _owner rather than carried in a second parallel array. One array cannot
+    -- fall out of step with itself, whereas two arrays indexed in lockstep is the
+    -- shape that silently pairs the wrong owner with a migrator after an edit.
+    FOREACH migrator_role IN ARRAY migrator_roles
+    LOOP
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = migrator_role) THEN
+            EXECUTE format('CREATE ROLE %I LOGIN', migrator_role);
+        ELSIF NOT EXISTS (
+            SELECT 1 FROM pg_roles WHERE rolname = migrator_role AND rolcanlogin
+        ) THEN
+            EXECUTE format('ALTER ROLE %I LOGIN', migrator_role);
+        END IF;
+
+        owner_role := left(migrator_role, length(migrator_role) - length('_migrator'))
+                      || '_owner';
+
+        IF NOT pg_has_role(migrator_role, owner_role, 'SET') THEN
+            EXECUTE format(
+                'GRANT %I TO %I WITH INHERIT FALSE, SET TRUE',
+                owner_role, migrator_role);
+        END IF;
+
+        -- WHY : Assumptions: the bootstrap session also needs to be able to act for
+        -- each migrator, because section 6 issues ALTER ROLE ... PASSWORD against
+        -- it. That needs the ADMIN option the creating role is auto-granted, and
+        -- re-granting with INHERIT and SET leaves it intact while supplying the two
+        -- options the earlier checks read.
+        IF NOT pg_has_role(CURRENT_USER, migrator_role, 'USAGE')
+           OR NOT pg_has_role(CURRENT_USER, migrator_role, 'SET') THEN
+            EXECUTE format(
+                'GRANT %I TO CURRENT_USER WITH INHERIT TRUE, SET TRUE',
+                migrator_role);
+        END IF;
+    END LOOP;
 END
 $$;
 
@@ -496,23 +679,39 @@ $$;
 -- IF NOT EXISTS and accept that any re-run aborts.
 -- =============================================================================
 
-CREATE SCHEMA IF NOT EXISTS auth AUTHORIZATION carddemo_auth;
-ALTER SCHEMA auth OWNER TO carddemo_auth;
+-- WHY : Refactoring Rationale: every AUTHORIZATION and OWNER clause below names a
+-- NOLOGIN carddemo_<context>_owner role. Each previously named the LOGIN role its
+-- service connects as, which handed every runtime identity the authority of an
+-- owner over its own schema -- ALTER, DROP and TRUNCATE on any table in it, CREATE
+-- of new objects, and the ability to grant its own privileges onward. A compromised
+-- task did not have to escalate to destroy or silently rewrite its context's data.
+-- Section 1 records why NOLOGIN is what makes the split real; section 2b grants each
+-- runtime role back exactly the data privileges its service actually uses.
+-- WHY : Assumptions: ownership is what these clauses set, and it is inherited by
+-- every object a migration later creates only because Flyway connects as
+-- carddemo_<context>_migrator and issues `SET ROLE carddemo_<context>_owner` first.
+-- The two halves are one mechanism: without the SET ROLE the tables would be owned
+-- by the migrator, this ownership would apply to the schema alone, and the default
+-- privileges in sections 2b, 4 and 5 -- all keyed on the CREATING role -- would
+-- never fire for any table.
 
-CREATE SCHEMA IF NOT EXISTS account AUTHORIZATION carddemo_account;
-ALTER SCHEMA account OWNER TO carddemo_account;
+CREATE SCHEMA IF NOT EXISTS auth AUTHORIZATION carddemo_auth_owner;
+ALTER SCHEMA auth OWNER TO carddemo_auth_owner;
 
-CREATE SCHEMA IF NOT EXISTS card AUTHORIZATION carddemo_card;
-ALTER SCHEMA card OWNER TO carddemo_card;
+CREATE SCHEMA IF NOT EXISTS account AUTHORIZATION carddemo_account_owner;
+ALTER SCHEMA account OWNER TO carddemo_account_owner;
 
-CREATE SCHEMA IF NOT EXISTS ledger AUTHORIZATION carddemo_ledger;
-ALTER SCHEMA ledger OWNER TO carddemo_ledger;
+CREATE SCHEMA IF NOT EXISTS card AUTHORIZATION carddemo_card_owner;
+ALTER SCHEMA card OWNER TO carddemo_card_owner;
 
-CREATE SCHEMA IF NOT EXISTS reference AUTHORIZATION carddemo_reference;
-ALTER SCHEMA reference OWNER TO carddemo_reference;
+CREATE SCHEMA IF NOT EXISTS ledger AUTHORIZATION carddemo_ledger_owner;
+ALTER SCHEMA ledger OWNER TO carddemo_ledger_owner;
 
-CREATE SCHEMA IF NOT EXISTS batch AUTHORIZATION carddemo_batch;
-ALTER SCHEMA batch OWNER TO carddemo_batch;
+CREATE SCHEMA IF NOT EXISTS reference AUTHORIZATION carddemo_reference_owner;
+ALTER SCHEMA reference OWNER TO carddemo_reference_owner;
+
+CREATE SCHEMA IF NOT EXISTS batch AUTHORIZATION carddemo_batch_owner;
+ALTER SCHEMA batch OWNER TO carddemo_batch_owner;
 
 -- WHY : Assumptions: authorization is a PostgreSQL reserved keyword, and
 -- CREATE SCHEMA AUTHORIZATION <role> is itself valid syntax that names a schema
@@ -536,8 +735,8 @@ ALTER SCHEMA batch OWNER TO carddemo_batch;
 -- The other seven names are not keywords and are deliberately left unquoted;
 -- quoting them gratuitously would invite a mixed-case name that then has to be
 -- quoted forever.
-CREATE SCHEMA IF NOT EXISTS "authorization" AUTHORIZATION carddemo_authorization;
-ALTER SCHEMA "authorization" OWNER TO carddemo_authorization;
+CREATE SCHEMA IF NOT EXISTS "authorization" AUTHORIZATION carddemo_authorization_owner;
+ALTER SCHEMA "authorization" OWNER TO carddemo_authorization_owner;
 
 -- WHY : Assumptions: reporting is the eighth schema and it holds no table. The
 -- eight bounded contexts are what the count refers to; seven of them own tables,
@@ -601,6 +800,156 @@ ALTER SCHEMA reporting OWNER TO carddemo_reporting_owner;
 -- owner for it.
 
 
+
+-- =============================================================================
+-- 2b. Runtime privileges for the seven connecting service roles
+--
+-- WHY : Refactoring Rationale: this section is new, and it exists because section 2
+-- took something away. Each of these seven roles used to OWN its schema, so it
+-- needed no grant at all -- ownership carried everything, including the authority to
+-- ALTER, DROP and TRUNCATE its own tables, to CREATE new objects, and to grant its
+-- privileges onward. Ownership now sits with a NOLOGIN role, so each connecting role
+-- has to be given back exactly the privileges its service uses and nothing else.
+-- That is the whole point: what is granted here is auditable, and what is not
+-- granted is impossible rather than merely unused.
+--
+-- WHY : Assumptions: DELETE is deliberately NOT granted, and its absence is a
+-- measurement rather than an oversight. No Java module in the reactor issues a
+-- delete against any of these seven schemas -- there is no repository delete call,
+-- no deleteById, no deleteAll, no @Modifying delete and no DELETE statement anywhere
+-- in services/*/src/main/java. Granting a privilege no code path uses is exactly
+-- what least privilege forbids, so it is withheld. The consequence is stated plainly
+-- for whoever adds the first delete: it will fail with a permission error naming the
+-- table, and the fix is to add DELETE here for that one context under review, not to
+-- widen the grant for all seven. That is the fail-closed direction, and it is why
+-- the omission is recorded here rather than left to be inferred.
+--
+-- WHY : Assumptions: TRUNCATE and REFERENCES are likewise not granted. TRUNCATE
+-- bypasses row-level rules and is not something an online service should be able to
+-- do to a ledger; REFERENCES would let a runtime role attach a foreign key to
+-- another context's table and thereby constrain data it does not own.
+--
+-- WHY : Assumptions: each pair of statements per context is deliberate and both
+-- halves are needed. ALTER DEFAULT PRIVILEGES applies to objects the owner creates
+-- IN FUTURE, which is what makes a Flyway migration's new table automatically
+-- readable and writable by the service without a follow-up grant; GRANT ... ON ALL
+-- covers objects that already exist when this script runs, which is what makes a
+-- re-run against an already-migrated database converge instead of leaving existing
+-- tables ungranted. Neither form subsumes the other, and section 4 records the same
+-- pairing for the batch role's cross-schema access.
+--
+-- WHY : Assumptions: the migration role is granted USAGE on the schema and nothing
+-- else. It needs USAGE to resolve the schema name at all; every privileged action it
+-- takes comes from `SET ROLE carddemo_<context>_owner`, which it holds through the
+-- SET-only membership section 1 grants it. A migrator that forgets the SET ROLE can
+-- therefore read and write nothing, which is the intended failure.
+--
+-- WHY : Assumptions: CREATE is REVOKED from each runtime role explicitly rather than
+-- simply left ungranted. A schema's owner may have granted it previously -- a
+-- cluster bootstrapped before this change had the runtime role AS the owner -- so a
+-- re-run must actively take the privilege away for the change to mean anything on an
+-- existing database. Leaving it merely ungranted would make this section correct on
+-- a fresh cluster and inert on the one that needs it most.
+--
+-- WHY : Assumptions: carddemo_reporting appears nowhere in this section. It reads
+-- through views rather than tables and its privileges are section 5's subject, which
+-- grants it USAGE on the reporting schema and SELECT on named views and revokes
+-- everything else. Adding it here would grant it table access the view arrangement
+-- exists to withhold.
+-- =============================================================================
+
+-- auth
+GRANT USAGE ON SCHEMA auth TO carddemo_auth;
+GRANT USAGE ON SCHEMA auth TO carddemo_auth_migrator;
+REVOKE CREATE ON SCHEMA auth FROM carddemo_auth;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_auth_owner IN SCHEMA auth
+    GRANT SELECT, INSERT, UPDATE ON TABLES TO carddemo_auth;
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_auth_owner IN SCHEMA auth
+    GRANT USAGE, SELECT ON SEQUENCES TO carddemo_auth;
+
+GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA auth TO carddemo_auth;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA auth TO carddemo_auth;
+
+-- account
+GRANT USAGE ON SCHEMA account TO carddemo_account;
+GRANT USAGE ON SCHEMA account TO carddemo_account_migrator;
+REVOKE CREATE ON SCHEMA account FROM carddemo_account;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_account_owner IN SCHEMA account
+    GRANT SELECT, INSERT, UPDATE ON TABLES TO carddemo_account;
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_account_owner IN SCHEMA account
+    GRANT USAGE, SELECT ON SEQUENCES TO carddemo_account;
+
+GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA account TO carddemo_account;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA account TO carddemo_account;
+
+-- card
+GRANT USAGE ON SCHEMA card TO carddemo_card;
+GRANT USAGE ON SCHEMA card TO carddemo_card_migrator;
+REVOKE CREATE ON SCHEMA card FROM carddemo_card;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_card_owner IN SCHEMA card
+    GRANT SELECT, INSERT, UPDATE ON TABLES TO carddemo_card;
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_card_owner IN SCHEMA card
+    GRANT USAGE, SELECT ON SEQUENCES TO carddemo_card;
+
+GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA card TO carddemo_card;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA card TO carddemo_card;
+
+-- ledger
+GRANT USAGE ON SCHEMA ledger TO carddemo_ledger;
+GRANT USAGE ON SCHEMA ledger TO carddemo_ledger_migrator;
+REVOKE CREATE ON SCHEMA ledger FROM carddemo_ledger;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_ledger_owner IN SCHEMA ledger
+    GRANT SELECT, INSERT, UPDATE ON TABLES TO carddemo_ledger;
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_ledger_owner IN SCHEMA ledger
+    GRANT USAGE, SELECT ON SEQUENCES TO carddemo_ledger;
+
+GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA ledger TO carddemo_ledger;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA ledger TO carddemo_ledger;
+
+-- reference
+GRANT USAGE ON SCHEMA reference TO carddemo_reference;
+GRANT USAGE ON SCHEMA reference TO carddemo_reference_migrator;
+REVOKE CREATE ON SCHEMA reference FROM carddemo_reference;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_reference_owner IN SCHEMA reference
+    GRANT SELECT, INSERT, UPDATE ON TABLES TO carddemo_reference;
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_reference_owner IN SCHEMA reference
+    GRANT USAGE, SELECT ON SEQUENCES TO carddemo_reference;
+
+GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA reference TO carddemo_reference;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA reference TO carddemo_reference;
+
+-- batch
+GRANT USAGE ON SCHEMA batch TO carddemo_batch;
+GRANT USAGE ON SCHEMA batch TO carddemo_batch_migrator;
+REVOKE CREATE ON SCHEMA batch FROM carddemo_batch;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_batch_owner IN SCHEMA batch
+    GRANT SELECT, INSERT, UPDATE ON TABLES TO carddemo_batch;
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_batch_owner IN SCHEMA batch
+    GRANT USAGE, SELECT ON SEQUENCES TO carddemo_batch;
+
+GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA batch TO carddemo_batch;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA batch TO carddemo_batch;
+
+-- authorization
+GRANT USAGE ON SCHEMA "authorization" TO carddemo_authorization;
+GRANT USAGE ON SCHEMA "authorization" TO carddemo_authorization_migrator;
+REVOKE CREATE ON SCHEMA "authorization" FROM carddemo_authorization;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_authorization_owner IN SCHEMA "authorization"
+    GRANT SELECT, INSERT, UPDATE ON TABLES TO carddemo_authorization;
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_authorization_owner IN SCHEMA "authorization"
+    GRANT USAGE, SELECT ON SEQUENCES TO carddemo_authorization;
+
+GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA "authorization" TO carddemo_authorization;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA "authorization" TO carddemo_authorization;
+
+
 -- =============================================================================
 -- 3. Public-schema hardening
 -- =============================================================================
@@ -620,6 +969,20 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 
 -- =============================================================================
 -- 4. Cross-schema privileges for the batch role
+--
+-- WHY : Refactoring Rationale: all FOURTEEN ALTER DEFAULT PRIVILEGES clauses in this
+-- section and in section 5 now name carddemo_<context>_owner where they previously
+-- named carddemo_<context>. This is not a cosmetic rename. Default privileges are
+-- keyed on the role that CREATES an object, and after section 2 that role is the
+-- NOLOGIN owner -- so a clause still keyed on the runtime role would parse, apply and
+-- then never fire for any table, leaving the batch and reporting grants silently
+-- inert on every table a migration creates. The count includes the four REVOKE forms
+-- in section 5, which must be re-keyed for the same reason: a revoke of a default
+-- privilege only matches an entry recorded under the same creating role. The
+-- GRANT ... ON ALL and REVOKE ... ON ALL forms beside them are keyed on the object
+-- rather than the creator and needed no change, which is precisely why the failure
+-- would have been invisible on an already-migrated database and total on a fresh
+-- one.
 --
 -- This section is the ONE documented exception to database-per-service purity in
 -- the whole design, so it carries the most reasoning.
@@ -698,7 +1061,7 @@ GRANT USAGE ON SCHEMA ledger, account, card, reference TO carddemo_batch;
 -- (L528) the category balance; the interest job writes its generated
 -- transaction (app/cbl/CBACT04C.cbl L500). Insert and update are each demanded
 -- by a specific write site, so neither is speculative headroom.
-ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_ledger IN SCHEMA ledger
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_ledger_owner IN SCHEMA ledger
     GRANT SELECT, INSERT, UPDATE ON TABLES TO carddemo_batch;
 
 -- WHY : Assumptions: a sequence grant is required in addition to the table
@@ -709,7 +1072,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_ledger IN SCHEMA ledger
 -- the table is read -- it fails only at the moment a row is inserted, inside the
 -- nightly batch, which is the worst possible place to discover it. Only ledger
 -- needs this, because ledger holds the only tables the batch role inserts into.
-ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_ledger IN SCHEMA ledger
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_ledger_owner IN SCHEMA ledger
     GRANT USAGE, SELECT ON SEQUENCES TO carddemo_batch;
 
 GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA ledger TO carddemo_batch;
@@ -749,7 +1112,7 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA ledger TO carddemo_batch;
 -- outstanding instead of applying it. That is the right direction to fail in:
 -- an outstanding grant is named in the output, whereas an over-broad one is
 -- invisible.
-ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_account IN SCHEMA account
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_account_owner IN SCHEMA account
     GRANT SELECT ON TABLES TO carddemo_batch;
 
 -- WHY : Assumptions: these two statements REPAIR a database provisioned by the
@@ -760,7 +1123,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_account IN SCHEMA account
 -- account table survives any change to default privileges, because default
 -- privileges only ever affect objects created afterwards. Both statements are
 -- no-ops on a clean database.
-ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_account IN SCHEMA account
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_account_owner IN SCHEMA account
     REVOKE UPDATE ON TABLES FROM carddemo_batch;
 
 REVOKE UPDATE ON ALL TABLES IN SCHEMA account FROM carddemo_batch;
@@ -800,7 +1163,7 @@ $$;
 -- L46 to validate the daily file against the card master and declares no write
 -- verb at all, so any write privilege here would exceed what every batch step
 -- put together performs.
-ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_card IN SCHEMA card
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_card_owner IN SCHEMA card
     GRANT SELECT ON TABLES TO carddemo_batch;
 
 GRANT SELECT ON ALL TABLES IN SCHEMA card TO carddemo_batch;
@@ -809,7 +1172,7 @@ GRANT SELECT ON ALL TABLES IN SCHEMA card TO carddemo_batch;
 -- at L47 to look up the disclosure-group interest rate and never writes to it.
 -- Reference data is maintained through reference-service and seeded by its own
 -- migration, never by the nightly chain.
-ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_reference IN SCHEMA reference
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_reference_owner IN SCHEMA reference
     GRANT SELECT ON TABLES TO carddemo_batch;
 
 GRANT SELECT ON ALL TABLES IN SCHEMA reference TO carddemo_batch;
@@ -864,22 +1227,22 @@ GRANT SELECT ON ALL TABLES IN SCHEMA reference TO carddemo_batch;
 -- has neither.
 GRANT USAGE ON SCHEMA ledger, account, card, reference TO carddemo_reporting_owner;
 
-ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_ledger IN SCHEMA ledger
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_ledger_owner IN SCHEMA ledger
     GRANT SELECT ON TABLES TO carddemo_reporting_owner;
 
 GRANT SELECT ON ALL TABLES IN SCHEMA ledger TO carddemo_reporting_owner;
 
-ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_account IN SCHEMA account
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_account_owner IN SCHEMA account
     GRANT SELECT ON TABLES TO carddemo_reporting_owner;
 
 GRANT SELECT ON ALL TABLES IN SCHEMA account TO carddemo_reporting_owner;
 
-ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_card IN SCHEMA card
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_card_owner IN SCHEMA card
     GRANT SELECT ON TABLES TO carddemo_reporting_owner;
 
 GRANT SELECT ON ALL TABLES IN SCHEMA card TO carddemo_reporting_owner;
 
-ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_reference IN SCHEMA reference
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_reference_owner IN SCHEMA reference
     GRANT SELECT ON TABLES TO carddemo_reporting_owner;
 
 GRANT SELECT ON ALL TABLES IN SCHEMA reference TO carddemo_reporting_owner;
@@ -925,13 +1288,13 @@ GRANT SELECT ON ALL TABLES IN SCHEMA reference TO carddemo_reporting_owner;
 -- revoked last, because withdrawing it first would not remove the table grants
 -- underneath it -- it would only make them unreachable, leaving a privilege graph
 -- that looks correct and is not.
-ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_ledger IN SCHEMA ledger
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_ledger_owner IN SCHEMA ledger
     REVOKE SELECT ON TABLES FROM carddemo_reporting;
-ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_account IN SCHEMA account
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_account_owner IN SCHEMA account
     REVOKE SELECT ON TABLES FROM carddemo_reporting;
-ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_card IN SCHEMA card
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_card_owner IN SCHEMA card
     REVOKE SELECT ON TABLES FROM carddemo_reporting;
-ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_reference IN SCHEMA reference
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_reference_owner IN SCHEMA reference
     REVOKE SELECT ON TABLES FROM carddemo_reporting;
 
 REVOKE ALL ON ALL TABLES IN SCHEMA ledger FROM carddemo_reporting;
@@ -1081,6 +1444,19 @@ $$;
 DO $$
 DECLARE
     service_role     text;
+    -- WHY : Refactoring Rationale: the seven carddemo_<context>_migrator roles are
+    -- listed here alongside the eight runtime roles, because every LOGIN role this
+    -- script creates needs a credential applied in this same transaction or the
+    -- assertion at the end of this section refuses to commit. The EIGHT owner roles
+    -- are deliberately absent: they are NOLOGIN, so there is nothing to apply and
+    -- nothing to store, which is the property that makes ownership unreachable by
+    -- authentication rather than merely unused.
+    -- WHY : Assumptions: this array and infra/modules/secrets' service_role_names
+    -- input must agree element for element -- fifteen entries, not eight -- because
+    -- the module generates exactly one Secrets Manager entry per element and the
+    -- bootstrap supplies exactly one session setting per element. A name in one and
+    -- not the other surfaces as either a role that cannot authenticate or a
+    -- credential nothing reads.
     service_roles    text[] := ARRAY[
         'carddemo_auth',
         'carddemo_account',
@@ -1089,7 +1465,14 @@ DECLARE
         'carddemo_reference',
         'carddemo_batch',
         'carddemo_authorization',
-        'carddemo_reporting'
+        'carddemo_reporting',
+        'carddemo_auth_migrator',
+        'carddemo_account_migrator',
+        'carddemo_card_migrator',
+        'carddemo_ledger_migrator',
+        'carddemo_reference_migrator',
+        'carddemo_batch_migrator',
+        'carddemo_authorization_migrator'
     ];
     -- WHY : Assumptions: the supplied credential is held in a local variable for
     -- exactly as long as it takes to build one statement from it. It is never
@@ -1291,13 +1674,19 @@ BEGIN
     END LOOP;
 
     -- WHY : Trade-offs: the outcome is reported as counts plus role names, never
-    -- as a per-role line, because eight notices per run buries the one line that
-    -- matters. Role names are safe to print -- they are already public in this
+    -- as a per-role line, because fifteen notices per run buries the one line that
+    -- matters.
+    -- WHY : Refactoring Rationale: the denominator is array_length(service_roles, 1)
+    -- rather than the literal 8 it used to be. The literal was already a second
+    -- place the inventory was stated, and extending the array to fifteen made it
+    -- wrong -- the notice read "Applied ... to 15 of 8 service roles", which is the
+    -- exact class of self-contradiction a hardcoded count produces. Role names are safe to print -- they are already public in this
     -- file -- and they are what an operator needs in order to act.
     IF array_length(applied, 1) > 0 THEN
         RAISE NOTICE
-            'Applied the supplied credential to % of 8 service roles: %.',
-            array_length(applied, 1), array_to_string(applied, ', ');
+            'Applied the supplied credential to % of % login roles: %.',
+            array_length(applied, 1), array_length(service_roles, 1),
+            array_to_string(applied, ', ');
     END IF;
 
     IF array_length(already_set, 1) > 0 THEN

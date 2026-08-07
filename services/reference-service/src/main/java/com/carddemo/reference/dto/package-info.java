@@ -69,6 +69,13 @@
  *   <li>Date conversion: {@code DateConversionRequest}, which binds the required date and the
  *       optional mask the date-evaluation read declares as query parameters, and
  *       {@code DateConversionResponse} for {@code DateEvaluationResult}.</li>
+ *   <li>Reference-data maintenance batch: {@code MaintenanceActionBatchRequest} for
+ *       {@code MaintenanceActionBatchRequest} and {@code MaintenanceActionBatchResponse} for
+ *       {@code MaintenanceActionBatchResponse}, together with the two element shapes those two
+ *       carry -- {@code MaintenanceActionRequest} for the element schema {@code MaintenanceAction}
+ *       and {@code MaintenanceActionOutcomeResponse} for {@code MaintenanceActionOutcome}. Four
+ *       types rather than two, because the contract declares the element schemas separately and an
+ *       array member typed as anything looser would leave each element unvalidated.</li>
  * </ul>
  *
  * <p>Where a name above differs from the schema it satisfies, the correspondence is recorded here
@@ -78,7 +85,10 @@
  * {@code TransactionCategoryReplaceRequest}, both reached through the operations
  * {@code replaceTransactionType} and {@code replaceTransactionCategory};
  * {@code PhoneAreaCodeResponse} satisfies {@code UsPhoneAreaCode}; and
- * {@code DateConversionResponse} satisfies {@code DateEvaluationResult}. Alternatives Considered:
+ * {@code DateConversionResponse} satisfies {@code DateEvaluationResult}. The two maintenance element
+ * shapes are the remaining pair: {@code MaintenanceActionRequest} satisfies {@code MaintenanceAction}
+ * and {@code MaintenanceActionOutcomeResponse} satisfies {@code MaintenanceActionOutcome}, each
+ * taking the suffix that says which direction it travels in, which the bare schema names do not. Alternatives Considered:
  * mirroring each schema name character for character was evaluated and rejected on one ground --
  * the suffix pair is what makes the convention mechanically checkable, and a type ending in
  * {@code ReplaceRequest} beside a type ending in {@code CreateRequest} breaks the pairing that lets
@@ -95,6 +105,19 @@
  * under a second convention invented at the point of need. Recording that here rather than leaving
  * the inventory to read as exhaustive is the difference between a charter a reader can trust and
  * one a reader has to verify against the document line by line.
+ *
+ * <p>Refactoring Rationale: the batch shapes named in the bullet above are now settled here rather
+ * than left to that convention. Deferring them was defensible while nothing consumed them and stopped
+ * being so once the batch operation had a caller, because this descriptor's stated job is to settle
+ * the NAMES the sibling packages are written against -- and a name derived independently by a mapper
+ * author and by a controller author is how two shapes of one payload come into existence. The four
+ * names are recorded rather than reasoned about a second time at each point of use.</p>
+ *
+ * <p>Assumptions: every type named in this inventory is <b>landed</b> as a compilation unit beside
+ * this descriptor. Nothing named here is outstanding, so a reader who cannot open one of them has
+ * found a gap rather than the expected state. Where a future shape is genuinely planned it is to be
+ * marked so at its own entry, because a blanket statement over the whole package is what once
+ * instructed a reader to treat every absence as intended.</p>
  *
  * <h2>Deliberate absences</h2>
  *

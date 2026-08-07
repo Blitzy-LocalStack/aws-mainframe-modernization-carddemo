@@ -1,5 +1,6 @@
 package com.carddemo.batch.domain;
 
+import com.carddemo.common.money.Money;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
@@ -494,8 +495,26 @@ public class DailyTransaction {
     //       notice per record and large enough to notice per file. The scale is stated on the column
     //       so a re-read compares equal to what was written: BigDecimal equality is scale-sensitive,
     //       so an amount stored at a different scale would not equal a round-trip of itself.
-    @Column(name = "amount", precision = 11, scale = 2)
+    // WHY : Refactoring Rationale: NOT NULL, where an earlier revision of this mapping left the
+    //       column nullable. `DALYTRAN-AMT PIC S9(09)V99` declares no absent state, and neither
+    //       normative zoned codec produces one -- ZonedDecimalCodec and the ETL's
+    //       carddemo_migration.copybook.zoned both refuse a blank or non-digit numeric body -- so a
+    //       blank amount field fails the load rather than loading as null. The amount is also the one
+    //       field of the feed record the posting validation cannot proceed without: app/cbl/CBTRN02C.cbl
+    //       L403-L405 forms its trial balance from it before any other test runs.
+    @Column(name = "amount", precision = 11, scale = 2, nullable = false)
     private BigDecimal amount;
+
+    /**
+     * Integer digit positions {@code DALYTRAN-AMT PIC S9(09)V99} declares, at
+     * {@code app/cpy/CVTRA06Y.cpy:10}.
+     *
+     * <p>Assumptions: nine, which is what makes the persisted column {@code NUMERIC(11,2)} rather than
+     * the {@code NUMERIC(12,2)} the widest reference money picture would need. It is named here because
+     * the constructor bounds against it, and a literal at that one site would be a width with no
+     * citation beside it.</p>
+     */
+    private static final int AMOUNT_INTEGER_DIGITS = 9;
 
     /**
      * The merchant identifier the feed supplies for the transaction, nine digits.
@@ -692,7 +711,8 @@ public class DailyTransaction {
      *     {@code app/cpy/CVTRA06Y.cpy:8}, blank-padded to its declared width
      * @param description the String free-text description, from {@code DALYTRAN-DESC PIC X(100)} at
      *     {@code app/cpy/CVTRA06Y.cpy:9}
-     * @param amount the BigDecimal signed amount at scale 2, from {@code DALYTRAN-AMT PIC S9(09)V99}
+     * @param amount the BigDecimal signed amount, from {@code DALYTRAN-AMT PIC S9(09)V99}, reduced to
+     *     scale 2 and bounded to nine integer digits through {@code Money}; must not be {@code null}
      *     at {@code app/cpy/CVTRA06Y.cpy:10}; a negative value is the debit convention and must be
      *     passed as the negative it is
      * @param merchantId the Long merchant identifier, from {@code DALYTRAN-MERCHANT-ID PIC 9(09)} at
@@ -722,7 +742,13 @@ public class DailyTransaction {
         this.categoryCd = categoryCd;
         this.source = source;
         this.description = description;
-        this.amount = amount;
+        // WHY : Refactoring Rationale: the amount is canonicalised through Money rather than assigned
+        //       verbatim, which an earlier revision did. Verbatim assignment admitted a null into a
+        //       column now declared NOT NULL, a scale other than two that the driver would coerce, and
+        //       a ten-integer-digit magnitude that Money.of admits for the widest reference picture and
+        //       that NUMERIC(11,2) then rejects at the database with no field name in the failure.
+        //       Bounding at the picture rejects all three where the value entered the row.
+        this.amount = Money.ofPicture(amount, AMOUNT_INTEGER_DIGITS).amount();
         this.merchantId = merchantId;
         this.merchantName = merchantName;
         this.merchantCity = merchantCity;

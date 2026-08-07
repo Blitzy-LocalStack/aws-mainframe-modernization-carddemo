@@ -1,5 +1,18 @@
 # `date_conversion/invalid_date_rejected` -- an impossible calendar date is refused
 
+> Refactoring Rationale: **this file was removed by one review and is restored, because the
+> premise of its removal was answered by another.** A review of this scenario found that the
+> section 4.1 table below documented a 1001-byte `date-request.txt` that did not exist, and
+> offered two remedies: add the exact record, or drop the executable-fixture claim. It took the
+> second. The record was added instead, in the same batch of work, so the claim the removal
+> answered had already become true: `date-request.txt` is present, `wc -c` reports 1001 and
+> `wc -l` reports 1, exactly as the table states. Restoring the file rather than leaving the
+> scenario undocumented is what keeps two other statements true as well -- the tree charter counts
+> one scenario README per scenario directory, and user-specified Rule 1 requires the documentation
+> for every fixture this directory ships. Assumptions: nothing in the restored text is taken on
+> trust; every relative link it carries resolves, and the record geometry it asserts was re-measured
+> against the file that now exists.
+
 ## 1. Scenario intent
 
 This scenario pairs a well-formed 1000-byte `CODATE01` request envelope with a date

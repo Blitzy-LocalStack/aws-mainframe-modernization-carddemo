@@ -144,12 +144,20 @@ import jakarta.validation.constraints.Size;
  * none of these five programs includes. The longest message the five emit is forty-four characters,
  * at {@code app/cbl/COUSR00C.cbl} line 273, so the declared width is never approached and there is
  * nothing for a truncation path to do. The structural reason is simpler still: this record is the
- * success shape, so the three sign-on failure sentences are not its business. Those are
- * {@code 'Wrong Password. Try again ...'} at {@code app/cbl/COSGN00C.cbl} lines 242 to 243,
- * {@code 'User not found. Try again ...'} at line 249 and
- * {@code 'Unable to verify the User ...'} at line 254, and each travels in
- * {@code com.carddemo.common.error.ApiError} instead. Every one of the three carries a space before
- * its ellipsis exactly as the program writes it, and none is reworded in transit.
+ * success shape, so the sign-on failure sentences are not its business. The two this migration can
+ * report are {@code 'Wrong Password. Try again ...'} at {@code app/cbl/COSGN00C.cbl} lines 242 to 243
+ * and {@code 'Unable to verify the User ...'} at line 254, and each travels in
+ * {@code com.carddemo.common.error.ApiError} instead. Both carry a space before the ellipsis exactly
+ * as the program writes it, and neither is reworded in transit.
+ *
+ * <p>Assumptions: the reference's third sentence, {@code 'User not found. Try again ...'} at line 249,
+ * is named separately because it travels nowhere. The identity provider answers an unknown identifier
+ * and a wrong credential identically, so the first sentence above covers both cases and the third is
+ * unreachable through any published operation -- a registered divergence,
+ * {@code D-SIGNON-EXISTENCE-UNIFORM} in section 7.4 of
+ * {@code docs/architecture/cobol-to-service-traceability.md}. It remains in the browser application's
+ * message catalogue for traceability alone. Counting it among the sentences that travel would have
+ * asserted a response no caller can receive.</p>
  *
  * <p>Trade-offs: no credential travels on this response in any form, and the compromise that
  * accepting a token set instead entails is worth naming. The reference system exposed the stored

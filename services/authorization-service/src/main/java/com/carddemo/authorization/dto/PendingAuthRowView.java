@@ -1,6 +1,7 @@
 package com.carddemo.authorization.dto;
 
 import com.carddemo.common.money.Money;
+import com.carddemo.common.security.MaskedCardNumber;
 import com.carddemo.common.web.CursorToken;
 import java.util.List;
 import java.util.Objects;
@@ -147,7 +148,7 @@ public record PendingAuthRowView(
             throw new IllegalArgumentException(
                     "matchStatus must be one of " + MATCH_STATUSES + " but was " + matchStatus);
         }
-        requireMasked(cardNum);
+        requireMaskedCardNumber(cardNum);
     }
 
     /**
@@ -157,30 +158,22 @@ public record PendingAuthRowView(
      * is what makes it a guard. A value that arrived here unmasked -- from a mapper that forgot the call
      * or from deserialisation of a hand-written body -- is refused on its digits rather than trusted.</p>
      *
+     * <p>Refactoring Rationale: the arithmetic that was written out here is now
+     * {@link MaskedCardNumber#require(String, String)} in the shared module, and this method delegates.
+     * The rule it stated was correct, but it was the only correct statement of it among four response
+     * types: two card contracts declared a maximum width alone, which a full sixteen-digit number
+     * satisfies, and the sibling detail view checked the length and the first character only, which
+     * {@code *234567890123456} satisfies while disclosing fifteen digits. Moving the rule out is what
+     * lets those three read this one rather than approximate it, and it is a stronger answer than making
+     * this method package-visible would have been: sharing it with the sibling detail view alone would
+     * have left the two card contracts free to keep disagreeing about what masked means.</p>
+     *
      * @param candidate the value to check, which may be {@code null}
      * @throws NullPointerException if {@code candidate} is {@code null}
      * @throws IllegalArgumentException if {@code candidate} is not twelve mask characters followed by
      *     exactly four digits
      */
-    private static void requireMasked(String candidate) {
-        Objects.requireNonNull(candidate, "cardNum is required");
-        if (candidate.length() != MASKED_CARD_LENGTH) {
-            throw new IllegalArgumentException("cardNum must be exactly " + MASKED_CARD_LENGTH
-                    + " characters but was " + candidate.length());
-        }
-        int maskedPrefix = MASKED_CARD_LENGTH - VISIBLE_CARD_DIGITS;
-        for (int index = 0; index < maskedPrefix; index++) {
-            if (candidate.charAt(index) != '*') {
-                throw new IllegalArgumentException("cardNum must be masked: position " + (index + 1)
-                        + " discloses a character the list contract withholds");
-            }
-        }
-        for (int index = maskedPrefix; index < MASKED_CARD_LENGTH; index++) {
-            char character = candidate.charAt(index);
-            if (character < '0' || character > '9') {
-                throw new IllegalArgumentException(
-                        "cardNum must end in " + VISIBLE_CARD_DIGITS + " digits");
-            }
-        }
+    private static void requireMaskedCardNumber(String candidate) {
+        MaskedCardNumber.require("cardNum", candidate);
     }
 }

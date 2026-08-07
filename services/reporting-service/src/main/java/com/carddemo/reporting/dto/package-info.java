@@ -89,9 +89,19 @@
  *
  * <p><strong>Ownership.</strong> This context owns no table, no index and no database
  * migration artifact, and the shape of these types follows from that. It does have a schema:
- * {@code reporting} is dedicated to it, holds views rather than tables, and is owned in the
- * database by the {@code NOLOGIN} role {@code carddemo_reporting_owner} rather than by the login role
- * the service authenticates as. These types therefore describe read-only projections over
+ * {@code reporting} is dedicated to it and is owned in the database by the {@code NOLOGIN} role
+ * {@code carddemo_reporting_owner} rather than by the login role the service authenticates as.
+ *
+ * <p>Refactoring Rationale: that schema holds seven views AND exactly one table,
+ * {@code card_grouping_key}, and an earlier revision of the sentence above said it held "views
+ * rather than tables", which is false. The one table carries the secret that keeps the per-card
+ * statement grouping token non-invertible, and the same script that creates it revokes it from
+ * this context's login -- so the module owning no table, the schema holding one, and this
+ * context being unable to read it are three separate true statements rather than one. The
+ * ownership authority is {@code docs/architecture/data-model-and-schema-mapping.md} and it is
+ * cited rather than restated. The correction changes nothing about the types below: they still
+ * describe read-only projections over views, because the one table is not among what this
+ * context may read. These types therefore describe read-only projections over
  * cross-schema views that other contexts populate -- views created by a reporting-views
  * migration under {@code data-migration/sql} and reached under a database role holding
  * {@code SELECT} on them alone; the ledger indexes those queries rely on belong

@@ -1,5 +1,6 @@
 package com.carddemo.authorization.dto;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
@@ -148,18 +149,43 @@ import com.carddemo.common.security.CardNumberMasker;
  *     {@code COPAUA0C.cbl} lines 689 and 694
  */
 public record AuthorizationReplyPayload(
-        @NotNull @Size(max = CARD_NUMBER_WIDTH) String cardNumber,
+        // WHY : Assumptions: the published reply schema names its first member cardNum, exactly as the
+        //   request schema does, because both abbreviate the same reference field PA-RL-CARD-NUM at
+        //   CCPAURLY.cpy L19. Refactoring Rationale: this annotation was initially applied to the
+        //   request record only, on the reading that the reply's own name matched. It did not -- the
+        //   reply emitted cardNumber against a document declaring cardNum with additionalProperties
+        //   false, so a conforming requester rejected every reply as carrying an undeclared member and
+        //   missing a required one. The serialized round-trip test in this module's dto test package is
+        //   what surfaced that, which is why the assertion runs the codec rather than comparing names.
+        @NotNull @Size(max = CARD_NUMBER_WIDTH) @JsonProperty("cardNum") String cardNumber,
         @NotNull @Size(max = TRANSACTION_ID_WIDTH) String transactionId,
         @NotNull @Size(max = AUTH_ID_CODE_WIDTH) String authIdCode,
+        // WHY : Assumptions: the three annotations below carry the contract's own member names,
+        //   which abbreviate where the copybook abbreviates -- authRespCode, authRespReason and
+        //   approvedAmt, from PA-RL-AUTH-RESP-CODE, PA-RL-AUTH-RESP-REASON and PA-RL-APPROVED-AMT
+        //   at CCPAURLY.cpy L22 to L24 -- while the components spell the words out. Without them a
+        //   client written to the published document bound none of the three, and a body this record
+        //   emitted declared three members the document does not have. The wire name is the part
+        //   that cannot move, since it is what an external requester parses.
         @NotNull @Size(max = AUTH_RESPONSE_CODE_WIDTH) @Pattern(regexp = RESPONSE_CODE_DOMAIN)
-                String authResponseCode,
+                @JsonProperty("authRespCode") String authResponseCode,
         @NotNull @Size(max = AUTH_RESPONSE_REASON_WIDTH) @Pattern(regexp = RESPONSE_REASON_DOMAIN)
-                String authResponseReason,
-        @NotNull Money approvedAmount) {
+                @JsonProperty("authRespReason") String authResponseReason,
+        @NotNull @JsonProperty("approvedAmt") Money approvedAmount) {
 
     /**
      * The positions {@code PA-RL-CARD-NUM PIC X(16)} declares at {@code CCPAURLY.cpy} line 19.
      */
+    /**
+     * The text this record's rendering emits in place of a component it withholds.
+     *
+     * <p>Assumptions: a NAMED marker rather than an omitted component, so a reader can tell a withheld
+     * value from a value that was absent and from a rendering that forgot the component. The spelling
+     * matches the one {@code com.carddemo.common.codec.CsvAuthCodec} uses on the wire carriers of the
+     * same reply, so one grep finds every withholding across both layers.</p>
+     */
+    private static final String WITHHELD_MARKER = "<withheld>";
+
     private static final int CARD_NUMBER_WIDTH = 16;
 
     /**
@@ -228,21 +254,36 @@ public record AuthorizationReplyPayload(
      * that contract if the two were the same code path; they are not, and this rendering is
      * parsed by nothing.</p>
      *
-     * <p>Trade-offs: the decision components are rendered in full -- the response code, the reason
-     * and the approved amount -- because they are the reply's whole substance and the reason a
+     * <p>Trade-offs: the three DECISION components are rendered in full -- the identification code, the
+     * response code and the reason -- because they are the reply's whole substance and the reason a
      * reply is ever examined. None of them identifies a cardholder.</p>
      *
-     * @return a single-line rendering naming this type and all six components, with the card number
-     *     reduced to a mask and its last four digits; the component is labelled as masked so that no
-     *     reader mistakes it for the value the wire carries
+     * <p>Refactoring Rationale: the transaction identifier and the approved amount are WITHHELD, both
+     * having been rendered in full by an earlier revision. Both appear in the sensitive-field set of
+     * {@code com.carddemo.common.codec.CsvAuthCodec} -- {@code PA-RL-TRANSACTION-ID} and
+     * {@code PA-RL-APPROVED-AMT} -- and that class's two wire carriers withhold them for reasons this
+     * type does not escape: the identifier is the deduplication key of the ordered queue, so it appears
+     * in operational tooling beside the card number it was grouped by, and an approved amount beside a
+     * masked card number is transaction detail rather than an operational fact. The two layers that
+     * render the same reply have to agree, or the value reaches the log through whichever of them a
+     * failure happens to touch.</p>
+     *
+     * <p>Trade-offs: what is given up is naming the transaction and reconciling the money from a log
+     * line. A reader who has to correlate uses the keyed token
+     * {@code CsvAuthCodec.AuthReply.correlationKey} answers over the same identity, and a reader who has
+     * to reconcile consults the stored decision, which is the record of account in either case.</p>
+     *
+     * @return a single-line rendering naming this type, the masked card number and the three decision
+     *     components, with the identifier and the amount marked as withheld; the card component is
+     *     labelled as masked so that no reader mistakes it for the value the wire carries
      */
     @Override
     public String toString() {
         return "AuthorizationReplyPayload[maskedCardNumber=" + CardNumberMasker.mask(cardNumber)
-                + ", transactionId=" + transactionId
+                + ", transactionId=" + WITHHELD_MARKER
                 + ", authIdCode=" + authIdCode
                 + ", authResponseCode=" + authResponseCode
                 + ", authResponseReason=" + authResponseReason
-                + ", approvedAmount=" + approvedAmount + ']';
+                + ", approvedAmount=" + WITHHELD_MARKER + ']';
     }
 }

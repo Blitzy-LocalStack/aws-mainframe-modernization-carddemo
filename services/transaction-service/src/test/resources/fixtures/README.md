@@ -583,11 +583,22 @@ though it already exists, which is the failure this annotation prevents.
   Three of the things it supplies are what make an assertion on these bytes
   reproducible at all: it pins schema resolution to `ledger` for both the
   connection and the migration tool (its `search_path` setting at line 285 and
-  its schema settings at lines 340 and 356), it points the migration tool at this
-  module's own single migration (line 327, with the reasoning at line 318), and it
-  pins the clock to one instant (line 180). Without that last one, no assertion on
-  a 26-character timestamp can be reproducible, because the value would change
-  between runs.
+  its schema settings at lines 340 and 356), and it points the migration tool at
+  this module's own single migration (line 327, with the reasoning at line 318).
+  The third thing is NOT supplied by that file: the pinned clock is
+  `TransactionRepositoryIT.FIXED_CLOCK`, declared at its lines 259 and 260 as
+  `Clock.fixed(Instant.parse("2022-07-18T00:00:00Z"), ZoneOffset.UTC)`. Without a
+  pinned instant no assertion on a 26-character timestamp can be reproducible,
+  because the value would change between runs.
+
+  Assumptions: the profile is the wrong place to look for it, and the profile says
+  so itself. Its own exclusion list names "any clock or current-time property" as
+  item 8 and records that determinism is injected through `Clock.fixed` because
+  `common-lib`'s `TimestampFormatter` takes the clock as a collaborator rather than
+  reading the ambient one; a closing note in the same file states there is no
+  `Clock` bean anywhere in it. This citation previously pointed at line 180 of that
+  profile, which is inside that very rationale -- so a reader who followed it landed
+  on the text explaining why the property is absent and read it as the property.
 - [`../../../main/resources/db/migration/V1__ledger.sql`](../../../main/resources/db/migration/V1__ledger.sql)
   -- **[present]**. It creates the four `ledger` tables these fixtures load into,
   along with `idx_transactions_card_num` and the non-unique

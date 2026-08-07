@@ -1252,7 +1252,7 @@ paths:
     #       for POST, PUT, PATCH and DELETE on every path, and admits a caller
     #       holding EITHER group through its catch-all rule, which requires one
     #       of the two group authorities rather than mere authentication.
-    #       Refactoring rationale: this note previously cited
+    #       Refactoring Rationale: this note previously cited
     #       anyRequest().authenticated() at a fixed line number. Both halves were
     #       liabilities -- the rule was the missing-authorization defect this
     #       contract's authority model was written against, and a line number in

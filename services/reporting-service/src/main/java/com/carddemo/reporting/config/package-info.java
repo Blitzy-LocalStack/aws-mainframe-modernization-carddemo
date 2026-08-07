@@ -15,12 +15,17 @@
  * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
  *
  * <p>Assumptions: the roster below is this package's <b>target contract</b> as the
- * migration plan assigns it, not a measurement of the directory. Measured at the
- * checkpoint that authored this section, three of the five have landed --
- * {@code SecurityConfig}, {@code DataSourceConfig} and {@code JwtDecoderConfig} -- while
- * {@code OpenApiConfig} and {@code StepFunctionsConfig} are <b>planned</b>, not missing,
- * and are authored at a later index of the same plan. Each planned entry says so at its
- * own bullet, so a reader never has to infer presence from a name.</p>
+ * migration plan assigns it. It is now also a measurement of the directory: all five
+ * classes have landed, so the two readings coincide and no entry has to be read as an
+ * assignment rather than as a description.</p>
+ *
+ * <p>Refactoring Rationale: an earlier revision of this section recorded two of the five --
+ * {@code OpenApiConfig} and {@code StepFunctionsConfig} -- as planned and not yet authored,
+ * and each bullet said so at its own entry. Both are now present, so those notes have been
+ * replaced by what the classes actually do rather than being left standing. A planned marker
+ * that outlives the file it describes is worse than no marker at all: it reads as measured,
+ * so a reader auditing this roster would conclude that a landed and load-bearing class was
+ * still missing and might author a second one beside it.</p>
  *
  * <p><strong>The roster is closed at five classes.</strong> Each owns one concern, and no
  * sixth configuration class is expected here:
@@ -49,13 +54,25 @@
  *   <li>{@code DataSourceConfig} -- LANDED. The database role holding {@code SELECT} and nothing
  *       else, the schema search path that role reads across, and the connection pool
  *       sizing.</li>
- *   <li>{@code OpenApiConfig} -- PLANNED, not yet authored. The OpenAPI 3.1 document
- *       metadata consumed by springdoc,
- *       whose starter is the dependency declared at this module's {@code pom.xml} L234.</li>
- *   <li>{@code StepFunctionsConfig} -- PLANNED, not yet authored. The client through which a
+ *   <li>{@code OpenApiConfig} -- LANDED. The OpenAPI 3.1 document metadata consumed by
+ *       springdoc, whose starter is the dependency declared at this module's {@code pom.xml}
+ *       L234. It contributes exactly three members to the served document -- the information
+ *       block, one bearer scheme and the document-level requirement naming that scheme -- and
+ *       no path, operation, schema or response. Assumptions: that emptiness is deliberate and
+ *       is not an unfinished edge. The contract of record is the hand-authored
+ *       {@code src/main/resources/openapi/reporting-api.yaml}, which the browser client is
+ *       written against, and the served document is a CHECK on it rather than a second source
+ *       of truth. The two are held together by
+ *       {@code com.carddemo.reporting.api.ReportingApiContractTest}, which compares the
+ *       published operation set, the declared authorities and the declared response headers
+ *       against the handlers and the filter chain.</li>
+ *   <li>{@code StepFunctionsConfig} -- LANDED. The client through which a
  *       {@code states:StartExecution} call starts a report execution. The AWS SDK Step
- *       Functions artifact backing it is declared at this module's {@code pom.xml}
- *       L280.</li>
+ *       Functions artifact backing it is declared at this module's {@code pom.xml} L280.
+ *       Assumptions: it declares a call timeout and nothing else -- no region, no credential
+ *       provider and no endpoint override appear in source, because all three are resolved
+ *       from the task environment the deployment supplies, and hard-coding any of them would
+ *       make one environment's value compiled into every environment's image.</li>
  * </ul>
  *
  * <p>Alternatives Considered: folding these concerns into the context root package,

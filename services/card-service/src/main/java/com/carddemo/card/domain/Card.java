@@ -1,6 +1,7 @@
 package com.carddemo.card.domain;
 
 import jakarta.persistence.Column;
+import jakarta.persistence.Convert;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
@@ -106,7 +107,13 @@ import java.util.Objects;
 @Table(name = "cards")
 public class Card {
 
-    // WHAT: the sixteen-character card number, and the whole of this mapping's primary key.
+    /**
+     * The sixteen-character card number, and the whole of this mapping's primary key.
+     *
+     * <p>Transcribed from {@code CARD-NUM PIC X(16)} at {@code app/cpy/CVACT02Y.cpy} line 5, bytes 1
+     * to 16 of the record, onto {@code card_num CHAR(16) NOT NULL} at
+     * {@code V1__card.sql:175}.</p>
+     */
     // WHY : Assumptions: characters at every hop, and a number only inside arithmetic, which is how
     //       the baseline itself holds the value. app/cpy/CVCRD01Y.cpy declares CC-CARD-NUM as
     //       PIC X(16) at :37-38 and overlays CC-CARD-NUM-N as PIC 9(16) on the same bytes by
@@ -132,7 +139,13 @@ public class Card {
     @Column(name = "card_num", length = 16, nullable = false, updatable = false)
     private String cardNum;
 
-    // WHAT: the account the card belongs to, and the column the by-account access path orders.
+    /**
+     * The account the card belongs to, and the column the by-account access path orders.
+     *
+     * <p>Transcribed from {@code CARD-ACCT-ID PIC 9(11)} at {@code app/cpy/CVACT02Y.cpy} line 6,
+     * bytes 17 to 27 of the record, onto {@code account_id BIGINT NOT NULL} at
+     * {@code V1__card.sql:187}.</p>
+     */
     // WHY : Assumptions: an integer member, because CARD-ACCT-ID is PIC 9(11) at
     //       app/cpy/CVACT02Y.cpy:6, occupying bytes 17 to 27, and is used throughout as an
     //       identifier rather than as a quantity. Eleven digits overflow a thirty-two-bit integer
@@ -158,7 +171,14 @@ public class Card {
     @Column(name = "account_id", nullable = false)
     private Long accountId;
 
-    // WHAT: the enciphered card verification value, held as opaque bytes.
+    /**
+     * The enciphered card verification value, held as opaque bytes.
+     *
+     * <p>Transcribed from {@code CARD-CVV-CD PIC 9(03)} at {@code app/cpy/CVACT02Y.cpy} line 7,
+     * bytes 28 to 30 of the record, onto the one nullable column of this table,
+     * {@code cvv_encrypted BYTEA} at {@code V1__card.sql:218}. It holds ciphertext rather than the
+     * three display digits the baseline stores.</p>
+     */
     // WHY : Refactoring Rationale: the baseline holds CARD-CVV-CD as three display digits in the
     //       clear at app/cpy/CVACT02Y.cpy:7, bytes 28 to 30, on files declared JOURNAL(NO) and
     //       RECOVERY(NONE) -- app/csd/CARDDEMO.CSD:19 and :21 for the alternate index, :31 and :33
@@ -169,21 +189,41 @@ public class Card {
     //       directly from that, matching the BYTEA column at V1__card.sql:218, because ciphertext is
     //       opaque bytes of whatever length the cipher chooses and a three-character member could
     //       not hold it.
-    // WHY : Assumptions: this type receives bytes that are already enciphered and performs no
+    // WHY : Assumptions: this type receives a value that is already enciphered and performs no
     //       cryptography itself. Enciphering here would mean reaching a key provider from a domain
     //       type, which is the dependency the architecture test refuses, and it would also make the
     //       plaintext reachable from an entity that a query can hydrate at will. The boundary that
-    //       enciphers and deciphers is outside this package, and this member is the storage form on
-    //       both sides of it.
+    //       enciphers and deciphers is com.carddemo.card.service.CardVerificationValueCipher, and
+    //       this member is the storage form on both sides of it.
+    // WHY : Refactoring Rationale: the member is EncryptedCvv and no longer a bare byte array named
+    //       for what it was supposed to contain. Nothing checked the name against the contents, so
+    //       the three ASCII bytes of a plaintext verification value -- CARD-CVV-CD PIC 9(03) at
+    //       app/cpy/CVACT02Y.cpy:7, in the clear -- were valid state for a column called
+    //       cvv_encrypted, and the first mapper authored would have had nothing to be refused by. The
+    //       value type carries a self-describing envelope whose shortest well-formed form is far
+    //       longer than three bytes, so the plaintext is not merely discouraged from reaching the
+    //       column: it cannot be expressed as this attribute's value.
+    // WHY : Assumptions: the conversion is declared here rather than left to the provider's default
+    //       byte-array handling, because the provider reads and writes a mapped attribute itself
+    //       rather than through the accessors below -- so the framing check belongs on the
+    //       conversion, where it binds the persistence path, and not only on the accessors, where it
+    //       would bind whoever remembered to use them.
     // WHY : Assumptions: the only nullable member here, and deliberately so, matching the one
     //       nullable column in the migration. A deployment that retains no verification value at
     //       all then stores nothing rather than a placeholder that would afterwards have to be told
     //       apart from a genuine value. No route of this service selects this column, no request or
     //       response shape carries it, and the renderings at the foot of this type omit it.
     @Column(name = "cvv_encrypted")
-    private byte[] cvvEncrypted;
+    @Convert(converter = EncryptedCvvConverter.class)
+    private EncryptedCvv cvvEncrypted;
 
-    // WHAT: the name embossed on the card.
+    /**
+     * The name embossed on the card.
+     *
+     * <p>Transcribed from {@code CARD-EMBOSSED-NAME PIC X(50)} at {@code app/cpy/CVACT02Y.cpy} line
+     * 8, bytes 31 to 80 of the record, onto {@code embossed_name VARCHAR(50) NOT NULL} at
+     * {@code V1__card.sql:233}.</p>
+     */
     // WHY : Trade-offs: a variable-width column here, against fixed width for the key and the
     //       status, is the one place a PIC X width is read as a maximum instead of as data.
     //       CARD-EMBOSSED-NAME is PIC X(50) at app/cpy/CVACT02Y.cpy:8, bytes 31 to 80, and the
@@ -196,7 +236,14 @@ public class Card {
     @Column(name = "embossed_name", length = 50, nullable = false)
     private String embossedName;
 
-    // WHAT: the date the card expires.
+    /**
+     * The date the card expires.
+     *
+     * <p>Transcribed from {@code CARD-EXPIRAION-DATE PIC X(10)} at {@code app/cpy/CVACT02Y.cpy} line
+     * 9, bytes 81 to 90 of the record, onto {@code expiration_date DATE NOT NULL} at
+     * {@code V1__card.sql:258}. This is the one member whose name spells out a word the baseline
+     * field name abbreviates.</p>
+     */
     // WHY : Assumptions: a true date member from a PIC X(10) source field, because those ten bytes
     //       are demonstrably ISO year-month-day and not an arbitrary string.
     //       CARD-EXPIRAION-DATE is PIC X(10) at app/cpy/CVACT02Y.cpy:9, bytes 81 to 90, and three
@@ -225,7 +272,14 @@ public class Card {
     @Column(name = "expiration_date", nullable = false)
     private LocalDate expirationDate;
 
-    // WHAT: the one-character active-status code.
+    /**
+     * The one-character active-status code.
+     *
+     * <p>Transcribed from {@code CARD-ACTIVE-STATUS PIC X(01)} at {@code app/cpy/CVACT02Y.cpy} line
+     * 10, byte 91 of the record, onto {@code active_status CHAR(1) NOT NULL} at
+     * {@code V1__card.sql:270}, whose closed {@code 'Y'}/{@code 'N'} domain is enforced by the named
+     * check constraint at {@code V1__card.sql:339}.</p>
+     */
     // WHY : Assumptions: a code and not a boolean. CARD-ACTIVE-STATUS is PIC X(01) at
     //       app/cpy/CVACT02Y.cpy:10, byte 91, and the baseline tests it against the closed
     //       two-value domain declared at app/cbl/COCRDUPC.cbl:89-91, where FLG-YES-NO-CHECK holds
@@ -242,7 +296,13 @@ public class Card {
     @Column(name = "active_status", length = 1, nullable = false)
     private String activeStatus;
 
-    // WHAT: the optimistic-concurrency counter, and the one member carrying no copybook field.
+    /**
+     * The optimistic-concurrency counter, and the one member carrying no copybook field.
+     *
+     * <p>It has no source in {@code app/cpy/CVACT02Y.cpy}; it maps onto
+     * {@code version INTEGER NOT NULL DEFAULT 0} at {@code V1__card.sql:303} and subsumes the
+     * six-field before-image comparison the baseline performs by hand.</p>
+     */
     // WHY : Refactoring Rationale: the baseline already performs optimistic concurrency by hand, so
     //       this member expresses a discipline that exists rather than introducing one that does
     //       not. Because a CICS task ends at every screen turn, app/cbl/COCRDUPC.cbl cannot hold a
@@ -312,39 +372,20 @@ public class Card {
      *     cannot be reassigned afterwards
      * @param accountId the eleven-digit account identifier the card belongs to
      * @param cvvEncrypted the already-enciphered verification value, or null when none is retained;
-     *     the array is copied, so a later change to the caller's array does not reach this card
+     *     the value is immutable, so nothing a caller does afterwards reaches this card
      * @param embossedName the name embossed on the card, up to fifty characters
      * @param expirationDate the date the card expires
      * @param activeStatus the one-character active-status code, which the migration restricts to
      *     'Y' or 'N'
      */
-    public Card(String cardNum, Long accountId, byte[] cvvEncrypted, String embossedName,
+    public Card(String cardNum, Long accountId, EncryptedCvv cvvEncrypted, String embossedName,
             LocalDate expirationDate, String activeStatus) {
         this.cardNum = cardNum;
         this.accountId = accountId;
-        this.cvvEncrypted = defensiveCopy(cvvEncrypted);
+        this.cvvEncrypted = cvvEncrypted;
         this.embossedName = embossedName;
         this.expirationDate = expirationDate;
         this.activeStatus = activeStatus;
-    }
-
-    /**
-     * Copies an array of bytes, preserving an absent value as absent.
-     *
-     * <p>Assumptions: an array is mutable and is handed over by reference, so a member holding one
-     * that a caller still has a reference to is not really this card's own state. Copying on the way
-     * in and on the way out is what makes the enciphered member below behave like a value. It
-     * matters more here than it would for an ordinary field because the provider reads and writes
-     * the member directly rather than through the accessors, so a caller mutating a shared array in
-     * place would change what the next flush writes without any assignment appearing in the source.
-     * Null is returned unchanged rather than turned into an empty array, because the column is
-     * nullable and an empty array is a value while null is the absence of one.</p>
-     *
-     * @param value the array to copy, which may be null
-     * @return a copy of the array, or null when the argument was null
-     */
-    private static byte[] defensiveCopy(byte[] value) {
-        return value == null ? null : value.clone();
     }
 
     /**
@@ -376,32 +417,40 @@ public class Card {
     }
 
     /**
-     * Returns a copy of the enciphered verification value.
+     * Returns the enciphered verification value.
      *
      * <p>Assumptions: the caller is the boundary that deciphers, and no request or response shape of
-     * this service carries this value in either direction. A copy is returned so that a caller
-     * cannot change this card's stored bytes in place, which the provider would otherwise write out
-     * at the next flush with nothing in the source showing an assignment.</p>
+     * this service carries this value in either direction. The value is immutable and its own
+     * accessors copy the byte runs they expose, so it is returned directly: there is nothing a
+     * caller can change in place that the next flush would write out.</p>
      *
-     * @return a copy of the enciphered verification value, or null when the row retains none
+     * @return the enciphered verification value, or null when the row retains none
      */
-    public byte[] getCvvEncrypted() {
-        return defensiveCopy(this.cvvEncrypted);
+    public EncryptedCvv getCvvEncrypted() {
+        return this.cvvEncrypted;
     }
 
     /**
      * Assigns the enciphered verification value.
      *
-     * <p>Assumptions: the argument is already enciphered. This type performs no cryptography, so
-     * passing a plaintext value here would store plaintext under a member whose whole purpose is
-     * that it holds none, and nothing in this package would detect it. The enciphering boundary sits
-     * outside this package for the reason recorded on the member itself.</p>
+     * <p>Refactoring Rationale: this replaces a setter that accepted an arbitrary byte array. That
+     * signature made a plaintext verification value assignable to the member whose whole purpose is
+     * that it holds none, and the only thing standing against it was a sentence in this Javadoc
+     * saying the argument was expected to be enciphered already. The parameter type now carries the
+     * requirement, so the mistake the sentence warned about is a compilation failure rather than a
+     * silent write of payment data.</p>
      *
-     * @param cvvEncrypted the already-enciphered verification value to assign, or null to retain
-     *     none; the array is copied, so a later change to the caller's array does not reach this card
+     * <p>Assumptions: a setter is retained rather than removed outright, and the retention is about
+     * re-keying rather than about ordinary writes. No route of this service writes this column --
+     * the before-image predicate at {@code app/cbl/COCRDUPC.cbl:1503-1508} does not compare it and
+     * no request shape carries it -- but a key rotation has to be able to replace an envelope
+     * enciphered under a retired data key, and that is an assignment of an already-enciphered value,
+     * which this signature admits and a plaintext one cannot reach.</p>
+     *
+     * @param cvvEncrypted the already-enciphered verification value to assign, or null to retain none
      */
-    public void setCvvEncrypted(byte[] cvvEncrypted) {
-        this.cvvEncrypted = defensiveCopy(cvvEncrypted);
+    public void setCvvEncrypted(EncryptedCvv cvvEncrypted) {
+        this.cvvEncrypted = cvvEncrypted;
     }
 
     /**
@@ -553,27 +602,49 @@ public class Card {
     /**
      * Returns a diagnostic rendering of this card for a log line or an assertion message.
      *
-     * <p>Trade-offs: this rendering names four of the seven members and deliberately omits the card
+     * <p>Refactoring Rationale: THE ACCOUNT IDENTIFIER IS OMITTED, and an earlier revision rendered
+     * it. That revision reasoned carefully about the two members it recognised as sensitive, the card
+     * number and the enciphered verification value, and then treated everything left over as
+     * unremarkable. The sensitive-data logging contract in
+     * {@code docs/architecture/observability.md} does not work that way: it names account and
+     * customer identifiers explicitly, in their own clause, alongside the primary account number
+     * rather than beneath it. An eleven-digit account identifier is therefore protected on its own
+     * terms, and it was protected nowhere in the earlier text -- which is the whole of the defect.
+     * The reasoning below about the card number and the verification value was already right and is
+     * kept unchanged.</p>
+     *
+     * <p>Trade-offs: this rendering names three of the seven members and deliberately omits the card
      * number, even though it is this type's own key. Every sibling entity's rendering names its key,
      * and this one cannot, because here the key is itself a primary account number. It is omitted
      * outright rather than abbreviated, because abbreviating a primary account number is masking,
      * and masking has one owner in this context, {@code com.carddemo.card.mapper}; a second and
      * slightly different masking rule here would give one value two renderings and make neither
-     * authoritative. The enciphered verification value is omitted on the stronger ground that it has
+     * authoritative. The same argument applies unchanged to the account identifier now omitted
+     * beside it. The enciphered verification value is omitted on the stronger ground that it has
      * no safe rendering at all -- not its content, not its length, which would disclose the cipher's
      * output size, and not a hash of it, which would be a stable identifier for a secret. The cost
-     * accepted is real: this rendering cannot identify which card it describes, so locating a
-     * specific card in a log means going through the masked form the mapper produces. What is bought
-     * is absolute, in that no log line written from this type can carry a primary account number or
-     * a verification value at all.</p>
+     * accepted is real: this rendering cannot identify which card it describes, nor whose account it
+     * belongs to, so locating a specific card in a log means going through the masked form the
+     * mapper produces. What is bought is absolute, in that no log line written from this type can
+     * carry a primary account number, an account identifier or a verification value at all.</p>
      *
-     * @return a short single-line rendering naming the type, the account identifier, the expiry
-     *     date, the active status and the concurrency counter, and no other member
+     * <p>Assumptions: the exposure this closes is the RETAINED LOG rather than any request path. The
+     * by-account access path this table indexes returns every card an account holds, so one rendered
+     * line per returned row turned a single card-list call into a log entry naming that account
+     * repeatedly -- and across calls, into a second copy of the cross-reference this context reads
+     * rather than owns. What remains is an expiry date, a status code and a counter: enough to say
+     * what STATE a card was in when a line was written, and not enough to say which card or whose.
+     * The cost is paid down elsewhere, because a request-scoped line already carries the correlation
+     * identifier {@code com.carddemo.common.web.CorrelationIdFilter} publishes. The accessors above
+     * return the omitted members to a caller that needs one, so nothing is unavailable to the
+     * service itself.</p>
+     *
+     * @return a short single-line rendering naming the type, the expiry date, the active status and
+     *     the concurrency counter, and carrying neither identifier of this record
      */
     @Override
     public String toString() {
-        return "Card[accountId=" + this.accountId
-                + ", expirationDate=" + this.expirationDate
+        return "Card[expirationDate=" + this.expirationDate
                 + ", activeStatus=" + this.activeStatus
                 + ", version=" + this.version + ']';
     }

@@ -1,6 +1,26 @@
 import type { NavigateFunction, To } from 'react-router';
 
 /**
+ * Route the main menu occupies, which is where the source application's PF3 returns to.
+ *
+ * Assumptions: the constant is declared here, in the module every screen already imports its
+ * transitions from, rather than being written as a literal at each call site. Two screens need it --
+ * sign-on routes here once a token is installed, and the card browse exits here, matching
+ * `app/cbl/COCRDLIC.cbl` L390-L399 where PF3 transfers to `LIT-MENUPGM` -- and a literal repeated in
+ * two modules is two places for the path to drift apart.
+ *
+ * Assumptions: the route is not authored yet. `ui/src/router.tsx` declares four screens, so a
+ * transition here currently resolves to the router's bounded not-found result, which offers a way
+ * back to the card browse. Naming the source's real destination is still correct: sending PF3 to a
+ * screen the source does not return to would invent a destination, and the delivery boundary is
+ * already recorded in `docs/adr/ADR-006-api-and-ui.md`.
+ */
+export const MAIN_MENU_ROUTE = '/menu';
+
+/** Route the administrative menu occupies, reached when the group claim carries the admin group. */
+export const ADMIN_MENU_ROUTE = '/admin';
+
+/**
  * Performs a router transition and falls back to a full navigation if a data
  * router rejects the transition.
  * @param {NavigateFunction} navigate - Router navigation function.

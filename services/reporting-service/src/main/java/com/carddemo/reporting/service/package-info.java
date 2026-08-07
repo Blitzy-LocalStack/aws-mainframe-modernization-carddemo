@@ -5,11 +5,23 @@
  * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
  *
  * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
- * beside this one today. The migration lands its artifacts in plan order and this charter is
- * authored first, so at the checkpoint that authored it this directory holds this charter and
- * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
- * missing, and a count below is a target total rather than a measurement of the directory.</p>
+ * package's <b>target contract</b> as the migration plan assigns it, and all three named services
+ * have now landed beside it, so the contract and the directory agree and no entry has to be read as
+ * an assignment rather than as a description.</p>
+ *
+ * <p>Refactoring Rationale: an earlier revision of this paragraph recorded that the directory held
+ * this charter and nothing else, and that a type named below with no file was planned rather than
+ * missing. That was accurate while it stood; it is replaced rather than softened now that all three
+ * exist, because a planned marker outliving the files it describes reads as measured and would tell
+ * a reader auditing this package that a landed service was still absent.</p>
+ *
+ * <p>Assumptions: the two controllers in {@code com.carddemo.reporting.api} are the only callers of
+ * these three services over HTTP, and the published contract at
+ * {@code src/main/resources/openapi/reporting-api.yaml} settles the four operations they expose. The
+ * business rules stay here and none of them moves into a controller: the report-type exclusivity, the
+ * per-type date-range derivation, the confirmation vocabulary, the integrity reconciliation, the
+ * subtotal accumulation and the masked-collision refusal are all owned by these classes, and a
+ * controller only maps their outcomes onto statuses.</p>
  *
  * <p>Alternatives Considered: withholding this charter until every class it governs
  * exists. Rejected, because the charter is what the authors of those classes work
@@ -108,7 +120,16 @@
  * <h2>What this context does not own</h2>
  *
  * <p>Assumptions: this context owns no table, no index and no view, and so has no
- * write path at all. It does own a schema, and the distinction matters because a
+ * write path at all -- meaning that this module declares none and that the login role
+ * it connects as can write none and can read only the seven views. The schema itself
+ * is not empty of tables: it holds exactly one, {@code card_grouping_key}, created by
+ * {@code data-migration/sql/V1__reporting_views.sql}, owned by the no-login role and
+ * revoked from this context's login, because it carries the secret that keeps the
+ * per-card statement grouping token non-invertible. The two readings are stated
+ * together because the shorter one reads as "the schema is empty" and would make that
+ * revoke look redundant; the ownership model is owned by
+ * {@code docs/architecture/data-model-and-schema-mapping.md}. It does own a schema,
+ * and the distinction matters because a
  * flat "owns no schema" disagrees with the bootstrap DDL:
  * {@code data-migration/sql/V0__schemas_and_roles.sql} creates {@code reporting}
  * as the eighth schema, owned in the database by the {@code NOLOGIN} role

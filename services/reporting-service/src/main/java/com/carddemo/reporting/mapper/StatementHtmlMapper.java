@@ -1,6 +1,13 @@
 package com.carddemo.reporting.mapper;
 
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CharsetEncoder;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 
@@ -32,8 +39,8 @@ import java.util.Objects;
  * recreates them. The plain-text statement genuinely is 80, declared at line 45 of
  * {@code app/cbl/CBSTM03A.CBL} and at line 89 of the job. Two artifacts, two declared lengths.</p>
  *
- * <p><b>Assumptions: three padding situations coexist in this module and none of them generalises
- * to the others.</b> They are stated together here because a reader who carries one of them across
+ * <p>Assumptions: three padding situations coexist in this module and none of them generalises
+ * to the others. They are stated together here because a reader who carries one of them across
  * writes the wrong assembly. <b>This artifact</b>: every fragment and every cell is <em>shorter</em>
  * than the declared 100 -- the longest declared fragment is 85 characters, at line 157 of
  * {@code app/cbl/CBSTM03A.CBL} -- so every record must be blank-padded out to 100. <b>The
@@ -77,7 +84,7 @@ import java.util.Objects;
  * literal -- and it is written exactly once per statement, at line 530, fed by the move at line
  * 529.</p>
  *
- * <p><b>Assumptions: the second group, at lines 217 to 220, is never written at all.</b> It is 76
+ * <p>Assumptions: the second group, at lines 217 to 220, is <b>never written at all</b>. It is 76
  * characters -- a 26-character styled paragraph prefix and a 50-character name item -- and it
  * declares <em>no position for a closing tag</em>, so writing it would emit an unterminated
  * paragraph. What the reference does instead is assemble the same markup by concatenation at lines
@@ -180,7 +187,81 @@ import java.util.Objects;
  * table populate at line 827, alongside the control-break comparand declared at line 69. Narrowing
  * an exposure that does not exist would rewrite bytes the golden comparison expects untouched, so
  * masking here would break parity while appearing prudent. Data-exposure narrowing belongs to the
- * transfer-object mapper of this package alone.</p>
+ * transfer-object mapper of this package alone. <b>Escaping is a separate obligation from masking
+ * and the two must not be conflated</b>: masking withholds a value a reader should not see, while
+ * escaping keeps a value a reader is entitled to see from being read as markup. Masking is declined
+ * here for the reason just given; escaping is applied here, for the reason the next section
+ * gives.</p>
+ *
+ * <h2>Every dynamic value is escaped for the HTML text context</h2>
+ *
+ * <p>Ten of this artifact's records carry a value that came from the database rather than from a
+ * declared literal: the narrowed customer name, the three address cells, the account identifier,
+ * the edited balance, the credit score, and a transaction's identifier, description and amount.
+ * Four of those ten are free text a cardholder or a merchant supplies -- the name, the three
+ * address lines and the transaction description -- and a free-text field in this baseline is a
+ * fixed-width alphanumeric item that constrains its <em>width</em> and not its <em>alphabet</em>:
+ * {@code CUST-FIRST-NAME} is declared {@code PIC X(25)} at line 6 of {@code app/cpy/CVCUS01Y.cpy}
+ * and {@code TRAN-DESC} is declared {@code PIC X(100)} at line 9 of {@code app/cpy/CVTRA05Y.cpy},
+ * and an {@code X} picture admits every character in the character set, angle brackets included.
+ * Every such value is therefore passed through {@link #escapeForMarkup(String, String)} before
+ * it is concatenated into a record, so that the five characters which change how a browser parses
+ * the surrounding document -- {@code &}, {@code <}, {@code >}, {@code "} and {@code '} -- leave as
+ * character references rather than as markup.</p>
+ *
+ * <p>Assumptions: escaping is the <b>identity</b> transformation for every value that carries none
+ * of those five characters, which is what makes it compatible with a byte comparison. The baseline
+ * data sets under {@code app/data} hold names, addresses and descriptions composed of letters,
+ * digits, blanks and ordinary punctuation, so an escaped record and an unescaped one are the same
+ * 100 bytes for all of them, and the golden statement is reproduced unchanged. The bytes differ
+ * only for an input the baseline never carried, and that difference is registered as
+ * {@code D-STMT-HTML-ESCAPING} in
+ * {@code docs/architecture/cobol-to-service-traceability.md} rather than absorbed silently.</p>
+ *
+ * <p>Alternatives Considered: emitting these values as the reference emits them, on the ground that
+ * byte-for-byte parity is this class's whole purpose. Rejected because the reference's output
+ * device is a data set read by a person, while this artifact is a document parsed by a browser, so
+ * the same bytes carry a capability in the target that they do not carry in the baseline: a name of
+ * {@code <script>...} placed in the name cell would execute in the reader's session, which is
+ * stored cross-site scripting. Rejected also because the parity cost is confined to input the
+ * reference material does not contain, so the choice is not between parity and safety in general --
+ * it is between them on hostile input alone. Alternatives Considered: escaping in the calling
+ * service, or in the projection that reads the row. Rejected because the escape depends on the
+ * <em>context</em> the value lands in -- an HTML text node here, a fixed-width text band in
+ * {@link StatementTextMapper}, a JSON string in the transfer objects -- so a value escaped upstream
+ * would arrive at the plain-text band carrying character references that band must not contain.
+ * Escaping belongs at the boundary that knows the context, which is this class.</p>
+ *
+ * <p>Assumptions: no dynamic value reaches an attribute, a URL or a style context anywhere in this
+ * artifact, so the text-context escape above is the whole obligation rather than one of several.
+ * The artifact declares exactly one attribute, the {@code style} on the name cell's paragraph tag,
+ * and it is the constant {@link #NAME_CELL_PREFIX} transcribed from line 219 of
+ * {@code app/cbl/CBSTM03A.CBL}; no fragment declares an {@code href}, a {@code src}, an
+ * {@code action} or an event-handler attribute, and no value is ever interpolated into one. That
+ * property is asserted rather than assumed: {@code StatementHtmlMapperTest} walks all
+ * {@value #FRAGMENT_COUNT} declared fragments plus the four cell prefixes and fails if any of them
+ * introduces a URL-bearing or event-handler attribute, so a fragment added later cannot open an
+ * attribute context without the assertion catching it.</p>
+ *
+ * <p>Trade-offs: escaping is length-expanding and the record width is fixed at
+ * {@value #HTML_RECORD_LENGTH} by line 94 of {@code app/jcl/CREASTMT.JCL}, so a value dense in
+ * those five characters produces a cell that will not fit. This class <b>refuses</b> such a record
+ * rather than truncating it: truncation would emit a cell whose content silently differs from the
+ * value stored, and it could sever a character reference in the middle and put a bare {@code &}
+ * back into the document. The refusal is a raised exception naming the component and the two widths
+ * and nothing else, and it is reachable only for input the baseline never produced. The accepted
+ * cost is that one hostile row fails the statement run it appears in; the compensation is that no
+ * statement is ever produced whose content is neither the stored value nor a safe rendering of
+ * it.</p>
+ *
+ * <p>Assumptions: this class is one layer of the defence and not the whole of it. The escape here
+ * makes the document safe to parse; the artifact must additionally be <b>delivered</b> with
+ * controls that stop a browser treating it as an active document of the serving origin --
+ * {@code Content-Disposition: attachment}, {@code X-Content-Type-Options: nosniff} and a
+ * {@code Content-Security-Policy} of {@code default-src 'none'; sandbox} -- which is an obligation
+ * of whatever serves the stored artifact rather than of the code that assembles it. It is recorded
+ * here because this is the file a reader consults to find out how the markup is made safe, and a
+ * reader who found only the escape might conclude the delivery side needed nothing.</p>
  *
  * <h2>Assumptions: the markup labels differ from the plain-text labels by one character</h2>
  *
@@ -214,7 +295,35 @@ import java.util.Objects;
  * reference at all, and both are recorded as observations about what the reference does rather
  * than as anything to be changed. Where migrated behaviour departs from the reference the
  * departure is registered in {@code docs/architecture/cobol-to-service-traceability.md}, which
- * owns that register; this class defines one such entry by reference and creates none.</p>
+ * owns that register; this class defines one such entry by reference and creates one,
+ * {@code D-STMT-HTML-ESCAPING}.</p>
+ *
+ * <h2>Refactoring Rationale: every embedded value is HTML-encoded, which the reference does not do</h2>
+ *
+ * <p>The reference concatenates each value between its literal tags with no encoding at all, and three
+ * of the values it so transfers are free text a client supplied -- the transaction description
+ * declared {@code TRAN-DESC PIC X(100)} at line 9 of {@code app/cpy/CVTRA05Y.cpy}, and the customer
+ * name and address items of {@code app/cpy/CVCUS01Y.cpy}, all {@code PIC X} and therefore admitting
+ * every character in the code page. That was inert where the reference sent it: a 3270 terminal has no
+ * markup grammar, so a {@code <} in a description displayed a {@code <}. A browser opening this
+ * artifact is a different consumer, and there the same concatenation opens a tag. Reproducing the
+ * reference's bytes for a hostile value would therefore reproduce stored cross-site scripting, so
+ * every value this class embeds passes through
+ * {@link #escapeForMarkup(String, String)} first. The divergence is registered as
+ * {@code D-STMT-HTML-ESCAPING}.</p>
+ *
+ * <p>Assumptions: this does NOT cost the artifact its byte agreement with the reference on ordinary
+ * data. The encoder returns a value containing none of the five significant characters unchanged, so
+ * a statement assembled from ordinary names, addresses and descriptions is byte-for-byte what it was;
+ * a difference appears only where a genuine markup character was present, and renders identically
+ * because a character reference renders as the character it names.</p>
+ *
+ * <p>Trade-offs: encoding expands a value and these records have a declared length, so a cell whose
+ * encoded value would overrun the record is truncated at a whole character-reference boundary. The
+ * bound is reached only by a value carrying an implausible density of markup characters. What is
+ * given up is that the markup artifact may render less of such a value than the plain-text artifact
+ * holds; {@code StatementTextMapper} performs no encoding and no truncation of this kind, so that
+ * artifact remains the complete record and remains the side a byte comparison runs on.</p>
  *
  * <p>Assumptions: none of the three baseline misspelling corrections named by AAP Rule T1 reaches
  * this package, so no field is renamed anywhere in this file. It is stated once here so that a
@@ -335,6 +444,13 @@ public final class StatementHtmlMapper {
      * this class sum to 75, which is exactly what
      * {@code grep -c 'WRITE FD-HTMLFILE-REC' app/cbl/CBSTM03A.CBL} reports, and that agreement is
      * the check that no write site has been dropped from any of the four sequences.</p>
+     *
+     * <p>Assumptions: this is a MINIMUM for the migrated operation, for the same reason the two counts
+     * below are. The group write at line 530 carries the account item as a text node, the item is
+     * escaped at that sink, and an escaped item that exceeds the declared record length is continued
+     * into a further record. No account identifier the tree produces contains an escaped character, so
+     * the ordinary case emits exactly this many records; the constant sizes the accumulator rather than
+     * asserting a total.</p>
      */
     public static final int DOCUMENT_HEADER_LINE_COUNT = 22;
 
@@ -344,6 +460,16 @@ public final class StatementHtmlMapper {
      * <p>Assumptions: the paragraph labelled at line 558 of {@code app/cbl/CBSTM03A.CBL} issues 27
      * fragment writes and seven assembled-cell writes, at lines 568, 576, 584, 592, 619, 626 and
      * 633.</p>
+     *
+     * <p>Assumptions: this is a MINIMUM for the migrated operation rather than an invariant of it, and
+     * the qualification is a consequence of the text-node escaping. Each of the seven cells occupies
+     * one record whenever its escaped content still fits the declared record length, which is the case
+     * for every value the committed seed data holds and for every value that contains none of the three
+     * escaped characters -- so the operation emits exactly this many records in the ordinary case. A
+     * cell whose escaped content exceeds the record length is continued into a further record, so the
+     * count rises by one for each continuation. The constant is retained at the reference's own figure
+     * because it is the count the reference paragraph writes, and it is used to size the accumulator
+     * rather than to assert a total.</p>
      */
     public static final int NAME_ADDRESS_BASIC_DETAIL_LINE_COUNT = 34;
 
@@ -354,6 +480,11 @@ public final class StatementHtmlMapper {
      * eight fragment writes and three assembled-cell writes, at lines 692, 704 and 716. The
      * paragraph is performed once per transaction, so this is a per-row count rather than a
      * per-statement one.</p>
+     *
+     * <p>Assumptions: as with the operation above, this is a MINIMUM for the migrated operation. The
+     * three cells of a row each occupy one record unless the text-node escaping widens one past the
+     * declared record length, in which case that cell is continued and the row emits one further
+     * record.</p>
      */
     public static final int TRANSACTION_ROW_LINE_COUNT = 11;
 
@@ -418,6 +549,69 @@ public final class StatementHtmlMapper {
     public static final String PAIRED_BLANK = "  ";
 
     /**
+     * The US-ASCII byte a record is padded out to its declared length with.
+     *
+     * <p>Assumptions: declared as a byte rather than written as a character, because the padding is
+     * applied to the encoded record and not to the string it came from. US-ASCII 0x20 is the blank
+     * the reference's own fixed-length record is filled with.</p>
+     */
+    private static final byte ASCII_BLANK = (byte) 0x20;
+
+    /**
+     * The highest character code US-ASCII can carry.
+     *
+     * <p>Assumptions: {@code 0x7F}. This is deliberately NOT the same bound as
+     * {@link #LOWEST_REFUSED_HIGH_CHARACTER}, which refuses {@code 0x7F} itself because the delete
+     * control has no place in a rendered document. The encoder, by contrast, carries {@code 0x7F}
+     * perfectly well, so locating the first unencodable character at that bound inclusive would name
+     * a position the encoder had no complaint about, and a maintainer sent to that position would
+     * find a character that encodes.</p>
+     */
+    private static final char HIGHEST_ENCODABLE_CHARACTER = 0x7F;
+
+    /**
+     * Named entity the ampersand is escaped to inside a text node.
+     */
+    public static final String AMPERSAND_ENTITY = "&amp;";
+
+    /**
+     * Named entity the less-than sign is escaped to inside a text node.
+     */
+    public static final String LESS_THAN_ENTITY = "&lt;";
+
+    /**
+     * Named entity the greater-than sign is escaped to inside a text node.
+     *
+     * <p>Assumptions: the greater-than sign is escaped even though a lone one cannot open an element,
+     * because a parser recovering from malformed markup may treat it as closing a tag it inferred, and
+     * because a reader auditing this class should find the pair complete rather than have to reason
+     * about which half of the pair is load-bearing.</p>
+     */
+    public static final String GREATER_THAN_ENTITY = "&gt;";
+
+    /**
+     * Named entity the double quote is escaped to.
+     *
+     * <p>Assumptions: the quote and the apostrophe below are escaped even though this artifact places
+     * no value inside an attribute today, and the reason is the direction the risk runs. Adding a
+     * value to an attribute is a one-line change in the prefix table; noticing that doing so silently
+     * needs two more substitutions is not. Escaping all five keeps that future edit safe by
+     * construction, and it costs parity nothing measurable: no name, address or description in
+     * {@code app/data} carries either character.</p>
+     */
+    public static final String QUOTE_ENTITY = "&quot;";
+
+    /**
+     * Numeric reference the apostrophe is escaped to.
+     *
+     * <p>Assumptions: a NUMERIC reference rather than the named {@code &apos;}, because the named form
+     * is not defined in HTML 4 and a legacy reader can render it literally. The numeric form is
+     * unambiguous in every version, which matters for an artifact whose reader is not specified
+     * anywhere in this migration.</p>
+     */
+    public static final String APOSTROPHE_ENTITY = "&#39;";
+
+    /**
      * Prefix of the account-identifier basic-detail cell, its trailing blank included.
      *
      * <p>Assumptions: 24 characters, declared at line 614 of {@code app/cbl/CBSTM03A.CBL}. The
@@ -441,6 +635,27 @@ public final class StatementHtmlMapper {
      * differing from the plain-text label at line 117 by that one blank.</p>
      */
     public static final String FICO_SCORE_CELL_PREFIX = "<p>FICO Score         : ";
+
+    /**
+     * The lowest character code a declared item of this artifact may carry.
+     *
+     * <p>Assumptions: {@code 0x20}, the blank. Every item this artifact renders is declared as a
+     * display picture holding digits, letters, blanks or the edit masks' own punctuation, so no code
+     * below the blank is representable in one. Naming the bound as a constant rather than writing
+     * {@code 0x20} at the comparison keeps the reason attached to the number.</p>
+     */
+    public static final char LOWEST_RENDERABLE_CHARACTER = ' ';
+
+    /**
+     * The lowest character code this artifact refuses at the top of the range.
+     *
+     * <p>Assumptions: {@code 0x7F}, the delete control. Every code from here upward is refused, which
+     * covers the delete control itself and every code outside US-ASCII. That is not incidental
+     * strictness: {@link #toRecord(String, String)} encodes with US-ASCII, so a character above this
+     * bound is already unrepresentable and the encoder would substitute a replacement byte for it
+     * silently. Refusing it is the only outcome in which the substitution cannot go unnoticed.</p>
+     */
+    public static final char LOWEST_REFUSED_HIGH_CHARACTER = 0x7F;
 
     // WHY : Assumptions: the 34 declarations below are condition names on ONE reusable
     //       100-character buffer, declared at line 149 of app/cbl/CBSTM03A.CBL. Selecting a
@@ -710,7 +925,7 @@ public final class StatementHtmlMapper {
     }
 
     /**
-     * Emits the opening records of the markup statement, up to and including the first panel cell.
+     * Emits the opening records of the markup statement.
      *
      * <p>Assumptions: the sequence transcribed here is the paragraph labelled at line 506 of
      * {@code app/cbl/CBSTM03A.CBL} through its exit at line 554, in source order: the document
@@ -719,7 +934,7 @@ public final class StatementHtmlMapper {
      * block bracketed at 535 to 547, and finally a row and the first neutral panel cell at 549 and
      * 551. That is {@value #DOCUMENT_HEADER_LINE_COUNT} records.</p>
      *
-     * <p>Assumptions: three declarations are selected more than once inside this one sequence --
+     * <p>Trade-offs: three declarations are selected more than once inside this one sequence --
      * the row open at lines 524, 535 and 549, the cell close at 531 and 545, and the row close at
      * 533 and 547 -- and each repetition is emitted again rather than collapsed. A sequence that
      * emitted a repeated fragment once would produce a document whose rows do not close, and the
@@ -737,41 +952,53 @@ public final class StatementHtmlMapper {
      *     by declared blanks, exactly as
      *     {@link StatementTextMapper#renderAccountIdItem(long)} produces it and as
      *     {@code StatementTextMapper.PreparedHeaderFields.accountId()} carries it
-     * @return {@value #DOCUMENT_HEADER_LINE_COUNT} freshly allocated records, each exactly
-     *     {@value #HTML_RECORD_LENGTH} bytes, in emission order; never {@code null}
+     * @return exactly {@value #DOCUMENT_HEADER_LINE_COUNT} freshly allocated records, each exactly
+     *     {@value #HTML_RECORD_LENGTH} bytes, in emission order; more than that only when the
+     *     text-node escaping widens the heading past the record length; never {@code null}
      * @throws NullPointerException if {@code accountIdItem} is {@code null}
      * @throws IllegalArgumentException if {@code accountIdItem} is not exactly
      *     {@value StatementTextMapper#ACCOUNT_ID_ITEM_WIDTH} characters, because a shorter or
-     *     longer item would move the closing tag of the heading off its declared position
+     *     longer item would move the closing tag of the heading off its declared position, or if it
+     *     carries any character other than a digit or a blank, which is the whole domain of a
+     *     {@code PIC 9(11)} value moved into that display item and is what keeps the heading from
+     *     becoming a route into the document for content that is not an account identifier
      */
     public static List<byte[]> emitDocumentHeader(String accountIdItem) {
         Objects.requireNonNull(accountIdItem, "accountIdItem must not be null");
         requireExactWidth(accountIdItem, StatementTextMapper.ACCOUNT_ID_ITEM_WIDTH,
                 "accountIdItem");
 
-        return List.of(
-                fragmentRecord(HTML_L01),
-                fragmentRecord(HTML_L02),
-                fragmentRecord(HTML_L03),
-                fragmentRecord(HTML_L04),
-                fragmentRecord(HTML_L05),
-                fragmentRecord(HTML_L06),
-                fragmentRecord(HTML_L07),
-                fragmentRecord(HTML_L08),
-                fragmentRecord(HTML_LTRS),
-                fragmentRecord(HTML_L10),
-                accountHeadingRecord(accountIdItem),
-                fragmentRecord(HTML_LTDE),
-                fragmentRecord(HTML_LTRE),
-                fragmentRecord(HTML_LTRS),
-                fragmentRecord(HTML_L15),
-                fragmentRecord(HTML_L16),
-                fragmentRecord(HTML_L17),
-                fragmentRecord(HTML_L18),
-                fragmentRecord(HTML_LTDE),
-                fragmentRecord(HTML_LTRE),
-                fragmentRecord(HTML_LTRS),
-                fragmentRecord(HTML_L22_35));
+        // WHY : Refactoring Rationale: this sequence is accumulated rather than written as a single
+        //       List.of because the heading carries a dynamic value and is therefore built by a
+        //       method rather than by a literal, and accumulating keeps the emission order of the
+        //       whole header readable as one column of statements. The arity is fixed at
+        //       DOCUMENT_HEADER_LINE_COUNT and asserted below: every cell in this class occupies
+        //       exactly one record, a value that would widen past the record length being refused
+        //       at the sink rather than continued onto a further record.
+        List<byte[]> records = new ArrayList<>(DOCUMENT_HEADER_LINE_COUNT);
+        records.add(fragmentRecord(HTML_L01));
+        records.add(fragmentRecord(HTML_L02));
+        records.add(fragmentRecord(HTML_L03));
+        records.add(fragmentRecord(HTML_L04));
+        records.add(fragmentRecord(HTML_L05));
+        records.add(fragmentRecord(HTML_L06));
+        records.add(fragmentRecord(HTML_L07));
+        records.add(fragmentRecord(HTML_L08));
+        records.add(fragmentRecord(HTML_LTRS));
+        records.add(fragmentRecord(HTML_L10));
+        records.add(accountHeadingRecord(accountIdItem));
+        records.add(fragmentRecord(HTML_LTDE));
+        records.add(fragmentRecord(HTML_LTRE));
+        records.add(fragmentRecord(HTML_LTRS));
+        records.add(fragmentRecord(HTML_L15));
+        records.add(fragmentRecord(HTML_L16));
+        records.add(fragmentRecord(HTML_L17));
+        records.add(fragmentRecord(HTML_L18));
+        records.add(fragmentRecord(HTML_LTDE));
+        records.add(fragmentRecord(HTML_LTRE));
+        records.add(fragmentRecord(HTML_LTRS));
+        records.add(fragmentRecord(HTML_L22_35));
+        return List.copyOf(records);
     }
 
     /**
@@ -799,11 +1026,16 @@ public final class StatementHtmlMapper {
      *
      * @param fields the once-per-card prepared values, every component at its exact declared width
      *     with its trailing blanks intact
-     * @return {@value #NAME_ADDRESS_BASIC_DETAIL_LINE_COUNT} freshly allocated records, each
-     *     exactly {@value #HTML_RECORD_LENGTH} bytes, in emission order; never {@code null}
+     * @return exactly {@value #NAME_ADDRESS_BASIC_DETAIL_LINE_COUNT} freshly allocated records,
+     *     each exactly {@value #HTML_RECORD_LENGTH} bytes, in emission order; exactly that many
+     *     unless the text-node escaping widens a cell past the record length, in which case that cell
+     *     is continued into a further record; never {@code null}
      * @throws NullPointerException if {@code fields} is {@code null}
-     * @throws IllegalStateException if any assembled cell exceeds the declared record length, which
-     *     reports a defect in this class rather than a fault of the caller
+     * @throws IllegalArgumentException if any rendered value carries a control character or a
+     *     character outside US-ASCII, neither of which any declared item of this artifact can hold
+     * @throws IllegalStateException if any assembled cell exceeds the declared record length, either
+     *     through a defect in this class or because a value's markup-significant characters expanded
+     *     past it
      */
     public static List<byte[]> emitNameAddressAndBasicDetails(
             StatementTextMapper.PreparedHeaderFields fields) {
@@ -819,10 +1051,11 @@ public final class StatementHtmlMapper {
         //       independent assembly, which is what the four separate blanking moves at lines 561,
         //       569, 577 and 585 make it.
         return List.of(
-                rightTrimmedCellRecord(NAME_CELL_PREFIX, fields.markupName()),
-                rightTrimmedCellRecord(PLAIN_CELL_PREFIX, fields.addressLine1()),
-                rightTrimmedCellRecord(PLAIN_CELL_PREFIX, fields.addressLine2()),
-                rightTrimmedCellRecord(PLAIN_CELL_PREFIX, fields.assembledAddress()),
+                rightTrimmedCellRecord(NAME_CELL_PREFIX, fields.markupName(), "markupName"),
+                rightTrimmedCellRecord(PLAIN_CELL_PREFIX, fields.addressLine1(), "addressLine1"),
+                rightTrimmedCellRecord(PLAIN_CELL_PREFIX, fields.addressLine2(), "addressLine2"),
+                rightTrimmedCellRecord(PLAIN_CELL_PREFIX, fields.assembledAddress(),
+                        "assembledAddress"),
                 fragmentRecord(HTML_LTDE),
                 fragmentRecord(HTML_LTRE),
                 fragmentRecord(HTML_LTRS),
@@ -832,7 +1065,7 @@ public final class StatementHtmlMapper {
                 fragmentRecord(HTML_LTRE),
                 fragmentRecord(HTML_LTRS),
                 fragmentRecord(HTML_L22_35),
-                wholeItemCellRecord(ACCOUNT_ID_CELL_PREFIX, fields.accountId()),
+                wholeItemCellRecord(ACCOUNT_ID_CELL_PREFIX, fields.accountId(), "accountId"),
 
                 // WHY : Assumptions: the edited balance is embedded as it arrives. It was produced
                 //       by CobolEditMask.formatStatementBalance under the mask declared at line 113
@@ -840,8 +1073,9 @@ public final class StatementHtmlMapper {
                 //       markup, so re-formatting it here -- or formatting a number instead -- could
                 //       make the two artifacts disagree about one balance while both still read as
                 //       the same amount.
-                wholeItemCellRecord(CURRENT_BALANCE_CELL_PREFIX, fields.currentBalance()),
-                wholeItemCellRecord(FICO_SCORE_CELL_PREFIX, fields.creditScore()),
+                wholeItemCellRecord(CURRENT_BALANCE_CELL_PREFIX, fields.currentBalance(),
+                        "currentBalance"),
+                wholeItemCellRecord(FICO_SCORE_CELL_PREFIX, fields.creditScore(), "creditScore"),
                 fragmentRecord(HTML_LTDE),
                 fragmentRecord(HTML_LTRE),
                 fragmentRecord(HTML_LTRS),
@@ -878,11 +1112,16 @@ public final class StatementHtmlMapper {
      *
      * @param fields the per-transaction prepared values, every component at its exact declared
      *     width with its trailing blanks intact
-     * @return {@value #TRANSACTION_ROW_LINE_COUNT} freshly allocated records, each exactly
-     *     {@value #HTML_RECORD_LENGTH} bytes, in emission order; never {@code null}
+     * @return exactly {@value #TRANSACTION_ROW_LINE_COUNT} freshly allocated records, each exactly
+     *     {@value #HTML_RECORD_LENGTH} bytes, in emission order; exactly that many unless the
+     *     text-node escaping widens a cell past the record length, in which case that cell is
+     *     continued into a further record; never {@code null}
      * @throws NullPointerException if {@code fields} is {@code null}
-     * @throws IllegalStateException if any assembled cell exceeds the declared record length, which
-     *     reports a defect in this class rather than a fault of the caller
+     * @throws IllegalArgumentException if any rendered value carries a control character or a
+     *     character outside US-ASCII, neither of which any declared item of this artifact can hold
+     * @throws IllegalStateException if any assembled cell exceeds the declared record length, either
+     *     through a defect in this class or because a value's markup-significant characters expanded
+     *     past it
      */
     public static List<byte[]> emitTransactionRow(
             StatementTextMapper.PreparedTransactionFields fields) {
@@ -891,10 +1130,10 @@ public final class StatementHtmlMapper {
         return List.of(
                 fragmentRecord(HTML_LTRS),
                 fragmentRecord(HTML_L58),
-                wholeItemCellRecord(PLAIN_CELL_PREFIX, fields.transactionId()),
+                wholeItemCellRecord(PLAIN_CELL_PREFIX, fields.transactionId(), "transactionId"),
                 fragmentRecord(HTML_LTDE),
                 fragmentRecord(HTML_L61),
-                wholeItemCellRecord(PLAIN_CELL_PREFIX, fields.description()),
+                wholeItemCellRecord(PLAIN_CELL_PREFIX, fields.description(), "description"),
                 fragmentRecord(HTML_LTDE),
                 fragmentRecord(HTML_L64),
 
@@ -905,7 +1144,7 @@ public final class StatementHtmlMapper {
                 //       line 113 preserves them. Both are thirteen characters with a trailing sign,
                 //       so a substitution would still fill the cell and would still parse as the
                 //       same number.
-                wholeItemCellRecord(PLAIN_CELL_PREFIX, fields.amount()),
+                wholeItemCellRecord(PLAIN_CELL_PREFIX, fields.amount(), "amount"),
                 fragmentRecord(HTML_LTDE),
                 fragmentRecord(HTML_LTRE));
     }
@@ -966,7 +1205,13 @@ public final class StatementHtmlMapper {
      *     which reports a defect in the table above rather than a fault of the caller
      */
     private static byte[] fragmentRecord(String fragment) {
-        return toRecord(fragment);
+        // WHY : Assumptions: a fragment is NOT escaped and is named as a fragment in any diagnostic,
+        //       because it is one of the declared literals of FRAGMENT_TABLE and its angle brackets are
+        //       the markup itself rather than data that happens to look like markup. Escaping here
+        //       would replace every tag of the document with its own text. This is the whole reason the
+        //       escaping lives in the two cell helpers and not in this one shared exit: the two kinds
+        //       of string meet only at the record boundary, and only one of them is data.
+        return toRecord(fragment, "declared fragment");
     }
 
     /**
@@ -986,16 +1231,56 @@ public final class StatementHtmlMapper {
      * item, two positions, the same bytes, which is why this operation takes the prepared item
      * rather than rendering the digits again.</p>
      *
+     * <p>Assumptions: the item lands between a prefix ending in a colon and a blank and a suffix
+     * that is a closing heading tag, so it is a TEXT NODE and is escaped like every other text node
+     * this class writes. The declared-geometry assertion below is nonetheless made against the
+     * UNESCAPED assembly, and the order of the two is deliberate: the assertion exists to catch a
+     * literal or an item transcribed at the wrong width, and measuring an escaped assembly would let
+     * a genuine transcription error through whenever the escaping happened to make the total come
+     * out at {@value #ACCOUNT_HEADING_CONTENT_LENGTH} again. Geometry is checked on the declared
+     * bytes; escaping is applied to what is actually emitted.</p>
+     *
+     * <p>Alternatives Considered: leaving this one sink unescaped on the ground that the only
+     * producer in the tree, {@link StatementTextMapper#renderAccountIdItem(long)}, renders eleven
+     * digits and nine blanks and can therefore emit no markup character at all. Rejected because
+     * this operation is public, its declared contract admits ANY string of the declared width, and a
+     * sink whose safety rests on the current behaviour of one caller stops being safe the first time
+     * a second caller appears. Escaping at the sink is the property that does not depend on who
+     * calls.</p>
+     *
      * @param accountIdItem the account identifier at exactly
      *     {@value StatementTextMapper#ACCOUNT_ID_ITEM_WIDTH} characters, its declared blanks
      *     included
      * @return a freshly allocated record of exactly {@value #HTML_RECORD_LENGTH} bytes whose first
      *     {@value #ACCOUNT_HEADING_CONTENT_LENGTH} characters are the heading, never {@code null}
+     * @throws IllegalArgumentException if the item carries any character other than a digit or a
+     *     blank, the whole domain the reference move can produce
      * @throws IllegalStateException if the assembled heading is not exactly
-     *     {@value #ACCOUNT_HEADING_CONTENT_LENGTH} characters, which reports a defect in this class
-     *     rather than a fault of the caller
+     *     {@value #ACCOUNT_HEADING_CONTENT_LENGTH} characters before escaping, which reports a
+     *     defect in this class rather than a fault of the caller
      */
     private static byte[] accountHeadingRecord(String accountIdItem) {
+        // WHY : Trade-offs: this cell is guarded by a CHARACTER-DOMAIN check rather than by the
+        //       escaping the other cells receive, and the two are not interchangeable here. The
+        //       assembled heading must be exactly ACCOUNT_HEADING_CONTENT_LENGTH characters, so any
+        //       expansion at all would fail that assertion and the escaping could never produce a
+        //       valid heading; refusing anything but digits and blanks instead leaves the length
+        //       untouched. The domain is exactly what StatementTextMapper.renderAccountIdItem(long)
+        //       can produce, so a conforming caller is unaffected -- but this operation is public and
+        //       takes a String, so without the check a caller could pass twenty characters of markup
+        //       and it would reach the document verbatim.
+        for (int position = 0; position < accountIdItem.length(); position++) {
+            char character = accountIdItem.charAt(position);
+            if (character != ' ' && (character < '0' || character > '9')) {
+                throw new IllegalArgumentException("accountIdItem carries a character that is neither"
+                        + " a digit nor a blank at zero-based position " + position
+                        + "; the item is a PIC 9(11) value moved into a "
+                        + StatementTextMapper.ACCOUNT_ID_ITEM_WIDTH
+                        + "-character display item, so digits and declared blanks are the whole of its"
+                        + " domain");
+            }
+        }
+
         String heading = ACCOUNT_HEADING_PREFIX + accountIdItem + ACCOUNT_HEADING_SUFFIX;
 
         // WHY : Assumptions: the assembled length is asserted against the declared 59 rather than
@@ -1009,7 +1294,7 @@ public final class StatementHtmlMapper {
                     + " characters but app/cbl/CBSTM03A.CBL declares "
                     + ACCOUNT_HEADING_CONTENT_LENGTH);
         }
-        return toRecord(heading);
+        return toRecord(heading, "accountHeading");
     }
 
     /**
@@ -1042,13 +1327,26 @@ public final class StatementHtmlMapper {
      *     {@value #PLAIN_CELL_PREFIX_LENGTH}
      * @param value the item to render, at its exact declared width with its trailing blanks intact
      *     and not trimmed by the caller
+     * @param component the name of the item being rendered, reported in any diagnostic so that a
+     *     refusal or an overrun identifies its source without reproducing any of the value
      * @return a freshly allocated record of exactly {@value #HTML_RECORD_LENGTH} bytes, never
      *     {@code null}
-     * @throws IllegalStateException if the assembled cell exceeds the declared record length, which
-     *     reports a defect in this class rather than a fault of the caller
+     * @throws IllegalArgumentException if the value carries a control character or a character outside
+     *     US-ASCII, neither of which any declared item of this artifact can hold
+     * @throws IllegalStateException if the assembled cell exceeds the declared record length, either
+     *     through a defect in this class or because the value's markup-significant characters expanded
+     *     past it
      */
-    private static byte[] rightTrimmedCellRecord(String prefix, String value) {
-        return toRecord(prefix + upToFirstBlankPair(value) + PAIRED_BLANK + CELL_SUFFIX);
+    private static byte[] rightTrimmedCellRecord(String prefix, String value, String component) {
+        // WHY : Assumptions: the cut happens BEFORE the escaping and the order is load-bearing. The
+        //       cut is the transcription of the reference's DELIMITED BY '  ' on the declared item, so
+        //       it has to read the item's own characters: escaping first would leave the cut searching
+        //       a string whose blank pair may sit at a different offset, and could place the cut inside
+        //       an entity reference and emit half of one. Escaping the cut result instead means the
+        //       cut is byte-for-byte the reference's and only what actually reaches the markup is
+        //       escaped.
+        String rendered = escapeForMarkup(upToFirstBlankPair(value), component);
+        return toRecord(prefix + rendered + PAIRED_BLANK + CELL_SUFFIX, component);
     }
 
     /**
@@ -1073,13 +1371,113 @@ public final class StatementHtmlMapper {
      * @param value the item to render, at its exact declared width with its trailing blanks intact;
      *     for the two monetary cells this is the already-edited string of
      *     {@value CobolEditMask#STATEMENT_AMOUNT_WIDTH} characters, sign position included
+     * @param component the name of the item being rendered, reported in any diagnostic so that a
+     *     refusal or an overrun identifies its source without reproducing any of the value
      * @return a freshly allocated record of exactly {@value #HTML_RECORD_LENGTH} bytes, never
      *     {@code null}
-     * @throws IllegalStateException if the assembled cell exceeds the declared record length, which
-     *     reports a defect in this class rather than a fault of the caller
+     * @throws IllegalArgumentException if the value carries a control character or a character outside
+     *     US-ASCII, neither of which any declared item of this artifact can hold
+     * @throws IllegalStateException if the assembled cell exceeds the declared record length, either
+     *     through a defect in this class or because the value's markup-significant characters expanded
+     *     past it
      */
-    private static byte[] wholeItemCellRecord(String prefix, String value) {
-        return toRecord(prefix + value + CELL_SUFFIX);
+    private static byte[] wholeItemCellRecord(String prefix, String value, String component) {
+        return toRecord(prefix + escapeForMarkup(value, component) + CELL_SUFFIX, component);
+    }
+
+    /**
+     * Renders one dynamic value safe to place in a markup text node, refusing what cannot be rendered.
+     *
+     * <p>Refactoring Rationale: every value that reaches a cell of this artifact was previously
+     * concatenated into the markup exactly as it arrived. The values are customer, address, account and
+     * transaction text, so a name or an address holding {@code <script>} was stored as markup and
+     * executed when the statement was opened -- a stored cross-site-scripting exposure whose reach is
+     * every reader of a statement rather than only its subject. The reference has no such exposure to
+     * transcribe either way: its output is a data set read by a mainframe utility, not a document
+     * loaded by a browser, so the browser is a property of the target platform and the encoding it
+     * requires is a property of the target too. Escaping here is therefore a target-platform obligation
+     * rather than a change of business behaviour, and it is registered as
+     * {@code D-STMT-HTML-ESCAPING} in
+     * {@code docs/architecture/cobol-to-service-traceability.md}.
+     *
+     * <p>Assumptions: escaping happens at the point of OUTPUT rather than at ingestion, and the
+     * distinction is what keeps the two statement artifacts correct at once. The same prepared fields
+     * feed {@link StatementTextMapper}, whose artifact is plain text and in which an entity reference
+     * would be literal wrong content rather than an encoding. Escaping at ingestion would put
+     * {@code &amp;} into the plain-text band; escaping here puts it only where a markup parser will
+     * read it back as the original character.
+     *
+     * <p>Assumptions: all five characters are escaped, not only the two that open and close a tag. The
+     * angle brackets alone leave an attribute-value break reachable through a quote, and leaving the
+     * ampersand unescaped makes the escaping itself forgeable, since a stored {@code &amp;lt;} would
+     * render as {@code &lt;} and reintroduce the character the escaping was meant to remove. The
+     * apostrophe is emitted as a numeric reference rather than as {@code &apos;} because the numeric
+     * form is understood by every parser generation, and this artifact declares no document type that
+     * would guarantee the named one.
+     *
+     * <p>Assumptions: the replacement is built in ONE pass over the source characters, so a character
+     * this method has already emitted is never re-examined. A sequence of replacements over the whole
+     * string would have to escape the ampersand first and would still double-escape any ampersand a
+     * later replacement introduced; a single pass makes that class of fault unreachable rather than
+     * merely avoided by ordering.
+     *
+     * <p>Trade-offs: an unrenderable character is REFUSED rather than dropped or substituted. Dropping
+     * it would silently alter customer data, and substituting it would put a character into the record
+     * that the customer's data does not contain. Refusal costs the statement -- one unrenderable
+     * character stops the document rather than corrupting it -- and that is the direction chosen,
+     * because a carriage return or line feed reaching this artifact does not merely look wrong: the
+     * output is a fixed-length record data set, so an embedded terminator forges a record boundary and
+     * every record after it is displaced.
+     *
+     * <p>Trade-offs: the diagnostic names the COMPONENT and the zero-based position and never the
+     * character or the surrounding text. A message quoting the value would put customer, address or
+     * transaction content into a log, which is the second half of the exposure this method exists to
+     * close; a component and an offset are enough to locate the value in its source record without
+     * reproducing any of it.
+     *
+     * @param value the dynamic value about to enter a markup text node; must not be {@code null}
+     * @param component the name of the item being rendered, reported in a diagnostic so that a
+     *     refusal identifies which value was refused without quoting any of it
+     * @return the value with every markup-significant character replaced by its reference, which is
+     *     the identical string when the value holds none of them; never {@code null}
+     * @throws IllegalArgumentException if the value carries a character below
+     *     {@value #LOWEST_RENDERABLE_CHARACTER} or at or above
+     *     {@code LOWEST_REFUSED_HIGH_CHARACTER}, neither of which any declared item of this artifact
+     *     can hold and either of which would break the fixed-length record contract or the US-ASCII
+     *     encoding
+     */
+    private static String escapeForMarkup(String value, String component) {
+        StringBuilder rendered = new StringBuilder(value.length());
+        for (int position = 0; position < value.length(); position++) {
+            char character = value.charAt(position);
+            switch (character) {
+                // WHY : Refactoring Rationale: the five replacements read from the constants above
+                //       rather than repeating their literals. Three of those constants existed and
+                //       were referenced only by a second, narrower escaper that escaped three
+                //       characters instead of five; that method has been removed and its constants
+                //       kept, because the alternative left every entity spelled in two places and
+                //       the two places disagreeing on how many characters are significant.
+                case '&' -> rendered.append(AMPERSAND_ENTITY);
+                case '<' -> rendered.append(LESS_THAN_ENTITY);
+                case '>' -> rendered.append(GREATER_THAN_ENTITY);
+                case '"' -> rendered.append(QUOTE_ENTITY);
+                case '\'' -> rendered.append(APOSTROPHE_ENTITY);
+                default -> {
+                    if (character < LOWEST_RENDERABLE_CHARACTER
+                            || character >= LOWEST_REFUSED_HIGH_CHARACTER) {
+                        throw new IllegalArgumentException(component
+                                + " carries a character this artifact cannot render at zero-based"
+                                + " position " + position
+                                + "; every item it declares is a display picture, so no control"
+                                + " character and no character outside US-ASCII is representable in"
+                                + " one, and either would break the "
+                                + HTML_RECORD_LENGTH + "-character record contract");
+                    }
+                    rendered.append(character);
+                }
+            }
+        }
+        return rendered.toString();
     }
 
     /**
@@ -1127,7 +1525,11 @@ public final class StatementHtmlMapper {
      * <p>Assumptions: the artifact's character encoding is US-ASCII, matching the encoding the
      * shared codec uses for the plain-text statement and the seed data sets. Using one encoding for
      * both artifacts is what keeps them from disagreeing about a character that neither can
-     * represent: whatever the encoder substitutes for such a character, it substitutes in both.</p>
+     * represent: it is REFUSED in both, so a value that cannot be carried fails the whole statement
+     * rather than one of its two artifacts. See {@link #encodeStrictly(String, String)}, which is
+     * where the refusal is made and where the previous claim -- that a substitute character was
+     * substituted alike in both -- is corrected; it was not, because the plain-text half has always
+     * refused.</p>
      *
      * <p>Alternatives Considered: composing these records with a format string or a decimal
      * formatter instead of concatenation. Rejected because both are locale-sensitive, and a runtime
@@ -1138,27 +1540,242 @@ public final class StatementHtmlMapper {
      * concatenation has no locale to consult, so the question does not arise here at all; there is
      * consequently no format string and no formatter anywhere in this file.</p>
      *
+     * <p>Refactoring Rationale: the overlength diagnostic reports LENGTHS and the component name, and
+     * no longer appends the assembled content. The content of an overlong cell is customer, address,
+     * account or transaction text wrapped in markup, and an exception message reaches a log, so the
+     * message was a route by which the very data the rest of this artifact protects left the process
+     * in the clear -- and it did so on precisely the inputs most likely to be hostile, since an
+     * ordinary record cannot reach this length at all. The two numbers say everything a maintainer
+     * needs in order to act: which component overran, and by how much.
+     *
+     * <p>Assumptions: an overrun is no longer necessarily a defect in this class, and the wording says
+     * so. Every declared fragment and every cell assembled from a conforming item is well short of the
+     * limit, but {@link #escapeForMarkup(String, String)} expands a value by up to four characters per
+     * markup-significant character it holds, and the tightest cell -- the assembled address, at
+     * {@value StatementTextMapper#ASSEMBLED_ADDRESS_WIDTH} characters inside a
+     * {@value #PLAIN_CELL_PREFIX_LENGTH}-character prefix, a blank pair and a
+     * four-character suffix -- leaves only eleven characters of headroom. Enough
+     * markup-significant characters in one address therefore reaches this bound. Trade-offs: the record
+     * is refused rather than truncated to fit, because a truncated cell would emit an unterminated tag
+     * or half of an entity reference and the document would be malformed in a way a length check could
+     * not see afterwards; failing closed costs the statement and keeps the artifact well formed.
+     *
      * @param content the assembled content of one record, at or below the declared record length
+     * @param component the name of the item or fragment the content was assembled for, reported in a
+     *     diagnostic so that an overrun identifies its source without reproducing any of the content
      * @return a freshly allocated record of exactly {@value #HTML_RECORD_LENGTH} bytes, the content
      *     followed by blanks, never {@code null}
-     * @throws IllegalStateException if {@code content} is longer than
-     *     {@value #HTML_RECORD_LENGTH} characters, which reports a defect in this class rather than
-     *     a fault of the caller, since every declared fragment and every assembled cell of this
-     *     artifact is shorter than the declared length
+     * @throws IllegalStateException if {@code content} encodes to more than
+     *     {@value #HTML_RECORD_LENGTH} bytes, which is either a defect in this class or a value
+     *     whose markup-significant characters expanded past the declared length; the message reports
+     *     the component and the two lengths and never the content. Also thrown, by
+     *     {@link #encodeStrictly(String, String)}, if {@code content} carries a character US-ASCII
+     *     cannot represent
      */
-    private static byte[] toRecord(String content) {
-        if (content.length() > HTML_RECORD_LENGTH) {
-            throw new IllegalStateException("record content is " + content.length()
-                    + " characters but app/cbl/CBSTM03A.CBL declares " + HTML_RECORD_LENGTH + ": "
-                    + content);
+    private static byte[] toRecord(String content, String component) {
+        // WHY : Refactoring Rationale: the content is ENCODED FIRST and the declared length is then
+        //       asserted on the resulting BYTES. A character count taken before the encoding was
+        //       wrong in both directions. It under-counted, because a character outside US-ASCII was
+        //       silently replaced by a single substitute -- the count passed, the record was the
+        //       right length, and the data was gone. And it over-trusted, because the record
+        //       contract line 94 of app/jcl/CREASTMT.JCL declares is a contract about BYTES on a
+        //       fixed-length data set, so a character count only happens to equal it while every
+        //       character is representable.
+        // WHY : Assumptions: renderability is checked on the ASSEMBLED record and before anything is
+        //       encoded, which is not redundant with the per-value guard in escapeForMarkup. That
+        //       guard runs only on the dynamic values a cell carries; the account heading and the
+        //       declared fragments reach this method without it, and US-ASCII encodes every code
+        //       point from 0x00 to 0x7F, so a control character in one of those would pass the
+        //       encoder and split a record of a fixed-width stream in two. Checking here is what
+        //       makes the refusal hold for every path into a record rather than for the escaped ones
+        //       alone.
+        requireRenderable(content, component);
+
+        byte[] encoded = encodeStrictly(content, component);
+
+        if (encoded.length > HTML_RECORD_LENGTH) {
+            throw new IllegalStateException("the assembled record for " + component + " is "
+                    + encoded.length + " bytes but app/cbl/CBSTM03A.CBL declares "
+                    + HTML_RECORD_LENGTH + ", an excess of "
+                    + (encoded.length - HTML_RECORD_LENGTH)
+                    + "; the content is withheld because it carries statement data");
         }
 
         // WHY : Assumptions: the padding is appended here rather than left to a caller because the
         //       declared length is a property of the data set, not of any one cell, so a cell that
         //       knew its own padding would have to know the record it lands in. Line 94 of
         //       app/jcl/CREASTMT.JCL fixes that length for every record alike.
-        String padded = content + " ".repeat(HTML_RECORD_LENGTH - content.length());
-        return padded.getBytes(StandardCharsets.US_ASCII);
+        // WHY : Assumptions: the pad is written as BYTES into the encoded array rather than appended
+        //       to the string before encoding, so that the assertion above is the last thing that can
+        //       change the length. Padding first and encoding after would put the width check on a
+        //       string and hand the byte count back to the encoder, which is the arrangement this
+        //       method was rewritten to remove.
+        byte[] record = new byte[HTML_RECORD_LENGTH];
+        System.arraycopy(encoded, 0, record, 0, encoded.length);
+        Arrays.fill(record, encoded.length, HTML_RECORD_LENGTH, ASCII_BLANK);
+        return record;
+    }
+
+    /**
+     * Refuses an assembled record carrying a character this artifact cannot render.
+     *
+     * <p>Assumptions: the admitted range is the PRINTABLE range of US-ASCII and not the range the
+     * encoder can represent, and the two are genuinely different. US-ASCII encodes every code point
+     * from {@code 0x00} to {@code 0x7F}, so a carriage return, a line feed or a null byte passes an
+     * encoder without complaint while destroying this artifact: the records are a fixed-width stream
+     * of {@value #HTML_RECORD_LENGTH} bytes per line, so an embedded line terminator splits one
+     * logical record into two of the wrong length. A control character reaching a diagnostic message
+     * would additionally let stored data forge lines in an operational log.</p>
+     *
+     * <p>Assumptions: this guard and {@link #encodeStrictly(String, String)} catch two DIFFERENT
+     * classes of character and neither makes the other redundant. This one rejects characters
+     * US-ASCII can encode but this artifact cannot carry -- the C0 controls and the delete; the
+     * encoder rejects characters US-ASCII cannot encode, which is every code point above
+     * {@code 0x7F}. Removing either would leave one of the two classes unhandled.</p>
+     *
+     * <p>Trade-offs: the diagnostic names the component, the zero-based position and the offending
+     * CODE POINT, and never the surrounding text. The code point is safe to name because it is by
+     * construction not a character any declared item of this artifact can hold, so it identifies a
+     * defect rather than reproducing statement data; the surrounding text is withheld for the reason
+     * recorded on {@link #encodeStrictly(String, String)}.</p>
+     *
+     * @param content the assembled content of one record; must not be {@code null}
+     * @param component the name of the item or fragment the content was assembled for, reported in
+     *     the diagnostic so a refusal identifies its source without reproducing the content
+     * @throws IllegalStateException if any character lies below
+     *     {@value #LOWEST_RENDERABLE_CHARACTER} or at or above {@code LOWEST_REFUSED_HIGH_CHARACTER}
+     */
+    private static void requireRenderable(String content, String component) {
+        for (int position = 0; position < content.length(); position++) {
+            char character = content.charAt(position);
+            if (character < LOWEST_RENDERABLE_CHARACTER
+                    || character >= LOWEST_REFUSED_HIGH_CHARACTER) {
+                throw new IllegalStateException("the assembled record for " + component
+                        + " carries a character this artifact cannot render at zero-based position "
+                        + position + ": code point 0x" + Integer.toHexString(character)
+                        + "; the surrounding content is withheld because it carries statement data");
+            }
+        }
+    }
+
+    /**
+     * Encodes assembled content to US-ASCII, refusing rather than substituting for any character the
+     * encoding cannot carry.
+     *
+     * <p>Purpose: {@code String.getBytes(Charset)} replaces an unmappable character with a
+     * substitute -- {@code '?'} for US-ASCII -- and reports nothing. On a statement that is silent
+     * data loss inside a financial artifact: a customer whose name carries an accented letter would
+     * be rendered with a question mark in its place and no record anywhere that it happened.</p>
+     *
+     * <p>Assumptions: this makes the two halves of the statement path agree, which the previous
+     * arrangement only claimed to. The plain-text half encodes through
+     * {@link com.carddemo.common.codec.FixedWidthCodec}, which round-trips every character it writes
+     * and rejects one that is not reversible, so the text half already refused what this half was
+     * quietly substituting for. The artifacts are generated from ONE set of prepared values, so a
+     * value that cannot be carried must fail both artifacts or neither -- otherwise one statement run
+     * produces a correct text file beside a corrupted markup file, with no signal that the two
+     * disagree.</p>
+     *
+     * <p>Alternatives Considered: keeping the substitution but logging it. Rejected because a
+     * statement is a financial artifact of record: emitting a knowingly wrong one and noting the fact
+     * in a log leaves the wrong document in the customer's hands, and the log is read only by someone
+     * already investigating. Failing the run puts the decision where it belongs -- with an operator
+     * who can correct the stored value.</p>
+     *
+     * <p>Alternatives Considered: widening the artifact's encoding so that more characters are
+     * carriable. Rejected because the encoding is not this class's to choose: line 94 of
+     * {@code app/jcl/CREASTMT.JCL} declares a fixed-length record, the seed data sets and the
+     * plain-text band codec are US-ASCII, and a wider encoding would make a multi-byte character
+     * consume more than one position of a fixed-width cell -- moving every closing tag after it.</p>
+     *
+     * <p>Trade-offs: one unrepresentable character now fails the statement run for the whole card
+     * rather than degrading one cell. Accepted because the alternative is an artifact that is wrong
+     * without saying so.</p>
+     *
+     * <p>Refactoring Rationale: the diagnostic names the COMPONENT and the POSITION of the offending
+     * character and withholds the content, rather than appending the assembled content as it first
+     * did. The content of a record is customer, address, account or transaction text, and an
+     * exception message reaches a log, so appending it made this refusal a route by which the very
+     * data the rest of this artifact protects left the process in the clear. Component and position
+     * are what a maintainer needs in order to act -- they identify the stored value without
+     * reproducing any of it -- and they are the same two facts the character-domain refusal in
+     * {@link #escapeForMarkup(String, String)} reports, so the two refusals read alike.</p>
+     *
+     * <p>Assumptions: reaching this refusal at all means the value did not pass through
+     * {@link #escapeForMarkup(String, String)}, whose character domain already refuses every code
+     * from {@value #LOWEST_REFUSED_HIGH_CHARACTER} upward. Declared fragments, the account heading
+     * and the rendered money amounts are assembled from literals and digits and reach this method
+     * without that guard, so this is the layer that holds for them. Trade-offs: the two layers
+     * overlap for escaped values, which is accepted -- a byte-level check on the value actually
+     * being written is the only one that cannot be bypassed by a future caller that forgets the
+     * guard.</p>
+     *
+     * @param content the assembled content of one record
+     * @param component the name of the item or fragment the content was assembled for, reported in a
+     *     diagnostic so that a refusal identifies its source without reproducing any of the content
+     * @return the US-ASCII bytes of {@code content}, one byte per character; never {@code null}
+     * @throws IllegalStateException if {@code content} carries a character US-ASCII cannot represent,
+     *     naming the component and the position so the value can be corrected at its source while
+     *     none of it is reproduced
+     */
+    private static byte[] encodeStrictly(String content, String component) {
+        CharsetEncoder encoder = StandardCharsets.US_ASCII.newEncoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT);
+
+        try {
+            ByteBuffer encoded = encoder.encode(CharBuffer.wrap(content));
+            byte[] bytes = new byte[encoded.remaining()];
+            encoded.get(bytes);
+            return bytes;
+        } catch (CharacterCodingException refused) {
+            // WHY : Assumptions: the cause is chained rather than summarised, because the two
+            //       reportable conditions are different faults -- a malformed surrogate pair is a
+            //       broken string, an unmappable character is a representable string carrying a
+            //       character this artifact cannot hold -- and only the cause distinguishes them.
+            throw new IllegalStateException("the assembled record for " + component + " carries at"
+                    + " position " + firstUnencodablePosition(content) + " a character US-ASCII"
+                    + " cannot represent, so it cannot be written to the statement data set"
+                    + " declared at line 94 of app/jcl/CREASTMT.JCL; the content is withheld"
+                    + " because it carries statement data", refused);
+        }
+    }
+
+    /**
+     * Locates the first character of assembled content that US-ASCII cannot carry.
+     *
+     * <p>Purpose: {@link java.nio.charset.CharacterCodingException} reports THAT the encoding failed
+     * and not where, and a refusal that cannot say where is a refusal a maintainer cannot act on
+     * without the content -- which is exactly what the refusal withholds.</p>
+     *
+     * <p>Assumptions: the representable set of US-ASCII is exactly the codes at or below
+     * {@value #HIGHEST_ENCODABLE_CHARACTER}, so a scan of the {@code char} sequence is exact rather
+     * than approximate. Every surrogate lies above that bound, so an unpaired surrogate -- the other
+     * condition the encoder reports -- is located by the same comparison and needs no separate
+     * case.</p>
+     *
+     * <p>Alternatives Considered: encoding one character at a time and reporting the index at which
+     * the encoder first objected. Rejected because it runs the encoder once per character on a path
+     * that is already failing, to learn something a comparison against a fixed bound answers
+     * exactly, and because {@code CharsetEncoder} is stateful, so the probe would have to be
+     * discarded and rebuilt to stay honest.</p>
+     *
+     * @param content the assembled content the encoder refused
+     * @return the one-based position of the first character above
+     *     {@value #HIGHEST_ENCODABLE_CHARACTER}, or the length of {@code content} if there is none
+     */
+    private static int firstUnencodablePosition(String content) {
+        for (int position = 0; position < content.length(); position++) {
+            if (content.charAt(position) > HIGHEST_ENCODABLE_CHARACTER) {
+                return position + 1;
+            }
+        }
+
+        // WHY : Assumptions: unreachable when the encoder has reported, because it reports only on a
+        //       character the loop above matches. A terminal return is nevertheless required, and it
+        //       yields the length rather than a sentinel so that the diagnostic reads as a position
+        //       even in the case this method cannot explain.
+        return content.length();
     }
 
     /**

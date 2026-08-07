@@ -5,17 +5,24 @@
 # =============================================================================
 #
 # Purpose:
-#   Carries the three cross-cutting configuration values that have to be identical
+#   Carries the four cross-cutting configuration values that have to be identical
 #   in every bounded context, so that they are written once here rather than
 #   copied into eight application.yml files:
 #
-#     1. logging.pattern.console -- the console layout, which names the two
-#        mapped-diagnostic-context keys the shared correlation filter publishes.
-#     2. carddemo.environment / carddemo.version -- the two metric tag values
-#        the shared meter filter reads. The third tag value, the service name,
-#        is spring.application.name and is genuinely per-service, so it is NOT
+#     1. logging.structured.* -- the STRUCTURED APPLICATION LOG FORMAT: one JSON
+#        object per event, carrying the three metric tag values as service
+#        dimensions and every mapped-diagnostic-context key -- the correlation
+#        identity among them -- as a queryable field.
+#     2. logging.pattern.console -- the human-readable console layout, which
+#        names the two mapped-diagnostic-context keys the shared correlation
+#        filter publishes. It is the fallback layout, in force only when the
+#        structured format above is switched off.
+#     3. carddemo.environment / carddemo.version -- the two metric tag values
+#        the shared meter filter reads, which the structured log format also
+#        reads. The third tag value, the service name, is
+#        spring.application.name and is genuinely per-service, so it is NOT
 #        defaulted here.
-#     3. OpenTelemetry export defaults -- traces, logs and OTLP metrics stay off
+#     4. OpenTelemetry export defaults -- traces, logs and OTLP metrics stay off
 #        outside a deployment that explicitly supplies the task-local collector.
 #
 # How a service consumes it:
@@ -29,7 +36,7 @@
 #   that has a reason to override the pattern still can, and the override is
 #   visible in that service's own file.
 #
-# WHY this file exists at all (Refactoring Rationale):
+# Refactoring Rationale: why this file exists at all.
 #   Only one service carried a console pattern naming the correlation key, so the
 #   correlation identity the filter published reached the log output of exactly
 #   one of them; the framework's default pattern names no context key, so the
@@ -39,7 +46,7 @@
 #   defects have the same shape -- a shared component correctly written and then
 #   not given the configuration it reads -- so both are answered in one place.
 #
-# WHY a classpath import rather than eight copies (Alternatives Considered):
+# Alternatives Considered: a classpath import rather than eight copies.
 #   Eight identical literals were the obvious alternative and were rejected: the
 #   pattern names context keys owned by a class in this module, so a key renamed
 #   in the class has to be renamed in every copy, and a copy missed produces a
@@ -50,7 +57,7 @@
 #   initialises, so a pattern supplied this way is in force for the first line a
 #   service logs.
 #
-# WHY not a logback include (Trade-offs):
+# Trade-offs: a property file rather than a logback include.
 #   A logback-spring.xml fragment would also single-source the layout, and it was
 #   rejected because it would bind every service to one logging implementation
 #   and would express the metric tag values nowhere -- leaving two mechanisms for
@@ -58,6 +65,64 @@
 # =============================================================================
 
 logging:
+  structured:
+    format:
+      # WHY : (1) Refactoring Rationale: this key is what makes centralized
+      #       structured logging an implemented control rather than an
+      #       obligation on whoever configures an encoder later. Before it
+      #       existed, no module shipped a logback-spring.xml and no
+      #       application.yml named a structured format, so every service
+      #       emitted the framework's default console layout while
+      #       docs/architecture/observability.md specified one JSON object per
+      #       event -- a specified control with no implementation, and the
+      #       failure was silent because prose lines still appeared in the log
+      #       group and still looked like logging.
+      #       (2) Assumptions: the value is `ecs`, which is one of the three
+      #       formats the pinned framework recognises by identifier -- `ecs`,
+      #       `logstash` and `gelf` -- and it is chosen rather than defaulted.
+      #       ECS carries the service NAME, VERSION and ENVIRONMENT as declared
+      #       members, which are exactly the three common tags the shared meter
+      #       filter puts on every metric, so a log record and a metric series
+      #       can be filtered by the same three dimensions with the same three
+      #       spellings. `logstash` has no equivalent service block and `gelf`
+      #       carries only a version, so either would have left two of the three
+      #       dimensions expressible on metrics and not on logs.
+      #       (3) Assumptions: the mapped diagnostic context reaches the record
+      #       as top-level fields, which is what carries the correlation
+      #       identity com.carddemo.common.web.CorrelationIdFilter publishes --
+      #       correlationId and requestId -- plus the traceId and spanId
+      #       Micrometer tracing contributes. This is the property that makes a
+      #       log line joinable to the API Gateway edge record for the same
+      #       request, and it is asserted by
+      #       StructuredLoggingDefaultsTest rather than assumed.
+      #       (4) Trade-offs: the value is indirected through an environment
+      #       variable so a developer reading a terminal can switch back to the
+      #       bracketed pattern below by exporting the variable EMPTY. An empty
+      #       value is what the framework treats as "no structured format", so
+      #       the switch needs no second key and cannot leave both layouts
+      #       claiming the console. The cost is that the deployed format is
+      #       overridable at all; the compensation is that the override is one
+      #       named variable whose absence is the secure default, rather than a
+      #       local edit to this file that could be committed by accident.
+      console: ${CARDDEMO_LOG_CONSOLE_FORMAT:ecs}
+
+    ecs:
+      service:
+        # WHY : Assumptions: these three are the SAME values the shared meter
+        #       filter reads -- spring.application.name for the service
+        #       dimension and the two carddemo.* keys below for environment and
+        #       version -- and they are referenced here rather than restated as
+        #       literals. Restating them is what would let a service's metrics
+        #       and its log records disagree about which environment produced
+        #       them, with nothing failing on either side. The service name has
+        #       no default in this file because it is genuinely per-service, so
+        #       the placeholder carries a last-resort literal that is
+        #       recognisably not a service name rather than the name of some
+        #       arbitrary one.
+        name: ${spring.application.name:carddemo-unnamed-service}
+        environment: ${carddemo.environment}
+        version: ${carddemo.version}
+
   pattern:
     # WHY : (1) Assumptions: traceId and spanId are contributed by Micrometer
     #       tracing, while correlationId and requestId are the two keys
@@ -75,10 +140,21 @@ logging:
     #       (3) Trade-offs: the four context identifiers are bracketed and
     #       separated by a single space rather than emitted as key=value pairs.
     #       Bracketing keeps the line readable in a terminal during development,
-    #       which is where a console pattern is actually read; a structured JSON
-    #       encoder is the right answer for machine parsing and is a
-    #       deployment-time choice that would replace this pattern wholesale
-    #       rather than amend it.
+    #       which is where this pattern is actually read.
+    #       (4) Assumptions: this pattern is the FALLBACK layout and not the
+    #       default one, and the distinction is stated here because the file
+    #       reads as though it were the default. Whenever
+    #       logging.structured.format.console above resolves to a non-empty
+    #       format identifier -- which it does unless CARDDEMO_LOG_CONSOLE_FORMAT
+    #       is exported empty -- the console appender is built from the
+    #       structured encoder and this pattern has no effect at all. It is kept
+    #       rather than deleted because the two layouts answer different
+    #       questions: the structured record is what a log-insights query reads,
+    #       and this line is what a developer reads while a service is starting
+    #       in a terminal. An earlier revision of this comment described a
+    #       structured encoder as a deployment-time choice that would replace
+    #       this pattern wholesale; the encoder is now configured in this same
+    #       file, so the replacement is expressed here rather than deferred.
     console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5p [%X{traceId:-} %X{spanId:-} %X{correlationId:-} %X{requestId:-}] %logger{36} : %msg%n"
 
 management:

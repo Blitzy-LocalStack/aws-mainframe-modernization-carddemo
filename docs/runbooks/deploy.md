@@ -19,6 +19,9 @@ requirements. The mainframe assets under `app/**` remain reference-only.
 | `<commit-sha>` | immutable image tag | Source revision used for all ten images in one release. |
 | `<planfile>` | local file path | Saved Terraform plan reviewed before apply; never commit it. |
 | `<next-rotation-revision>` | positive integer | Monotonic Cognito app-client-secret rotation trigger. |
+| `<regional-alb-certificate-arn>` | ACM certificate ARN | REGIONAL certificate presented by the internal ALB HTTPS listener, covering `<internal-service-name>`. Required; no default exists. |
+| `<internal-service-name>` | bare DNS hostname | The name that certificate covers and that the API Gateway private integration verifies. Required; no default exists. |
+| `<us-east-1-spa-certificate-arn>` | ACM certificate ARN | Certificate for the SPA distribution, which CloudFront reads only from `us-east-1`. Required; no default exists. |
 
 **Expected outcome / success signal**: Terraform exits zero after applying the reviewed saved plan;
 all long-running ECS services reach a stable state; health checks report `UP`; Flyway reports no
@@ -173,6 +176,32 @@ module enables scan-on-push, so inspect each repository's scan result after push
 Backend-enabled `init` is required for a real apply. The `-backend=false` form used in CI validates
 syntax only and must not precede a production apply.
 
+**Export the deployment-specific inputs first.** Each environment root declares several variables
+non-nullable with no default, so `plan` cannot run until they are set. They are absent from
+`terraform.tfvars` deliberately: an ARN and a hostname belong to a deployment, not to the
+repository, and none of them is a secret.
+
+```bash
+# WHAT: supplies the inputs no committed variable file can carry.
+# WHY : Assumptions: the ALB certificate is REGIONAL and the SPA certificate must be issued in
+#       us-east-1, because CloudFront reads a viewer certificate only from that region. Two
+#       certificates are needed rather than one for that reason alone, and passing a regional ARN
+#       to the distribution -- or a us-east-1 ARN to a load balancer in another region -- fails at
+#       apply after other resources have already been created.
+# WHY : Assumptions: no listener PRIVATE KEY appears here or anywhere else in this runbook. Each
+#       online task mints its own key pair and self-signed certificate at startup
+#       (config/docker/generate-listener-material.sh), so the only certificate an operator supplies
+#       is the load balancer's own -- the one hop whose peer actually verifies it.
+export TF_VAR_alb_certificate_arn="<regional-alb-certificate-arn>"
+export TF_VAR_internal_service_domain_name="<internal-service-name>"
+export TF_VAR_cloudfront_acm_certificate_arn="<us-east-1-spa-certificate-arn>"
+export TF_VAR_cloudfront_aliases='["<spa-hostname>"]'
+export TF_VAR_cloudfront_api_connect_src_origins='["https://<api-hostname>"]'
+export TF_VAR_image_tag="<commit-sha>"
+export TF_VAR_github_repository="<owner>/<repo>"
+export TF_VAR_github_oidc_provider_arn="<oidc-provider-arn>"
+```
+
 ```bash
 # WHAT: initialises the selected environment against the bootstrapped remote state.
 # WHY : Assumptions: the S3 backend and lock table from Step 1 must already exist; otherwise this
@@ -204,9 +233,23 @@ terraform -chdir="infra/envs/<env>" apply "<planfile>"
 
 ## Step 4 - Apply database schemas and migrate data
 
-`data-migration/sql/V0__schemas_and_roles.sql` creates the service schemas and roles. Owning services
-then apply their Flyway migrations. `reporting-service` owns no source tables and reads only the
-masked security-barrier views granted to its read-only role.
+`data-migration/sql/V0__schemas_and_roles.sql` creates the eight service schemas and the **three
+tiers of role** behind them: eight `NOLOGIN` `carddemo_<context>_owner` roles that own each schema
+and everything a migration creates in it, seven `carddemo_<context>_migrator` logins that are
+members of those owners `WITH INHERIT FALSE`, and eight runtime logins holding `USAGE` plus
+`SELECT`, `INSERT` and `UPDATE` with `CREATE` explicitly revoked. Owning services then apply their
+Flyway migrations **under the migration credential**, injected as `SPRING_FLYWAY_USER` and
+`SPRING_FLYWAY_PASSWORD` from that context's `<role>_migrator` secret; each service's
+`spring.flyway.init-sqls` issues `SET ROLE carddemo_<context>_owner` first, which is what makes the
+resulting tables belong to the `NOLOGIN` owner rather than to any credential a task holds.
+`reporting-service` owns no source tables, ships no migration and therefore has no migration role;
+it reads only the masked security-barrier views granted to its read-only role.
+
+> A service that receives the runtime credential but not the migration credential fails at startup
+> on an unresolved `SPRING_FLYWAY_USER` placeholder — deliberately, because the alternative is
+> migrating as the runtime role, which the bootstrap SQL leaves without `CREATE`. Both environment
+> roots project the pair for all seven migrating workloads, and `infra/modules/ecs-service`
+> requires it of each of them, so an omission fails at plan time.
 
 The batch role's cross-schema grants are deliberately limited to the account and ledger objects
 needed to preserve the posting unit of work as one database transaction. Do not replace those grants
@@ -286,6 +329,156 @@ The deployment role needs only the scoped Cognito add/list/delete client-secret 
 Secrets Manager get/put permissions for the app-client secret, plus KMS use through Secrets Manager.
 Do not grant wildcard secret access.
 
+### Rotate a service database credential (operator-managed)
+
+**No rotation schedule ships.** `infra/modules/secrets` creates one Secrets Manager entry per
+service database role and generates each initial value at apply time, but it implements no rotation
+function, and neither environment root supplies one through `rotation_lambda_arn` — so
+`aws_secretsmanager_secret_rotation` is created with zero instances and **a stored database
+credential is static until an operator replaces it**. The only rotation this package provisions
+automatically is KMS *key* rotation, in `infra/modules/kms`.
+
+Replacement itself is delivered and scripted, so no operator ever types a credential: the value is
+changed inside Secrets Manager, and `carddemo_migration.credentials` reads it back, derives the
+role's SCRAM-SHA-256 verifier **locally**, issues the `ALTER ROLE` that stores the verifier, and
+then logs in as every role to prove the stored verifier matches what each service will read. What is
+operator-managed is the *decision to run it* and the interval between runs.
+
+Rotate one role at a time, and complete the whole sequence for that role before starting another.
+
+```bash
+# WHAT: replaces the stored value for one role's credential with a freshly generated one.
+# WHY : Assumptions: --generate-random-password has Secrets Manager produce the value so it never
+#       exists in argv, in shell history or in a file; --output text with a null query keeps the
+#       new version identifier out of the transcript as well. The role name IS the secret name,
+#       matching V0__schemas_and_roles.sql character for character.
+aws secretsmanager put-secret-value --region "<aws-region>" --secret-id "<role-name>" \
+  --secret-string "$(aws secretsmanager get-random-password --region "<aws-region>" \
+  --exclude-punctuation --password-length 32 --query RandomPassword --output text \
+  | python3 -c 'import json,sys; print(json.dumps({"engine":"aurora-postgresql","username":"<role-name>","password":sys.stdin.read().strip(),"masteruser":"<master-username>"}))')" \
+  --query "null" --output text
+```
+
+```bash
+# WHAT: applies the replaced value to the PostgreSQL role and verifies every role can still log in.
+# WHY : Trade-offs: the applicator deliberately takes no --role option, so it re-applies EVERY
+#       role's current stored value rather than only the one just replaced. That is the safer
+#       shape: a per-role invocation is what leaves a deployment half applied, and re-applying an
+#       unchanged value is a no-op that additionally re-proves the other roles still authenticate.
+CARDDEMO_ENVIRONMENT="<env>" \
+CARDDEMO_PARAMETER_PREFIX="<parameter-prefix>" \
+CARDDEMO_DB_MASTER_SECRET="<master-secret-arn>" \
+CARDDEMO_DB_SSL_MODE="verify-full" \
+CARDDEMO_DB_SSL_ROOT_CERT="<trust-anchor-path>" \
+python -m carddemo_migration.credentials
+```
+
+```bash
+# WHAT: restarts the one service that authenticates with the replaced role.
+# WHY : Assumptions: a task resolves its credential from Secrets Manager at startup, so a running
+#       task keeps using the value it already holds -- which the database no longer accepts once
+#       the ALTER ROLE above has been applied. Rolling the service is what completes the rotation,
+#       and it is why the sequence is performed one role at a time.
+aws ecs update-service --region "<aws-region>" --cluster "<cluster-name>" --service "<service-name>" --force-new-deployment
+```
+
+Exit codes follow the return-code rubric in `tests/README.md` section 8: **0** applied and verified,
+**2** usage, **8** a role could not be applied or verified, **16** the environment could not be
+reached. A non-zero code means the credential in Secrets Manager and the verifier in PostgreSQL may
+disagree for that role — re-run the applicator, which is idempotent, before rolling any service.
+
+The identity running the applicator needs `secretsmanager:GetSecretValue` on the per-role entries
+and the master secret, `kms:Decrypt` through Secrets Manager on the secrets CMK, and the ability to
+connect to the cluster as the master role. It needs no write access to any secret. Do not grant
+wildcard secret access, and do not grant the applicator identity to a service task role — a task
+reads exactly one entry, its own.
+
+**If a schedule is wanted.** Supply a rotation function's ARN and an interval to
+`infra/modules/secrets` through `rotation_lambda_arn` and `rotation_automatically_after_days`, and
+name that function in `infra/modules/observability`'s `rotation_lambda_function_names` so its
+invocation errors alarm. Both inputs are a pass-through hook and default to null; nothing in this
+package provides the function. Note the constraint recorded in `V0__schemas_and_roles.sql`: the
+rotation functions AWS publishes for PostgreSQL authenticate with the credential they are replacing,
+so they cannot perform a first application against a freshly created role, and a function used here
+must escalate through the master identity instead.
+
+### Replace the internal-identity signing key (operator-managed, and NOT a rolling change)
+
+The selected environment root — not `infra/modules/secrets`, which composes database credentials
+only — creates one further entry, `<name-prefix>/<env>/internal-identity/signing-key`, with
+`<name-prefix>` being that root's `name_prefix` variable. It holds the symmetric key of the
+machine-to-machine bearer token the pending-authorization consumer presents to the account context
+on the three internal lookups described in
+[security-and-identity.md](../architecture/security-and-identity.md): `authorization-service` signs
+with it and `account-service` verifies against it. It stores a **bare string** rather than a JSON
+document, it is written through the write-only argument so the value never reaches state, and it is
+injected as `CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY` into exactly **two** task definitions —
+`account` and `authorization`. No rotation function ships for it, so it is static until an operator
+replaces it; the resource carries a recorded `checkov` suppression stating that reason rather than
+leaving the omission unexplained.
+
+> **This replacement has a refusal window, and the window is unavoidable with one stored value.**
+> Each consuming task reads the value once at startup, and the verifier is built with exactly
+> **one** key — `NimbusJwtDecoder.withSecretKey` takes a single key and holds no predecessor the way
+> the Cognito app-client rotation above does. So from
+> the moment the first of the two tasks is rolled until the second finishes, the minter and the
+> verifier hold different keys and **every internal account-context lookup is refused 401**. The
+> practical consequence is that pending-authorization decisions stop for the duration; queue
+> messages are not lost, because a refused decision leaves the message to be redelivered and the
+> request queue's dead-letter threshold is five receives, so a window shorter than five
+> redeliveries drains rather than discards.
+>
+> Trade-offs: the alternative — teaching the verifier to accept a current and a previous key, as
+> the app-client rotation does — was not built, because it doubles the number of keys that can
+> mint an accepted token for the entire interval between replacements, and the seam has exactly
+> one caller whose interruption is recoverable by redelivery. Perform this inside the batch
+> quiesce bracket, or during a period with no authorization traffic, rather than adding a second
+> simultaneously-valid key.
+
+Advance `secret_string_wo_version` in a reviewed diff if the value should be regenerated by
+Terraform. To replace it without an apply, do all three steps as one sequence and do not stop
+between them:
+
+```bash
+# WHAT: replaces the stored key with freshly generated bytes.
+# WHY : Assumptions: --exclude-punctuation matches the generator the module uses (special = false),
+#       and the 32-character floor matches the 32-BYTE minimum both consuming services enforce at
+#       startup -- a shorter value makes both fail to start rather than fail to authenticate.
+#       --query null keeps the new version identifier out of the transcript.
+aws secretsmanager put-secret-value --region "<aws-region>" \
+  --secret-id "<name-prefix>/<env>/internal-identity/signing-key" \
+  --secret-string "$(aws secretsmanager get-random-password --region "<aws-region>" \
+  --exclude-punctuation --password-length 32 --query RandomPassword --output text)" \
+  --query "null" --output text
+```
+
+```bash
+# WHAT: rolls BOTH consuming services, together rather than one after the other.
+# WHY : Trade-offs: issued as two calls in immediate succession because ECS has no primitive for
+#       replacing two services atomically. Ordering does not remove the window -- rolling the
+#       minter first produces new credentials the old verifier refuses, and rolling the verifier
+#       first produces a verifier that refuses the old credentials -- so the objective is to
+#       SHORTEN the window, not to sequence it away.
+aws ecs update-service --region "<aws-region>" --cluster "<cluster-name>" --service "<authorization-service-name>" --force-new-deployment
+aws ecs update-service --region "<aws-region>" --cluster "<cluster-name>" --service "<account-service-name>" --force-new-deployment
+```
+
+```bash
+# WHAT: confirms both deployments reached a steady state before the window is declared closed.
+# WHY : Assumptions: PRIMARY reaching COMPLETED on both is the observable end of the mismatch;
+#       treating the update-service calls above as the end would declare success while the old
+#       tasks are still draining and still refusing.
+aws ecs describe-services --region "<aws-region>" --cluster "<cluster-name>" \
+  --services "<authorization-service-name>" "<account-service-name>" \
+  --query "services[].deployments[?status=='PRIMARY'].[serviceName:@.id,rolloutState]" --output table
+```
+
+The identity performing this needs `secretsmanager:PutSecretValue` on that one entry,
+`kms:GenerateDataKey` and `kms:Decrypt` through Secrets Manager on the secrets CMK, and
+`ecs:UpdateService` and `ecs:DescribeServices` on the two services. It needs no access to any
+database credential entry, and no task role should ever be granted it — a task reads this entry
+and never writes it.
+
 ---
 
 ## Step 7 - Smoke-verify candidate business flows
@@ -297,7 +490,7 @@ document or a shared log.
 |:---|:---|
 | Sign-on | Authenticate through `POST /auth/signon`; complete `POST /auth/challenge` when the temporary credential requires a change. |
 | Account view/update | Read one account, update an allowed field, and verify a stale version returns conflict. |
-| Card list/update | List cards narrowed by account or card number, then address detail/update by the card's sixteen-digit number. The number reaches the request line and the shared masker redacts it from every operational record; the administrative full-number read sits on its own `/api/v1/admin/cards` path. |
+| Card list/update | List cards narrowed by account, then resolve one card through `POST /api/v1/cards/lookup` and address detail/update by the opaque `cardKey` that lookup and every list row return. No primary account number appears in a request line or a query string on any card route, so none can reach an access log, a referrer header or a browser history; the administrative full-number read sits on its own `/api/v1/admin/cards/{cardKey}` path and returns the number in the response body only. |
 | Transaction add/list | Add a fixed-point amount and verify the list returns the same decimal string. |
 | Bill pay | Submit one payment and verify the account and ledger effects commit together. |
 | Posting batch | Start the Step Functions execution and verify posted, rejected, and return-code outcomes. |
@@ -391,6 +584,7 @@ why rollback does not require an un-migration of the baseline.
 - [Teardown](teardown.md)
 - [Data migration](data-migration.md)
 - [Batch operations](batch-operations.md)
+- [Security and identity](../architecture/security-and-identity.md)
 - [Code documentation standard](../CODE_DOCUMENTATION_STANDARD.md)
 - [Migration guide](../../MIGRATION_README.md)
 - [Repository overview](../../README.md)

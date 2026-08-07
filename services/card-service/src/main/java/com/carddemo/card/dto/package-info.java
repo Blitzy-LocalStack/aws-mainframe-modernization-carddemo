@@ -42,26 +42,38 @@
  * <h2>The contract of record</h2>
  *
  * <p>{@code services/card-service/src/main/resources/openapi/card-api.yaml} is the contract of
- * record for every shape in this package. It declares four operations, all beneath the
+ * record for every shape in this package. It declares five operations, all beneath the
  * {@code /api/v1} prefix:</p>
  *
  * <ul>
  *   <li>{@code listCards}, {@code GET} on {@code /api/v1/cards}, answering with the schema
  *       {@code CardPage}: one page of the list positioned by key, with an optional account
- *       identifier and an optional card number as filters. A full page carries seven rows, settled
+ *       identifier as its one filter. A full page carries seven rows, settled
  *       server-side from {@code WS-MAX-SCREEN-LINES PIC S9(4) COMP VALUE 7} at
  *       {@code app/cbl/COCRDLIC.cbl:177-178}, and a client cannot vary it.</li>
- *   <li>{@code getCard}, {@code GET} on {@code /api/v1/cards/{cardNumber}}, answering with
+ *   <li>{@code lookupCard}, {@code POST} on {@code /api/v1/cards/lookup}, accepting
+ *       {@code CardLookupRequest} -- one card number, in a BODY -- and answering with
+ *       {@code CardDetail}. It is the only place in the contract a caller supplies a full primary
+ *       account number, and it exists because a body is the only part of a request that neither the
+ *       load balancer's access log nor the gateway's records.</li>
+ *   <li>{@code getCard}, {@code GET} on {@code /api/v1/cards/{cardKey}}, answering with
  *       {@code CardDetail}, on which the primary account number appears only as its last four
  *       digits behind a masking prefix.</li>
- *   <li>{@code getAdminCardDetail}, {@code GET} on {@code /api/v1/admin/cards/{cardNumber}},
+ *   <li>{@code getAdminCardDetail}, {@code GET} on {@code /api/v1/admin/cards/{cardKey}},
  *       answering with {@code AdminCardDetail}, the one shape in the contract able to carry that
  *       number in full, and reachable only by a caller holding the {@code carddemo-admin}
  *       authority.</li>
- *   <li>{@code updateCard}, {@code PUT} on {@code /api/v1/cards/{cardNumber}}, accepting
+ *   <li>{@code updateCard}, {@code PUT} on {@code /api/v1/cards/{cardKey}}, accepting
  *       {@code CardUpdateRequest} and answering 409 when the concurrency token submitted with it no
  *       longer matches the stored one.</li>
  * </ul>
+ *
+ * <p>Refactoring Rationale: the single-card operations were keyed by the sixteen-digit card number,
+ * and the list carried a card-number filter, until a review established that the load balancer writes
+ * the request line into a durable access-log object from inside itself, before any application code
+ * runs, with access logging mandatory in this deployment. No masking this service performs can bound
+ * a record it does not write. The number is therefore confined to one request BODY and every path is
+ * keyed by an opaque selector the response shapes publish as their {@code key} member.</p>
  *
  * <p>Assumptions: where a record in this package and that contract disagree about a shape, the
  * contract decides and the record is brought to it, never the reverse. The reason is that nothing
@@ -86,18 +98,27 @@
  * <ul>
  *   <li>{@code CardSummary}, one row of the list: the three values the baseline row displayed in
  *       its twenty-eight characters, being the account identifier, the masked rendering of the card
- *       number and the one-character active status, and nothing by which a client could address the
- *       row's card in a later request.</li>
+ *       number and the one-character active status, together with the opaque selector that addresses
+ *       the row's card in a later request.</li>
  *   <li>{@code CardDetail}, the full state of one card as a caller holding only
  *       {@code carddemo-user} receives it, from the non-administrative read and from a successful
- *       update. It has no member able to hold the card number in full.</li>
+ *       update, with the same selector. It has no member able to hold the card number in full.</li>
  *   <li>{@code AdminCardDetail}, that same state plus the card number in full, returned by the
  *       administrative read alone.</li>
- *   <li>{@code CardUpdateRequest}, the update payload: the three editable attributes -- the
- *       embossed name, the expiry date and the active status -- together with the concurrency token
- *       last read for the card. The card being changed is named in the request path and is not
- *       repeated in the body, and neither identifier is editable.</li>
+ *   <li>{@code CardUpdateRequest}, the update payload: the editable attributes -- the embossed name,
+ *       the active status and the month and year of the expiry -- together with the concurrency token
+ *       last read for the card. The card being changed is addressed by the selector in the request
+ *       path and is not repeated in the body; neither identifier is editable, and no member carries
+ *       the DAY of the expiry, which the baseline renders non-display and never validates.</li>
  * </ul>
+ *
+ * <p>Refactoring Rationale: the selector is what the earlier revision of this charter said the list row
+ * carried nothing of -- a value by which a client could address the row's card. Withholding it did not
+ * prevent an address from existing; it forced the card number itself to be the address, so the number
+ * travelled in the request line of every detail and update call, and from there into browser history,
+ * referrer headers and every intermediary's access log. The selector is sealed under the deployment key,
+ * so a party holding it holds no card number, and it is published on the rows and the detail shapes for
+ * the reason those responses exist: a caller has to be able to act on what it was shown.</p>
  *
  * <p>Assumptions: the contract cuts the two detail shapes from one shared core, which it names
  * {@code CardDetailCore} and returns from no operation directly. Java records do not inherit
@@ -219,17 +240,47 @@
  * screens without a single build failing to say so.
  *
  * <p><b>5. Masking, encryption and suppression happen in {@code com.carddemo.card.mapper} and
- * nowhere else.</b> A record here is an inert carrier: it holds the values it was constructed with
- * and transforms none of them. Alternatives Considered: performing the masking inside these records
- * instead, either by normalising the value in a constructor or by rendering it behind an accessor.
- * Rejected, because the decision would then be spread across every record that carries the number,
- * and auditing it would mean reading all of them and satisfying oneself that no path had been
- * missed. Concentrating it in the mapper leaves one class to inspect, and that matters here more
- * than it would elsewhere, because two detail shapes are cut from one core: the same members reach a
- * caller holding only {@code carddemo-user} and a caller holding {@code carddemo-admin}, and only
- * the second may additionally receive the number in full. Because these records transform nothing,
- * an unmasked value can reach a response only by passing through the mapper, which is what makes the
- * mapper the single auditable place where that disclosure is decided.
+ * nowhere else. A record here REFUSES an unmasked value and transforms nothing.</b> A record here is
+ * an inert carrier of the values it was constructed with. Alternatives Considered: performing the
+ * masking inside these records instead, either by normalising the value in a constructor or by
+ * rendering it behind an accessor. Rejected, because the decision would then be spread across every
+ * record that carries the number, and auditing it would mean reading all of them and satisfying
+ * oneself that no path had been missed. Concentrating it in the mapper leaves one class to inspect,
+ * and that matters here more than it would elsewhere, because two detail shapes are cut from one
+ * core: the same members reach a caller holding only {@code carddemo-user} and a caller holding
+ * {@code carddemo-admin}, and only the second may additionally receive the number in full.
+ *
+ * <p>Refactoring Rationale: refusing is not transforming, and the distinction is what an earlier
+ * revision of this rule collapsed. That revision reasoned that because these records transform
+ * nothing, an unmasked value could reach a response only through the mapper -- which is true and does
+ * not follow, because nothing then CHECKED that it had. A response is never validated: bean validation
+ * runs on a body the framework is asked to validate, not on one it serialises, so a mapper publishing
+ * raw storage produced a response that violated its own declared constraint and was sent anyway. The
+ * masked-rendering member of each response record is therefore checked in a compact constructor, which
+ * cannot be bypassed because every serialised instance was constructed. The check REFUSES; it does not
+ * mask, so the mapper remains the one place the rendering is produced and the one place the disclosure
+ * decision is taken.
+ *
+ * <p><b>5a. A record here overrides {@code toString()} to withhold personal values.</b> Refactoring
+ * Rationale: a record's generated rendering prints every component, so any log line, assertion message
+ * or exception detail that stringified an instance wrote a cardholder's name, their account number and
+ * their card's expiry into a durable store -- and a REJECTED request, the instance most likely to be
+ * stringified, was the worst case. A diagnostic rendering is not a value the record carries: no caller
+ * receives it, no serialiser emits it, and every accessor still returns exactly what the record was
+ * constructed with, so this is not the transformation rule 5 forbids. Assumptions: a selector and an
+ * already-masked rendering print in full because neither discloses anything, and printing the selector
+ * is what keeps the rendering useful for correlating a line with a request.
+ *
+ * <p>Assumptions: this rule governs the DATA PATH, and a DIAGNOSTIC RENDERING is not on it. Two records
+ * here override {@code toString()} to substitute a placeholder for the components that carry a
+ * cardholder's name or link one to an account, and that is consistent with this rule rather than an
+ * exception to it. The two alternatives rejected above -- normalising a value in a constructor, rendering
+ * one behind an accessor -- would each move a disclosure decision out of the mapper, because a response is
+ * written from the accessors. A string form produces no component value and reaches no wire, so the mapper
+ * still decides everything a caller receives; what the override decides is what a LOG LINE receives, which
+ * the mapper never had a view on. Refactoring Rationale: the distinction is stated here because an earlier
+ * revision of one of those records read this rule as forbidding the override and declined it, accepting
+ * that an incidental stringification would print a name and a full account identifier.
  *
  * <p><b>6. No record here carries money, and none carries a timestamp.</b> Assumptions: the absence
  * is recorded rather than left silent, because silence in a package derived from a financial record
@@ -239,13 +290,23 @@
  * {@code CARD-EXPIRAION-DATE PIC X(10)} at 9, {@code CARD-ACTIVE-STATUS PIC X(01)} at 10 and
  * {@code FILLER PIC X(59)} at 11 -- and there is no amount and no timestamp among them. It follows
  * that {@code com.carddemo.common.money.Money} is imported by nothing in this package, and that no
- * timestamp type is either: the expiry member the contract declares is an ISO calendar date, and the
- * twenty-six-character timestamp a refusal carries belongs to {@code ApiError} in the shared kernel
+ * timestamp type is either: the expiry member the RESPONSE shapes declare is an ISO calendar date, and
+ * the twenty-six-character timestamp a refusal carries belongs to {@code ApiError} in the shared kernel
  * rather than to any card shape. One target-side naming decision applies to that expiry member: it
  * is named {@code expirationDate} while the baseline field keeps its own spelling, which is why the
  * citation above reads as it does, and the pairing is recorded in
  * {@code docs/architecture/data-model-and-schema-mapping.md} so the lineage stays traceable from
  * either side.
+ *
+ * <p>Assumptions: the REQUEST shape carries the expiry as a month member and a year member rather than
+ * as that one date, so the response and the request are deliberately not the same shape. The baseline's
+ * update screen edits only the month and the year -- its day input is rendered non-display at
+ * {@code app/cbl/COCRDUPC.cbl:1285}, is redisplayed from the pre-edit snapshot at :1123 rather than from
+ * anything entered, and has no validation paragraph at all -- so a request member carrying a day would
+ * publish an editable field the baseline does not have. The response reports what is stored and the
+ * request carries what is editable, and those were never the same set of fields. The divergence is
+ * registered as {@code D-CARD-EXPIRY-MONTH-YEAR} in
+ * {@code docs/architecture/cobol-to-service-traceability.md}.
  *
  * <p><b>7. Every shape here is a Java 21 record with explicit, fully documented components, and no
  * code generator participates.</b> Alternatives Considered: an annotation processor to generate the

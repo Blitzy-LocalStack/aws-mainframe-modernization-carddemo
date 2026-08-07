@@ -38,33 +38,31 @@ import java.util.Set;
  *
  * <pre>
  * payload   fields   emitted width sum   delimiters   emitted length
- * request       18                 152   17 commas             169
+ * request       18                 153   17 commas             170
  * reply          6                  57    6 commas              63
  * </pre>
  *
  * <p>Assumptions: the reply sums to 57 over its six declared widths ({@code 16+15+6+2+4+14}) at
- * lines 19 to 24 of {@code CCPAURLY.cpy}. Neither sum counts a delimiter, because a copybook
+ * lines 19 to 24 of {@code CCPAURLY.cpy}, and the request to 153 over its eighteen declared widths
+ * at lines 19 to 36 of {@code CCPAURQY.cpy}. Neither sum counts a delimiter, because a copybook
  * declares fields and not the message that carries them.</p>
  *
- * <p><strong>Assumptions: the request's ordinal-nine width is 13 and not the 14 its copybook
- * declares, because the receiving field is 13 and the receiver is what the wire has to fit.</strong>
- * This is the single most consequential number in the class and an earlier revision had it wrong, so
- * the evidence is written out. {@code CCPAURQY.cpy} line 27 declares
- * {@code PA-RQ-TRANSACTION-AMT PIC +9(10).99}, which is fourteen characters. The {@code UNSTRING} at
- * lines 354 to 374 of {@code COPAUA0C.cbl} does <em>not</em> receive the money token into that
- * field: its ninth receiver, at line 364, is {@code WS-TRANSACTION-AMT-AN}, declared
- * {@code PIC X(13)} at line 63, and line 376 then converts it with
- * {@code COMPUTE PA-RQ-TRANSACTION-AMT = FUNCTION NUMVAL(WS-TRANSACTION-AMT-AN)}. An
- * {@code UNSTRING} receiver follows alphanumeric move rules, so a fourteen-character token is
- * left-justified into thirteen positions and the fourteenth character is DISCARDED -- an emitted
- * {@code +0000000100.99} arrives as {@code +0000000100.9} and {@code NUMVAL} returns 100.9 rather
- * than 100.99. The failure is silent, arithmetically plausible and off by a factor of ten in the
- * cents, which is exactly the class of defect the fixed-point rule exists to prevent. This class
- * therefore emits thirteen characters for that field ({@link #formatRequestMoney}) and the width
- * table records 13, while {@link #parseMoney} continues to accept the wider grammar so a token from
- * any producer still decodes.</p>
+ * <p>Assumptions: the request's ordinal-nine width is the fourteen its copybook declares.
+ * {@code CCPAURQY.cpy} line 27 declares {@code PA-RQ-TRANSACTION-AMT PIC +9(10).99}: one sign
+ * position, ten integer digits, the point and two fractional digits. That declaration is the wire
+ * contract, under the migration's rule that a copybook field's picture is normative. Source context,
+ * recorded because it explains an observation a reader will make in the reference program and must
+ * not mistake for the target contract: the {@code UNSTRING} at lines 354 to 374 of
+ * {@code COPAUA0C.cbl} receives the money token into an intermediate,
+ * {@code WS-TRANSACTION-AMT-AN PIC X(13)} at line 63, before line 376 converts it with
+ * {@code FUNCTION NUMVAL}, so the reference consumer keeps only thirteen of the fourteen characters
+ * it is sent. That truncation is a property of one consumer's working storage, not of the payload,
+ * and it is registered as a reference-side divergence in
+ * {@code docs/architecture/cobol-to-service-traceability.md}. This class emits and publishes
+ * fourteen ({@link #formatRequestMoney}), and {@link #parseMoney} accepts the narrower token as well
+ * so a producer that emits thirteen still decodes.</p>
  *
- * <p>Assumptions: the request's 152 and 169 are <strong>this class's own emission</strong> and are
+ * <p>Assumptions: the request's 153 and 170 are <strong>this class's own emission</strong> and are
  * NOT an observed producer contract, and the distinction matters because no request producer exists
  * anywhere in the repository to observe -- {@code tests/mocks/mq_request_stub.py} is a decision stub
  * that models the authorizer's reply, not a wire emitter. What the reference consumer actually
@@ -88,7 +86,7 @@ import java.util.Set;
  * delimiter would reject every well-formed reply the reference program produces.</p>
  *
  * <p>Assumptions: the request needs no such reconciliation. Its interior-delimited length and the
- * length this class emits are the same 169, because the {@code UNSTRING} at line 354 names eighteen
+ * length this class emits are the same 170, because the {@code UNSTRING} at line 354 names eighteen
  * receiving fields and therefore consumes seventeen interior delimiters and no trailing one.</p>
  *
  * <h2>Buffer length, payload length and cursor position are three different values</h2>
@@ -188,10 +186,10 @@ import java.util.Set;
  * <strong>two</strong> renderings of it rather than one, because the baseline uses two. Outbound
  * replies use {@link #formatReplyMoney}, the fourteen-character zero-suppressed mask
  * {@code PIC -zzzzzzzzz9.99} that {@code COPAUA0C.cbl} declares at line 66 and emits at line 720.
- * Outbound requests use {@link #formatRequestMoney}, thirteen characters, because that is the width
- * of the receiver at line 63. An earlier revision had a single fourteen-character renderer serving
- * both, which produced a truncated request amount and a reply that no COBOL program would have
- * emitted; the two are now separate methods so that using the wrong one is a call-site choice a
+ * Outbound requests use {@link #formatRequestMoney}, the fourteen characters
+ * {@code PIC +9(10).99} declares at line 27 of {@code CCPAURQY.cpy}, which is a fixed sign position
+ * and zero-padded digits rather than a zero-suppressed mask. The two renderings agree on their width
+ * and on nothing else, so they are separate methods and using the wrong one is a call-site choice a
  * reader can see rather than a shared default. Five further renderings exist in the migration and
  * each belongs elsewhere: zoned overpunch of eleven or twelve bytes is
  * {@code ZonedDecimalCodec}; packed
@@ -208,11 +206,11 @@ import java.util.Set;
  * payloads have no byte offsets to address. Their fields have declared widths, but the widths are
  * not where the fields sit: seventeen delimiters are interleaved between the request's eighteen
  * values, and the reference program's own intake proves the widths are not load-bearing on receive,
- * since it reads the ordinal-nine money token into {@code WS-TRANSACTION-AMT-AN PIC X(13)} at line
- * 63, one byte narrower than the fourteen the copybook declares at line 27. Reusing a byte-positional
- * codec would mean inventing offsets the wire does not have, and an invented offset is exactly the
- * silent-shift failure this contract cannot absorb. The two regimes are kept apart so that choosing
- * the wrong one is a compilation-time mistake rather than a run-time misread.</p>
+ * since it reads the ordinal-nine money token into a narrower intermediate at line 63 before
+ * converting it. Reusing a byte-positional codec would mean inventing offsets the wire does not have,
+ * and an invented offset is exactly the silent-shift failure this contract cannot absorb. The two
+ * regimes are kept apart so that choosing the wrong one is a compilation-time mistake rather than a
+ * run-time misread.</p>
  *
  * <p>Assumptions: the copybook declarations were read with whitespace-run tokenising rather than
  * single-space splitting, because {@code CCPAURQY.cpy} writes {@code PIC  X(06)} with two spaces
@@ -262,12 +260,10 @@ public final class CsvAuthCodec {
     /**
      * The sum of the eighteen field widths this class emits for a request, counting no delimiter.
      *
-     * <p>Assumptions: 152 and not the copybook's 153, because the ordinal-nine money field is
-     * emitted at {@link #REQUEST_MONEY_WIDTH} to fit the {@code PIC X(13)} receiver at line 63 of
-     * {@code COPAUA0C.cbl} rather than at the fourteen {@code CCPAURQY.cpy} line 27 declares. The
-     * class-level documentation carries the truncation evidence.</p>
+     * <p>Assumptions: 153, the sum of the widths {@code CCPAURQY.cpy} declares at lines 19 to 36,
+     * because every field including the ordinal-nine money field is emitted at its declared width.</p>
      */
-    public static final int REQUEST_DECLARED_WIDTH_SUM = 152;
+    public static final int REQUEST_DECLARED_WIDTH_SUM = 153;
 
     /**
      * The request length this class emits, the emitted width sum plus seventeen interior delimiters.
@@ -280,21 +276,11 @@ public final class CsvAuthCodec {
      * {@link #requireDeclaredTokenWidths(java.util.List, java.util.List, java.util.List, int, String)}
      * is where that equivalence is enforced.</p>
      *
-     * <p>Assumptions: this value is 169 and NOT 170, and the difference is one byte of the money
-     * field rather than a counting mistake. 170 is the copybook-declaration arithmetic -- the 153
-     * bytes {@code CCPAURQY.cpy} declares at lines 19 to 36 plus seventeen commas -- and it is
-     * recorded here as the figure this contract deliberately does not adopt, because arriving at it
-     * requires emitting the money field at the fourteen characters line 27 declares. Line 63 of
-     * {@code COPAUA0C.cbl} declares the receiving field {@code WS-TRANSACTION-AMT-AN PIC X(13)}, the
-     * {@code UNSTRING} hands ordinal nine into that field at line 364, and lines 376 and 377 then
-     * evaluate {@code FUNCTION NUMVAL} over it. A fourteen-character token moved into a
-     * thirteen-character field loses its LAST character, which is the second cents digit, so the
-     * amount the consumer computes is the amount sent divided by ten. Emitting thirteen is therefore
-     * the data-safe reading, and it agrees with
-     * {@code docs/architecture/messaging-contracts.md}. Anyone reconciling this constant against a
-     * document or a scope statement that says 170 should change the statement, not this value.</p>
+     * <p>Assumptions: 170 is the copybook-declaration arithmetic -- the 153 bytes
+     * {@code CCPAURQY.cpy} declares at lines 19 to 36 plus seventeen commas -- and it is the figure
+     * this contract publishes, because a copybook field's picture is normative for the wire.</p>
      */
-    public static final int REQUEST_WIRE_LENGTH = 169;
+    public static final int REQUEST_WIRE_LENGTH = 170;
 
     /**
      * The number of fields the reply declares, at lines 19 to 24 of {@code CCPAURLY.cpy}.
@@ -383,7 +369,7 @@ public final class CsvAuthCodec {
      * The greatest number of characters a payload may carry before it is parsed at all.
      *
      * <p>Assumptions: the two declared wire lengths are {@code REQUEST_WIRE_LENGTH} and
-     * {@code REPLY_WIRE_LENGTH}, 169 and 63 characters, and the reference program's own put buffer is
+     * {@code REPLY_WIRE_LENGTH}, 170 and 63 characters, and the reference program's own put buffer is
      * 200 bytes, declared at line 108 of {@code COPAUA0C.cbl}. The bound is set at 512, which is more
      * than twice the largest of those, so no payload the contract admits is affected and no legitimate
      * transport framing is refused.</p>
@@ -423,6 +409,18 @@ public final class CsvAuthCodec {
     public static final String GROUP_PURPOSE = "carddemo/pauth/order-group";
 
     /**
+     * The purpose string a queue deduplication identity is scoped by.
+     *
+     * <p>Assumptions: a first-in-first-out queue suppresses a duplicate by comparing the identifier the
+     * producer supplied, so the identity has to be stable for one authorization and independent of the
+     * payload's bytes -- the card number and the transaction identifier together are exactly that. It is
+     * scoped by its own purpose rather than sharing the correlation purpose so that the two tokens over
+     * that one pair are unrelated: an observer who sees a deduplication identifier in queue telemetry
+     * cannot join it to a correlation identity for the same authorization recorded in a log.</p>
+     */
+    public static final String DEDUPLICATION_PURPOSE = "carddemo/pauth/deduplication";
+
+    /**
      * The width of the reply's edited display money rendering {@code PIC -zzzzzzzzz9.99}.
      *
      * <p>Assumptions: fourteen positions -- one sign, nine zero-suppressed digit positions, one
@@ -435,15 +433,15 @@ public final class CsvAuthCodec {
     public static final int MONEY_EDITED_WIDTH = 14;
 
     /**
-     * The width of the request's money token, thirteen.
+     * The width of the request's money token, fourteen.
      *
-     * <p>Assumptions: this is the width of the RECEIVER rather than of the copybook field --
-     * {@code WS-TRANSACTION-AMT-AN PIC X(13)} at line 63 of {@code COPAUA0C.cbl}, into which the
-     * {@code UNSTRING} at line 364 places the ordinal-nine token before line 376 converts it with
-     * {@code FUNCTION NUMVAL}. Emitting the copybook's fourteen instead loses the last character to
-     * an alphanumeric move and silently divides the cents by ten.</p>
+     * <p>Assumptions: {@code PA-RQ-TRANSACTION-AMT PIC +9(10).99} at line 27 of
+     * {@code CCPAURQY.cpy} spends its fourteen characters on one sign position, ten integer digits,
+     * the point and two fractional digits. The reference consumer copies the token into a
+     * thirteen-character intermediate before converting it, which is source context recorded on this
+     * class rather than a narrower contract.</p>
      */
-    public static final int REQUEST_MONEY_WIDTH = 13;
+    public static final int REQUEST_MONEY_WIDTH = 14;
 
     /**
      * The zero-based ordinal of the request's money field, at line 27 of {@code CCPAURQY.cpy}.
@@ -981,24 +979,34 @@ public final class CsvAuthCodec {
          * correlating a customer report to a message needs to recognise the card without being handed
          * it. Every other sensitive wire value is WITHHELD outright rather than masked: the amount, the
          * merchant identity, the acquirer geography and the entry mode are together enough to
-         * reconstruct a cardholder's purchase, and none of them helps identify which message this is.
-         * The transaction identifier is retained in full because it is the correlation half a reader
-         * needs and it discloses nothing on its own.</p>
+         * reconstruct a cardholder's purchase, and none of them helps identify which message this is.</p>
          *
-         * <p>Trade-offs: what is given up is the ability to reconstruct a payload from a log line, so
-         * reproducing a decode failure requires the message itself rather than the record's rendering.
-         * That is accepted: the codec's own failure messages already name the offending field through
+         * <p>Refactoring Rationale: the transaction identifier is now WITHHELD too, where an earlier
+         * revision retained it in full on the ground that it "discloses nothing on its own". That
+         * reasoning contradicted this class's own sensitivity table two hundred lines above, which lists
+         * {@code PA-RQ-TRANSACTION-ID} among the withheld fields and states the reason: the identifier
+         * is the deduplication key of the ordered request queue, so it appears in operational tooling
+         * beside the card number it was grouped by, and quoting it in a log line while masking the card
+         * number still narrows a search to one cardholder. One class cannot hold both positions, and the
+         * table is the one that reasons about the queue. A reader who needs to correlate has
+         * {@link #correlationKey(OpaqueIdentifier)}, which answers a keyed token over the same identity
+         * and is stable across log lines without being the identity.</p>
+         *
+         * <p>Trade-offs: what is given up is the ability to reconstruct a payload from a log line, and
+         * now also the ability to name the transaction from one. That is accepted: the codec's own
+         * failure messages already name the offending field through
          * {@link #fieldFailure(String, String, CharSequence)}, which withholds the value for exactly
          * the fields withheld here, so the diagnostic path that genuinely needs field detail has it
-         * and the incidental path does not.</p>
+         * and the incidental path does not; and correlation is served by the tokenised key rather than
+         * by the identifier.</p>
          *
-         * @return a rendering carrying the masked card number and the transaction identifier only,
+         * @return a rendering carrying the masked card number and a note of the withheld components,
          *     never {@code null}
          */
         @Override
         public String toString() {
             return "AuthRequest[cardNum=" + CardNumberMasker.mask(cardNum)
-                    + ", transactionId=" + transactionId
+                    + ", transactionId=" + WITHHELD_MARKER
                     + ", " + WITHHELD_COMPONENTS_NOTE + "]";
         }
     }
@@ -1106,6 +1114,80 @@ public final class CsvAuthCodec {
         }
 
         /**
+         * Returns the keyed, opaque group identity that preserves per-card ordering on the reply wire.
+         *
+         * <p>Assumptions: this returns the SAME token
+         * {@link AuthRequest#orderGroup(OpaqueIdentifier)} returns for the same card under the same
+         * key, because both derive it from the sixteen-character card number under
+         * {@link #GROUP_PURPOSE}. That identity is the point rather than a coincidence: a request and
+         * the reply about one card have to land in one first-in-first-out group, and they are produced
+         * by two different carriers at two different times, so the derivation has to be a function of
+         * the card alone.</p>
+         *
+         * <p>Refactoring Rationale: this accessor did not exist while the request carrier's did, and
+         * its absence is what left the reply path publishing a raw primary account number as its group
+         * identity. A group identifier is message METADATA -- it sits outside the message body, it
+         * appears in queue telemetry and in the trace of every send, and it is recorded by anything
+         * observing the queue -- so the reply path carried the exact exposure the request carrier's
+         * accessor was written to prevent, on the one path that always runs.</p>
+         *
+         * <p>Alternatives Considered: having the reply publisher call the request carrier's accessor
+         * instead. Rejected because that publisher drains a stored row and holds no request: the reply
+         * is the only carrier it has, so requiring a request would make the group identity depend on
+         * eighteen fields the reply does not carry.</p>
+         *
+         * @param tokeniser the keyed tokeniser, whose key material every producer of this queue shares
+         *     so that one card's messages land in one group; must not be {@code null}
+         * @return the group identity, exactly {@link OpaqueIdentifier#TOKEN_LENGTH} URL-safe
+         *     characters, stable for this card and carrying no part of its number
+         * @throws NullPointerException if {@code tokeniser} is {@code null}
+         */
+        public String orderGroup(OpaqueIdentifier tokeniser) {
+            if (tokeniser == null) {
+                throw new NullPointerException("tokeniser must not be null");
+            }
+
+            return tokeniser.token(GROUP_PURPOSE, cardNum);
+        }
+
+        /**
+         * Returns the keyed, opaque identity a first-in-first-out queue deduplicates this reply by.
+         *
+         * <p>Assumptions: the identity is the card number and the transaction identifier at their
+         * declared widths, which is the pair that names one authorization exactly once, so a reply sent
+         * twice inside the queue's deduplication interval is accepted once however its bytes differ. A
+         * content hash was the alternative and is refused because a re-published reply whose rendering
+         * changed would then be accepted as a second answer to one request.</p>
+         *
+         * <p>Refactoring Rationale: the raw transaction identifier was used directly before this method
+         * existed, and it is replaced for the reason the group identity was: a deduplication identifier
+         * is message metadata. The acquirer's transaction identifier is not a primary account number,
+         * but it is the value that joins a queue observer's view to a cardholder's purchase in every
+         * other system that records it, so it is tokenised rather than published.</p>
+         *
+         * <p>Assumptions: the purpose string is {@link #DEDUPLICATION_PURPOSE} and NOT the correlation
+         * purpose, even though both tokenise the same pair. Two purposes yield two unrelated tokens, so
+         * an observer holding a deduplication identifier cannot join it to a correlation identity for
+         * the same authorization recorded elsewhere -- which is the linkage purpose separation exists to
+         * prevent.</p>
+         *
+         * @param tokeniser the keyed tokeniser, whose key material every publisher shares so that two
+         *     instances derive one identifier for one reply; must not be {@code null}
+         * @return the deduplication identity, exactly {@link OpaqueIdentifier#TOKEN_LENGTH} URL-safe
+         *     characters, carrying neither the card number nor the transaction identifier
+         * @throws NullPointerException if {@code tokeniser} is {@code null}
+         */
+        public String deduplicationKey(OpaqueIdentifier tokeniser) {
+            if (tokeniser == null) {
+                throw new NullPointerException("tokeniser must not be null");
+            }
+
+            return tokeniser.token(DEDUPLICATION_PURPOSE,
+                    buildCorrelationKey(cardNum, REPLY_FIELD_NAMES.get(0), transactionId,
+                            REPLY_FIELD_NAMES.get(1)));
+        }
+
+        /**
          * Renders this reply for a log line or a diagnostic, disclosing no sensitive wire value.
          *
          * <p>Refactoring Rationale: as on the request carrier, the compiler-generated rendering
@@ -1114,26 +1196,33 @@ public final class CsvAuthCodec {
          * so it reaches the same log aggregator by the same route, and a record's rendering cannot be
          * suppressed by annotation.</p>
          *
-         * <p>Assumptions: the card number is masked to its last four digits and the approved amount is
-         * withheld, while the three decision fields -- the authorization identification code, the
-         * response code and the response reason -- are retained in full. That split follows what a
-         * reader needs: the decision fields are the whole reason to look at a reply, they are the
-         * values a parity comparison checks, and none of them says anything about the cardholder. The
-         * amount is withheld because an approved amount beside even a masked card number is
-         * transaction detail rather than an operational fact.</p>
+         * <p>Assumptions: the card number is masked to its last four digits, while the three decision
+         * fields -- the authorization identification code, the response code and the response reason --
+         * are retained in full. The decision fields are the whole reason to look at a reply, they are
+         * the values a parity comparison checks, and none of them says anything about the cardholder.</p>
          *
-         * <p>Trade-offs: the withheld amount means a reader reconciling money has to consult the
-         * message or the stored decision rather than a log line, which is accepted for the same reason
-         * as on the request carrier: the paths that legitimately need the value have it, and an
-         * incidental rendering is not one of them.</p>
+         * <p>Refactoring Rationale: the approved amount and the transaction identifier are BOTH
+         * withheld, the identifier having been retained in full by an earlier revision. Both appear in
+         * this class's sensitivity table -- {@code PA-RL-APPROVED-AMT} and
+         * {@code PA-RL-TRANSACTION-ID} -- and the two carriers are kept symmetrical deliberately:
+         * withholding an identifier on the request while quoting the same identifier on the reply
+         * would leave the value in the log by whichever of the two happened to be rendered, and a
+         * reader could not tell which class had made the decision.
+         * {@link #correlationKey(OpaqueIdentifier)} answers a keyed token over the same identity for a
+         * reader who has to correlate.</p>
          *
-         * @return a rendering carrying the masked card number, the transaction identifier and the
-         *     three decision fields, never {@code null}
+         * <p>Trade-offs: the withheld amount and identifier mean a reader reconciling money or naming a
+         * transaction has to consult the message or the stored decision rather than a log line, which
+         * is accepted for the same reason as on the request carrier: the paths that legitimately need
+         * the value have it, and an incidental rendering is not one of them.</p>
+         *
+         * @return a rendering carrying the masked card number and the three decision fields, with the
+         *     identifier and the amount marked as withheld, never {@code null}
          */
         @Override
         public String toString() {
             return "AuthReply[cardNum=" + CardNumberMasker.mask(cardNum)
-                    + ", transactionId=" + transactionId
+                    + ", transactionId=" + WITHHELD_MARKER
                     + ", authIdCode=" + authIdCode
                     + ", authRespCode=" + authRespCode
                     + ", authRespReason=" + authRespReason
@@ -1154,11 +1243,8 @@ public final class CsvAuthCodec {
      * reproduced and the length lands on {@code REQUEST_WIRE_LENGTH} rather than somewhere between
      * {@code REQUEST_DECLARED_WIDTH_SUM} and it.</p>
      *
-     * <p>Assumptions: seventeen of the eighteen widths are the copybook's own; the ordinal-nine money
-     * field is emitted at {@link #REQUEST_MONEY_WIDTH} by {@link #formatRequestMoney}, because the
-     * reference program's receiver for that token is {@code PIC X(13)}. The class-level documentation
-     * carries the truncation evidence, and it is restated here because this is the method whose
-     * output that width governs.</p>
+     * <p>Assumptions: all eighteen widths are the copybook's own, the ordinal-nine money field being
+     * rendered by {@link #formatRequestMoney} at the fourteen {@code PIC +9(10).99} declares.</p>
      *
      * @param request the request to render; must not be {@code null}. Its components are already
      *     within their declared widths, because the carrier validates them at construction
@@ -1179,11 +1265,11 @@ public final class CsvAuthCodec {
         //       this direction too -- MOVE WS-APPROVED-AMT TO WS-APPROVED-AMT-DIS at line 720 of
         //       COPAUA0C.cbl moves a numeric field into an edited-display field before the STRING --
         //       so the rendering is a conversion step in the baseline and is kept as one here.
-        // WHY : Assumptions: formatRequestMoney and NOT formatReplyMoney, and the two are not
-        //       interchangeable. This payload's receiver is WS-TRANSACTION-AMT-AN PIC X(13) at line
-        //       63 of COPAUA0C.cbl, so a fourteen-character reply-mask token would be truncated to
-        //       thirteen by the UNSTRING and its final cent digit lost before FUNCTION NUMVAL ran.
-        //       Calling the reply renderer here is the defect this split exists to make visible.
+        // Assumptions: formatRequestMoney and NOT formatReplyMoney. Both are fourteen characters wide
+        //   and they agree on nothing else: the request picture PIC +9(10).99 at CCPAURQY.cpy line 27
+        //   fixes a sign character and zero-pads its digits, while the reply mask PIC -zzzzzzzzz9.99
+        //   blanks the sign for a non-negative amount and suppresses leading zeros. Calling the reply
+        //   renderer here would emit a payload no producer of this contract would send.
         List<String> values = List.of(
                 request.authDate(),
                 request.authTime(),
@@ -1465,43 +1551,27 @@ public final class CsvAuthCodec {
     }
 
     /**
-     * Renders a request amount in the thirteen characters the reference program's receiver holds.
+     * Renders a request amount in the fourteen characters {@code PIC +9(10).99} declares.
      *
-     * <p><strong>Assumptions: thirteen characters, not the copybook's fourteen, because the receiving
-     * field is thirteen.</strong> The {@code UNSTRING} at lines 354 to 374 of {@code COPAUA0C.cbl}
-     * reads the ordinal-nine token into {@code WS-TRANSACTION-AMT-AN PIC X(13)} at line 63, and line
-     * 376 converts it with {@code FUNCTION NUMVAL}. An alphanumeric receiver truncates on the right,
-     * so a fourteen-character token loses its final character before the conversion ever runs and
-     * {@code +0000000100.99} is read as 100.9. Emitting thirteen is the only rendering that survives
-     * that receiver intact.</p>
+     * <p>Assumptions: the fourteen are spent exactly as {@code PIC +9(10).99} at line 27 of
+     * {@code CCPAURQY.cpy} declares them -- one sign character, ten integer digits, the literal point
+     * and two fractional digits -- so the whole {@code 9(10)} domain up to {@code 9999999999.99} is
+     * renderable at either sign. A leading {@code +} in a COBOL picture is a fixed sign position that
+     * emits {@code +} for a non-negative value rather than a blank, which is what distinguishes this
+     * rendering from the reply mask.</p>
      *
-     * <p>Assumptions: the thirteen are spent as ten integer digits, the literal point and two
-     * fractional digits, with <strong>no sign position</strong>, for a non-negative amount. That is
-     * what preserves the copybook's full {@code 9(10)} domain: the largest value the picture can
-     * express is {@code 9999999999.99}, which is exactly thirteen characters unsigned and fourteen
-     * signed. Dropping the sign position rather than a digit position is safe because the request
-     * amount is non-negative in the only producer contract the repository states --
-     * {@code tests/mocks/mq_request_stub.py} validates the field against the closed domain
-     * {@code 0.00} to {@code 9999999999.99} -- and because {@code NUMVAL} treats an unsigned token as
-     * positive, so the reference conversion is unaffected.</p>
-     *
-     * <p>Alternatives Considered: always emitting a sign and giving up one integer digit
-     * ({@code -999999999.99}). Rejected because it would make this method reject values the reference
-     * receiver can carry perfectly well -- every amount from {@code 1000000000.00} upward -- and
-     * rejecting what the baseline accepts is a parity failure in the same way accepting what it
-     * corrupts is. Trade-offs: the cost of the chosen shape is that a NEGATIVE amount, which the
-     * copybook's sign position permits even though no producer contract uses it, is renderable only
-     * up to {@code -999999999.99}; beyond that this method raises by name rather than emitting a
-     * fourteenth character the receiver would silently discard.</p>
+     * <p>Trade-offs: zero padding rather than blank suppression, which is the opposite choice from
+     * {@link #formatReplyMoney}. Either would satisfy the reference conversion, which ignores leading
+     * blanks and leading zeros alike; zeros are chosen because they make the field fixed-width in its
+     * digits as well as in its total, so a byte-level diff of two payloads aligns column for
+     * column.</p>
      *
      * @param amount the amount to render; must not be {@code null} and must carry no more than
      *     {@code MONEY_SCALE} decimal places, a value with fewer being padded rather than rejected
      * @param fieldName the copybook name of the field being rendered, used only to compose a failure
      *     message so that a rejection names the field a reader can look up
-     * @return the amount as exactly {@code REQUEST_MONEY_WIDTH} characters: for a non-negative value,
-     *     ten zero-padded integer digits, a literal point and two fractional digits; for a negative
-     *     value, a {@code -} then nine zero-padded integer digits, the point and two fractional
-     *     digits
+     * @return the amount as exactly {@code REQUEST_MONEY_WIDTH} characters: a {@code +} or {@code -}
+     *     sign, ten zero-padded integer digits, a literal point and two fractional digits
      * @throws NullPointerException if {@code amount} is {@code null}
      * @throws AuthMessageFormatException if {@code amount} carries more than {@code MONEY_SCALE}
      *     decimal places, or if its magnitude needs more than {@code MONEY_INTEGER_DIGITS} integer
@@ -1509,29 +1579,12 @@ public final class CsvAuthCodec {
      */
     public static String formatRequestMoney(BigDecimal amount, String fieldName) {
         BigDecimal canonical = canonicalAmount(amount, fieldName);
-        boolean negative = canonical.signum() < 0;
-
-        // WHY : Assumptions: the available integer width depends on the sign, because the sign
-        //       occupies one of the thirteen positions when it is present and none when it is not.
-        //       Deriving it here rather than branching twice below keeps the two shapes one code
-        //       path, so the guard and the padding cannot disagree about how many digits fit.
-        int integerCapacity = negative ? MONEY_INTEGER_DIGITS - 1 : MONEY_INTEGER_DIGITS;
-        String integerDigits = integerDigitsOf(canonical, fieldName, integerCapacity);
+        String integerDigits = integerDigitsOf(canonical, fieldName, MONEY_INTEGER_DIGITS);
         String fractionDigits = fractionDigitsOf(canonical);
 
         StringBuilder rendered = new StringBuilder(REQUEST_MONEY_WIDTH);
-        if (negative) {
-            rendered.append(MONEY_NEGATIVE_SIGN);
-        }
-
-        // WHY : Assumptions: zero padding rather than blank suppression, and this is deliberately
-        //       the opposite choice from the reply rendering above. This token is not an edited
-        //       display field -- the receiver is PIC X(13) and the conversion is FUNCTION NUMVAL,
-        //       which ignores leading blanks and leading zeros alike -- so either would parse. Zeros
-        //       are chosen because they make the emitted field FIXED-WIDTH IN ITS DIGITS as well as
-        //       in its total, so a byte-level diff of two payloads aligns column for column, which
-        //       is what the golden vectors in the test for this class compare.
-        for (int position = integerDigits.length(); position < integerCapacity; position++) {
+        rendered.append(canonical.signum() < 0 ? MONEY_NEGATIVE_SIGN : MONEY_POSITIVE_SIGN);
+        for (int position = integerDigits.length(); position < MONEY_INTEGER_DIGITS; position++) {
             rendered.append(ZERO_DIGIT);
         }
         rendered.append(integerDigits).append(MONEY_DECIMAL_POINT).append(fractionDigits);
@@ -1646,23 +1699,17 @@ public final class CsvAuthCodec {
     }
 
     /**
-     * Renders a request amount in the thirteen characters the reference program's receiver holds.
+     * Renders a request amount in the fourteen characters {@code PIC +9(10).99} declares.
      *
-     * <p>Assumptions: unlike its reply counterpart, this overload CAN raise, and the asymmetry is the
-     * point rather than an oversight. {@code Money.MAX_MAGNITUDE} is {@code 9999999999.99}, which the
-     * non-negative shape renders in exactly {@link #REQUEST_MONEY_WIDTH} characters, so a positive
-     * {@link Money} never fails; a negative one gives up a digit position to the sign, so a magnitude
-     * of {@code 1000000000.00} or more is rejected by name. That rejection is preferable to the
-     * alternative, which is a fourteenth character the reference receiver would discard without
-     * reporting anything.</p>
+     * <p>Assumptions: a {@link Money} never fails this rendering at either sign, because
+     * {@code Money.MAX_MAGNITUDE} is {@code 9999999999.99} and the picture's sign position is
+     * additional to its ten integer digits rather than carved out of them.</p>
      *
      * @param amount the amount to render; must not be {@code null}
      * @param fieldName the copybook name of the field being rendered, used only to compose a failure
      *     message
      * @return the amount as exactly {@code REQUEST_MONEY_WIDTH} characters
      * @throws NullPointerException if {@code amount} is {@code null}
-     * @throws AuthMessageFormatException if the amount is negative and its magnitude needs all ten
-     *     integer digits, leaving no position for the sign
      */
     public static String formatRequestMoney(Money amount, String fieldName) {
         if (amount == null) {
@@ -1820,10 +1867,14 @@ public final class CsvAuthCodec {
                     names.get(fieldIndex)));
 
             // WHY : Assumptions: whether the final field is followed by a delimiter is a per-payload
-            //       property rather than a general one, which is the whole of defect D-COMMA. The
+            //       property rather than a general one, and the two payloads do not agree on it. The
             //       reply's STRING at lines 722 to 731 of COPAUA0C.cbl pairs a comma with all six
             //       values including the sixth, while the request's UNSTRING at line 354 names
-            //       eighteen receiving fields and therefore consumes only interior delimiters.
+            //       eighteen receiving fields and therefore consumes only interior delimiters. That
+            //       trailing comma is what makes the built reply sixty-three characters rather than
+            //       the sixty-two an interior-delimiter count predicts, and the length it is
+            //       published at is registered as D-REPLY-PUT-LENGTH in
+            //       docs/architecture/cobol-to-service-traceability.md.
             if (fieldIndex < lastIndex || trailingDelimiter) {
                 payload.append(DELIMITER);
             }

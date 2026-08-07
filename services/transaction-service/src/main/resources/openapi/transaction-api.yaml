@@ -529,9 +529,17 @@ paths:
     description: >-
       One transaction addressed by its identifier, migrated from CICS
       transaction CT01.
+    # Assumptions: this path-level list carries the PATH parameter alone. The
+    #   correlation header is declared by each operation instead, which is where
+    #   every other operation in this document declares it, and re-declaring it
+    #   here as well made the only operation on this path carry the same
+    #   (name, in) pair twice over -- once inherited and once of its own. The
+    #   specification permits an operation to OVERRIDE an inherited parameter,
+    #   but the two declarations here were the identical reference, so the
+    #   override carried no difference and left a reader unable to tell which
+    #   one was meant to win.
     parameters:
       - $ref: "#/components/parameters/TransactionId"
-      - $ref: "#/components/parameters/CorrelationIdHeader"
 
     get:
       tags: [Transaction View]

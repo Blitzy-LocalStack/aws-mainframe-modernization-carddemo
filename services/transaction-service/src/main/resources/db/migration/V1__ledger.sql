@@ -61,9 +61,8 @@
 --       search_path TO ledger`. batch-service reaches the same tables under its
 --       own login, which needs `ledger` and `account` together and therefore
 --       cannot pin a single schema the same way. And V0__schemas_and_roles.sql
---       L592-L597 records the deliberate decision to set no schema search order
---       on any of the eight roles, leaving name resolution to each connecting
---       service. Qualifying every name means this file resolves to the same
+--       records the deliberate decision to set no schema search order on any of
+--       the login roles, leaving name resolution to each connecting service. Qualifying every name means this file resolves to the same
 --       four objects no matter which of those connections executes or reads it,
 --       so none of that configuration is a dependency of the DDL.
 --
@@ -177,7 +176,26 @@ CREATE TABLE ledger.transactions (
     --   here and everywhere in this file: it cannot hold every value this
     --   field can express, so a balance could differ from the baseline by a
     --   cent with nothing in the schema to reveal it. Bytes 133-143.
-    amount          NUMERIC(11,2),
+    --
+    -- Refactoring Rationale: NOT NULL, where an earlier revision left this
+    --   column nullable on the reasoning that a blank fixed-width field
+    --   decodes to an absent value at the load boundary. It does not: both
+    --   normative zoned codecs -- common-lib's ZonedDecimalCodec and the ETL's
+    --   carddemo_migration.copybook.zoned -- refuse a numeric body that is
+    --   blank or carries a non-digit, so a blank TRAN-AMT fails the load rather
+    --   than loading as NULL, and `PIC S9(09)V99` declares no absent state at
+    --   all. An amount is the reason a transaction row exists, so a row that
+    --   carries none is not a transaction with an unknown amount; it is a row
+    --   the posting arithmetic at app/cbl/CBTRN02C.cbl L547 and L548-L552 has
+    --   no reference behaviour for.
+    -- Trade-offs: the constraint is asserted here as well as on the JPA
+    --   mappings over this table, and the duplication is the point. The
+    --   provider materialises a stored row by field assignment, which bypasses
+    --   every constructor and mutator guard a mapping holds, so the column is
+    --   the only place the invariant reaches a row this schema did not
+    --   originate -- one loaded by the ETL, by a repair statement or by a
+    --   restore.
+    amount          NUMERIC(11,2) NOT NULL,
 
     -- Assumptions: an identifier, so BIGINT by the numeric-identifier
     --   rule, and unlike the category code this one is a magnitude with no
@@ -409,7 +427,26 @@ CREATE TABLE ledger.daily_transactions (
     --   argued at ledger.transactions.amount. No approximate type appears
     --   on either side of the posting boundary, so the value the feed
     --   carries and the value that posts are the same digits.
-    amount          NUMERIC(11,2),
+    --
+    -- Refactoring Rationale: NOT NULL, where an earlier revision left this
+    --   column nullable on the reasoning that a blank fixed-width field
+    --   decodes to an absent value at the load boundary. It does not: both
+    --   normative zoned codecs -- common-lib's ZonedDecimalCodec and the ETL's
+    --   carddemo_migration.copybook.zoned -- refuse a numeric body that is
+    --   blank or carries a non-digit, so a blank TRAN-AMT fails the load rather
+    --   than loading as NULL, and `PIC S9(09)V99` declares no absent state at
+    --   all. An amount is the reason a transaction row exists, so a row that
+    --   carries none is not a transaction with an unknown amount; it is a row
+    --   the posting arithmetic at app/cbl/CBTRN02C.cbl L547 and L548-L552 has
+    --   no reference behaviour for.
+    -- Trade-offs: the constraint is asserted here as well as on the JPA
+    --   mappings over this table, and the duplication is the point. The
+    --   provider materialises a stored row by field assignment, which bypasses
+    --   every constructor and mutator guard a mapping holds, so the column is
+    --   the only place the invariant reaches a row this schema did not
+    --   originate -- one loaded by the ETL, by a repair statement or by a
+    --   restore.
+    amount          NUMERIC(11,2) NOT NULL,
 
     -- Assumptions: numeric identifier with no significant leading zero,
     --   bytes 144-152; argued at ledger.transactions.merchant_id.
@@ -602,7 +639,35 @@ CREATE TABLE ledger.transaction_rejects (
     --   present in storage and in what a client reads, so a 430-byte
     --   reconstruction must pad the cast result back to 350 before appending the
     --   trailer.
-    raw_record   CHAR(350),
+    --
+    -- Refactoring Rationale: NOT NULL on all three of this table's
+    --   copybook-derived columns, where an earlier revision left every one of
+    --   them nullable. Nullability here is not a permissive reading of the
+    --   source but a contradiction of it. A reject row EXISTS because a record
+    --   was rejected, and app/cbl/CBTRN02C.cbl L446-L451 writes it by moving two
+    --   WHOLE group items -- DALYTRAN-RECORD into the 350-character
+    --   REJECT-TRAN-DATA at L447, then WS-VALIDATION-TRAILER into the
+    --   80-character VALIDATION-TRAILER -- and a group MOVE transfers the full
+    --   declared width every time, blank-padding rather than omitting. There is
+    --   no branch on which one of the three is skipped and no width at which one
+    --   arrives short, so a row with a null image is an entry that records that
+    --   something was rejected while discarding the only evidence of what.
+    -- Trade-offs: a NULL in any of the three makes the 430-byte record
+    --   UNRECONSTRUCTABLE, which is the specific loss these constraints prevent.
+    --   A reconstruction concatenates the padded 350-byte image, the four-digit
+    --   code and the 76-character description -- 350 plus 4 plus 76 is exactly
+    --   the 430 bytes the contract declares -- and a null component has no
+    --   width, so the result would be short and every field after the gap would
+    --   sit at the wrong offset. That is worse than a wrong value, because a
+    --   wrong value is visible and a shifted record parses cleanly into
+    --   different data.
+    -- Alternatives Considered: leaving them nullable and reconstructing a null
+    --   as blanks. Rejected because blanks are a legitimate VALUE in a
+    --   fixed-width field -- a description shorter than 76 characters is stored
+    --   blank-padded -- so a null rendered as blanks would be indistinguishable
+    --   from a genuinely blank field, and the schema would have admitted a state
+    --   whose meaning it then had to guess.
+    raw_record   CHAR(350)     NOT NULL,
 
     -- Assumptions: SMALLINT is the narrowest exact integer type covering
     --   the declared domain: `PIC 9(04)` at CBTRN02C L181 admits at most
@@ -616,7 +681,20 @@ CREATE TABLE ledger.transaction_rejects (
     --   the baseline and all are three digits, at CBTRN02C: 100 at L385
     --   with the text at L386, 101 at L397 with L398, 102 at L410 with
     --   L411, 103 at L417 with L418, and 109 at L556 with L557.
-    reason_code  SMALLINT,
+    --
+    -- Refactoring Rationale: NOT NULL and CHECK-bounded, where an earlier
+    --   revision declared the type and cited the PIC 9(04) domain but
+    --   asserted neither. The Assumptions above read 9999 off that picture
+    --   as the reason SMALLINT is wide enough; the same reading is what
+    --   makes 9999 the upper BOUND, and stating the width without the bound
+    --   left SMALLINT's whole 32767 range admissible -- including negative
+    --   values, which an unsigned picture cannot express at all. A reject is
+    --   always written with a reason: each of the five sites named above
+    --   moves a literal code and its text together, so a null reason is a
+    --   state the program never produces, and it would break the reject
+    --   COUNT that CBTRN02C L229-L230 turns into the job's return code,
+    --   since a null neither equals nor differs from any code a filter names.
+    reason_code  SMALLINT      NOT NULL,
 
     -- Assumptions: descriptive text, so VARCHAR, holding the declared
     --   76-character maximum from CBTRN02C L182 as the constraint. The five
@@ -628,7 +706,17 @@ CREATE TABLE ledger.transaction_rejects (
     --   at 42 characters, so every one fits with room to spare and the
     --   declared width is preserved as the contract rather than trimmed to
     --   the observed maximum.
-    reason_desc  VARCHAR(76),
+    --
+    -- Refactoring Rationale: NOT NULL, on the same reading as the two
+    --   columns above. Every one of the five reject sites moves a reason
+    --   code and its verbatim text in the same pair of statements -- 100 at
+    --   L385 with L386, 101 at L397 with L398, 102 at L410 with L411, 103 at
+    --   L417 with L418 and 109 at L556 with L557 -- so a row carrying a code
+    --   and no text is a state the reference program cannot reach. The texts
+    --   are user-visible strings carried across character for character
+    --   under transformation rule T8, and a null one would silently drop the
+    --   half of the trailer an operator reads.
+    reason_desc  VARCHAR(76)   NOT NULL,
 
     -- Assumptions: the primary key is the occurrence sequence -- the reject-event
     --   ordinal and not the record image -- and NO unique constraint exists over
@@ -650,6 +738,25 @@ CREATE TABLE ledger.transaction_rejects (
     --   surrogate" but "no identity". It carries no business meaning, is never
     --   rendered to a caller and never participates in a golden-master
     --   comparison, so the 430-byte reconstruction of an entry is unaffected.
+    -- Assumptions: the bound is the PICTURE's own domain and nothing wider.
+    --   `WS-VALIDATION-FAIL-REASON PIC 9(04)` at CBTRN02C L181 is FOUR
+    --   UNSIGNED digits, so 0 through 9999 is the complete set of values the
+    --   trailer can carry and a value outside it could not have come from
+    --   the reference program. The constraint is inclusive at both ends
+    --   rather than starting at 100: zero is the picture's initial value and
+    --   a loader replaying a captured stream must be able to store whatever
+    --   the trailer held, so narrowing the floor to the lowest code the
+    --   baseline happens to emit would refuse a faithful replay.
+    -- Alternatives Considered: enumerating the five codes the baseline sets
+    --   -- 100, 101, 102, 103 and 109 -- as an IN list. Rejected because it
+    --   would refuse a code a later validation rule legitimately adds, and
+    --   because it would encode a set that is a property of the CURRENT rule
+    --   table rather than of the field. The picture's width is the durable
+    --   contract; the code list is not, and it is documented on the column
+    --   above where a reader looks for it.
+    CONSTRAINT ck_transaction_rejects_reason_code
+        CHECK (reason_code BETWEEN 0 AND 9999),
+
     CONSTRAINT pk_transaction_rejects PRIMARY KEY (reject_seq)
 );
 
@@ -723,7 +830,43 @@ CREATE TABLE ledger.transaction_category_balances (
     --   between. The measured field confirms the width: in
     --   app/data/ASCII/tcatbal.txt bytes 18-28 hold 11 characters ending in
     --   a sign overpunch, `0000000000{` on the first record. Bytes 18-28.
-    balance      NUMERIC(11,2),
+    --
+    -- Refactoring Rationale: NOT NULL DEFAULT 0, where an earlier revision of
+    --   this column left it nullable to admit "a blank fixed-width field". That
+    --   premise does not hold for this field. `TRAN-CAT-BAL PIC S9(09)V99` is a
+    --   signed NUMERIC DISPLAY picture, not a character one, so a blank span is a
+    --   malformed record rather than an absent balance -- and the measured
+    --   evidence is the proof: all 50 records of app/data/ASCII/tcatbal.txt carry
+    --   `0000000000{` in bytes 18-28, fifty explicit zoned zeros with the sign
+    --   overpunched and not one blank field. The count is measured, not
+    --   estimated. A zero is spelt as a zero here and never as a blank. Both
+    --   normative zoned codecs agree -- common-lib's ZonedDecimalCodec and the
+    --   ETL's carddemo_migration.copybook.zoned each refuse a numeric body that
+    --   is blank or carries a non-digit -- so a blank field fails the load rather
+    --   than loading as NULL.
+    -- Assumptions: the create path supplies a value too, and it was checked
+    --   rather than assumed: `2700-A-CREATE-TCATBAL-REC` issues INITIALIZE at
+    --   app/cbl/CBTRN02C.cbl L504, which sets a numeric item to ZERO, and only
+    --   then ADDs the amount at L508. The update path adds into the stored value
+    --   at L527. COBOL display arithmetic has no null to propagate, so a NULL
+    --   here has no reference behaviour to reproduce.
+    -- Trade-offs: DEFAULT 0 rather than NOT NULL alone, matching the six money
+    --   columns of authorization.pending_auth_summary, so that a bulk load which
+    --   omits the column inserts the same zero the create path would have
+    --   initialised rather than failing on a value the reference program derives
+    --   instead of reading. The rejected alternative -- NOT NULL with no default
+    --   -- would have made the column mandatory in every INSERT and coupled the
+    --   ETL to a derived value.
+    -- Trade-offs: the constraint is asserted here as well as on the two JPA
+    --   mappings over this table, and the duplication is the point. The provider
+    --   materialises a stored row by field assignment, which bypasses every
+    --   constructor and mutator guard those mappings hold, so the column is the
+    --   only place the invariant reaches a row this schema did not originate -- a
+    --   row loaded by the ETL, by a repair statement or by a restore. Leaving it
+    --   nullable admitted no real record and instead let a direct write store a
+    --   row the interest control break at app/cbl/CBACT04C.cbl L194-L205 would go
+    --   on to accumulate, propagating the absence into an accrual.
+    balance      NUMERIC(11,2) NOT NULL DEFAULT 0,
 
     -- Assumptions: a three-part composite key with exactly this arity and
     --   exactly this component order, taken from the group item the

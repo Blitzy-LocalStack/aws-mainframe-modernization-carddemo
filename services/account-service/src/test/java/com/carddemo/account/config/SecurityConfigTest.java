@@ -172,6 +172,101 @@ class SecurityConfigTest {
     }
 
     /**
+     * Confirms the internal read authority reaches NEITHER group authority, so no signed-on user reaches a
+     * record no baseline screen reads.
+     *
+     * <p>Assumptions: the disjointness is asserted from THIS side as well as from the internal chain's
+     * own test, because it is the property that survives either chain being edited. The internal read
+     * authority is minted for a machine caller and no Cognito group claim can produce it, so the two
+     * authority sets do not overlap; a rule here that admitted it, or a rule there that admitted a group,
+     * would each be a widening this assertion catches.</p>
+     */
+    @Test
+    @DisplayName("the internal read authority is neither of the two group authorities")
+    void theInternalReadAuthorityIsNeitherGroupAuthority() {
+        assertThat(InternalApiSecurityConfig.INTERNAL_READ_AUTHORITY)
+                .isNotEqualTo(JwtRoleConverter.ADMIN_AUTHORITY)
+                .isNotEqualTo(JwtRoleConverter.USER_AUTHORITY);
+        assertThat(grantedBy(SecurityConfig.businessAccess(),
+                workload(InternalApiSecurityConfig.INTERNAL_READ_AUTHORITY))).isFalse();
+    }
+
+    /**
+     * Confirms the business decision this chain installs admits either group authority and nothing else.
+     *
+     * <p>Refactoring Rationale: this replaces a case asserting that the account subtree admitted "either
+     * caller" through one either-or manager. The two callers are now separated by CHAIN rather than by an
+     * either-or rule -- {@code InternalApiSecurityConfig} matches the machine caller's exact path ahead of
+     * this chain -- so the property to assert here is that this chain's own decision is the group rule and
+     * only the group rule. Asserting the withdrawn composite would assert a manager the chain no longer
+     * installs.</p>
+     */
+    @Test
+    @DisplayName("the business decision admits either group authority and nothing else")
+    void theBusinessDecisionAdmitsEitherGroupAndNothingElse() {
+        assertThat(grantedBy(SecurityConfig.businessAccess(),
+                workload(JwtRoleConverter.ADMIN_AUTHORITY))).isTrue();
+        assertThat(grantedBy(SecurityConfig.businessAccess(),
+                workload(JwtRoleConverter.USER_AUTHORITY))).isTrue();
+        assertThat(grantedBy(SecurityConfig.businessAccess(),
+                workload("carddemo-something-else"))).isFalse();
+    }
+
+    /**
+     * Confirms the three declared patterns match exactly the three addresses the calling workload uses,
+     * and that neither internal-only pattern matches a business route.
+     *
+     * <p>Assumptions: the three literals are restated here rather than imported from the calling context,
+     * because the two are separate deployables and neither may depend on the other. What this asserts is
+     * therefore the agreement itself: the paths are
+     * {@code RestAccountContextClient.PATH_CARD_XREF_LOOKUP}, {@code PATH_ACCOUNT} and
+     * {@code PATH_CUSTOMER} in the pending-authorization context, and a change to either side that is not
+     * mirrored fails here.</p>
+     */
+    @Test
+    @DisplayName("the internal patterns match exactly the three addresses the caller uses")
+    void internalPatternsMatchTheAddressesTheWorkloadCalls() {
+        assertThat(MATCHER.match(SecurityConfig.CARD_XREF_PATH_PATTERN,
+                "/api/v1/card-xrefs/lookup")).isTrue();
+        assertThat(MATCHER.match(SecurityConfig.ACCOUNT_PATH_PATTERN,
+                "/api/v1/accounts/00000000001")).isTrue();
+        assertThat(MATCHER.match(SecurityConfig.CUSTOMER_PATH_PATTERN,
+                "/api/v1/customers/000000001")).isTrue();
+
+        assertThat(MATCHER.match(SecurityConfig.CARD_XREF_PATH_PATTERN, BUSINESS_PATH)).isFalse();
+        assertThat(MATCHER.match(SecurityConfig.CUSTOMER_PATH_PATTERN, BUSINESS_PATH)).isFalse();
+    }
+
+    /**
+     * Applies one authorization decision to one authentication.
+     *
+     * @param manager the decision under test; must not be {@code null}
+     * @param authentication the principal to test; must not be {@code null}
+     * @return {@code true} when the manager grants access, {@code false} when it does not
+     */
+    private boolean grantedBy(
+            org.springframework.security.authorization.AuthorizationManager<
+                    org.springframework.security.web.access.intercept.RequestAuthorizationContext>
+                    manager,
+            Authentication authentication) {
+        AuthorizationResult result = manager.authorize(() -> authentication, null);
+        return result != null && result.isGranted();
+    }
+
+    /**
+     * Builds an authenticated principal holding exactly one authority.
+     *
+     * @param authority the single authority to grant
+     * @return the authentication, never {@code null}
+     */
+    private static Authentication workload(String authority) {
+        return org.springframework.security.authentication.UsernamePasswordAuthenticationToken
+                .authenticated("caller", null,
+                        List.of(new org.springframework.security.core.authority
+                                .SimpleGrantedAuthority(authority)));
+    }
+
+    /**
      * Applies the installed catch-all decision to one authentication.
      *
      * @param authentication the principal to test; must not be {@code null}

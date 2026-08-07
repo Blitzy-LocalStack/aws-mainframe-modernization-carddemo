@@ -63,17 +63,16 @@
  *
  * <h2>The closed inventory: this charter plus five interfaces</h2>
  *
- * <p>Assumptions: this inventory states the package's <b>target contract</b> as the migration
- * plan assigns it, and not a measurement of the files sitting beside this one. A role named
- * here that has no file is <b>planned</b>, not missing, and is authored at another index of
- * the same plan. This paragraph is the single place a reader has to look to tell a target
- * from a measurement, and the distinction is declared because the list below otherwise reads
- * as present tense and a reader who finds one name absent has reason to doubt all 6. The
- * context charter one level up makes the same declaration in the same terms at its L83-L106,
- * so the convention is house-wide rather than local to this file; the sibling projection
- * charter states the neighbouring guarantee at its L11, that a projection beyond its declared
- * set is a defect rather than an addition, which is the same closed-set property this list
- * asserts with the number 6.
+ * <p>Refactoring Rationale: this inventory formerly declared itself a <b>target contract</b>
+ * rather than a measurement, on the ground that a role named in it with no file beside this one
+ * was planned rather than missing. That caveat is spent: all five interfaces are authored, so the
+ * inventory below is now a target contract <em>and</em> a measurement of this directory at the same
+ * time, and a reader can take it in the present tense without qualification. The caveat is
+ * recorded rather than deleted because the sibling charters still carry the same wording where
+ * their own sets are still incomplete, and a reader comparing the two should be able to see that
+ * the difference is a difference in delivery rather than in convention. The number 6 remains a
+ * closed set on both readings: a seventh file in this package is a defect and not an addition, which
+ * is the same guarantee the sibling projection charter states for its own set at its L11.
  *
  * <p>Six files, and a seventh is a defect rather than an addition:
  * <ul>
@@ -105,9 +104,40 @@
  * <p>This package declares no table, no index, no constraint and no schema-definition
  * statement of any kind, and it never will. The target design records this context's owned
  * tables as "(none)" and gives it read-only cross-schema views plus a database role holding
- * read privileges only; it also records that there is no owned schema and therefore no
- * migration directory. Three consequences follow and are stated plainly so that a subsequent
- * author reads an absence as a design decision rather than as an omission.
+ * read privileges only; it also records that this MODULE carries no migration directory.
+ * Three consequences follow and are stated plainly so that a subsequent author reads an
+ * absence as a design decision rather than as an omission.
+ *
+ * <p>Refactoring Rationale: the sentence above formerly read that the design "records that
+ * there is no owned schema and therefore no migration directory", and the first half of that
+ * was false. The {@code reporting} schema is this context's own -- it is the eighth of eight,
+ * created by {@code data-migration/sql/V0__schemas_and_roles.sql} and dedicated to this
+ * context -- and what makes the module carry no migration directory is that the schema's
+ * contents are authored OUTSIDE it, by {@code data-migration/sql/V1__reporting_views.sql}
+ * under a no-login owner role. Stating it as "no owned schema" put the absence in the wrong
+ * place and left the eight-schema post-state reading as seven schemas plus a footnote.
+ *
+ * <p>Refactoring Rationale: "owns no table" is a statement about this module and about the
+ * login role, and NOT a statement that the {@code reporting} schema is empty of tables. An
+ * earlier revision of this charter made only the first claim and left a reader to infer the
+ * second, which is false and consequential in both directions: a reader would conclude the
+ * schema held nothing but views, and a maintainer meeting the {@code REVOKE} that withholds one
+ * table from this context's login would read it as dead code and could remove it. The
+ * distinction has three levels and they are not interchangeable. First, this module owns no
+ * table: it carries no data-definition script, no migration artifact and no
+ * {@code db/migration} directory, and the login role it authenticates as holds schema usage plus
+ * read on the seven views and nothing else. Second, the schema itself holds exactly one table,
+ * {@code card_grouping_key}, created by {@code data-migration/sql/V1__reporting_views.sql} and
+ * owned by the no-login role {@code carddemo_reporting_owner}. Third, this context cannot read
+ * that table -- both that file and {@code V0__schemas_and_roles.sql} revoke it from the login
+ * role, the first closing the window schema-level default privileges open at creation and the
+ * second closing the window a re-run of the bootstrap's blanket grant opens. The third level is
+ * the security property rather than an implementation detail: the table holds the secret mixed
+ * into the per-card statement grouping token, and a role able to read it could recover a card
+ * number from a token by hashing sixteen digits. The authority for all three levels is
+ * {@code docs/architecture/data-model-and-schema-mapping.md}, which owns the ownership model for
+ * all eight schemas; it is cited rather than restated, because a privilege model with two
+ * homes drifts.
  *
  * <p>First, no schema-migration tooling is on this module's classpath. The two migration
  * artifacts the six table-owning services declare are deliberately absent from
@@ -494,7 +524,9 @@
  * <h3>R11 -- read privileges only, over relations this package does not own</h3>
  *
  * <p>Trade-offs: this context accepts that it cannot supply its own read surface. The target
- * design records its owned tables as "(none)", and the relations plus the read privileges over
+ * design records its owned tables as "(none)" -- in the sense set out under "No write path
+ * exists here" above, being no table owned by this module and none readable by its login,
+ * rather than a schema empty of tables -- and the relations plus the read privileges over
  * them are established by {@code data-migration/sql/V0__schemas_and_roles.sql} and
  * {@code data-migration/sql/V1__reporting_views.sql}, both owned by another agent. The
  * compromise is real and is stated rather than worked around: when a relation this package

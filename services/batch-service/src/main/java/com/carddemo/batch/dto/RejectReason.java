@@ -161,14 +161,23 @@ import java.util.Optional;
  * {@code docs/architecture/cobol-to-service-traceability.md}. Line numbers refer to the source as
  * committed, and columns 73 to 80 of a COBOL or JCL line carry a sequence field that is not part of
  * the statement.</p>
+ *
+ * <h2>The five constants, and the three properties a caller has to know</h2>
+ *
+ * <p>This enum declares FIVE reason codes, of which FOUR can be persisted. The fifth, 109, is
+ * assigned by the reference on a path that cannot reach the reject writer;
+ * {@link #isPersistedToRejectStream()} carries that distinction, so it cannot drift from the
+ * sibling type that persists these rows.</p>
+ *
+ * <p>Assumptions: reasons 101 and 109 carry BYTE-IDENTICAL descriptions under different codes, so a
+ * description does not identify a reason. {@link #code()} is what a caller compares, and a caller
+ * matching on text would silently conflate the two.</p>
+ *
+ * <p>Assumptions: precedence is {@link #lastWriterWins(RejectReason)} and expressly NOT
+ * {@link #ordinal()}. The only pair the reference can actually produce is {@code {102, 103}}, and on
+ * that pair 103 wins; relying on declaration order would make the answer a property of how this
+ * file is written rather than of what the reference does.</p>
  */
-// WHAT: five reason codes, of which FOUR can be persisted. The fifth, 109, is assigned by the
-//       reference on a path that cannot reach the reject writer; isPersistedToRejectStream()
-//       carries that distinction so it cannot drift from the sibling that persists these rows.
-// WHAT: reasons 101 and 109 carry byte-identical descriptions under different codes, so a
-//       description does not identify a reason and code() is what callers compare.
-// WHAT: precedence is lastWriterWins(RejectReason) and NOT ordinal(); the only pair the reference
-//       can actually produce is {102, 103}, and on that pair 103 wins.
 public enum RejectReason {
 
     /**
@@ -626,4 +635,3 @@ public enum RejectReason {
         return Optional.empty();
     }
 }
-

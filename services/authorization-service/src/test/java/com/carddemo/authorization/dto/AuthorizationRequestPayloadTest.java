@@ -35,16 +35,25 @@ class AuthorizationRequestPayloadTest {
     }
 
     /**
-     * Confirms no component was dropped while the masking was added.
+     * Confirms every component is still NAMED, and that the seven sensitive ones name a withheld value.
      *
      * <p>Assumptions: this guards the specific regression an override invites on an eighteen-component
      * record. A hand-written rendering replaces a generated one that named every component, and a
      * component omitted by oversight would silently reduce what a consumer failure reports without
      * failing anything -- which matters here because a refusal on any one of the eighteen is the usual
-     * reason this rendering is produced.</p>
+     * reason this rendering is produced. Every component name is therefore still asserted present.</p>
+     *
+     * <p>Refactoring Rationale: seven of the eighteen are now asserted to render a withheld MARKER
+     * rather than their value, where this case previously asserted all eighteen values present. The seven
+     * are exactly the seven that {@code com.carddemo.common.codec.CsvAuthCodec} lists as sensitive wire
+     * fields for this record -- the card expiry date, the amount, the four merchant identity components
+     * and the transaction identifier -- and asserting their values present pinned a rendering that put a
+     * cardholder's purchase into a log line. The distinction between "component absent" and "component
+     * present with its value withheld" is asserted explicitly, because collapsing the two would let a
+     * component quietly disappear from the rendering.</p>
      */
     @Test
-    @DisplayName("every component of the record appears in the rendering")
+    @DisplayName("every component is named, and the seven sensitive ones are withheld")
     void everyComponentIsRendered() {
         String rendered = payload().toString();
 
@@ -54,20 +63,28 @@ class AuthorizationRequestPayloadTest {
                 .contains("authDate=260115")
                 .contains("authTime=143000")
                 .contains("authType=01")
-                .contains("cardExpiryDate=2812")
+                .contains("cardExpiryDate=<withheld>")
                 .contains("messageType=0100")
                 .contains("messageSource=POS")
                 .contains("processingCode=000000")
-                .contains("transactionAmount=")
+                .contains("transactionAmount=<withheld>")
                 .contains("merchantCategoryCode=5411")
                 .contains("acquirerCountryCode=840")
                 .contains("posEntryMode=05")
-                .contains("merchantId=000000000")
-                .contains("merchantName=CORNER STORE")
-                .contains("merchantCity=SEATTLE")
+                .contains("merchantId=<withheld>")
+                .contains("merchantName=<withheld>")
+                .contains("merchantCity=<withheld>")
                 .contains("merchantState=WA")
-                .contains("merchantZip=981010000")
-                .contains("transactionId=000000000000001");
+                .contains("merchantZip=<withheld>")
+                .contains("transactionId=<withheld>");
+
+        assertThat(rendered)
+                .doesNotContain("2812")
+                .doesNotContain("125.50")
+                .doesNotContain("CORNER STORE")
+                .doesNotContain("SEATTLE")
+                .doesNotContain("981010000")
+                .doesNotContain("000000000000001");
     }
 
     /**
@@ -85,15 +102,21 @@ class AuthorizationRequestPayloadTest {
         String rendered = new AuthorizationReplyPayload(CARD_NUMBER, "000000000000001", "143000",
                 "00", "0000", Money.of("125.50")).toString();
 
+        // Refactoring Rationale: the identifier and the amount are asserted WITHHELD, where this case
+        //   previously asserted the identifier's value present. Both are named in the codec's
+        //   sensitive-field set for the reply record, and the two layers that render the same reply have
+        //   to agree or the value reaches the log through whichever of them a failure happens to touch.
         assertThat(rendered)
                 .startsWith("AuthorizationReplyPayload[")
                 .doesNotContain(CARD_NUMBER)
+                .doesNotContain("000000000000001")
+                .doesNotContain("125.50")
                 .contains("maskedCardNumber=" + "*".repeat(12) + "2345")
-                .contains("transactionId=000000000000001")
+                .contains("transactionId=<withheld>")
                 .contains("authIdCode=143000")
                 .contains("authResponseCode=00")
                 .contains("authResponseReason=0000")
-                .contains("approvedAmount=");
+                .contains("approvedAmount=<withheld>");
     }
 
     /**

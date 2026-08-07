@@ -1,15 +1,13 @@
 package com.carddemo.auth.dto;
 
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
-import java.util.UUID;
 
 /**
  * Carries the values a new user row is created from, in the order the add-user screen validates them.
  *
- * <h2>Where the five components come from, and why their order is not a style choice</h2>
+ * <h2>Where the four components come from, and why their order is not a style choice</h2>
  *
  * <p>Assumptions: the component order is the physical field order of the add-user map.
  * {@code app/cpy-bms/COUSR01.CPY} declares {@code FNAMEI PIC X(20)} at L60,
@@ -46,10 +44,10 @@ import java.util.UUID;
  * because they look like an inconsistency between two sibling records and are not one: harmonising
  * them would silence the first-error contract on one side or the column correspondence on the other.
  *
- * <p>Assumptions: {@code cognitoSub} is appended fifth and last because it is the one component with
- * no field on the map at all. Every component ahead of it is placed by a map line, so appending the
- * one that has none keeps the four that do in their reference sequence; inserting it earlier would
- * displace them for a component that no screen order can justify.
+ * <p>Assumptions: every component of this record is placed by a map line, so the screen order is
+ * total and nothing is appended after it. That was not always so: a fifth component named
+ * {@code cognitoSub} sat at the end precisely because it had no map line, and it has been withdrawn
+ * for the reason recorded under the subject reference below.
  *
  * <h2>The credential is not carried forward</h2>
  *
@@ -70,8 +68,8 @@ import java.util.UUID;
  * it has no target analogue: with no component to carry a credential, this record supplies nothing
  * for such a move to read. The map field it would have been collected in is
  * {@code app/cpy-bms/COUSR01.CPY} L78, {@code 02 PASSWDI PIC X(8).}, and it is cited explicitly so
- * that its absence from the five components reads as a decision and not as a field overlooked while
- * transcribing a six-field map into a five-component record.
+ * that its absence from the four components reads as a decision and not as a field overlooked while
+ * transcribing a five-field map into a four-component record.
  *
  * <p>Refactoring Rationale: one validation branch disappears with the component, and dropping it
  * silently is what Rule 1 forbids at its lines 38 to 41, which rule out leaving a non-obvious choice
@@ -94,10 +92,10 @@ import java.util.UUID;
  * string {@code PASSWD} zero times, so that map has no field a credential could be written into. One
  * of the five reference screens already worked without it.
  *
- * <p>Assumptions: no credential is created anywhere on this path. {@code cognitoSub} is supplied by
- * whatever provisioned the pool account, so this service accepts an existing subject reference and
- * mints neither it nor any secret. That is why the component is required on create rather than
- * returned from it.
+ * <p>Assumptions: no credential is created anywhere on this path, and no subject reference is
+ * accepted on it either. This service provisions the pool account itself and reads the subject back
+ * from the provider's own response, so the subject is an OUTPUT of creating a user and never an input
+ * to it; it appears on {@code UserResponse} and not here.
  *
  * <h2>Why this record is not unified with the update payload</h2>
  *
@@ -117,10 +115,10 @@ import java.util.UUID;
  * the forms it could take -- an {@code allOf} in the published contract, and a shared base record or
  * shared interface here -- and the reason is a specific change in behaviour rather than a preference
  * about shape. The properties
- * common to both bodies are the given name, the family name and the type; the ones only this body
- * carries are the identifier and the subject reference. A composed definition would therefore emit
- * the three shared properties together and append the two extras, producing the order given name,
- * family name, type, identifier, subject reference for create -- which places the type ahead of the
+ * common to both bodies are the given name, the family name and the type; the only property this body
+ * carries and the other does not is the identifier. A composed definition would therefore emit the
+ * three shared properties together and append that one extra, producing the order given name, family
+ * name, type, identifier for create -- which places the type ahead of the
  * identifier when {@code app/cbl/COUSR01C.cbl} tests the identifier at L130 and the type at L142. A
  * caller submitting a request with both of those blank would then be told about the type where the
  * reference tells it about the identifier. One shared base record or one shared interface between the
@@ -132,10 +130,16 @@ import java.util.UUID;
  * ordering argument aside they are not one shape. The identifier is a component here because create
  * is where it is assigned, whereas update addresses an existing row and takes it from the request
  * path instead, which keeps a request from naming one user in its path and another in its body. The
- * subject reference appears on create only, because the binding between a pool account and a row is
- * established once. The update body consequently carries three properties where this one carries
- * five, and a shared definition would have to make two of those five optional to fit both, which
- * would publish as optional two values that a create request cannot omit.
+ * update body consequently carries three properties where this one carries four, and a shared
+ * definition would have to make one of those four optional to fit both, which would publish as
+ * optional a value that a create request cannot omit.
+ *
+ * <p>Refactoring Rationale: this paragraph used to name a second membership difference -- a subject
+ * reference "on create only, because the binding between a pool account and a row is established
+ * once" -- and put the create body at five properties against the update body's three. That component
+ * has been withdrawn, so the membership difference is now the identifier alone and the counts are four
+ * against three. The argument is unchanged in substance and weaker only in arithmetic: one property
+ * that would have to be published as optional is still one too many.
  *
  * <h2>The identifier is the key being assigned</h2>
  *
@@ -198,16 +202,34 @@ import java.util.UUID;
  * the domain is refused at the three points just named, so an out-of-domain value never reaches such
  * a handler to fall through it.
  *
- * <h2>The subject reference is the one net-new component</h2>
+ * <h2>The subject reference is deliberately not a component of this record</h2>
  *
- * <p>Assumptions: {@code cognitoSub} corresponds to no field of the security record and to no field
- * of any map. It is the fifth and last column the owning migration declares for {@code auth.users},
- * as {@code UUID NOT NULL UNIQUE}, and the published contract declares it a string in the uuid
- * format, which is why the component is a {@code java.util.UUID} rather than a string that happens
- * to look like one: parsing at the boundary refuses a malformed value once, and canonicalises the
- * rest so that two spellings of one subject cannot compare unequal. It is required because the
- * column is not nullable and because a row without one could never be matched to a presented token,
- * and it is supplied rather than generated because this service does not create pool accounts.
+ * <p>Refactoring Rationale: this record carried a fifth component, {@code cognitoSub}, declared
+ * {@code @NotNull UUID} and documented as "the subject identifier of the already-provisioned Cognito
+ * account", "supplied by whatever provisioned that account, because this service creates no pool
+ * account". It has been withdrawn, and the reason is not tidiness. The subject is the ONLY link
+ * between a presented token and this row -- the column is {@code UUID NOT NULL UNIQUE} -- so a
+ * caller able to choose it was a caller able to decide which pool identity a new row authenticates
+ * as. An administrator creating a row could bind it to another person's subject, or to a subject
+ * whose pool account carries the administrator group while the row says {@code 'U'}, and the two
+ * sides would disagree with the signed claim winning every authorization decision. Nothing in the
+ * request could have detected either case, because a well-formed UUID is all the shape a client had
+ * to satisfy.
+ *
+ * <p>Assumptions: withdrawing the component is only half the fix and the other half is what makes it
+ * work. {@code com.carddemo.auth.service.CognitoUserProvisioningService} now creates the pool account
+ * and its group membership from the four components below, and reads the subject back out of the
+ * provider's response, so the row and the pool identity are established by one act and cannot drift.
+ * The subject remains a component of {@code com.carddemo.auth.dto.UserResponse}, where it is an
+ * output: a caller learns which subject its row was bound to and cannot nominate one.
+ *
+ * <p>Alternatives Considered: keeping the component and validating it against the pool -- reading the
+ * named subject back and refusing one that does not exist, or whose group disagrees with
+ * {@code userType}. Rejected because it answers a question that should not be asked. The check would
+ * be a round trip per request against a value the service can simply produce, it would still admit a
+ * real subject belonging to a different person, and it would leave a pool account created by some
+ * unnamed other party as a precondition of using this operation at all -- which is the coupling the
+ * withdrawal removes.
  *
  * <h2>What this record deliberately does not carry</h2>
  *
@@ -333,7 +355,7 @@ import java.util.UUID;
  * which is why the citations are exact.
  *
  * <p>Assumptions: seven assertions are required of whatever tests this record. That it declares
- * exactly these five components in exactly this order, matching the five properties of the published
+ * exactly these four components in exactly this order, matching the four properties of the published
  * create schema. That its order differs from the update body's, and that neither type extends or
  * implements a shared supertype, which is the assertion that would fail first if the composition
  * rejected above were ever introduced. That a 9-character identifier is refused while an
@@ -344,7 +366,7 @@ import java.util.UUID;
  * string, a blank, the lower-case form of either letter and the two letters together are each
  * rejected. That each refusal carries the sentence named in the constant below it, since a sentence
  * carried across from the reference is only preserved if something checks it. And that the string
- * form renders neither name nor the subject reference, stated as an assertion about the rendered
+ * form renders neither name, stated as an assertion about the rendered
  * text rather than about the override's presence, because a rendering that named a component and
  * then printed its value would satisfy the weaker check while disclosing exactly what the stronger
  * one forbids.
@@ -377,13 +399,6 @@ import java.util.UUID;
  *     {@code app/cbl/COUSR01C.cbl} L142. Choosing the administrator value grants that user the
  *     authority these operations themselves require, so it is the one component here with an
  *     authorisation consequence
- * @param cognitoSub the subject identifier of the already-provisioned Cognito account the new row
- *     represents, and the one component with no counterpart in the security record or on any map. It
- *     is the fifth and last column the owning migration declares for {@code auth.users}, as
- *     {@code UUID NOT NULL UNIQUE}, and the published contract declares it a string in the uuid
- *     format, so it is required and is a {@code java.util.UUID} rather than a string. It is supplied
- *     by whatever provisioned that account, because this service creates no pool account and no
- *     credential, and it is the only link between a presented token and the row created here
  */
 public record CreateUserRequest(
         @NotBlank(message = MESSAGE_FIRST_NAME_REQUIRED)
@@ -395,8 +410,7 @@ public record CreateUserRequest(
         @NotBlank(message = MESSAGE_USER_TYPE_REQUIRED)
         @Size(min = USER_TYPE_LENGTH, max = USER_TYPE_LENGTH,
                 message = MESSAGE_USER_TYPE_LENGTH)
-        @Pattern(regexp = USER_TYPE_DOMAIN, message = MESSAGE_USER_TYPE_DOMAIN) String userType,
-        @NotNull(message = MESSAGE_COGNITO_SUB_REQUIRED) UUID cognitoSub) {
+        @Pattern(regexp = USER_TYPE_DOMAIN, message = MESSAGE_USER_TYPE_DOMAIN) String userType) {
 
     /**
      * The number of positions the reference declares for each of the two name fields.
@@ -591,18 +605,6 @@ public record CreateUserRequest(
     private static final String MESSAGE_USER_TYPE_DOMAIN = "User Type must be A or U...";
 
     /**
-     * The sentence reported when the Cognito subject is absent.
-     *
-     * <p>Assumptions: authored, because the component it guards has no counterpart in the security
-     * record or on any map and so no reference sentence exists for it. Its wording follows the
-     * "can NOT be empty..." shape of the four reference sentences above, so one refusal vocabulary
-     * covers the whole body rather than the net-new component announcing itself through a differently
-     * phrased sentence.
-     */
-    private static final String MESSAGE_COGNITO_SUB_REQUIRED =
-            "Cognito Subject can NOT be empty...";
-
-    /**
      * The placeholder that stands in for a component this record refuses to render.
      *
      * <p>Assumptions: the literal deliberately matches the one
@@ -616,16 +618,23 @@ public record CreateUserRequest(
     private static final String REDACTED_PERSONAL = "REDACTED";
 
     /**
-     * Renders this request for diagnostics with the two names and the subject reference withheld.
+     * Renders this request for diagnostics with both names withheld.
      *
      * <p>Refactoring Rationale: the string form a record generates for itself lists every component
-     * beside its value, which on this record means the given name and family name of a real person
-     * and the identity provider's subject for their account. A request body is stringified in exactly
+     * beside its value, which on this record means the given name and family name of a real person. A
+     * request body is stringified in exactly
      * the places that happens without anyone intending it: the framework includes the bound target in
      * the message of the exception it raises when a constraint on that target fails, so the ordinary
-     * outcome of a caller mistyping one field would be a log line carrying the other four values in
+     * outcome of a caller mistyping one field would be a log line carrying the other three values in
      * full. This override keeps the generated form's shape and its component order and substitutes
-     * {@code REDACTED_PERSONAL} for the three.
+     * {@code REDACTED_PERSONAL} for the two.
+     *
+     * <p>Refactoring Rationale: this block used to name a third withheld value, the identity
+     * provider's subject, and put the incidental disclosure at four values. The subject is no longer a
+     * component of this record -- it is provisioned by the service and returned on the response -- so
+     * the withheld set is the two names and the incidental disclosure is three values. The override
+     * itself already substituted only two placeholders; what was stale was the prose describing it,
+     * which is the failure mode a reader is least able to detect.
      *
      * <p>Trade-offs: two components print in full and the choice of which is the substance of this
      * method. {@code userId} prints because it is the row locator, an eight-character logon
@@ -643,19 +652,18 @@ public record CreateUserRequest(
      * purpose.
      *
      * @return a single-line description of this record naming every component in contract order, in
-     *     which the given name, the family name and the Cognito subject are each represented by a
-     *     placeholder and never rendered
+     *     which the given name and the family name are each represented by a placeholder and never
+     *     rendered
      */
     @Override
     public String toString() {
         // Assumptions: the generated form's shape is reproduced deliberately, component order
         //   included, so that a reader who knows what a record prints is not led to think some other
-        //   type produced this line. Only the three withheld values depart from it.
+        //   type produced this line. Only the two withheld values depart from it.
         return "CreateUserRequest[firstName=" + REDACTED_PERSONAL
                 + ", lastName=" + REDACTED_PERSONAL
                 + ", userId=" + userId
                 + ", userType=" + userType
-                + ", cognitoSub=" + REDACTED_PERSONAL
                 + "]";
     }
 }

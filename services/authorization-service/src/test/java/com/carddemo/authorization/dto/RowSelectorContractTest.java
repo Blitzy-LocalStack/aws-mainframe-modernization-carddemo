@@ -8,6 +8,7 @@ import com.carddemo.common.web.CursorToken;
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
 import jakarta.validation.ValidatorFactory;
+import java.lang.reflect.RecordComponent;
 import java.time.Duration;
 import java.util.Arrays;
 import org.junit.jupiter.api.AfterAll;
@@ -27,13 +28,11 @@ import org.junit.jupiter.api.Test;
  *
  * <p>Assumptions: the two ends are deliberately NOT symmetric, and asserting one rule for both would
  * assert the wrong thing. The summary response publishes an opaque sealed token per row, so what is
- * asserted outbound is that it never publishes a raw row address. The fraud request carries the three
- * decoded primary-key columns of {@code authorization.pending_auth_detail} together with the customer
- * identifier and the action, exactly as the request-direction fields of the baseline communication area
- * at {@code cbl/COPAUS2C.cbl} lines 75, 76 and 80 carry them, so what is asserted inbound is that each
- * component is held to its own declared domain. The path selector on the operation is what the outbound
- * token is for; the service compares the triple it opens from that token against the triple in the body
- * and refuses a disagreement, which is a service-layer property and is not asserted from here.</p>
+ * asserted outbound is that it never publishes a raw row address. Inbound, the sealed token travels as
+ * the operation's path selector and is the row's ONLY address, so what is asserted is that the fraud
+ * request body declares no row address of its own and carries the action alone. The baseline's
+ * request-direction communication-area fields at {@code cbl/COPAUS2C.cbl} lines 75, 76 and 80 are
+ * therefore not all reproduced on the body: only line 80 is.</p>
  *
  * <p>Assumptions: the key material below is a fixed byte pattern of the minimum accepted length, not a
  * secret. A test that read real key material would couple these assertions to a deployment, and the
@@ -53,47 +52,24 @@ class RowSelectorContractTest {
      * The account component of the row addressed throughout, as eleven digits.
      *
      * <p>Assumptions: this is the first of the three parts joined in {@code RAW_ROW_KEY} above, held
-     * separately so that the same row is addressed by both the outbound and the inbound assertions and a
-     * failure cannot be explained away as two cases having used two different rows.</p>
+     * separately because it also scopes the token binding, so one edit changes both the row sealed and
+     * the subject it is sealed for and the two cannot drift apart.</p>
      */
     private static final String ROW_ACCOUNT_ID = "11111111111";
 
     /**
-     * The customer the fraud row is filed against, as nine digits.
+     * The single component the fraud request body is expected to declare.
      *
-     * <p>Assumptions: it is not part of any key. {@code cbl/COPAUS2C.cbl} line 139 moves the
-     * caller-supplied value into the fraud row's customer column, so it is required on the request while
-     * contributing nothing to addressing the row.</p>
-     */
-    private static final String ROW_CUSTOMER_ID = "000000011";
-
-    /**
-     * The decoded Julian authorization date of the row addressed, as a day of year in a two-digit year.
-     */
-    private static final Integer ROW_AUTH_DATE_KEY = 26217;
-
-    /**
-     * The decoded millisecond-of-day authorization time of the row addressed, 10:45:30 and 123
-     * milliseconds.
-     */
-    private static final Integer ROW_AUTH_TIME_KEY = 104530123;
-
-    /**
-     * The five-digit constant a nines-complemented authorization date is subtracted from.
+     * <p>Assumptions: naming it here rather than inline is what lets one assertion cover both halves of
+     * the contract -- that the component exists and that no second component sits beside it.</p>
      *
-     * <p>Assumptions: this is not a date. It is the constant at {@code cbl/COPAUA0C.cbl} line 874, and a
-     * value equal to it can only have arrived by carrying the storage representation instead of the
-     * decoded one.</p>
+     * <p>Assumptions: the member is named for the action alone and not for the action of a fraud
+     * operation. The resource it is sent to is already the fraud state of an authorization, so a
+     * {@code fraud} qualifier inside the body would restate in the member name what the route says --
+     * and the shared advice keys a rejected member by its record component name, so that restatement
+     * would reach every client as part of a per-field key.</p>
      */
-    private static final Integer NINES_COMPLEMENT_DATE = 99999;
-
-    /**
-     * The nine-digit constant a nines-complemented authorization time is subtracted from.
-     *
-     * <p>Assumptions: as with the date constant above, this is the constant at
-     * {@code cbl/COPAUA0C.cbl} line 875 and not a time of day.</p>
-     */
-    private static final Integer NINES_COMPLEMENT_TIME = 999999999;
+    private static final String ACTION_COMPONENT = "action";
 
     /**
      * The factory backing the engine, held so it can be closed after the class has run.
@@ -138,7 +114,7 @@ class RowSelectorContractTest {
     @Test
     @DisplayName("a sealed token is accepted as a summary row selector")
     void aSealedTokenIsAcceptedAsASelector() {
-        String selector = sealer.seal("pending-auth-summary:11111111111", RAW_ROW_KEY);
+        String selector = sealer.seal("pending-auth-summary:" + ROW_ACCOUNT_ID, RAW_ROW_KEY);
 
         PendingAuthSummaryResponse response = responseWithSelectors(selector, null, null, null, null);
 
@@ -177,7 +153,7 @@ class RowSelectorContractTest {
     @Test
     @DisplayName("the refusal names the offending row and withholds the value")
     void theRefusalNamesTheOffendingRow() {
-        String selector = sealer.seal("pending-auth-summary:11111111111", RAW_ROW_KEY);
+        String selector = sealer.seal("pending-auth-summary:" + ROW_ACCOUNT_ID, RAW_ROW_KEY);
 
         IllegalArgumentException refusal = assertThrows(IllegalArgumentException.class,
                 () -> responseWithSelectors(selector, selector, RAW_ROW_KEY, null, null));
@@ -207,7 +183,7 @@ class RowSelectorContractTest {
     }
 
     /**
-     * The fraud request accepts the row key with either of the two commands the baseline admits.
+     * The fraud request accepts either of the two commands the baseline admits.
      *
      * <p>Assumptions: {@code F} and {@code R} are the two condition names at
      * {@code cbl/COPAUS2C.cbl} lines 81 and 82, and nothing else is a command there. {@code S} is
@@ -218,11 +194,11 @@ class RowSelectorContractTest {
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("the fraud request accepts the row key with F or R and refuses S")
+    @DisplayName("the fraud request accepts F or R and refuses S")
     void theFraudRequestAcceptsTheTwoCommands() {
-        assertTrue(validator.validate(fraudRequestWith(ROW_ACCOUNT_ID, "F")).isEmpty());
-        assertTrue(validator.validate(fraudRequestWith(ROW_ACCOUNT_ID, "R")).isEmpty());
-        assertEquals(1, validator.validate(fraudRequestWith(ROW_ACCOUNT_ID, "S")).size());
+        assertTrue(validator.validate(new FraudMarkRequest("F")).isEmpty());
+        assertTrue(validator.validate(new FraudMarkRequest("R")).isEmpty());
+        assertEquals(1, validator.validate(new FraudMarkRequest("S")).size());
     }
 
     /**
@@ -232,58 +208,81 @@ class RowSelectorContractTest {
      * rather than only described. {@code WS-FRD-ACTION} at {@code cbl/COPAUS2C.cbl} line 80 reads
      * {@code F} as REPORT FRAUD at line 81, while {@code WS-FRD-UPDATE-STATUS} at line 83 reads the same
      * character as UPDATE FAILED at line 85. The two fields are adjacent inside one group item, so the
-     * collision is easy to read past; what makes it harmless is that the two domains do not overlap
-     * beyond that character, and that is what this asserts. Swapping the two values across the two
-     * records leaves each one invalid, so a mapper that crossed them cannot pass validation.</p>
+     * collision is easy to read past; what makes it harmless is that the two domains do not overlap at
+     * all, and that is what this asserts. Swapping the two values across the two records leaves each one
+     * invalid, so a mapper that crossed them cannot pass validation.</p>
+     *
+     * <p>Refactoring Rationale: the response half of this assertion was inverted and is corrected here.
+     * It previously asserted that {@code 'F'} is VALID on the response, which was true of the record at
+     * the time and contradicted the published contract, whose {@code updateStatus} is a {@code const} of
+     * {@code 'S'}. The response now admits the success value alone -- a failed write is answered with a
+     * non-2xx problem body rather than with a 2xx that says it failed -- so the two domains are disjoint
+     * in both directions: {@code 'F'} and {@code 'R'} are request-only and {@code 'S'} is response-only.
+     * Asserting the disjointness in both directions is what makes a crossed mapper impossible to write
+     * rather than merely unlikely.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("the request action and the reply outcome flag are not interchangeable")
     void theActionAndTheOutcomeFlagAreNotInterchangeable() {
-        assertTrue(validator.validate(new FraudMarkResponse("F", "UPDT SUCCESS")).isEmpty());
-        assertEquals(1, validator.validate(fraudRequestWith(ROW_ACCOUNT_ID, "S")).size());
+        assertTrue(validator.validate(
+                new FraudMarkResponse(FraudMarkResponse.UPDATE_STATUS_SUCCESS, "UPDT SUCCESS"))
+                .isEmpty());
+        assertEquals(1, validator.validate(new FraudMarkRequest("S")).size());
+        assertEquals(1, validator.validate(new FraudMarkResponse("F", "UPDT SUCCESS")).size());
         assertEquals(1, validator.validate(new FraudMarkResponse("R", null)).size());
     }
 
     /**
-     * The fraud request holds each key component to its own declared domain.
+     * The fraud request body declares no row address, so no row address can be sent on it.
      *
-     * <p>Assumptions: the values refused here are the three ways a wrong value reaches this boundary
-     * looking plausible. A raw joined row address is refused because the account component is a
-     * fixed-width digit string and a colon is not a digit. A Julian date of 99999 is refused because that
-     * is the five-nine constant a nines complement is subtracted FROM rather than a day of any year, and
-     * the complement is the representation {@code db/migration/V1__authorization.sql} deliberately does
-     * not store. A millisecond time of 999999999 is refused for the same reason at nine digits. Bounding
-     * each component at its domain rather than at its width is what turns those three into rejections
-     * instead of into a write against a different row.</p>
+     * <p>Assumptions: this is the structural half of the inbound contract and it is asserted by
+     * reflection because it is a property of the declaration rather than of any one value. A body that
+     * named the row as well as the action would admit two hazards the sealed path selector closes: a
+     * caller could address a row it was never shown, and it could send the nines-complemented storage
+     * forms of the key components -- 99999 and 999999999, the constants subtracted from at
+     * {@code cbl/COPAUA0C.cbl} lines 874 and 875 -- which are not the decoded values
+     * {@code db/migration/V1__authorization.sql} stores. With one component there is nothing to
+     * disagree with the selector and nothing to bound.</p>
+     *
+     * <p>Refactoring Rationale: the two temporal assertions this test once carried are WITHDRAWN rather
+     * than rewritten. They asserted that an out-of-range Julian date and an out-of-range time key were
+     * each refused and attributed to the key member at fault -- and both members have been removed from
+     * the body, so there is no member left for such a refusal to be attributed to. Asserting the
+     * declaration instead is the stronger claim in any case: a bound on a member can be relaxed, whereas
+     * a member that does not exist cannot carry a value at all. The two constants those assertions read
+     * from went with them, because a constant no assertion reads is a claim about a rule the code no
+     * longer has.</p>
+     *
+     * <p>Assumptions: the third assertion sends the whole raw row key as the action. It is refused by the
+     * action's own one-character domain, which is the remaining evidence that a row address cannot travel
+     * on this body even as the value of the one member it does declare.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("the fraud request refuses a raw joined key and either nines complement")
-    void theFraudRequestRefusesValuesOutsideItsDomains() {
-        assertEquals(1, validator.validate(fraudRequestWith(RAW_ROW_KEY, "F")).size());
-        assertEquals(1, validator.validate(new FraudMarkRequest(ROW_ACCOUNT_ID, ROW_CUSTOMER_ID,
-                NINES_COMPLEMENT_DATE, ROW_AUTH_TIME_KEY, "F")).size());
-        assertEquals(1, validator.validate(new FraudMarkRequest(ROW_ACCOUNT_ID, ROW_CUSTOMER_ID,
-                ROW_AUTH_DATE_KEY, NINES_COMPLEMENT_TIME, "F")).size());
+    @DisplayName("the fraud request body carries the action alone and no row address")
+    void theFraudRequestDeclaresNoRowAddress() {
+        RecordComponent[] components = FraudMarkRequest.class.getRecordComponents();
+
+        assertEquals(1, components.length);
+        assertEquals(ACTION_COMPONENT, components[0].getName());
+        assertEquals(1, validator.validate(new FraudMarkRequest(RAW_ROW_KEY)).size());
     }
 
     /**
-     * The fraud request requires all five of its components.
+     * The fraud request requires its one component.
      *
-     * <p>Assumptions: five is the closed component count of the record, so asserting the number is what
-     * catches a component silently gaining or losing its requiredness. Each omission reports exactly one
-     * violation because the requiredness annotation is the only constraint a null reaches.</p>
+     * <p>Assumptions: one violation is expected rather than none because requiredness is declared
+     * separately from the character domain, and a null reaches only the former.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("the fraud request requires all five of its components")
-    void theFraudRequestRequiresAllFiveComponents() {
-        assertEquals(5,
-                validator.validate(new FraudMarkRequest(null, null, null, null, null)).size());
+    @DisplayName("the fraud request requires its action component")
+    void theFraudRequestRequiresItsActionComponent() {
+        assertEquals(1, validator.validate(new FraudMarkRequest(null)).size());
     }
 
     /**
@@ -299,30 +298,12 @@ class RowSelectorContractTest {
     @Test
     @DisplayName("a selector round-trips to its row key and is bound to its issuing context")
     void aSelectorRoundTripsToItsRowKey() {
-        String binding = "pending-auth-detail:11111111111";
+        String binding = "pending-auth-detail:" + ROW_ACCOUNT_ID;
         String selector = sealer.seal(binding, RAW_ROW_KEY);
 
         assertEquals(RAW_ROW_KEY, sealer.open(binding, selector));
         assertThrows(CursorToken.InvalidCursorException.class,
                 () -> sealer.open("pending-auth-detail:22222222222", selector));
-    }
-
-    /**
-     * Builds a fraud request that varies only in the two components a case is about.
-     *
-     * <p>Assumptions: the customer identifier and the two key integers are held at their valid values so
-     * that each case reports violations from the one component it varies. Varying more than one at a time
-     * would make a violation count ambiguous about which constraint produced it.</p>
-     *
-     * @param accountId the account component to place on the request, which may be a value the domain
-     *     refuses
-     * @param action the one-character command to place on the request, which may be a value the domain
-     *     refuses
-     * @return the request, never {@code null}
-     */
-    private FraudMarkRequest fraudRequestWith(String accountId, String action) {
-        return new FraudMarkRequest(accountId, ROW_CUSTOMER_ID, ROW_AUTH_DATE_KEY,
-                ROW_AUTH_TIME_KEY, action);
     }
 
     /**

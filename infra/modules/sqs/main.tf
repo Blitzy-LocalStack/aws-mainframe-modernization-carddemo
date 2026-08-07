@@ -442,8 +442,19 @@ resource "aws_sqs_queue" "pauth_request" {
   #       purpose-scoped HMAC held by OpaqueIdentifier. Equal cards therefore
   #       produce one stable group while the primary account number itself never
   #       appears in SQS metadata, queue telemetry or send traces. The key arrives
-  #       through CARDDEMO_MASK_HMAC_KEY, so every producer in one environment
+  #       through CARDDEMO_MESSAGING_HMAC_KEY, so every producer in one environment
   #       derives the same group without carrying key material in source.
+  # WHY : Refactoring Rationale: this comment named CARDDEMO_MASK_HMAC_KEY, and the
+  #       name was wrong in a way that mattered. That variable is the
+  #       extract-transform-load redaction key and infra/modules/ecs-service admits
+  #       it for the data-migration workload ONLY -- so the name here described a
+  #       key that could not reach any producer, and the derivation it describes
+  #       could not happen. The two keys are deliberately separate: this one is held
+  #       by the long-running authorization consumer and shared with every producer
+  #       on this queue, because the group identity must be equal for equal cards
+  #       ACROSS producers, while the mask key is held by a one-off migration
+  #       workload that reads cardholder extracts. Sharing one value would let that
+  #       workload compute production queue group identities.
   # WHY : Alternatives Considered: a single constant message group would give
   #       total ordering across the whole stream. It is rejected because it
   #       serialises every card behind every other and collapses throughput to
@@ -1057,10 +1068,13 @@ resource "aws_sqs_queue_redrive_allow_policy" "exact_source" {
 #       stream. The requirement these queues serve is request/reply, which SQS
 #       satisfies directly, so a streaming platform would add a partitioned log
 #       and its retention and consumer-group semantics to a workload that needs
-#       none of them. Amazon MQ for IBM MQ was the closest alternative and would
-#       have preserved the MQ wire protocol itself, at the cost of keeping a
-#       broker to size, patch and fail over. docs/adr/ADR-004-messaging.md owns
-#       that comparison in full and it is not restated here.
+#       none of them. The two broker options were a SELF-MANAGED IBM MQ queue
+#       manager, which would have preserved the MQ wire protocol itself, and an
+#       Amazon MQ ActiveMQ or RabbitMQ broker, which would not -- Amazon MQ has no
+#       IBM MQ engine, so protocol fidelity and a managed broker are not the same
+#       option. Both were rejected at the cost of keeping a broker to size, patch
+#       and fail over. docs/adr/ADR-004-messaging.md owns that comparison in full
+#       and it is not restated here.
 #
 # WHY : Assumptions: NO data source and NO reference to a sibling module. The
 #       encryption key arrives as var.kms_key_arn from the calling root rather

@@ -49,20 +49,26 @@
  * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
  *
  * <p>Assumptions: every inventory, interface name and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
- * beside this one today. The migration lands its artifacts in plan order and this charter is
- * authored first, so at the checkpoint that authored it this directory holds this charter and
- * nothing else. An interface named below that has no file yet is therefore <b>planned</b>, not
- * missing, and a count below is a target total rather than a measurement of the directory. The
- * parent charter records the same split from the other side, listing this package's contents
- * among the types it describes as planned and not yet authored.</p>
+ * package's <b>target contract</b> as the migration plan assigns it, and each entry additionally
+ * states whether it is <b>AUTHORED</b> or <b>PLANNED</b> as of the latest revision of this file.
+ * The migration lands its artifacts in plan order, so a count below is a target total rather than
+ * a measurement of the directory, while the per-entry marker is a measurement and is expected to
+ * move as files land.</p>
+ *
+ * <p>Refactoring Rationale: every entry below once read PLANNED unconditionally, on the reasoning
+ * that this charter was authored before any interface beside it. That stopped being true the
+ * moment the first interface landed, and a blanket marker cannot record the difference: with
+ * {@code BatchRunRepository} present in this directory the inventory described a package that no
+ * longer existed, and a reader could not tell the two states apart without listing the directory
+ * themselves -- which is exactly the work a charter exists to save. The markers are therefore
+ * per-entry, so a landed interface and a genuinely future one read differently.</p>
  *
  * <p>Alternatives Considered: withholding this charter until every interface it governs exists.
  * Rejected, because the charter is what the authors of those interfaces work from -- which type
  * belongs here, which may not, and what the closed set is -- so writing it last would leave the
  * package with no stated contract during exactly the interval in which one is needed. The cost of
  * authoring it first is that its inventory reads as present tense unless the distinction is
- * declared, which is what the paragraph above is for; that paragraph is the single place a reader
+ * declared, which is what the per-entry markers above are for; they are the single place a reader
  * has to look to tell a target from a measurement.</p>
  *
  * <h2>Why data access is an interface here and was a file verb there</h2>
@@ -107,9 +113,19 @@
  * discipline that table is reached with, because the discipline is the part a caller cannot infer
  * from the name.</p>
  *
+ * <p>Refactoring Rationale: each entry states LANDED or PLANNED, and at this revision THREE of the
+ * eight are landed -- {@code BatchRunRepository}, {@code TransactionCategoryBalanceRepository} and
+ * {@code DisclosureGroupRepository}. An earlier revision marked every entry PLANNED, including
+ * {@code BatchRunRepository} whose file was already present, so a reader consulting the roster to learn
+ * whether the step ledger had an interface was told it did not. The three that are here arrived with
+ * the services that call them -- the ledger with {@code BatchStepLedger}, the category balances with
+ * {@code CategoryBalanceService} and the rates with {@code InterestCalculationService} -- and the
+ * remaining five arrive the same way, with the jobs that read and write their tables. The count is a
+ * measurement against the directory and has to be re-measured whenever a file is added to it.</p>
+ *
  * <dl>
  *   <dt>{@code BatchRunRepository} into {@code batch.batch_run}</dt>
- *   <dd>PLANNED. The <b>only</b> table this module owns, and the only entry here with no baseline
+ *   <dd>LANDED. The <b>only</b> table this module owns, and the only entry here with no baseline
  *       record behind it. It is the durable step ledger, and it is what makes a resumed step
  *       idempotent: a step that already recorded completion for a run becomes a no-op rather than
  *       repeating its writes. Assumptions: the uniqueness constraint that makes a row an
@@ -130,7 +146,7 @@
  *
  *   <dt>{@code TransactionCategoryBalanceRepository} into
  *       {@code ledger.transaction_category_balances}</dt>
- *   <dd>PLANNED. A keyed read on the three-part composite key, an ordered walk over that same key,
+ *   <dd>LANDED. A keyed read on the three-part composite key, an ordered walk over that same key,
  *       and both arms of the create-versus-update branch kept separately observable. Assumptions:
  *       the two arms must stay distinguishable rather than collapsing into one upsert, because the
  *       distinction is observable behaviour in the baseline and the golden masters compare it;
@@ -139,7 +155,13 @@
  *       that a caller can still tell an insert from an update.</dd>
  *
  *   <dt>{@code TransactionRejectRepository} into {@code ledger.transaction_rejects}</dt>
- *   <dd>PLANNED. Append-only: an insert method and nothing else. Assumptions: the table's key is
+ *   <dd>PLANNED <b>in this package</b>, and the qualification is load-bearing: the owning ledger
+ *       context has already authored an interface of the same name over the same table, at
+ *       {@code services/transaction-service/src/main/java/com/carddemo/transaction/repository/TransactionRejectRepository.java}.
+ *       The two are distinct types in distinct packages reached through distinct schema grants --
+ *       that context writes as {@code carddemo_ledger}, this module as {@code carddemo_batch} under
+ *       the scoped cross-schema grant recorded below -- so the existence of theirs neither supplies
+ *       nor replaces this one. Append-only: an insert method and nothing else. Assumptions: the table's key is
  *       the surrogate sequence {@code reject_seq} rather than any part of the rejected record, so
  *       a reject carries no natural key this module could read it back by, and no finder is
  *       offered because none would have a caller. The reject stream is written and then compared
@@ -166,7 +188,7 @@
  *       and this module must not re-declare.</dd>
  *
  *   <dt>{@code DisclosureGroupRepository} into {@code reference.disclosure_groups}</dt>
- *   <dd>PLANNED. Strictly read-only: an interest-rate lookup on the three-part key of account
+ *   <dd>LANDED. Strictly read-only: an interest-rate lookup on the three-part key of account
  *       group, transaction type and transaction category. No write method belongs here under any
  *       circumstances, and the reason is a grant rather than a convention -- see the schema
  *       ruling below, which extends this module no write privilege on {@code reference} at
@@ -290,14 +312,14 @@
  * to physical column names, and <b>the physical spelling of the same logical field is not uniform
  * across the schemas this one package reaches.</b> The transaction type code is {@code type_cd} in
  * {@code ledger.transactions} and in {@code ledger.transaction_category_balances}, at
- * {@code V1__ledger.sql:134} and {@code V1__ledger.sql:709}, but it is {@code tran_type_cd} in
+ * {@code V1__ledger.sql:133} and {@code V1__ledger.sql:816}, but it is {@code tran_type_cd} in
  * {@code reference.disclosure_groups}, at {@code V1__reference.sql:313}. The category code is
- * {@code category_cd} in those same two ledger tables, at {@code V1__ledger.sql:148} and
- * {@code V1__ledger.sql:715}, and {@code tran_cat_cd} in the reference table, at
+ * {@code category_cd} in those same two ledger tables, at {@code V1__ledger.sql:147} and
+ * {@code V1__ledger.sql:822}, and {@code tran_cat_cd} in the reference table, at
  * {@code V1__reference.sql:319}. The amount column diverges within a single schema: it is
- * {@code amount} in {@code ledger.transactions} at {@code V1__ledger.sql:180} and
+ * {@code amount} in {@code ledger.transactions} at {@code V1__ledger.sql:198} and
  * {@code balance} in {@code ledger.transaction_category_balances} at
- * {@code V1__ledger.sql:726}.</p>
+ * {@code V1__ledger.sql:869}.</p>
  *
  * <p>Assumptions: those spellings genuinely meet inside one method rather than staying in separate
  * files, which is what makes the divergence a live hazard and not a curiosity. Interest accrual
@@ -371,11 +393,30 @@
  *   <li><b>Keyset-continuation finders</b> -- a predicate selecting rows whose ordering key is
  *       strictly greater than a supplied key, with a bounded result. Assumptions: these exist for
  *       resumption rather than for reading in convenient chunks. A redriven state-machine
- *       execution restarts a step that may already have processed part of its input, and the key
- *       it resumes from is the one recorded against that step in {@code batch.batch_run}; a
- *       continuation finder is what turns that recorded key back into the remainder of the
- *       walk.</li>
+ *       execution restarts a step that may already have processed part of its input, and a
+ *       continuation finder is what turns the key it resumes from back into the remainder of the
+ *       walk. Where that key is <b>stored</b> is stated below, because it is not stored where an
+ *       earlier revision of this charter said it was.</li>
  * </ul>
+ *
+ * <p>Refactoring Rationale: the continuation key is held in the framework's own step
+ * {@code ExecutionContext} -- persisted by the configured {@code JobRepository} in its
+ * {@code BATCH_STEP_EXECUTION_CONTEXT} table and restored into the same step on a restart -- and
+ * <b>not</b> in {@code batch.batch_run}, which an earlier revision of this paragraph asserted. That
+ * assertion was checkable and false: {@code services/batch-service/src/main/resources/db/migration/V1__batch.sql}
+ * declares exactly seven columns on that table -- {@code id}, {@code run_id}, {@code step_name},
+ * {@code status}, {@code started_at}, {@code finished_at} and {@code return_code} -- and the
+ * {@code BatchRun} mapping beside it maps those seven and no eighth, so no column exists that could
+ * hold a cursor. The two mechanisms answer different questions and the split is deliberate:
+ * {@code batch.batch_run} answers <i>did this step already complete for this run</i>, which is the
+ * idempotency question a redriven state machine asks before doing anything at all, and the
+ * execution context answers <i>how far into its input had it got</i>, which is the resumption
+ * question a step asks once it has decided to run. Alternatives Considered: adding a continuation
+ * column to {@code batch.batch_run} so that one table answered both. Rejected because the framework
+ * already persists and restores the execution context transactionally with the step's own chunk
+ * commit, so a second store would have to be written in the same commit to stay consistent with it
+ * -- two records of one position that can disagree, where the disagreement is silent and the loser
+ * is a re-processed or a skipped chunk.</p>
  *
  * <p>Assumptions: {@code com.carddemo.common.web.PageResponse} is <b>not</b> used in this package,
  * and neither is its companion {@code com.carddemo.common.web.CursorToken}. Both are the HTTP
@@ -386,7 +427,7 @@
  * actuator health probe, so neither type has a consumer here. A batch continuation key never
  * leaves the process or the database it was read from, so sealing it would add a keyed-hash
  * computation against a threat that does not exist on this path, and the key is carried as the
- * plain value {@code batch.batch_run} already stores.</p>
+ * plain value the framework's step {@code ExecutionContext} already stores.</p>
  *
  * <h2>The two ordered-walk contracts this package defines</h2>
  *
@@ -406,7 +447,7 @@
  * {@code app/cpy/CVTRA01Y.cpy:8}. Those widths sum to exactly seventeen, in that declared
  * sequence, so the key order is not a matter of interpretation. The owning service then declares
  * the same sequence independently as the composite primary key
- * {@code (account_id, type_cd, category_cd)} at {@code V1__ledger.sql:741}.</p>
+ * {@code (account_id, type_cd, category_cd)} at {@code V1__ledger.sql:884}.</p>
  *
  * <p>Assumptions: the reason that ordering has to be honoured, rather than merely documented, is
  * that a downstream control break depends on it. Interest accrual detects a change of account by

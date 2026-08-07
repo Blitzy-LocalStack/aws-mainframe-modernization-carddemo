@@ -65,12 +65,14 @@ declining the check -- which would accept every substitution in order to permit 
 The eight schemas
 -----------------
 ``auth``, ``account``, ``card``, ``ledger``, ``reference``, ``batch``, ``authorization`` and
-``reporting``. The first seven are each owned by the matching ``carddemo_*`` login role; the
-eighth, ``reporting``, is owned by the dedicated ``NOLOGIN`` role ``carddemo_reporting_owner``
-for the reason recorded on :data:`OWNED_SCHEMA_ROLES`. The names are mirrored
-from ``data-migration/sql/V0__schemas_and_roles.sql``, which creates them and is their single
-source of truth; this module only names them, and a name that disagrees with that script is a
-defect here rather than a variant spelling.
+``reporting``. Each is owned by a dedicated ``NOLOGIN`` role ``carddemo_<context>_owner`` and
+connected to by a separate login role, for the reason recorded on :data:`OWNED_SCHEMA_ROLES`.
+Seven of the eight additionally have a ``carddemo_<context>_migrator`` login role, which is a
+member of the owner and reaches its authority only through ``SET ROLE``; ``reporting`` has none,
+because reporting-service ships no migration. The names are mirrored from
+``data-migration/sql/V0__schemas_and_roles.sql``, which creates them and is their single source
+of truth; this module only names them, and a name that disagrees with that script is a defect
+here rather than a variant spelling.
 
 Those eight replace what the baseline exposed to one CICS region as eight ``DEFINE FILE``
 stanzas in ``app/csd/CARDDEMO.CSD`` -- ACCTDAT at L1, CARDAIX at L13, CARDDAT at L25, CCXREF
@@ -179,6 +181,8 @@ __all__ = [
     "ENV_SSL_MODE",
     "ENV_SSL_ROOT_CERT",
     "REDACTED",
+    "LOGIN_ROLE_NAMES",
+    "MIGRATION_SCHEMA_ROLES",
     "OWNED_SCHEMA_ROLES",
     "REQUIRED_SSL_MODE",
     "SCHEMA_NAMES",
@@ -189,6 +193,8 @@ __all__ = [
     "DatasetStagingSettings",
     "alternate_database_user_verification_sql",
     "database_secret_name",
+    "database_secret_name_for_role",
+    "migration_role_for_schema",
     "owner_role_for_schema",
     "parameter_path",
     "quote_identifier",
@@ -198,6 +204,7 @@ __all__ = [
     "resolve_alternate_database_users",
     "resolve_aurora_settings",
     "resolve_dataset_staging_settings",
+    "resolve_migration_settings",
     "resolve_environment_name",
     "resolve_master_settings",
     "resolve_parameter_prefix",
@@ -353,18 +360,19 @@ NON_PRODUCTION_ENVIRONMENTS: frozenset[str] = frozenset({"dev", "test", "local"}
 # Assumptions: the allowlist is keyed BY ROLE (``role=alternate``, comma separated) rather
 # than being a flat list of accepted user names. A flat list would be satisfied by any entry for
 # any schema, so allowlisting one role's rotation clone would simultaneously permit that clone --
-# or any other listed name -- as the credential for all eight. Keying by role keeps each
+# or any other listed name -- as the credential for all of them. Keying by role keeps each
 # exception scoped to the role it was granted for, and an alternate that is itself one of the
-# eight owning roles is refused outright, because that spelling is not a rotation clone but a
+# fifteen login roles is refused outright, because that spelling is not a rotation clone but a
 # cross-role substitution.
 ENV_ALTERNATE_DB_USERS = "CARDDEMO_DB_ALTERNATE_USERS"
 
 # Assumptions: the cluster's MASTER credential is named by an environment variable rather
 # than by a composed path, because it is the one credential this stack does not name. The other
-# eight live at ``<prefix>/<environment>/aurora/<role>``, composed by
-# :func:`database_secret_name` from the same convention the Terraform module that creates them
-# composes; the master credential is created by RDS itself -- ``infra/modules/aurora-postgresql``
-# sets ``manage_master_user_password`` -- and RDS chooses the entry's name, so there is no
+# fifteen live at ``<prefix>/<environment>/aurora/<role>``, composed by
+# :func:`database_secret_name_for_role` from the same convention the Terraform module that
+# creates them composes; the master credential is created by RDS itself --
+# ``infra/modules/aurora-postgresql`` sets ``manage_master_user_password`` -- and RDS chooses the
+# entry's name, so there is no
 # convention to compose and nothing to derive it from. The cluster module publishes the ARN as
 # its ``master_user_secret_arn`` output, and the environment root passes that value to the
 # bootstrap task in this variable.
@@ -486,8 +494,9 @@ _SCHEMA_ROLES: dict[str, str] = {
     # Each pair names one bounded-context schema and the ``carddemo_*`` login role a loader
     # connects as to work in it, in the order
     # data-migration/sql/V0__schemas_and_roles.sql creates them, so the two can be read side
-    # by side. Seven of the eight are also the schema's owner; ``reporting`` is not, and the
-    # note on that entry records the difference at the point a reader meets it.
+    # by side. NONE of them owns its schema: every schema is owned by a ``NOLOGIN``
+    # ``carddemo_<context>_owner`` role, and :data:`OWNED_SCHEMA_ROLES` is where ownership is
+    # answered. That uniformity is recent -- see the rationale on that mapping.
     #
     # Assumptions: every schema name here is stored BARE, and the quoted form is obtained
     # only through :func:`quoted_schema`. This rests on a property of the server rather than a
@@ -508,49 +517,105 @@ _SCHEMA_ROLES: dict[str, str] = {
     "reference": "carddemo_reference",
     "batch": "carddemo_batch",
     "authorization": "carddemo_authorization",
-    # Assumptions: this entry is the one that is NOT a schema owner. The reporting
-    # context owns no table: it reads the other contexts' data through the SELECT-only grants
-    # the bootstrap script establishes, and the cross-schema views it reads through live in a
-    # reporting schema owned by the dedicated ``NOLOGIN`` role ``carddemo_reporting_owner``
-    # that the script creates for exactly that purpose. ``carddemo_reporting`` is
-    # therefore the role the ETL connects as for reporting work, with USAGE and SELECT and no
-    # CREATE anywhere. Anything that needs an OWNER -- creating a view, altering one -- must
-    # not read it from here; :func:`owner_role_for_schema` refuses this schema explicitly and
-    # says why.
+    # Assumptions: this entry is the one whose role holds no INSERT or UPDATE anywhere.
+    # The reporting context owns no table: it reads the other contexts' data through the
+    # SELECT-only grants the bootstrap script establishes, and the cross-schema views it reads
+    # through live in the ``reporting`` schema owned by ``carddemo_reporting_owner``.
+    # ``carddemo_reporting`` is therefore the role the ETL connects as for reporting work, with
+    # USAGE and SELECT and no CREATE anywhere. It is also the one context with no
+    # ``_migrator`` role, because reporting-service ships no Flyway migration -- see
+    # :data:`MIGRATION_SCHEMA_ROLES`.
     "reporting": "carddemo_reporting",
 }
 
 #: Read-only mapping of each bounded-context schema name to the ``carddemo_*`` login role the
-#: ETL connects as for work in that schema. Seven of the eight roles also own their schema;
-#: ``reporting`` does not -- use :data:`OWNED_SCHEMA_ROLES` when ownership is what matters.
+#: ETL connects as for work in that schema. None of these roles owns its schema -- use
+#: :data:`OWNED_SCHEMA_ROLES` when ownership is what matters, and
+#: :data:`MIGRATION_SCHEMA_ROLES` when DDL authority is.
 SCHEMA_ROLES: Mapping[str, str] = MappingProxyType(_SCHEMA_ROLES)
 
-# Assumptions: this is the subset of :data:`SCHEMA_ROLES` in which the role genuinely
-# owns the schema, and it is derived rather than typed out a second time, so the two cannot
-# disagree about the seven they share. ``reporting`` is the single exclusion, named as a
-# constant beside the derivation so the exclusion is legible instead of arithmetic.
-# Trade-offs: a derived subset means adding a ninth owning context is one edit above and
-# nothing here, while adding a second non-owned schema is one edit here. Two hand-maintained
-# lists of overlapping names was the alternative and is how one of them ends up with seven
-# entries and the other with eight.
-_UNOWNED_SCHEMA = "reporting"
-
+# Assumptions: every schema's owner is the connection role's name with ``_owner``
+# appended, so the mapping is DERIVED from :data:`SCHEMA_ROLES` rather than typed out a second
+# time and the two cannot disagree about which contexts exist. The suffix is not a convention
+# invented here: ``data-migration/sql/V0__schemas_and_roles.sql`` builds its own owner names the
+# same way, from the same stems, so a context added there appears here with no edit.
+#
+# Refactoring Rationale: this mapping held SEVEN entries pointing at the LOGIN roles --
+# ``account`` to ``carddemo_account``, and so on -- with ``reporting`` excluded as the one
+# schema whose owner was a separate ``NOLOGIN`` role. That is no longer what the bootstrap
+# script does, and the difference is a privilege boundary rather than a spelling. A schema's
+# owner holds CREATE on it implicitly and may ALTER or DROP anything in it, so while the
+# connection role was also the owner, the single long-lived credential every request ran under
+# could drop the tables it read. V0 now owns all EIGHT schemas with ``NOLOGIN``
+# ``carddemo_<context>_owner`` roles -- generalising the arrangement ``reporting`` already had
+# -- and reduces each connection role to USAGE plus named DML. The seven-entry, LOGIN-role
+# form of this mapping would now be actively wrong: it would report a DDL-capable identity for
+# a role that has none, which is the direction of error that invents authority rather than
+# withholding it.
+#
+# Trade-offs: ``reporting`` is no longer an exception, so the ``_UNOWNED_SCHEMA`` constant that
+# expressed the exclusion is deleted with it and :func:`owner_role_for_schema` no longer refuses
+# one of the eight names. The cost is that a caller which relied on that refusal to detect
+# "this schema has no owning role" loses the signal -- accepted, because no such caller exists
+# and the premise it rested on is no longer true.
 _OWNED_SCHEMA_ROLES: dict[str, str] = {
-    schema: role for schema, role in _SCHEMA_ROLES.items() if schema != _UNOWNED_SCHEMA
+    schema: f"{role}_owner" for schema, role in _SCHEMA_ROLES.items()
 }
 
-#: Read-only mapping of the seven bounded-context schemas that a ``carddemo_*`` role owns, to
-#: that owning role. Mirrors the seven ``CREATE SCHEMA ... AUTHORIZATION <role>`` statements in
-#: ``data-migration/sql/V0__schemas_and_roles.sql``; the eighth schema, ``reporting``, is owned
-#: by the dedicated ``NOLOGIN`` role ``carddemo_reporting_owner`` and is deliberately absent:
-#: that role holds no credential, so no loader can ever connect as it.
+#: Read-only mapping of each of the eight bounded-context schemas to the ``NOLOGIN``
+#: ``carddemo_<context>_owner`` role that owns it. Mirrors the eight
+#: ``CREATE SCHEMA ... AUTHORIZATION <role>`` statements in
+#: ``data-migration/sql/V0__schemas_and_roles.sql``. Every role named here is created
+#: ``NOLOGIN`` and holds no credential, so no loader can connect as one: DDL authority is
+#: reached by a ``SET ROLE`` from the context's ``_migrator`` role, not by authentication.
 OWNED_SCHEMA_ROLES: Mapping[str, str] = MappingProxyType(_OWNED_SCHEMA_ROLES)
+
+# Assumptions: seven contexts have a migration role and ``reporting`` does not, because
+# reporting-service ships no ``src/main/resources/db/migration`` directory -- the cross-schema
+# views it reads are created by ``data-migration/sql/V1__reporting_views.sql`` under the
+# bootstrap principal instead. The exclusion is named as a constant beside the derivation so it
+# is legible rather than arithmetic, and it matches the seven ``carddemo_<context>_migrator``
+# roles V0 creates.
+# Trade-offs: derived from :data:`SCHEMA_ROLES` by suffix for the same reason
+# :data:`OWNED_SCHEMA_ROLES` is. A hand-written second list of near-identical names is how one
+# list ends up with a context the other lacks, and the failure that produces is a service whose
+# Flyway credential was never created -- which surfaces as an authentication error at startup,
+# naming a role rather than the list that omitted it.
+_SCHEMA_WITHOUT_MIGRATION = "reporting"
+
+_MIGRATION_SCHEMA_ROLES: dict[str, str] = {
+    schema: f"{role}_migrator"
+    for schema, role in _SCHEMA_ROLES.items()
+    if schema != _SCHEMA_WITHOUT_MIGRATION
+}
+
+#: Read-only mapping of the seven bounded-context schemas whose service applies its own Flyway
+#: migration, to the ``carddemo_<context>_migrator`` login role that applies it. Each of these
+#: roles is a member of the schema's :data:`OWNED_SCHEMA_ROLES` entry ``WITH INHERIT FALSE``, so
+#: it can authenticate but owns nothing until it issues ``SET ROLE`` -- which is what makes the
+#: objects a migration creates belong to the ``NOLOGIN`` owner rather than to any credential a
+#: task holds. ``reporting`` is absent because reporting-service ships no migration.
+MIGRATION_SCHEMA_ROLES: Mapping[str, str] = MappingProxyType(_MIGRATION_SCHEMA_ROLES)
 
 # Assumptions: the tuple is derived from the mapping rather than typed out a second
 # time. Two hand-maintained lists of the same eight names is how one of them ends up with
 # seven, and a dict preserves insertion order, so the tuple is already in the bootstrap
 # script's own order without that order having to be restated.
 SCHEMA_NAMES: tuple[str, ...] = tuple(_SCHEMA_ROLES)
+
+# Assumptions: this is the inventory of roles that can AUTHENTICATE, and it is therefore
+# exactly the inventory that needs a credential: the eight connection roles plus the seven
+# migration roles, fifteen in all. The eight ``carddemo_<context>_owner`` roles are deliberately
+# absent -- they are ``NOLOGIN``, so their ``rolpassword`` is null permanently and correctly, and
+# a verification that expected one there could never pass on a cluster that was in fact fully
+# bootstrapped.
+# Trade-offs: derived from the two mappings rather than written out, and sorted so that any log
+# or report built from it is diffable between runs. The alternative -- a third hand-maintained
+# list -- is the copy that goes stale silently, because a role V0 creates but this tuple omits
+# would be reported as missing only if it appeared here, so the omission would hide itself.
+LOGIN_ROLE_NAMES: tuple[str, ...] = tuple(
+    sorted({*_SCHEMA_ROLES.values(), *_MIGRATION_SCHEMA_ROLES.values()})
+)
 
 
 def _require_text(value: object, description: str) -> str:
@@ -759,10 +824,12 @@ def role_for_schema(schema: str) -> str:
     the role a loader connects as, and the secret name its credential is stored under, are both
     derived from one declaration instead of being spelled out again at each call site.
 
-    This is the CONNECTION role, which is not always the schema's owner. For seven of the eight
-    schemas the two coincide; for ``reporting`` they do not, because that schema is owned by the
-    ``NOLOGIN`` role ``carddemo_reporting_owner`` while ``carddemo_reporting`` holds only USAGE
-    and SELECT. Call :func:`owner_role_for_schema` when ownership is the question being asked.
+    This is the CONNECTION role, and for none of the eight schemas is it the schema's owner.
+    Every schema is owned by a ``NOLOGIN`` ``carddemo_<context>_owner`` role, and every
+    connection role holds USAGE on its schema plus named DML on its tables and nothing more --
+    no CREATE, no DROP, no ALTER, and no ability to ``SET ROLE`` to the owner. Call
+    :func:`owner_role_for_schema` when ownership is the question being asked, and
+    :func:`migration_role_for_schema` when the question is which credential may apply DDL.
 
     Parameters
     ----------
@@ -810,40 +877,97 @@ def owner_role_for_schema(schema: str) -> str:
     Parameters
     ----------
     schema : str
-        A bare schema name. Must be one of the seven keys of :data:`OWNED_SCHEMA_ROLES`, which
-        is :data:`SCHEMA_NAMES` without ``reporting``.
+        A bare schema name. Must be one of :data:`SCHEMA_NAMES`; every one of the eight has an
+        owning role, so there is no accepted name this function refuses.
 
     Returns
     -------
     str
-        The ``carddemo_*`` role named in that schema's ``CREATE SCHEMA ... AUTHORIZATION``
-        statement in ``data-migration/sql/V0__schemas_and_roles.sql``.
+        The ``NOLOGIN`` ``carddemo_<context>_owner`` role named in that schema's
+        ``CREATE SCHEMA ... AUTHORIZATION`` statement in
+        ``data-migration/sql/V0__schemas_and_roles.sql``.
+
+    Raises
+    ------
+    ConfigurationError
+        If the schema is not text, is blank, or is not one of the eight known schemas.
+
+    Notes
+    -----
+    Refactoring Rationale: this function used to refuse ``reporting`` with a message explaining
+    that its owner was a ``NOLOGIN`` role rather than a service role. The refusal is gone because
+    its premise is: ALL eight schemas are now owned by a ``NOLOGIN`` role, so the answer it
+    withheld is the answer every schema now has. Keeping the special case would have made the one
+    context that first demonstrated the design look like the exception to it.
+
+    Assumptions: the role returned here can never be connected as. It holds no credential, and
+    ``infra/modules/secrets`` deliberately creates no entry for it. A caller that needs a session
+    with this authority authenticates as :func:`migration_role_for_schema` and issues
+    ``SET ROLE`` -- which is what keeps DDL authority unreachable by presenting a password.
+    """
+    text = _require_text(schema, "schema name")
+    role = _OWNED_SCHEMA_ROLES.get(text)
+    if role is None:
+        # Trade-offs: the message lists the accepted names, for the same reason
+        # :func:`role_for_schema` lists them -- they are published by the bootstrap script, so
+        # nothing resolved is disclosed, and a near-miss such as ``authorisation`` is otherwise
+        # slow to spot from the rejected value alone.
+        raise ConfigurationError(
+            f"unknown schema {text!r}; expected one of {', '.join(OWNED_SCHEMA_ROLES)}"
+        )
+    return role
+
+
+def migration_role_for_schema(schema: str) -> str:
+    """Return the login role that applies one bounded-context schema's Flyway migration.
+
+    Purpose
+    -------
+    Answer the third of the three distinct questions this module keeps apart: which credential
+    may apply DDL to a schema. :func:`role_for_schema` answers which credential serves requests
+    and :func:`owner_role_for_schema` answers which principal owns the objects; this one answers
+    which of the fifteen login roles is permitted to become that owner.
+
+    Parameters
+    ----------
+    schema : str
+        A bare schema name. Must be one of the seven keys of :data:`MIGRATION_SCHEMA_ROLES`,
+        which is :data:`SCHEMA_NAMES` without ``reporting``.
+
+    Returns
+    -------
+    str
+        The ``carddemo_<context>_migrator`` login role, spelled exactly as
+        ``data-migration/sql/V0__schemas_and_roles.sql`` creates it.
 
     Raises
     ------
     ConfigurationError
         If the schema is not text, is blank, is not one of the eight known schemas, or is
-        ``reporting`` -- which is a known schema that no service role owns.
+        ``reporting`` -- a known schema whose service ships no migration and for which no
+        migration role exists.
+
+    Notes
+    -----
+    Assumptions: the two failures are reported with DIFFERENT messages, because they call for
+    different actions. An unknown name is a typo and the accepted set is listed. ``reporting`` is
+    not a typo: it is a real schema whose views are created by
+    ``data-migration/sql/V1__reporting_views.sql`` under the bootstrap principal, so the message
+    says where its DDL comes from instead, which is the answer the caller actually needs.
     """
     text = _require_text(schema, "schema name")
-    role = _OWNED_SCHEMA_ROLES.get(text)
+    role = _MIGRATION_SCHEMA_ROLES.get(text)
     if role is None:
-        # Trade-offs: the two failures are reported with DIFFERENT messages rather than
-        # one shared "not an owned schema", because they call for different actions. A name
-        # that is not a schema at all is a typo, and the accepted set is listed for the same
-        # reason :func:`role_for_schema` lists it. ``reporting`` is not a typo: it is a real
-        # schema whose owner is deliberately not a service role, so the message says who owns
-        # it instead, which is the answer the caller actually needs.
         if text in _SCHEMA_ROLES:
             raise ConfigurationError(
-                f"schema {text!r} is not owned by a carddemo_* role; it is owned by the "
-                "NOLOGIN role carddemo_reporting_owner that "
-                "data-migration/sql/V0__schemas_and_roles.sql creates, because "
-                f"{_SCHEMA_ROLES[text]} is read-only and a schema owner would hold CREATE "
-                "on it implicitly"
+                f"schema {text!r} has no migration role; its objects are created by "
+                "data-migration/sql/V1__reporting_views.sql under the bootstrap principal "
+                "rather than by a service migration, so "
+                "data-migration/sql/V0__schemas_and_roles.sql creates no "
+                f"{text}_migrator login for it"
             )
         raise ConfigurationError(
-            f"unknown schema {text!r}; expected one of {', '.join(OWNED_SCHEMA_ROLES)}"
+            f"unknown schema {text!r}; expected one of {', '.join(MIGRATION_SCHEMA_ROLES)}"
         )
     return role
 
@@ -2080,7 +2204,13 @@ def resolve_alternate_database_users() -> Mapping[str, frozenset[str]]:
         return MappingProxyType({})
 
     description = f"the environment variable {ENV_ALTERNATE_DB_USERS}"
-    owning_roles = frozenset(SCHEMA_ROLES.values())
+    # Assumptions: the accepted keys are ALL FIFTEEN login roles, not just the eight connection
+    # roles. A ``_migrator`` credential is rotated by the same operator procedure as a runtime
+    # one, so an allowlist that could not name it would refuse a legitimately rotated migration
+    # credential -- and the refusal would present as a service failing to start rather than as a
+    # gap in this variable. Widening the KEY domain does not widen what may be allowlisted: the
+    # value check below still refuses any login role as another role's alternate.
+    owning_roles = frozenset(LOGIN_ROLE_NAMES)
     allowlist: dict[str, set[str]] = {}
 
     # Trade-offs: an empty entry is refused rather than skipped, so a trailing comma or a
@@ -2109,7 +2239,7 @@ def resolve_alternate_database_users() -> Mapping[str, frozenset[str]]:
             # Assumptions: an unrecognised role is refused rather than ignored. An ignored
             # entry is the worst outcome available here, because the operator believes an
             # exception is in force, the misspelling means it is not, and the discovery comes as
-            # a refused connection during a rotation window. The eight accepted roles are named
+            # a refused connection during a rotation window. The fifteen accepted roles are named
             # in the message for the same reason :func:`role_for_schema` names the eight schemas:
             # they are published by the bootstrap script, so nothing resolved is disclosed.
             raise ConfigurationError(
@@ -2130,7 +2260,7 @@ def resolve_alternate_database_users() -> Mapping[str, frozenset[str]]:
             # write grants on the ledger and account schemas -- and be treated as legitimate.
             raise ConfigurationError(
                 f"{description} allowlists an owning role as the alternate for role {role!r}; "
-                f"an alternate must be a rotation user distinct from all eight owning roles"
+                f"an alternate must be a rotation user distinct from all fifteen login roles"
             )
         allowlist.setdefault(role, set()).add(alternate)
 
@@ -2491,7 +2621,58 @@ def database_secret_name(schema: str) -> str:
     # single-sourced in :func:`parameter_path`: the two names stay identical except for the one
     # character the two stores genuinely disagree about, so a prefix or environment change still
     # moves both together.
-    return parameter_path(_AURORA_SEGMENT, role_for_schema(schema)).lstrip("/")
+    return database_secret_name_for_role(role_for_schema(schema))
+
+
+def database_secret_name_for_role(role: str) -> str:
+    """Return the secret store name holding the credential for one login role.
+
+    Purpose
+    -------
+    Compose the credential path from a ROLE rather than from a schema, so that the two credentials
+    a migrating context has -- its runtime role and its ``_migrator`` role -- resolve through one
+    convention instead of two. :func:`database_secret_name` is the schema-keyed form and delegates
+    here, which is what keeps the composed name identical for both tiers.
+
+    Parameters
+    ----------
+    role : str
+        A login role name, which must be one of :data:`LOGIN_ROLE_NAMES`.
+
+    Returns
+    -------
+    str
+        The full secret name, for example ``carddemo/dev/aurora/carddemo_auth_migrator`` -- the
+        parameter path with its leading separator removed, for the reason recorded on
+        :func:`database_secret_name`.
+
+    Raises
+    ------
+    ConfigurationError
+        If the role is not text, is blank, or is not one of the fifteen login roles the bootstrap
+        script creates.
+
+    Notes
+    -----
+    Assumptions: the role is checked against a closed inventory rather than merely pattern-matched,
+    and the reason is that this function composes a name a caller then reads a CREDENTIAL from. A
+    free-form role would let a caller construct a path to any secret sharing this prefix -- the
+    Cognito seed-user entries do -- and have it read as a database credential. Checking membership
+    means the only names this function can build are the ones ``infra/modules/secrets`` creates.
+
+    Assumptions: an owner role is refused by that same check, because ``LOGIN_ROLE_NAMES`` excludes
+    the eight ``NOLOGIN`` ``carddemo_<context>_owner`` roles. Refusing is correct rather than
+    unhelpful: no secret exists for them, so the alternative is a not-found error naming a path
+    that was never created, which reads as a provisioning failure rather than as a caller asking
+    for a credential that by design does not exist.
+    """
+    text = _require_text(role, "database role name")
+    if text not in LOGIN_ROLE_NAMES:
+        raise ConfigurationError(
+            f"unknown database login role {text!r}; expected one of "
+            f"{', '.join(LOGIN_ROLE_NAMES)}"
+        )
+    return parameter_path(_AURORA_SEGMENT, text).lstrip("/")
 
 
 @lru_cache(maxsize=1)
@@ -2664,7 +2845,81 @@ def resolve_aurora_settings(schema: str) -> AuroraConnectionSettings:
     # unknown schema from an immediate ConfigurationError into a parameter lookup against a
     # path composed from a bad name, which surfaces as an access-denied error naming a
     # resource that never existed.
-    secret_name = database_secret_name(schema)
+    return _resolve_settings_for_role(schema, role_for_schema(schema))
+
+
+def resolve_migration_settings(schema: str) -> AuroraConnectionSettings:
+    """Resolve the connection parameters for the role that applies one schema's migration.
+
+    Purpose
+    -------
+    Supply the second of a migrating context's two credentials -- the ``_migrator`` login, whose
+    membership of the schema's ``NOLOGIN`` owner is what lets a migration create objects the
+    runtime credential can then only read and write. It exists as a separate entry point rather
+    than as a flag on :func:`resolve_aurora_settings` so that a caller asking for DDL authority
+    has to say so.
+
+    Parameters
+    ----------
+    schema : str
+        A bare schema name, one of the seven keys of :data:`MIGRATION_SCHEMA_ROLES`. Validated
+        before any AWS call is made, so a misspelling costs no round trip.
+
+    Returns
+    -------
+    AuroraConnectionSettings
+        A frozen descriptor whose rendering masks the password, identical in shape to the one
+        :func:`resolve_aurora_settings` returns and differing only in the user it authenticates as.
+
+    Raises
+    ------
+    ConfigurationError
+        For every reason :func:`resolve_aurora_settings` raises, plus: if the schema is
+        ``reporting``, which ships no migration and has no migration role.
+
+    Notes
+    -----
+    Assumptions: a session opened with these settings owns NOTHING until it issues
+    ``SET ROLE carddemo_<context>_owner``. V0 grants the migration role its owner ``WITH INHERIT
+    FALSE`` deliberately, so a caller that resolves these settings and then forgets the
+    ``SET ROLE`` fails with a permission error on its first statement rather than silently
+    creating objects owned by the migration role -- which would leave every
+    ``ALTER DEFAULT PRIVILEGES FOR ROLE <owner>`` clause in V0 inert.
+    """
+    return _resolve_settings_for_role(schema, migration_role_for_schema(schema))
+
+
+def _resolve_settings_for_role(schema: str, role: str) -> AuroraConnectionSettings:
+    """Assemble one validated connection descriptor for a named role in a named schema.
+
+    Purpose
+    -------
+    Hold the resolution sequence once, so the runtime and migration entry points differ only in
+    the role they ask for and cannot come to disagree about the endpoint, the user-name assertion
+    or the transport requirements.
+
+    Parameters
+    ----------
+    schema : str
+        The bounded-context schema the settings were requested for. Reported in failure messages.
+    role : str
+        The login role to resolve, already derived by the calling entry point.
+
+    Returns
+    -------
+    AuroraConnectionSettings
+        A frozen descriptor whose rendering masks the password.
+
+    Raises
+    ------
+    ConfigurationError
+        If the role is unknown; if the environment name or prefix cannot be resolved; if any
+        parameter or the secret is absent, unreadable or malformed; if the secret's user name is
+        neither the requested role nor an alternate allowlisted for it; if the requested SSL mode
+        is weaker than :data:`REQUIRED_SSL_MODE`; if the TLS trust anchor is absent or unreadable;
+        or if any resolved value fails the descriptor's own validation.
+    """
+    secret_name = database_secret_name_for_role(role)
     host, port, database = _aurora_endpoint()
     username, password = _secret_credentials(secret_name)
 
@@ -2679,7 +2934,7 @@ def resolve_aurora_settings(schema: str) -> AuroraConnectionSettings:
     # detect that case, because in it the name is correct and the contents are not. The exception
     # is now expressed as an explicit, per-role allowlist instead of as an absent check, so
     # alternating rotation is still supported and everything else is refused.
-    username = _require_matching_database_user(schema, role_for_schema(schema), username)
+    username = _require_matching_database_user(schema, role, username)
 
     # Assumptions: the two transport checks run AFTER the parameters and the credential
     # have resolved, not before. Ordering them last costs nothing -- neither reads AWS -- and

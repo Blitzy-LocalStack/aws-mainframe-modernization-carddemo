@@ -3331,14 +3331,26 @@ PA_ACCOUNT_STATUS_ELEMENT_LENGTH: Final[int] = 2
 #   the same fields, so a malformed byte here could emit in full precisely what the Java refuses
 #   to emit at all. The two lists below reconcile that, and the reconciliation is expressed as an
 #   ALLOWLIST so the default direction is closed.
-# Assumptions: this frozenset names every authorization field whose bytes MAY be rendered, and
-#   the line it draws is the Java policy's own -- closed-domain codes, dates, times, counters and
-#   pad on the disclosable side; cardholder-identifying or amount-bearing content on the other.
-#   Each name below is one of: a date or time (the Java note states these are deliberately not
-#   sensitive), a code from a small closed domain, a count rather than a money value, an account
-#   identifier the published contracts render in full, or the trailing pad. Merchant STATE is
-#   here and merchant CITY, ZIP, NAME and ID are not, which mirrors the Java set exactly: a
-#   two-character state is a closed domain, the other four narrow to a place or a party.
+# Assumptions: this frozenset names every authorization field whose bytes MAY be rendered.
+#   Each name below is one of: a date or time, a code from a small closed domain, a count rather
+#   than a money value, an account identifier the published contracts render in full, or the
+#   trailing pad. Merchant STATE is here and merchant CITY, ZIP, NAME and ID are not, because a
+#   two-character state is a closed domain while the other four narrow to a place or a party.
+# Refactoring Rationale: this block used to claim the set "mirrors the Java set exactly" and that
+#   "the line it draws is the Java policy's own", naming CsvAuthCodec as that policy. Both
+#   statements were misleading, and the reason is that there were THREE policies rather than two.
+#   CsvAuthCodec classifies the request and reply PAYLOADS, which carry no customer identifier
+#   and none of the summary segment's limits, balances or counters -- so on the summary segment it
+#   had no opinion to mirror at all, and "exactly" could not be true of it. The artifact this
+#   module actually mirrors is CopybookLayout.java, the Java transcription of the same two
+#   copybooks, and at the time of the claim that file marked one field sensitive in the detail
+#   segment and none in the summary. The claim was therefore false of the counterpart it should
+#   have named and unverifiable against the one it did name.
+# Assumptions: the parity is now REAL and is asserted rather than asserted-about.
+#   CopybookLayout.AUTHORIZATION_DISCLOSABLE_FIELDS holds these same names, applied the same way
+#   through the same fail-closed helper, and a Java test reads THIS file and fails the build if
+#   the two sets differ by a single name. So the sentence above is checkable: adding a name here
+#   without adding it there breaks the Java build, and the reverse breaks it too.
 # Trade-offs: an allowlist reads longer than the four extra sensitive markers it replaces, and
 #   that length is the point. With a denylist, a field added to either segment later would be
 #   disclosable until somebody remembered to mark it; with this allowlist it is withheld until

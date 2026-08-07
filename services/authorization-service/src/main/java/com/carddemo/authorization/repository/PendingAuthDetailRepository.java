@@ -2,10 +2,12 @@ package com.carddemo.authorization.repository;
 
 import com.carddemo.authorization.domain.PendingAuthDetail;
 import com.carddemo.authorization.domain.PendingAuthDetailKey;
+import jakarta.persistence.LockModeType;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.data.domain.Limit;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -129,4 +131,41 @@ public interface PendingAuthDetailRepository
      *     none is
      */
     Optional<PendingAuthDetail> findByCardNumAndTransactionId(String cardNum, String transactionId);
+
+    /**
+     * Reads one authorization by its full three-part key and holds it for update.
+     *
+     * <p>Assumptions: the lock is what makes the fraud write's find-then-insert sequence safe. That
+     * write probes {@code auth_fraud} and takes the insert path when it finds nothing, so two requests
+     * naming one authorization must not both observe an absent fraud row; both must first read THIS row,
+     * so locking it here serialises them before either probe runs. Without the lock the second request
+     * would reach a uniqueness violation on the fraud table's primary key, which inside one transaction
+     * is unrecoverable rather than retryable, and the caller would receive an internal failure for a
+     * request that was merely concurrent.
+     *
+     * <p>Refactoring Rationale: the lock is a transcription rather than a target-only addition. The
+     * reference detail screen re-reads the segment for update inside its fraud path -- {@code MARK-AUTH-FRAUD}
+     * at {@code app/app-authorization-ims-db2-mq/cbl/COPAUS1C.cbl} L233 performs {@code READ-AUTH-RECORD},
+     * whose {@code EXEC DLI GU} on the parent at L439 and {@code GNP} on the child at L465 run against an
+     * update-capable program communication block, so the occurrence is held before the {@code REPL} at
+     * L525 to L528. The migrated form of holding an occurrence for replacement is a pessimistic write
+     * lock, and it is declared here rather than left to the provider's default because the default is no
+     * lock at all.
+     *
+     * <p>Trade-offs: this is a PESSIMISTIC lock where the account and card contexts use an optimistic
+     * version column. The two situations differ in one respect that decides it: an optimistic version
+     * detects a conflict when the write lands, which is fine when the only casualty is that write, but
+     * this operation's conflict lands on a DIFFERENT table's primary key, where the failure is a
+     * constraint violation rather than a version mismatch and cannot be reported as a contention. The
+     * cost accepted is that concurrent marks of one authorization queue rather than one of them failing
+     * fast, and the queue is short because the transaction holding the lock performs two writes and
+     * commits.
+     *
+     * @param id the account identifier, decoded Julian authorization date and decoded millisecond
+     *     authorization time forming the composite key; must not be {@code null}
+     * @return the authorization that key names, held for update until the surrounding transaction ends,
+     *     or an empty optional when the key names no row
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    Optional<PendingAuthDetail> findWithLockById(PendingAuthDetailKey id);
 }

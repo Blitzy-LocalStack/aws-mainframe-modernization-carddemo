@@ -657,15 +657,24 @@ variable "cloudfront_api_connect_src_origins" {
 #       environment variable, so a variable that accepts key material is a
 #       channel for committing key material however carefully it is used;
 #       `sensitive = true` changed only how a plan RENDERED the value, never
-#       whether a tfvars or state file could hold it. main.tf now GENERATES the
-#       pair with tls_private_key/tls_self_signed_cert and writes it straight
+#       whether a tfvars or state file could hold it.
+#       Refactoring Rationale: this went on to say that main.tf "now GENERATES
+#       the pair with tls_private_key/tls_self_signed_cert and writes it straight
 #       into two root-owned Secrets Manager entries and into
-#       aws_acm_certificate, so the material has no input to arrive through.
+#       aws_acm_certificate". That intermediate arrangement is withdrawn in full:
+#       it moved the key out of a VARIABLE and into STATE, which is the same
+#       material in a place that is equally readable and harder to notice. All
+#       four resources are deleted and the tls provider requirement with them.
+#       Each task now mints its own listener key pair and self-signed certificate
+#       before the JVM starts (config/docker/generate-listener-material.sh), so
+#       there is no shared key at all -- not in a tfvars file, not in state, and
+#       not in a task definition.
 #       Alternatives Considered: keeping the inputs nullable and letting a
 #       supplied pair win over the generated one. Rejected: an optional channel
-#       for key material is still a channel, and the operator-issued case is
-#       served instead by importing the certificate into ACM out of band, which
-#       is the service built to custody a private key and never re-export it.
+#       for key material is still a channel. The operator-issued case is served
+#       by var.alb_certificate_arn, which names a certificate the operator has
+#       already imported into ACM out of band -- the service built to custody a
+#       private key and never re-export it.
 #       Trade-offs: an environment that requires a certificate from its own
 #       authority now needs that out-of-band ACM import rather than a variable.
 #       Accepted, because the listeners this pair serves are internal to the

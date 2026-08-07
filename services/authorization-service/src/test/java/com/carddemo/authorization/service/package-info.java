@@ -1,20 +1,30 @@
 /**
  * Unit tests for the queue-driven decision path of the authorization bounded context.
  *
- * <p><b>Purpose.</b> Two classes execute here, and between them they pin the behaviour of the one
+ * <p><b>Purpose.</b> Three classes execute here, and between them they pin the behaviour of the one
  * program in this context that decides money: {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl}.
  * {@code AuthorizationDecisionServiceTest} covers the decision itself -- which of eight outcomes a
- * request reaches and which four-character reason it reports -- and
+ * request reaches and which four-character reason it reports --
  * {@code AuthorizationRequestListenerTest} covers everything around the decision: the order the three
  * account-context reads happen in, the key the recorded row is given, the values that are refused before
- * any lookup, and the destinations a reply may be sent to.</p>
+ * any lookup, the three verdicts a supplied expiry attribute reaches, the per-component contract every
+ * decoded request is admitted through, and the destinations a reply may be sent to together with the
+ * allowlist shapes that are refused at construction, and the keyed token a diagnostic names in place of
+ * the transaction identifier. {@code OutboxPublisherTest} covers what the reply
+ * publisher refuses to be constructed with -- the batch size one pass may claim and the delay between
+ * passes -- which is the other half of the same fail-closed configuration property.</p>
  *
- * <p>Assumptions: neither class starts a Spring context, opens a database or touches a queue. The
- * decision service holds no state and takes its inputs as one argument, and the listener takes every
- * collaborator through its constructor, so both are exercised with plain objects and a fixed clock. That
- * is the whole reason the decision was extracted from the listener in the first place: a branch table
- * with eight outcomes is worth asserting exhaustively, and it cannot be asserted exhaustively through a
- * container.</p>
+ * <p>Assumptions: no class here starts a Spring context, opens a database or touches a queue. The
+ * decision service holds no state and takes its inputs as one argument, and the listener and the
+ * publisher take every collaborator through their constructors, so all three are exercised with plain
+ * objects and a fixed clock. That is the whole reason the decision was extracted from the listener in the
+ * first place: a branch table with eight outcomes is worth asserting exhaustively, and it cannot be
+ * asserted exhaustively through a container.</p>
+ *
+ * <p>Assumptions: the listener's validating mapper is used REAL rather than mocked, and it is the one
+ * collaborator of the listener that is. What several cases assert is that a malformed component is
+ * REFUSED rather than coerced, and a mocked mapper returns whatever it was told to -- so it would pass
+ * just as readily against the unvalidated path that collaborator was added to close.</p>
  *
  * <p>Assumptions: the reference program is the specification and is read, never modified. Every
  * assertion below cites the paragraph and line range it comes from, so a reader can confirm the expected

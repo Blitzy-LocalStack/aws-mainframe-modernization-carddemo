@@ -22,12 +22,33 @@ import org.springframework.context.annotation.Configuration;
  * contract of record. The hand-authored {@code src/main/resources/openapi/reporting-api.yaml} is
  * what {@code ui/src/api/reporting.ts} is written against, so it decides on any disagreement, and
  * the document generated from this context's request handlers is a CHECK on it rather than a second
- * source of truth. The compromise accepted is that the two can drift apart quietly, because no build
- * step compares them; the offsetting benefit is that a drift becomes discoverable at all, which a
- * single generated document could never be. Measured while this class was authored, that contract
- * file was not yet present in the tree, so every value below is pitched at the narrowest scope that
- * is accurate and carries no claim this context cannot honour. Where that contract and a database
- * migration disagree about a shape, the migration sits upstream of both and decides.</p>
+ * source of truth. Where that contract and a database migration disagree about a shape, the
+ * migration sits upstream of both and decides.</p>
+ *
+ * <p>Refactoring Rationale: the paragraph above previously ended by recording that the contract file
+ * "was not yet present in the tree", two sentences after naming it the document that decides on any
+ * disagreement. Both halves were written honestly and together they were a contradiction: a file
+ * cannot be the arbiter of a disagreement and also be absent. The contract now exists at that exact
+ * path and the contradiction is removed by the file rather than by the wording, which is the only
+ * one of the two repairs a consumer benefits from.</p>
+ *
+ * <p>Refactoring Rationale: the same paragraph also claimed that the two documents "can drift apart
+ * quietly, because no build step compares them". Two build steps now compare them, and stating which
+ * is what makes the residual gap legible instead of overstated.
+ * {@code src/test/java/com/carddemo/reporting/api/ReportingApiContractTest.java} asserts that the
+ * committed document parses, that its specification version, its whole information block and its
+ * single security scheme equal the ones this bean serves, that every path sits beneath the prefix
+ * both routing hops forward, that every operation carries an identifier and the authority the filter
+ * chain enforces, and that every internal reference resolves. {@code ui/src/api/contracts.test.ts}
+ * asserts that the browser client implements exactly the operation set the document declares,
+ * neither more nor fewer.</p>
+ *
+ * <p>Trade-offs: what remains unchecked is FIELD-LEVEL agreement between a request handler and the
+ * document -- whether a property this context serializes carries the name, type and width the
+ * contract declares for it. No step compares those, because one side is Java and the other YAML and
+ * nothing in this build reads both as schemas. The generated document is still the instrument for
+ * that half, read by eye, and the cost of the arrangement is accepted: naming the boundary is what
+ * stops a green build from being mistaken for full contract conformance.</p>
  *
  * <p>Assumptions: {@code GET /actuator/health} is supplied by the framework and is deliberately not
  * a declared operation of this contract, so its absence from the published document is correct
@@ -40,11 +61,16 @@ import org.springframework.context.annotation.Configuration;
  * because either one would let those two consumers disagree about liveness, with one calling the
  * task healthy while the other took it out of service.</p>
  *
- * <p>Assumptions: the count of declared operations is deliberately not stated anywhere in this file.
- * Measured while this class was authored, {@code com.carddemo.reporting.api} held exactly one file,
- * its package charter, and zero request-handler types, so there was no operation list to count. A
- * number written here would therefore have been a guess, and a guess in document metadata is worse
- * than an absence because it reads as measured.</p>
+ * <p>Assumptions: the count of declared operations is deliberately not stated anywhere in this file,
+ * and the reason is now different from the one first recorded here. It was that
+ * {@code com.carddemo.reporting.api} held no request-handler type under {@code src/main/java} -- still
+ * true, that directory holding its package charter and nothing else -- so there was no operation list
+ * to count and a number written here would have been a guess. The committed contract now declares
+ * five operations, so a count is available; it is still not written here, because this bean
+ * contributes no path and a figure in its metadata would describe the contract's content rather than
+ * this bean's, giving a reader two places to look for one number. {@code ReportingApiContractTest}
+ * pins that figure as an exact set of five paths and five identifiers where they are declared, so the
+ * count is asserted once rather than restated here.</p>
  *
  * <p>Alternatives Considered: the singular and the parenthesised registers for the four rationale
  * labels used throughout this file. Rejected on a census measured across this repository while this
@@ -95,25 +121,60 @@ public class OpenApiConfig {
             starting of an on-demand report execution.\
             """;
 
+    // WHY : Refactoring Rationale: the read-only claim is stated about the SERVICE and its login
+    //       rather than about the schema, and an earlier revision of this constant was not. That
+    //       revision read that this context "owns no table, index or constraint" with no
+    //       qualification, which is true of the module and of the login and NOT true of the schema:
+    //       data-migration/sql/V1__reporting_views.sql creates reporting.card_grouping_key, owned by
+    //       the no-login role carddemo_reporting_owner and revoked from carddemo_reporting, which
+    //       holds the secret that keeps the per-card statement grouping token non-invertible. A
+    //       caller reading the unqualified form would conclude the schema was empty of tables, and a
+    //       maintainer would read the revoke on one as dead code. The three-level statement --
+    //       the service owns none, the schema holds exactly one, the service cannot read it -- is
+    //       set out once in docs/architecture/data-model-and-schema-mapping.md, which is the
+    //       ownership authority for all eight schemas, and is cited here rather than restated in
+    //       full, because a published contract description is not the place a reader should have to
+    //       learn a privilege model.
     // WHY : Assumptions: the description states what this context reads and what shape its output
     //       takes, both of which a caller needs and neither of which is derivable from an operation
     //       list. The two report edit masks are named separately on purpose: app/cpy/CVTRA07Y.cpy
     //       declares a leading-minus mask at its L30 for a detail amount and a leading-plus mask at
     //       its L54, L60 and L66 for the page, account and grand totals, each 15 characters wide,
     //       and treating them as one mask would change the bytes this context emits.
+    //
+    // WHY : Refactoring Rationale: this value is now BYTE-IDENTICAL to the info.description of the
+    //       committed contract at src/main/resources/openapi/reporting-api.yaml, paragraph breaks
+    //       included, and ReportingApiContractTest compares the two. It was not before: the two
+    //       texts said compatible things in different words, which is precisely the state in which
+    //       a reader cannot tell whether the difference is meaningful. Making them equal turns the
+    //       relationship between this bean and that document from "believed consistent" into
+    //       "checked", and the direction of the copy is deliberate -- the document is the contract
+    //       of record, so this constant is derived from it rather than the reverse.
+    //
+    // WHY : Assumptions: the three paragraphs are separated by a blank line in the text block, which
+    //       yields exactly the two newlines the contract's folded scalar yields for the same break.
+    //       Every other line ends with a backslash so it contributes a space and not a newline. That
+    //       is not cosmetic here: a single stray newline makes the equality assertion fail, which is
+    //       the intended sensitivity rather than a fragility to work around.
     private static final String CONTRACT_DESCRIPTION = """
             Reports and statements for the migrated CardDemo credit-card system. This context reads \
-            and never writes: its queries resolve against read-only cross-schema views under a \
-            database role holding select and nothing else, and it owns no table, index or \
-            constraint. The surface it publishes covers the transaction detail report, whose \
-            133-column width comes from the X(133) separator declared at app/cpy/CVTRA07Y.cpy L48; \
-            the account statement pair rendered as plain text and as HTML; and the starting of an \
-            on-demand report execution, which stands in for the baseline's submission of job \
-            control text to a transient data queue. Monetary amounts are carried as JSON strings so \
-            that no client parses one into IEEE-754 binary floating point. The report's two \
-            distinct COBOL edit masks are preserved separately rather than unified: \
-            app/cpy/CVTRA07Y.cpy L30 declares a leading-minus mask for a detail amount, while its \
-            L54, L60 and L66 declare a leading-plus mask for the page, account and grand totals.\
+            and never writes: its queries resolve against the read-only cross-schema views created \
+            by data-migration/sql/V1__reporting_views.sql under a database role holding select and \
+            nothing else, and it owns no table, index or constraint. It therefore ships no \
+            schema-migration directory, and one appearing beneath this module would itself be a \
+            defect.
+
+            Three surfaces are published. The transaction detail report preserves the 133-column \
+            width that the X(133) separator at app/cpy/CVTRA07Y.cpy L48 fixes, and it preserves its \
+            two distinct COBOL edit masks separately rather than unifying them: L30 declares a \
+            leading-minus mask for a detail amount, while L54, L60 and L66 declare a leading-plus \
+            mask for the page, account and grand totals. The account statement pair is rendered as \
+            plain text and as HTML and is returned by URI. The submission operation stands in for \
+            the baseline's writing of job-control text to a transient data queue, which \
+            app/csd/CARDDEMO.CSD L502 maps to the internal reader.
+
+            Monetary amounts are carried as JSON strings so that no client parses one into \
+            IEEE-754 binary floating point.\
             """;
 
     // WHY : Assumptions: the identifier is the SPDX short form rather than a prose licence name,

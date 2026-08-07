@@ -39,7 +39,7 @@ import org.springframework.context.ConfigurableApplicationContext;
  *
  * <h2>What is not yet runnable, stated before either contract</h2>
  *
- * <p><strong>Assumptions: no {@link Job} bean exists in this module yet, so no {@code --job=} value
+ * <p>Assumptions: <strong>no {@link Job} bean exists in this module yet, so no {@code --job=} value
  * can currently complete a run.</strong> This class is authored ahead of the seven jobs it launches:
  * {@link #JOB_NAMES} is the argument contract those beans must satisfy, not an inventory of beans
  * that exist. Both contracts below are therefore TARGET contracts, and the two things that already
@@ -187,7 +187,7 @@ import org.springframework.context.ConfigurableApplicationContext;
  * exactly when the baseline skipped it and skip it exactly when the baseline ran it, and every clean
  * night would look correct because a clean night reports {@code 0} either way.</p>
  *
- * <p><strong>Assumptions: that gate is NOT the consumer of this class's warn tier, and the two must
+ * <p>Assumptions: <strong>that gate is NOT the consumer of this class's warn tier, and the two must
  * not be conflated.</strong> A {@code COND} parameter is evaluated against the return codes of
  * earlier steps IN THE SAME JOB and can see nothing outside it, so {@code TRANBKP.jcl:51} gates its
  * own job's cluster redefine against its own job's preceding steps -- {@code STEP05R}, a

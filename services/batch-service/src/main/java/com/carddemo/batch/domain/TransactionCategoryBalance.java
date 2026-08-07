@@ -160,69 +160,37 @@ import org.hibernate.type.SqlTypes;
  * omitting it makes the break fire spuriously, flush one account repeatedly and update that
  * account's balance more than once in a run.</p>
  *
- * <p>Assumptions: the ordering has to be <b>deterministic</b> across runs and not merely grouped,
- * because the accrual step is redrivable. {@code app/cbl/CBACT04C.cbl} lines 474 to 480 compose the
- * identifier of each generated interest transaction by concatenating the injected business date
- * with an incrementing suffix, so the sequence in which rows arrive decides which identifier each
- * generated transaction receives. Two runs over the same data that disagreed about row order would
- * produce the same balances under different identifiers.</p>
- *
- * <p>Assumptions: accrual <b>never writes this table</b>, and that was verified rather than
- * assumed, because it is the kind of claim that is expensive to get wrong in either direction. The
- * only {@code REWRITE} in {@code app/cbl/CBACT04C.cbl} is against the account file at line 356, and
- * the only {@code WRITE} is against the transaction file at line 500; no statement in the program
- * writes or rewrites the category-balance file. In particular the balance carried here is
- * <b>not</b> reset by an accrual run: what {@code 1050-UPDATE-ACCOUNT} at lines 350 to 356 zeroes
- * at lines 353 and 354 are the two account-level cycle accumulators, after adding the accumulated
- * interest to the account balance at line 352, and the interest transactions it generates go to a
- * separate sequential dataset that {@code app/jcl/INTCALC.jcl} lines 37 to 41 mount as
- * {@code AWS.M2.CARDDEMO.SYSTRAN(+1)}. No accrual-side mutation of this type may be added on the
- * assumption that the baseline performs one.</p>
- *
  * <h2>The table is not this module's to own</h2>
  *
  * <p>{@code ledger.transaction_category_balances} belongs to {@code transaction-service}, which
  * creates it through its own migration at
- * {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql} lines 694 to
- * 742. This module writes it under the narrowly-scoped cross-schema grant that the migration plan's
+ * {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql} lines 787 to
+ * 885. This module writes it under the narrowly-scoped cross-schema grant that the migration plan's
  * section 0.4.1.3 records as <b>the one documented exception to database-per-service purity in the
  * whole migration</b>, and the reason the exception exists is the three-write unit of work above:
  * keeping those three writes in one ACID commit is what keeps partial-posting states unobservable.
  * The grants themselves are created by {@code data-migration/sql/V0__schemas_and_roles.sql}.</p>
  *
- * <p>Assumptions: this file is a <b>local</b> mapping of a table another service owns, and every
- * column, SQL type, length, precision, scale and Java type in it is asserted against that migration
- * rather than chosen here. Where this mapping and that file could be read differently, the
- * migration is the authority: the provider validates its mappings against the physical schema at
- * start-up, and this module holds no grant that could alter a column to suit a mapping.</p>
- *
  * @see Account
  * @see CardXref
  * @see DailyTransaction
  */
-// WHY : Alternatives Considered: reusing transaction-service's own mapping of this table instead of
-//       declaring a local one. Rejected on three independent grounds. The migration plan's section
-//       0.5.3.1 forbids one service from importing another's domain package, and the ArchUnit rule
-//       A2 in com.carddemo.common.architecture.LayeringRulesTest enforces that at build time, so
-//       the import would fail the reactor rather than a review. A compile-time dependency between
-//       two independently deployable services also reintroduces exactly the coupling a bounded
-//       context exists to remove: the two would then have to be released together. And common-lib
-//       cannot host the type as a shared one, because it ships no persistence provider by design.
-//       The cost accepted is that one table has two mappings, which is why the paragraph above
-//       states that the owning migration -- not either mapping -- is the authority on the shape.
-// WHY : Alternatives Considered: naming the schema explicitly here rather than leaving it to the
-//       connection's search path. Rejected because this module spans four schemas at three
-//       different grant levels -- batch, which it owns; ledger and account, on which it holds
-//       scoped write grants; and reference, on which it holds SELECT only -- so no single search
-//       path can disambiguate them. Naming the schema also puts the grant boundary in view at the
-//       mapping site, where a reader deciding whether a write is legal is actually looking.
-// WHY : Assumptions: the mapping is DDL-passive. The table, its four columns and its composite
-//       primary key are created by the owning service's V1__ledger.sql, and the provider's schema
-//       handling is never set stronger than validation, so the annotations here describe a shape
-//       that already exists rather than requesting one. That is why no index, no unique constraint,
-//       no column definition and no generated value appears anywhere below. BatchRun in this same
-//       package is the only entity whose table this module owns, and therefore the only one
-//       entitled to declare a constraint of its own.
+// Alternatives Considered: reusing transaction-service's own mapping of this table instead of
+//     declaring a local one. Rejected on three independent grounds. The migration plan's section
+//     0.5.3.1 forbids one service from importing another's domain package, and the ArchUnit rule
+//     A2 in com.carddemo.common.architecture.LayeringRulesTest enforces that at build time, so
+//     the import would fail the reactor rather than a review. A compile-time dependency between
+//     two independently deployable services also reintroduces exactly the coupling a bounded
+//     context exists to remove: the two would then have to be released together. And common-lib
+//     cannot host the type as a shared one, because it ships no persistence provider by design.
+//     The cost accepted is that one table has two mappings, which is why the paragraph above
+//     states that the owning migration -- not either mapping -- is the authority on the shape.
+// Alternatives Considered: naming the schema explicitly here rather than leaving it to the
+//     connection's search path. Rejected because this module spans four schemas at three
+//     different grant levels -- batch, which it owns; ledger and account, on which it holds
+//     scoped write grants; and reference, on which it holds SELECT only -- so no single search
+//     path can disambiguate them. Naming the schema also puts the grant boundary in view at the
+//     mapping site, where a reader deciding whether a write is legal is actually looking.
 @Entity
 @Table(name = "transaction_category_balances", schema = "ledger")
 public class TransactionCategoryBalance {
@@ -256,7 +224,7 @@ public class TransactionCategoryBalance {
     //       since the three components are exactly what that path already holds.
     // WHY : Assumptions: @EmbeddedId is the one structural annotation this DDL-passive mapping must
     //       declare, and it is not an exception to the passivity stated above. It maps the primary
-    //       key the owning migration already created at V1__ledger.sql lines 740 and 741 as
+    //       key the owning migration already created at V1__ledger.sql lines 883 and 884 as
     //       pk_transaction_category_balances over (account_id, type_cd, category_cd); without it
     //       the type is not a valid entity at all, because a mapped class has to identify its rows.
     @EmbeddedId
@@ -321,17 +289,60 @@ public class TransactionCategoryBalance {
     //       one: the service layer forms the new balance through Money and assigns it through the
     //       mutator below, and the multiply-before-divide order stays inside the one type that owns
     //       it rather than being restated at each call site.
-    // WHY : Assumptions: the column is nullable in the owning migration and this member does not
-    //       restate a NOT NULL that the schema does not assert. V1__ledger.sql declares NOT NULL on
-    //       the three primary-key columns only, at lines 703, 709 and 715, and leaves balance
-    //       nullable at line 726, because a blank fixed-width field decodes to an absent value at
-    //       the load boundary and asserting more widely here would refuse a load the reference
-    //       system itself accepts. Nothing this type ORIGINATES is ever absent, since both public
+    // WHY : Refactoring Rationale: nullable = false was ADDED here to match the NOT NULL the owning
+    //       migration now declares on this column at V1__ledger.sql line 869. The note this replaces
+    //       held that "the column is nullable in the owning migration and this member does not
+    //       restate a NOT NULL that the schema does not assert", that the migration declares NOT
+    //       NULL "on the three primary-key columns only", and that balance was left nullable
+    //       "because a blank fixed-width field decodes to an absent value at the load boundary". The
+    //       first two parts are now false, and the third was never true of THIS field: all 50
+    //       records of app/data/ASCII/tcatbal.txt carry an explicit zoned zero in the balance field
+    //       and not one carries blanks, and the reference create path INITIALIZEs the record to zero
+    //       at app/cbl/CBTRN02C.cbl line 504 before adding at line 508, so zero is the base rather
+    //       than an absent value. The second part was already false before this change: the same
+    //       migration asserts NOT NULL on proc_ts at V1__ledger.sql line 265, a column its table
+    //       does not key on.
+    // WHY : Assumptions: the guarantee is therefore about every row rather than only about values
+    //       this type originates, and that widening is the substantive change. Both public
     //       constructors and the mutator route through Money, which has no representation for an
-    //       absent amount; that is a guarantee about values this type creates, not a claim about
-    //       every row the table can hold.
-    @Column(name = "balance", precision = 11, scale = 2)
+    //       absent amount, but a row already holding NULL is materialised by field assignment and
+    //       bypasses all three -- yielding a null on the one member the posting arithmetic
+    //       dereferences. The column now forbids the state, so the hydration path has nothing to
+    //       admit. The three primary-key columns remain NOT NULL, at V1__ledger.sql lines 810, 816
+    //       and 822.
+    // WHY : Assumptions: there is no decode path that produces an absent balance, which is what makes
+    //       the constraint safe as well as correct. com.carddemo.common.codec.ZonedDecimalCodec
+    //       refuses a numeric body that is blank or carries a non-digit, and
+    //       carddemo_migration.copybook.zoned refuses the same, so a blank TRAN-CAT-BAL field is a
+    //       load FAILURE rather than an absent value. The picture agrees: a signed zoned display
+    //       field always carries eleven digit positions and a sign overpunch, and the value meaning
+    //       "no balance" is 0.00, which is a value.
+    // WHY : Trade-offs: leaving it nullable cost more than it saved. app/cbl/CBTRN02C.cbl adds the
+    //       transaction amount into this balance at line 508 on the create path and line 527 on the
+    //       update path, and COBOL arithmetic over a display field has no null to propagate -- so a
+    //       null reaching the Java would either raise at the addition, far from the row that
+    //       introduced it, or be silently coerced to zero by a caller defending against it, which
+    //       would post a transaction against a balance the ledger never held. Asserting the
+    //       constraint at the mapping and in the schema makes the row that is wrong the row that
+    //       fails.
+    @Column(name = "balance", precision = 11, scale = 2, nullable = false)
     private BigDecimal balance;
+
+    /**
+     * The count of integer digit positions {@code TRAN-CAT-BAL} declares, being nine.
+     *
+     * <p>Assumptions: read from {@code TRAN-CAT-BAL PIC S9(09)V99} at {@code app/cpy/CVTRA01Y.cpy}
+     * line 9. It is NOT the ten that {@link Money} admits, and the difference is the whole reason this
+     * constant exists: {@code Money}'s own bound is the widest money field in the reference set,
+     * {@code PIC S9(10)V99}, so a ten-integer-digit balance satisfies {@code Money.of} and then
+     * overflows the {@code NUMERIC(11,2)} column above.</p>
+     *
+     * <p>Refactoring Rationale: bounding the value here rather than letting the database bound it moves
+     * the refusal to the assignment that introduced it. A provider-side numeric-field-overflow names
+     * neither the column nor the row, arrives after the surrounding unit of work has already done its
+     * other writes, and on a batch step reports as a failed chunk rather than as a bad record.</p>
+     */
+    private static final int BALANCE_INTEGER_DIGITS = 9;
 
     /**
      * Creates an empty instance for the persistence provider to populate when it materialises a row.
@@ -344,13 +355,13 @@ public class TransactionCategoryBalance {
      * meaningless -- out of reach of a caller who has a fully specified constructor available.</p>
      */
     protected TransactionCategoryBalance() {
-        // WHY : Assumptions: the body is deliberately empty because the provider assigns both mapped
-        //       members after construction, so anything initialised here would be overwritten on a
-        //       hydrate. Seeding the balance to zero here would be actively misleading rather than
-        //       merely redundant: a row that failed to populate would then read as a genuine zero
-        //       balance, and zero is a meaningful value on this table rather than an absent one --
-        //       tests/golden/posting/reject_102_overlimit/tcatbal.expected is a real row whose
-        //       balance is exactly zero.
+        // Assumptions: the body is deliberately empty because the provider assigns both mapped
+        //     members after construction, so anything initialised here would be overwritten on a
+        //     hydrate. Seeding the balance to zero here would be actively misleading rather than
+        //     merely redundant: a row that failed to populate would then read as a genuine zero
+        //     balance, and zero is a meaningful value on this table rather than an absent one --
+        //     tests/golden/posting/reject_102_overlimit/tcatbal.expected is a real row whose
+        //     balance is exactly zero.
     }
 
     /**
@@ -374,10 +385,11 @@ public class TransactionCategoryBalance {
      *     reduced to the migration's two-decimal money contract through {@link Money}; signed,
      *     because {@code TRAN-CAT-BAL PIC S9(09)V99} is signed; must not be {@code null}
      * @throws NullPointerException if {@code id} is {@code null}, or if {@code balance} is
-     *     {@code null}, which {@link Money#of(BigDecimal)} refuses because a monetary field under
-     *     this contract has no representation for an absent amount
-     * @throws ArithmeticException if {@code balance} falls outside the domain {@link Money} admits,
-     *     which that type reports before attempting any reduction to two decimal places
+     *     {@code null}, which {@link Money#ofPicture(BigDecimal, int)} refuses because a monetary
+     *     field under this contract has no representation for an absent amount
+     * @throws ArithmeticException if {@code balance} needs more than the nine integer digits
+     *     {@code TRAN-CAT-BAL} declares, which {@link Money#ofPicture(BigDecimal, int)} reports
+     *     against the declared picture rather than against the widest money field in the set
      */
     public TransactionCategoryBalance(TransactionCategoryBalanceId id, BigDecimal balance) {
         this.id = Objects.requireNonNull(id, "id must not be null");
@@ -387,7 +399,7 @@ public class TransactionCategoryBalance {
         //       was the alternative and would let an instance carry a scale the rest of the money
         //       path does not use, which matters because equality on an exact decimal is sensitive
         //       to scale: a balance of 0 and a balance of 0.00 are unequal values of that type.
-        this.balance = Money.of(balance).amount();
+        this.balance = Money.ofPicture(balance, BALANCE_INTEGER_DIGITS).amount();
     }
 
     /**
@@ -418,7 +430,6 @@ public class TransactionCategoryBalance {
         this.id = Objects.requireNonNull(id, "id must not be null");
         this.balance = Money.ZERO.amount();
     }
-
 
     /**
      * The composite identity of this row: account, transaction type, then transaction category.
@@ -497,12 +508,14 @@ public class TransactionCategoryBalance {
      * @param balance the new {@link BigDecimal} running balance, signed and exact, as computed by
      *     the caller through {@link Money}; must not be {@code null}
      * @throws NullPointerException if {@code balance} is {@code null}, which
-     *     {@link Money#of(BigDecimal)} refuses because a monetary field under this contract has no
-     *     representation for an absent amount
-     * @throws ArithmeticException if {@code balance} falls outside the domain {@link Money} admits
+     *     {@link Money#ofPicture(BigDecimal, int)} refuses because a monetary field under this
+     *     contract has no representation for an absent amount
+     * @throws ArithmeticException if {@code balance} needs more than the nine integer digits
+     *     {@code TRAN-CAT-BAL} declares, which is a narrower bound than {@link Money#of(BigDecimal)}
+     *     applies and is the bound the {@code NUMERIC(11,2)} column actually enforces
      */
     public void setBalance(BigDecimal balance) {
-        this.balance = Money.of(balance).amount();
+        this.balance = Money.ofPicture(balance, BALANCE_INTEGER_DIGITS).amount();
     }
 
     /**
@@ -517,21 +530,21 @@ public class TransactionCategoryBalance {
         if (this == other) {
             return true;
         }
-        // WHY : Assumptions: a pattern match is used rather than an exact class comparison because
-        //       the provider may return an instrumented subclass for a lazily-loaded reference, and
-        //       a strict class comparison would then report a row as unequal to itself. No subclass
-        //       of this type is authored, so widening the test costs nothing.
+        // Assumptions: a pattern match is used rather than an exact class comparison because
+        //     the provider may return an instrumented subclass for a lazily-loaded reference, and
+        //     a strict class comparison would then report a row as unequal to itself. No subclass
+        //     of this type is authored, so widening the test costs nothing.
         if (!(other instanceof TransactionCategoryBalance that)) {
             return false;
         }
-        // WHY : Alternatives Considered: including the balance in the comparison was evaluated and
-        //       rejected, and on this type the reason is sharper than on an immutable one. The
-        //       balance is the single mutable member, and posting mutates it: were equality to read
-        //       it, an instance's equality and hash would change under the very addition that lines
-        //       508 and 527 of app/cbl/CBTRN02C.cbl perform, so an instance placed in a hash-based
-        //       collection before the add would become unfindable in it afterwards. The composite
-        //       key already discriminates every row the table can hold, since no two rows may share
-        //       it, so reading the balance would add no discrimination and would cost correctness.
+        // Alternatives Considered: including the balance in the comparison was evaluated and
+        //     rejected, and on this type the reason is sharper than on an immutable one. The
+        //     balance is the single mutable member, and posting mutates it: were equality to read
+        //     it, an instance's equality and hash would change under the very addition that lines
+        //     508 and 527 of app/cbl/CBTRN02C.cbl perform, so an instance placed in a hash-based
+        //     collection before the add would become unfindable in it afterwards. The composite
+        //     key already discriminates every row the table can hold, since no two rows may share
+        //     it, so reading the balance would add no discrimination and would cost correctness.
         return Objects.equals(id, that.id);
     }
 
@@ -551,7 +564,8 @@ public class TransactionCategoryBalance {
     }
 
     /**
-     * Renders the three key components and the balance for a log line or an assertion message.
+     * Renders the two reference codes for a log line or an assertion message, carrying neither
+     * the account identifier nor the balance.
      *
      * <p>Trade-offs: <b>this is a diagnostic aid and it is expressly NOT the parity emitter.</b> The
      * distinction has to be stated here rather than assumed, because this record has a byte-exact
@@ -566,30 +580,59 @@ public class TransactionCategoryBalance {
      * reformatting of a log line would break the comparison with nothing to indicate why. Nothing
      * may parse what this method returns.</p>
      *
-     * <p>Assumptions: the two code components are rendered inside single quotes deliberately, so
-     * that a leading or trailing space in either is visible in a log rather than being lost in the
-     * surrounding text. An operator diagnosing a category-balance lookup that matched nothing is
-     * looking for exactly that class of difference -- most often a category code that lost a leading
-     * zero -- and an unquoted rendering hides it.</p>
+     * <p>Assumptions: the account identifier is rendered to its last four digits and the balance is
+     * omitted entirely. Both are covered by the sensitive-data logging prohibition in
+     * {@code docs/architecture/observability.md}, which names account and customer identifiers
+     * alongside primary account numbers, and a rendering reachable from a log statement is exactly
+     * the path that prohibition exists to close. Alternatives Considered: rendering the whole
+     * identifier because it is an internal key rather than a card number. Rejected -- the
+     * prohibition is written in terms of the identifier and not of its issuer, and a full
+     * eleven-digit key is enough to address a row through this migration's own endpoints. A
+     * four-digit suffix is retained because correlating two log lines to the same account is the
+     * reason this rendering exists at all.</p>
      *
-     * <p>Assumptions: no member of this record is a primary account number, a card verification
-     * value or a national identifier, so nothing here requires masking. The record holds an account
-     * identifier, two reference codes and one amount; the account identifier is an internal
-     * eleven-digit key and not a card number. That is recorded so a later change does not add a
-     * sensitive member to this rendering on the assumption that the method was already cleared for
-     * one. A running balance is not itself protected: the masking rules the migration states apply
-     * to card numbers, verification values and national identifiers.</p>
+     * <p>Refactoring Rationale: THE ACCOUNT IDENTIFIER AND THE BALANCE ARE OMITTED, and an earlier
+     * revision rendered both. It argued that "no member of this record is a primary account number,
+     * a card verification value or a national identifier, so nothing here requires masking", and
+     * added that "a running balance is not itself protected". Both statements are refuted by the
+     * sensitive-data logging contract in {@code docs/architecture/observability.md}, which names
+     * account identifiers explicitly and covers persistence-bound values as a class -- and a
+     * category balance is the persisted content of this very table. The earlier reasoning worked
+     * from a three-example list rather than from the contract, which is how it reached the opposite
+     * conclusion.</p>
      *
-     * @return a single-line rendering naming the type, the three key components and the balance
+     * <p>Trade-offs: the omission is total rather than partial, because abbreviating a protected
+     * value IS masking and masking has one owner per context -- {@code com.carddemo.batch.mapper}
+     * for this module. A second, slightly different rule inside an entity would give one value two
+     * renderings and make neither authoritative. What survives is the two reference codes, which say
+     * WHICH CATEGORY an entry concerns without saying whose it is or what it is worth. The cost is
+     * real: a reader diagnosing a lookup that matched nothing can no longer tell two accounts' rows
+     * apart from a log line alone. It is paid down by the correlation identifier
+     * {@code com.carddemo.common.web.CorrelationIdFilter} publishes on a request-scoped line and by
+     * the {@code batch.batch_run} step ledger for batch work, and the accessors above return both
+     * omitted members to any caller that needs one.</p>
+     *
+     * <p>Assumptions: the exposure closed here is the RETAINED LOG rather than any request path. The
+     * interest job renders one such line per category row scanned, so the aggregate of one run is a
+     * log holding every account identifier and every category balance in the table.</p>
+     *
+     * <p>Assumptions: the masking discipline this migration states names card numbers, verification
+     * values and national identifiers, and neither member withheld here is one of those. That list is a
+     * FLOOR on what must never be rendered rather than a licence covering everything absent from it: an
+     * account's outstanding balance per transaction category is customer financial detail, and a log is
+     * a durable, widely-readable, differently-governed store, so writing it there discloses it outside
+     * the authorization boundary a caller would otherwise have to pass to see it. This is recorded so
+     * that a later change does not add a sensitive member to this rendering on the assumption that the
+     * method was already cleared for one.</p>
+     *
+     * @return a single-line rendering naming the type and the two reference codes, and carrying
+     *     neither the account identifier nor the balance
      */
     @Override
     public String toString() {
-        return "TransactionCategoryBalance[accountId=" + getAccountId()
-                + ", typeCd='" + getTypeCd()
-                + "', categoryCd='" + getCategoryCd()
-                + "', balance=" + balance + ']';
+        return "TransactionCategoryBalance[typeCd='" + getTypeCd()
+                + "', categoryCd='" + getCategoryCd() + "']";
     }
-
 
     /**
      * The three-part composite key of a category-balance row, in the copybook's physical order.
@@ -618,31 +661,23 @@ public class TransactionCategoryBalance {
      * <p>Assumptions: the arity is fixed at three by the copybook, so no fourth component and no
      * surrogate identifier is admissible. A key of any other width would not balance against the
      * {@code KEYS(17 0)} operand above.</p>
-     *
-     * <p>Assumptions: the three components are documented as required but are not guarded against
-     * {@code null} in the constructor. Guarding them was the alternative and is declined because it
-     * would duplicate a constraint the schema already asserts -- all three columns are declared
-     * {@code NOT NULL} by the owning service's migration -- and because validating the width and
-     * form of a reference code is a representation concern this module's mapper package owns. The
-     * cost accepted is that a partially built key can exist in memory and is refused when it reaches
-     * the database rather than at the point of construction.</p>
      */
     @Embeddable
-    // WHY : Assumptions: the persistence specification requires the type of an embedded identifier
-    //       to be serializable, because the provider holds a detached copy of the key in its own
-    //       structures -- the entry key of the persistence context, and of a second-level cache
-    //       region -- independently of the entity instance. The interface is therefore implemented
-    //       to satisfy that contract rather than for any use this module makes of serialization, and
-    //       the version below is pinned to a literal rather than left to the default computation so
-    //       that recompiling this class cannot change it and invalidate a serialized form some cache
-    //       region is still holding.
-    // WHY : Alternatives Considered: the explicit name TransactionCategoryBalanceId rather than a
-    //       bare nested Id. The short form reads more cleanly at the declaration and was rejected
-    //       for two reasons that both bite away from it: the sibling DisclosureGroupId in this same
-    //       package already sets the longer convention, so a second convention would make the
-    //       package inconsistent for no gain; and this name appears unqualified in a repository
-    //       query signature and in test assertion messages, where a bare Id would not say which
-    //       row it identifies.
+    // Assumptions: the persistence specification requires the type of an embedded identifier
+    //     to be serializable, because the provider holds a detached copy of the key in its own
+    //     structures -- the entry key of the persistence context, and of a second-level cache
+    //     region -- independently of the entity instance. The interface is therefore implemented
+    //     to satisfy that contract rather than for any use this module makes of serialization, and
+    //     the version below is pinned to a literal rather than left to the default computation so
+    //     that recompiling this class cannot change it and invalidate a serialized form some cache
+    //     region is still holding.
+    // Alternatives Considered: the explicit name TransactionCategoryBalanceId rather than a
+    //     bare nested Id. The short form reads more cleanly at the declaration and was rejected
+    //     for two reasons that both bite away from it: the sibling DisclosureGroupId in this same
+    //     package already sets the longer convention, so a second convention would make the
+    //     package inconsistent for no gain; and this name appears unqualified in a repository
+    //     query signature and in test assertion messages, where a bare Id would not say which
+    //     row it identifies.
     public static class TransactionCategoryBalanceId implements Serializable {
 
         /**
@@ -651,55 +686,54 @@ public class TransactionCategoryBalance {
          */
         private static final long serialVersionUID = 1L;
 
-        // WHY : Assumptions: this is the LEADING component of the key, and the account identifier it
-        //       carries reaches this key from the card cross-reference rather than from the
-        //       transaction being posted. app/cbl/CBTRN02C.cbl line 469 moves XREF-ACCT-ID -- the
-        //       value returned by the cross-reference read at lines 380 to 392 -- into this
-        //       component, while lines 470 and 471 take the other two from the transaction. The
-        //       daily-transaction record has no account identifier to offer: app/cpy/CVTRA06Y.cpy
-        //       declares a card number and no account, so this key is necessarily assembled from two
-        //       sources. Deriving it from the transaction record is not a mistake that produces a
-        //       wrong account, it is one that has nothing to read.
-        // WHY : Alternatives Considered: BIGINT and a long-valued member rather than a narrower
-        //       integer type. TRANCAT-ACCT-ID PIC 9(11) at app/cpy/CVTRA01Y.cpy line 6 is eleven
-        //       unsigned digits, whose maximum of 99999999999 exceeds what a 32-bit integer can
-        //       hold, so a narrower type could not represent the declared domain at all. The
-        //       migration plan's section 0.4.1.3 maps a numeric identifier of this shape to BIGINT,
-        //       and using one width for every account identifier in the schema keeps a join or a
-        //       lookup across them free of an implicit cast. Account.accountId and CardXref.accountId
-        //       in this package carry the same type for the same reason and have to stay aligned:
-        //       app/cbl/CBACT04C.cbl lines 202 and 204 feed this very value into the account and
-        //       cross-reference lookups, so a divergence would surface as a cast on the hot path.
-        // WHAT: the baseline is looser about this value's type than this mapping is.
-        //       app/cbl/CBACT04C.cbl line 167 declares the control-break holder as
-        //       WS-LAST-ACCT-NUM PIC X(11) VALUE SPACES -- a CHARACTER field -- and line 194
-        //       compares it against the numeric TRANCAT-ACCT-ID.
-        // WHY : Assumptions: that looseness is not imitated here. This component is mapped
-        //       numerically because the copybook picture is numeric and rule T1 makes the copybook
-        //       normative, so the comparison line 194 performs becomes a typed inequality between
-        //       two long values in the service layer. The consequence is that the SPACES sentinel
-        //       has no target equivalent and must not be emulated by a blank string coerced to a
-        //       number: the "no previous account" state becomes an absent value or an explicit
-        //       first-iteration flag, which is what the baseline itself falls back on at line 195
-        //       where WS-FIRST-TIME guards the first flush.
+        // Assumptions: this is the LEADING component of the key, and the account identifier it
+        //     carries reaches this key from the card cross-reference rather than from the
+        //     transaction being posted. app/cbl/CBTRN02C.cbl line 469 moves XREF-ACCT-ID -- the
+        //     value returned by the cross-reference read at lines 380 to 392 -- into this
+        //     component, while lines 470 and 471 take the other two from the transaction. The
+        //     daily-transaction record has no account identifier to offer: app/cpy/CVTRA06Y.cpy
+        //     declares a card number and no account, so this key is necessarily assembled from two
+        //     sources. Deriving it from the transaction record is not a mistake that produces a
+        //     wrong account, it is one that has nothing to read.
+        // Alternatives Considered: BIGINT and a long-valued member rather than a narrower
+        //     integer type. TRANCAT-ACCT-ID PIC 9(11) at app/cpy/CVTRA01Y.cpy line 6 is eleven
+        //     unsigned digits, whose maximum of 99999999999 exceeds what a 32-bit integer can
+        //     hold, so a narrower type could not represent the declared domain at all. The
+        //     migration plan's section 0.4.1.3 maps a numeric identifier of this shape to BIGINT,
+        //     and using one width for every account identifier in the schema keeps a join or a
+        //     lookup across them free of an implicit cast. Account.accountId and CardXref.accountId
+        //     in this package carry the same type for the same reason and have to stay aligned:
+        //     app/cbl/CBACT04C.cbl lines 202 and 204 feed this very value into the account and
+        //     cross-reference lookups, so a divergence would surface as a cast on the hot path.
+        // Assumptions: the baseline is LOOSER about this value's type than this mapping is,
+        //     and the looseness is not imitated. app/cbl/CBACT04C.cbl line 167 declares the
+        //     control-break holder as WS-LAST-ACCT-NUM PIC X(11) VALUE SPACES -- a CHARACTER
+        //     field -- and line 194 compares it against the numeric TRANCAT-ACCT-ID. This
+        //     component is mapped numerically because the copybook picture is numeric and rule T1
+        //     makes the copybook normative, so the comparison line 194 performs becomes a typed
+        //     inequality between two long values in the service layer. The consequence is that the SPACES sentinel
+        //     has no target equivalent and must not be emulated by a blank string coerced to a
+        //     number: the "no previous account" state becomes an absent value or an explicit
+        //     first-iteration flag, which is what the baseline itself falls back on at line 195
+        //     where WS-FIRST-TIME guards the first flush.
         @Column(name = "account_id", nullable = false, updatable = false)
         private Long accountId;
 
-        // WHY : Assumptions: the SECOND component, TRANCAT-TYPE-CD PIC X(02) at
-        //       app/cpy/CVTRA01Y.cpy line 7, occupying zero-based offsets 11 and 12. It is carried
-        //       as text because the picture is alphanumeric, so the two characters are a code rather
-        //       than a quantity, and it is fixed-width rather than variable because it is a key
-        //       component -- the declared width is part of the contract, which is what the
-        //       KEYS(17 0) operand depends on. app/jcl/PRTCATBL.jcl line 48 declares the same field
-        //       to its sort utility as CH, character, independently of the copybook.
-        // WHY : Assumptions: the type has to match, field for field, DailyTransaction.typeCd and
-        //       Transaction.typeCd in this package and the type component of DisclosureGroup's key,
-        //       because this value is copied straight along that chain with no transformation.
-        //       app/cbl/CBTRN02C.cbl line 470 copies it out of the transaction into this key, and
-        //       app/cbl/CBACT04C.cbl line 212 copies it out of this key into the disclosure-group
-        //       key. A type that disagreed at any link would not fail to compile; it would produce a
-        //       lookup that quietly matches nothing, which the baseline then reports as a missing
-        //       disclosure group rather than as a type error.
+        // Assumptions: the SECOND component, TRANCAT-TYPE-CD PIC X(02) at
+        //     app/cpy/CVTRA01Y.cpy line 7, occupying zero-based offsets 11 and 12. It is carried
+        //     as text because the picture is alphanumeric, so the two characters are a code rather
+        //     than a quantity, and it is fixed-width rather than variable because it is a key
+        //     component -- the declared width is part of the contract, which is what the
+        //     KEYS(17 0) operand depends on. app/jcl/PRTCATBL.jcl line 48 declares the same field
+        //     to its sort utility as CH, character, independently of the copybook.
+        // Assumptions: the type has to match, field for field, DailyTransaction.typeCd and
+        //     Transaction.typeCd in this package and the type component of DisclosureGroup's key,
+        //     because this value is copied straight along that chain with no transformation.
+        //     app/cbl/CBTRN02C.cbl line 470 copies it out of the transaction into this key, and
+        //     app/cbl/CBACT04C.cbl line 212 copies it out of this key into the disclosure-group
+        //     key. A type that disagreed at any link would not fail to compile; it would produce a
+        //     lookup that quietly matches nothing, which the baseline then reports as a missing
+        //     disclosure group rather than as a type error.
         @JdbcTypeCode(SqlTypes.CHAR)
         @Column(name = "type_cd", length = 2, nullable = false, updatable = false)
         private String typeCd;
@@ -711,7 +745,7 @@ public class TransactionCategoryBalance {
         //       than smoothed over because the picture invites the wrong answer. Reading the picture
         //       alone gives a bounded four-digit numeric code, which would narrow to a small integer.
         //       The owning service's V1__ledger.sql instead declares category_cd CHAR(4) NOT NULL at
-        //       line 715, and its note gives the reason that decides it: an integer column drops the
+        //       line 822, and its note gives the reason that decides it: an integer column drops the
         //       leading zeros the baseline writes, so 0001 would come back as 1. Being part of the
         //       key makes that argument stronger here rather than weaker, because 0001 and 1 must not
         //       resolve to two different keys. Two further reasons make the text binding the only
@@ -751,6 +785,20 @@ public class TransactionCategoryBalance {
         private String categoryCd;
 
         /**
+         * The declared width of the type-code component, from {@code TRAN-TYPE-CD PIC X(02)}.
+         *
+         * <p>Assumptions: the number is declared once and read by the guard below, rather than written
+         * into the guard call and again into its message. A width that appeared twice could be changed
+         * in one place and leave the refusal message describing the other.</p>
+         */
+        public static final int TYPE_CD_WIDTH = 2;
+
+        /**
+         * The declared width of the category-code component, from {@code TRANCAT-CD PIC 9(04)}.
+         */
+        public static final int CATEGORY_CD_WIDTH = 4;
+
+        /**
          * Creates an empty identity for the persistence provider to populate.
          *
          * <p>Assumptions: the specification requires a no-argument constructor on an embeddable
@@ -760,11 +808,11 @@ public class TransactionCategoryBalance {
          * value on which equality and hashing are both meaningless.</p>
          */
         protected TransactionCategoryBalanceId() {
-            // WHY : Assumptions: the body is deliberately empty because the provider assigns all
-            //       three components after construction, so anything initialised here would be
-            //       overwritten on a hydrate. Defaulting a component to spaces or zeros would be
-            //       worse than leaving it absent: it would produce a syntactically valid key that
-            //       silently matches no row, which is the failure mode this key is most prone to.
+            // Assumptions: the body is deliberately empty because the provider assigns all
+            //     three components after construction, so anything initialised here would be
+            //     overwritten on a hydrate. Defaulting a component to spaces or zeros would be
+            //     worse than leaving it absent: it would produce a syntactically valid key that
+            //     silently matches no row, which is the failure mode this key is most prone to.
         }
 
         /**
@@ -787,9 +835,83 @@ public class TransactionCategoryBalance {
          *     become two distinct keys
          */
         public TransactionCategoryBalanceId(Long accountId, String typeCd, String categoryCd) {
-            this.accountId = accountId;
-            this.typeCd = typeCd;
-            this.categoryCd = categoryCd;
+            // WHY : Refactoring Rationale: the three components are checked here, and an earlier
+            //       revision of this constructor assigned all three unchecked. The note on the
+            //       category member above explains precisely why that could not stand: a value short
+            //       on the LEFT is not forgiven by the fixed-character column, so '5' is stored as
+            //       '5' plus three blanks and compares as a DIFFERENT KEY from '0005'. Two callers
+            //       spelling one logical code differently therefore produced two rows for one
+            //       account, type and category -- and the running balance of that category became
+            //       whichever of the two a later read happened to find. Nothing downstream could
+            //       detect it: both rows satisfy every declared constraint.
+            // WHY : Alternatives Considered: normalising a short all-digit value by left-padding it,
+            //       which the review's guidance offered as an alternative to validating. It is
+            //       rejected because it accepts an ambiguity rather than removing one. A caller that
+            //       supplied '5' either meant 0005 and was careless, or was carrying a value from
+            //       somewhere that had already lost its leading zeros -- and padding cannot tell the
+            //       two apart, so it would silently make the second case look correct while the
+            //       source of the loss stayed in place. Refusing reports the omission at the point
+            //       the key is built, which is the only place it can still be traced.
+            this.accountId = Objects.requireNonNull(accountId, "accountId must not be null");
+            this.typeCd = requireExactWidth(typeCd, TYPE_CD_WIDTH, "typeCd");
+            this.categoryCd = requireExactDigits(categoryCd, CATEGORY_CD_WIDTH, "categoryCd");
+        }
+
+        /**
+         * Returns a component that is present and exactly as wide as its column declares.
+         *
+         * <p>Assumptions: the width is checked for exact equality rather than as a maximum, because
+         * this component belongs to a composite key over fixed-character columns. A value narrower
+         * than the column is stored padded and compares as the padded form, so accepting it would
+         * admit a second spelling of one key rather than a shorter one.</p>
+         *
+         * @param candidate the supplied component, possibly {@code null}
+         * @param width the declared width the column carries
+         * @param member the component's name, used only in the refusal message
+         * @return the same value once it has been accepted, never {@code null}
+         * @throws NullPointerException if {@code candidate} is {@code null}
+         * @throws IllegalArgumentException if the value is not exactly {@code width} characters
+         */
+        private static String requireExactWidth(String candidate, int width, String member) {
+            Objects.requireNonNull(candidate, member + " must not be null");
+            if (candidate.length() != width) {
+                throw new IllegalArgumentException(member + " must be exactly " + width
+                        + " characters, because it is part of a composite key over a fixed-character"
+                        + " column and a narrower value is stored padded and compares as the padded"
+                        + " form; received " + candidate.length());
+            }
+            return candidate;
+        }
+
+        /**
+         * Returns a component that is present, exactly as wide as its column declares, and all digits.
+         *
+         * <p>Assumptions: the digits test applies to this one component because its source picture is
+         * numeric -- {@code TRANCAT-CD PIC 9(04)} at line 8 of {@code app/cpy/CVTRA01Y.cpy} -- and a
+         * numeric picture right-justifies and zero-fills, so every value the reference can write is
+         * four digits. The member note above declines to re-assert the digits half as a persistence
+         * CONSTRAINT, and that stands: this is a check at the point a KEY is constructed, which is
+         * where a non-digit spelling would create a second row rather than fail a constraint.</p>
+         *
+         * @param candidate the supplied component, possibly {@code null}
+         * @param width the declared width the column carries
+         * @param member the component's name, used only in the refusal message
+         * @return the same value once it has been accepted, never {@code null}
+         * @throws NullPointerException if {@code candidate} is {@code null}
+         * @throws IllegalArgumentException if the value is not exactly {@code width} digits
+         */
+        private static String requireExactDigits(String candidate, int width, String member) {
+            requireExactWidth(candidate, width, member);
+            for (int index = 0; index < candidate.length(); index++) {
+                char character = candidate.charAt(index);
+                if (character < '0' || character > '9') {
+                    throw new IllegalArgumentException(member + " must be exactly " + width
+                            + " digits with its leading zeros intact, because its source picture is"
+                            + " numeric and zero-filled, so 0001 and 1 must not become two keys;"
+                            + " received a non-digit at position " + (index + 1));
+                }
+            }
+            return candidate;
         }
 
         /**
@@ -840,15 +962,15 @@ public class TransactionCategoryBalance {
             if (!(other instanceof TransactionCategoryBalanceId that)) {
                 return false;
             }
-            // WHY : Assumptions: the components are compared exactly as held, with no trimming and
-            //       no padding applied here. Normalising either way was the alternative and is
-            //       declined because it would make in-memory equality disagree with the database for
-            //       one of the two forms, and a key that behaves one way in a collection and another
-            //       in a query is worse than one that is simply literal. It is also unnecessary: a
-            //       fixed-character column strips the trailing blanks of its declared width on the
-            //       way out, so a value that arrived padded and one that arrived bare are the same
-            //       string by the time either reaches this method. Equality is therefore literal on
-            //       values the database has already normalised.
+            // Assumptions: the components are compared exactly as held, with no trimming and
+            //     no padding applied here. Normalising either way was the alternative and is
+            //     declined because it would make in-memory equality disagree with the database for
+            //     one of the two forms, and a key that behaves one way in a collection and another
+            //     in a query is worse than one that is simply literal. It is also unnecessary: a
+            //     fixed-character column strips the trailing blanks of its declared width on the
+            //     way out, so a value that arrived padded and one that arrived bare are the same
+            //     string by the time either reaches this method. Equality is therefore literal on
+            //     values the database has already normalised.
             return Objects.equals(accountId, that.accountId)
                     && Objects.equals(typeCd, that.typeCd)
                     && Objects.equals(categoryCd, that.categoryCd);
@@ -870,23 +992,35 @@ public class TransactionCategoryBalance {
         }
 
         /**
-         * Renders the three components of this key for a log line or an assertion message.
+         * Renders the two reference components of this key for a log line or an assertion message.
          *
-         * <p>Trade-offs: this is a diagnostic aid only and nothing may parse it. The components are
-         * rendered separately rather than concatenated into the 17-byte form the baseline keys on,
-         * which costs a reader the ability to see the key as the reference system does but makes the
-         * boundary between the components unambiguous. That is the more useful property here,
-         * because the failure this rendering exists to expose is a category code that lost a leading
-         * zero, and a concatenated 17-character run shows it only to someone counting characters.</p>
+         * <p>Refactoring Rationale: THE ACCOUNT IDENTIFIER IS OMITTED, and an earlier revision
+         * rendered it. It reasoned that a key is a row's identity and carries nothing personal, so
+         * withholding a component would remove the only way to tell two rows apart while protecting
+         * nothing. The first half is right and the second is not: the sensitive-data logging contract
+         * in {@code docs/architecture/observability.md} names account identifiers explicitly, so the
+         * component was protected all along. This method is reached from the enclosing type's own
+         * rendering as well as directly, so leaving it would have re-disclosed through the key
+         * exactly what the enclosing type withholds.</p>
          *
-         * @return a single-line rendering naming the type and its three components
+         * <p>Trade-offs: this is a diagnostic aid only and nothing may parse it. The two surviving
+         * components are rendered separately rather than concatenated into the 17-byte form the
+         * baseline keys on, which costs a reader the ability to see the key as the reference system
+         * does but makes the boundary between them unambiguous. That is the more useful property
+         * here, because the failure this rendering exists to expose is a category code that lost a
+         * leading zero, and a concatenated run shows it only to someone counting characters. What is
+         * given up by the omission is that two accounts' rows for one category are no longer
+         * distinguishable from a log line alone; the accessor for the identifier returns it to any
+         * caller that needs it, and a request-scoped line already carries the correlation identifier
+         * {@code com.carddemo.common.web.CorrelationIdFilter} publishes.</p>
+         *
+         * @return a single-line rendering naming the type, the type code and the category code, and
+         *     carrying no account identifier
          */
         @Override
         public String toString() {
-            return "TransactionCategoryBalanceId[accountId=" + accountId
-                    + ", typeCd='" + typeCd
+            return "TransactionCategoryBalanceId[typeCd='" + typeCd
                     + "', categoryCd='" + categoryCd + "']";
         }
     }
 }
-

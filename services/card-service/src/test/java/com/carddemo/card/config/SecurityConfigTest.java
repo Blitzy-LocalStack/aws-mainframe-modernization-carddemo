@@ -34,12 +34,25 @@ class SecurityConfigTest {
     private static final AntPathMatcher MATCHER = new AntPathMatcher();
 
     /**
-     * A representative card number: sixteen digits, as the contract fixes.
+     * A specimen selector-shaped value, used to make a card path template concrete.
      *
-     * <p>Assumptions: this is a test-local literal and not a credential -- the reserved test prefix with
-     * a fixed tail -- and it identifies no real card.</p>
+     * <p>Assumptions: this stands in for the opaque selector the contract's {@code cardKey} parameter
+     * carries, at the published length and alphabet. It is synthetic -- it has the declared shape and
+     * seals nothing -- because this test asserts a path-pattern MATCH and holds no deployment key. Only
+     * the shape matters to a matcher, which never opens the value, and a value that seals nothing cannot
+     * be mistaken for a real address.</p>
+     *
+     * <p>Refactoring Rationale: {@link #SAMPLE_CARD_NUMBER} filled this role until the contract stopped
+     * putting card numbers in paths. It is retained because the negative assertion below still needs a
+     * card-number-shaped value to prove no gate is keyed on one.</p>
+     *
+     * <p>Refactoring Rationale: the literal was a {@code v1.payload.code} cursor token while the selector
+     * was sealed by the paging primitive. It is now the 59-character form
+     * {@code com.carddemo.common.security.SealedSelector} emits, matching the contract's own example, so a
+     * reader of this file is not shown a shape the contract has stopped declaring.</p>
      */
-    private static final String SAMPLE_CARD_NUMBER = "4111111111110011";
+    private static final String SAMPLE_CARD_SELECTOR =
+            "fake-selector-example-not-a-real-sealed-value-0000000000000";
 
     /** The operation the contract designates as the single administrative, unredacted read. */
     private static final String ADMIN_OPERATION_ID = "getAdminCardDetail";
@@ -47,15 +60,17 @@ class SecurityConfigTest {
     /**
      * Confirms the gate matches the concrete request path the administrative operation will be called on.
      *
-     * <p>Assumptions: the template's path variable is substituted with a real sixteen-digit number
-     * rather than left as {@code {cardNumber}}, because the gate is evaluated against a concrete request
-     * path at run time and a template would not exercise the wildcard at all.</p>
+     * <p>Assumptions: the template's path variable is substituted with a concrete selector-shaped value
+     * rather than left as {@code {cardKey}}, because the gate is evaluated against a concrete request
+     * path at run time and a template would not exercise the wildcard at all. The substituted value is
+     * NOT a card number: the contract removed the number from every path when a review established that
+     * the load balancer writes the request line into its access log before any application code runs.</p>
      */
     @Test
     @DisplayName("the admin gate matches the contract path of the only full-number operation")
     void adminGateMatchesTheContractPathOfTheUnmaskedOperation() {
         String contractPath = pathOfOperation(ADMIN_OPERATION_ID);
-        String requestPath = contractPath.replace("{cardNumber}", SAMPLE_CARD_NUMBER);
+        String requestPath = contractPath.replace("{cardKey}", SAMPLE_CARD_SELECTOR);
 
         assertThat(MATCHER.match(SecurityConfig.ADMIN_CARD_PATH_PATTERN, requestPath))
                 .as("gate %s must match the administrative request path %s",
@@ -75,7 +90,7 @@ class SecurityConfigTest {
     @DisplayName("the admin gate matches no other published operation")
     void adminGateMatchesNoOtherPublishedOperation() {
         for (String path : publishedPaths()) {
-            String requestPath = path.replace("{cardNumber}", SAMPLE_CARD_NUMBER);
+            String requestPath = path.replace("{cardKey}", SAMPLE_CARD_SELECTOR);
             if (path.equals(pathOfOperation(ADMIN_OPERATION_ID))) {
                 continue;
             }
@@ -102,7 +117,7 @@ class SecurityConfigTest {
                 .as("the gate must be written against the path the service actually receives")
                 .startsWith("/api/v1/");
 
-        String prefixLessRequest = "/admin/cards/" + SAMPLE_CARD_NUMBER;
+        String prefixLessRequest = "/admin/cards/" + SAMPLE_CARD_SELECTOR;
         assertThat(MATCHER.match(SecurityConfig.ADMIN_CARD_PATH_PATTERN, prefixLessRequest))
                 .as("a prefix-less request path must not satisfy the gate, proving the prefix is load-bearing")
                 .isFalse();

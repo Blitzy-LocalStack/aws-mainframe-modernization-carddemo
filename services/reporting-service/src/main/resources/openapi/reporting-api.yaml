@@ -1,0 +1,1310 @@
+# =============================================================================
+# services/reporting-service/src/main/resources/openapi/reporting-api.yaml
+# -----------------------------------------------------------------------------
+# Purpose:
+#   The OpenAPI 3.1 contract of record for the reporting and statement bounded
+#   context. It settles the paths, the operation identifiers, the property
+#   names, the response shapes, the rendering of money and the refusal
+#   behaviour of every operation this context publishes, so that the browser
+#   client at ui/src/api/reporting.ts is written against this document rather
+#   than against a reading of this module's Java.
+#
+#   Three separate artifacts have to agree about these paths and none of them
+#   can see the other two at build time, which is the whole reason this document
+#   exists as a committed file rather than as generated output:
+#     - this module's request handlers, which answer them;
+#     - infra/envs/{dev,prod}/main.tf, whose local.online_services entry for
+#       this workload forwards "/api/v1/reports" and "/api/v1/reports/*" at
+#       priority 70, and infra/modules/api-gateway-http/variables.tf, whose
+#       route_keys default publishes "ANY /api/v1/reports" and
+#       "ANY /api/v1/reports/{proxy+}" at the public edge;
+#     - ui/src/api/reporting.ts, which composes each target from the SPA's
+#       configured base URL.
+#   Every path below therefore sits beneath "/api/v1/reports", and a path that
+#   did not would be unreachable through both hops while remaining perfectly
+#   valid here.
+#
+# Why this document leads the handlers:
+#   Assumptions: four of the six sibling contracts in this repository were
+#   authored before the controllers they describe, and each says so in its own
+#   header; account-api.yaml is the one that records only what already runs,
+#   because its three operations already bind two live services. This document
+#   follows the majority convention deliberately, and the reason is specific.
+#   The surface it describes is assigned to com.carddemo.reporting.api by the
+#   migration plan and that package's charter states the assignment as a closed
+#   roster of two controllers, measured against a directory that holds only the
+#   charter itself. A contract authored from the request and response records
+#   that DO exist -- the seven types under com.carddemo.reporting.dto, whose
+#   component lists fix every property name and width quoted below -- is
+#   therefore derived from committed code rather than invented, and it is what
+#   lets the browser client and the handlers be written against one agreement
+#   instead of against each other.
+#
+#   Trade-offs: the cost is that this document declares operations no handler in
+#   this module answers yet, so a caller reaching one today receives the
+#   framework's own 404 rather than any response declared here. That cost is
+#   accepted and it is made visible rather than left to be discovered:
+#   src/test/java/com/carddemo/reporting/api/ReportingApiContractTest.java
+#   asserts that this file parses, that its information block equals the one
+#   com.carddemo.reporting.config.OpenApiConfig serves, that every operation
+#   carries an identifier and an authority, and that every reference resolves --
+#   so the document cannot rot while it waits for its handlers. The alternative,
+#   omitting the file until the handlers land, was rejected because three
+#   artifacts already name these paths and two of them are deployed; with no
+#   contract, the SPA and the infrastructure would be agreeing with each other
+#   by coincidence.
+#
+# Parameters:
+#   Requests carry input in three forms and each is described again where it is
+#   declared.
+#     - Two request bodies. ReportRequest selects a transaction report by type
+#       and, for a caller-supplied run, by an inclusive range. StatementRequest
+#       names one card or one account. Both are bodies rather than query strings
+#       for the reason recorded on each operation.
+#     - Four query parameters on the read operations: the two bounds of an
+#       inclusive processing-date range, and the sealed browse cursor with the
+#       direction it was issued for.
+#     - One request header, X-Correlation-Id, accepted on every path in this
+#       system and declared once under components/parameters.
+#     - No path parameter at all. Nothing in this context is addressed by an
+#       identifier, because a card number may not appear in a target and no
+#       other row here has a published address.
+#
+# Return values:
+#     - ReportSubmissionPreview or ReportSubmission from the submission
+#       operation, distinguished by status: 200 for a deliberate cancellation
+#       and 201 for a started execution.
+#     - TransactionReportLinePage from the report-line browse, one bounded
+#       keyset page.
+#     - TransactionReportTotals from the totals read, the three subtotal bands
+#       the reference report emits.
+#     - Statement from the statement operation, carrying the two rendered
+#       artifacts by URI rather than inline.
+#     - StatementTransactionCollection from the statement-transaction read.
+#   Every monetary value in every one of them is a JSON string. That is
+#   transformation rule T3 of the migration plan and not a stylistic choice: a
+#   JSON number is parsed into an IEEE-754 binary double by most clients, and
+#   app/cpy/CVACT01Y.cpy L7 declares ACCT-CURR-BAL PIC S9(10)V99 -- twelve
+#   significant digits, which leaves that representation no margin at all.
+#
+# Exceptions / error responses:
+#   Every failure is rendered by the shared advice in common-lib as one problem
+#   document, so the error vocabulary here is identical to every other contract
+#   in this migration. 400 for a request whose declared constraints are not met,
+#   401 for a caller presenting no usable token, 403 for a token lacking the
+#   authority an operation requires, 404 for an absent card or account, and 500
+#   for an unexpected failure. 401 and 403 are decided by the filter chain
+#   before any handler runs and are nonetheless declared with a body, because
+#   src/main/java/com/carddemo/reporting/config/SecurityConfig.java installs the
+#   shared refusal handlers precisely so that they carry one.
+#
+# Authorization:
+#   Assumptions: every operation requires one of the two group authorities, and
+#   none requires the administrative one specifically. That is what
+#   SecurityConfig enforces -- its catch-all rule admits a token carrying either
+#   the administrator or the ordinary user group and refuses one carrying
+#   neither -- so x-required-authority is carddemo-user throughout. Declaring
+#   the administrative authority on any operation here would describe a
+#   restriction the chain does not apply.
+#
+# Reference sources (REFERENCE-ONLY; read as the specification, never modified):
+#   app/cbl/CORPT00C.cbl  - the 649-line online report-request program driving
+#                           the CR00 transaction. Its confirmation paragraph
+#                           SUBMIT-JOB-TO-INTRDR opens at L462, and the split
+#                           between a deliberate cancel and a validation failure
+#                           declared below is argued from L480-L493 there.
+#   app/cbl/CBTRN03C.cbl  - the batch transaction report writer.
+#   app/cpy/CVTRA07Y.cpy  - the report layout: an X(133) separator at L48 fixes
+#                           the printed width, a leading-minus edit mask at L30
+#                           formats a detail amount, and leading-plus masks at
+#                           L54, L60 and L66 format the three subtotal bands
+#                           whose verbatim labels are declared at L51, L57 and
+#                           L63.
+#   app/cbl/CBSTM03A.CBL  - the 924-line statement generator. Note the
+#                           upper-case extension; a lower-case citation is a
+#                           dead reference.
+#   app/cbl/CBSTM03B.CBL  - its 230-line file-handling subprogram.
+#   app/cpy/COSTM01.CPY   - the statement layout.
+#   app/jcl/TRANREPT.jcl  - the report job, whose sort control fixes the
+#                           processing-date selection the range parameters below
+#                           express as a predicate.
+#   app/jcl/CREASTMT.JCL  - the statement job.
+# =============================================================================
+
+openapi: 3.1.0
+
+info:
+  title: CardDemo Reporting Service API
+  version: 1.0.0
+  summary: >-
+    Transaction reports and account statements for the migrated CardDemo
+    system, plus the starting of an on-demand report execution.
+  description: >-
+    Reports and statements for the migrated CardDemo credit-card system. This
+    context reads and never writes: its queries resolve against the read-only
+    cross-schema views created by data-migration/sql/V1__reporting_views.sql
+    under a database role holding select and nothing else, and it owns no table,
+    index or constraint. It therefore ships no schema-migration directory, and
+    one appearing beneath this module would itself be a defect.
+
+
+    Three surfaces are published. The transaction detail report preserves the
+    133-column width that the X(133) separator at app/cpy/CVTRA07Y.cpy L48
+    fixes, and it preserves its two distinct COBOL edit masks separately rather
+    than unifying them: L30 declares a leading-minus mask for a detail amount,
+    while L54, L60 and L66 declare a leading-plus mask for the page, account
+    and grand totals. The account statement pair is rendered as plain text and
+    as HTML and is returned by URI. The submission operation stands in for the
+    baseline's writing of job-control text to a transient data queue, which
+    app/csd/CARDDEMO.CSD L502 maps to the internal reader.
+
+
+    Monetary amounts are carried as JSON strings so that no client parses one
+    into IEEE-754 binary floating point.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+
+servers:
+  - url: /
+    description: >-
+      The origin that served this document. Every path below is appended to it
+      unchanged, so no host, port or environment name is recorded here. The two
+      hops in front of this service -- the public HTTP API and the internal load
+      balancer -- are not observable from inside it, so naming either one here
+      would advertise an address no browser can resolve.
+
+# WHY : Assumptions: authorization is asserted at the document level and
+#       inherited by all five operations, rather than repeated per operation with
+#       the risk that one is forgotten. There is no unauthenticated operation in
+#       this context and none may be added: SecurityConfig permits exactly one
+#       unauthenticated path, /actuator/health/**, which is deliberately not an
+#       operation of this contract because two consumers outside this
+#       repository's Java probe it and neither can present a token.
+security:
+  - bearerAuth: []
+
+# WHY : Refactoring Rationale: the authority each operation requires is declared
+#       as a MACHINE-READABLE field on the operation rather than only in prose or
+#       in a tag name, following the convention card-api.yaml establishes.
+#       Prose and tag membership are not checkable, so a restriction stated only
+#       that way is indistinguishable to a generator or a gateway from any other
+#       authenticated route. ReportingApiContractTest asserts that every
+#       operation carries this field and that its value is one of the two the
+#       model below admits.
+x-authority-model:
+  field: x-required-authority
+  values:
+    - carddemo-user
+    - carddemo-admin
+  enforcedBy: >-
+    services/reporting-service/src/main/java/com/carddemo/reporting/config/SecurityConfig.java
+  assertedBy: >-
+    services/reporting-service/src/test/java/com/carddemo/reporting/api/ReportingApiContractTest.java
+
+tags:
+  - name: reports
+    description: >-
+      The transaction detail report: starting an on-demand execution of it, and
+      reading the lines and the subtotal bands of a completed one. Each carries
+      x-required-authority carddemo-user.
+  - name: statements
+    description: >-
+      The account statement pair rendered from a card's posted transactions,
+      and the transactions a statement was rendered from. Each carries
+      x-required-authority carddemo-user.
+
+paths:
+
+  /api/v1/reports/transaction-report:
+
+    description: >-
+      The transaction detail report as a resource that can be asked to run. It
+      carries one operation, and deliberately no delete: an execution already
+      started is owned by the orchestrator rather than by this context, so
+      nothing here can withdraw one.
+
+    post:
+      operationId: submitTransactionReport
+      tags:
+        - reports
+      x-required-authority: carddemo-user
+      summary: Starts an on-demand transaction report execution.
+      description: >-
+        Replaces the report-request screen CORPT0A and the confirmation gate in
+        front of it. Exactly one of the three type selectors must be marked;
+        marking none is refused with the verbatim message the baseline raises at
+        app/cbl/CORPT00C.cbl L438, and the two range bounds are required only by
+        the custom type.
+
+
+        Refactoring Rationale: a deliberate cancellation answers 200 with an
+        explicit not-submitted outcome and no error payload, while only a
+        validation failure answers 400. The baseline cannot draw that
+        distinction and one paragraph shows why: inside SUBMIT-JOB-TO-INTRDR,
+        which opens at app/cbl/CORPT00C.cbl L462, the branch taken for 'N' or
+        'n' runs from L480 to L483 and sets the error flag with no message text
+        and no cursor move at all, while the branch for an unrecognised value at
+        L484 to L493 supplies both. At flag level a deliberate cancel is
+        therefore indistinguishable from a validation failure, and the screen
+        redisplays cleared with no feedback about which occurred. Splitting the
+        two outcomes across 200 and 201 preserves the suppression the flag
+        existed for -- it gated the success block at L445 to L456 -- while
+        giving the caller the feedback a single flag could not carry. The same
+        split is already delivered by transaction-service, whose
+        TransactionAddPreview and BillPaymentPreview carry exactly this role for
+        the same COBOL confirmation idiom, so this is the established shape in
+        this migration rather than a new one.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReportRequest'
+      responses:
+        '200':
+          description: >-
+            The caller declined the confirmation. Nothing was started and no
+            error occurred.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportSubmissionPreview'
+        '201':
+          description: An execution was started; its identity is in the body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportSubmission'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/reports/transaction-report/lines:
+
+    description: >-
+      The detail lines of the transaction report over an inclusive
+      processing-date range, addressable only as a key-ordered sequence of
+      pages.
+
+    get:
+      operationId: listTransactionReportLines
+      tags:
+        - reports
+      x-required-authority: carddemo-user
+      summary: Reads one page of transaction report detail lines.
+      description: >-
+        Each line carries the eight values the printed detail band carries, with
+        its amount rendered from the leading-minus mask declared at
+        app/cpy/CVTRA07Y.cpy L30.
+
+
+        Alternatives Considered: paging by a counted row position, the
+        skip-then-take shape. Rejected because under concurrent inserts it both
+        skips and repeats rows, and inserts really do land mid-key-space while a
+        browse is in flight -- app/cbl/COBIL00C.cbl L212 to L217 moves high
+        values into the key, starts a browse, reads backwards for the highest
+        identifier, ends the browse and only then adds one, so no lock is held
+        across that gap. Keyset paging is used instead, and the cursor is sealed
+        by the service so that replaying a backward position with direction next
+        is refused with 400 rather than answered with the wrong page.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+        - $ref: '#/components/parameters/StartDateQuery'
+        - $ref: '#/components/parameters/EndDateQuery'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PagingDirection'
+      responses:
+        '200':
+          description: One bounded page of report detail lines.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionReportLinePage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/reports/transaction-report/totals:
+
+    description: >-
+      The three subtotal bands the transaction report emits over an inclusive
+      processing-date range.
+
+    get:
+      operationId: readTransactionReportTotals
+      tags:
+        - reports
+      x-required-authority: carddemo-user
+      summary: Reads the subtotal bands of the transaction report.
+      description: >-
+        Assumptions: the account band breaks on the CARD NUMBER and not on the
+        account identifier, because that is what the reference program does --
+        app/cpy/CVTRA07Y.cpy L57 declares the label 'Account Total' verbatim
+        while the break itself is taken on the card. Substituting a per-account
+        grouping would produce output differing from the golden master for every
+        account holding more than one card, so the band label is carried
+        verbatim and the break is not reinterpreted. The register for documented
+        divergences is docs/architecture/cobol-to-service-traceability.md.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+        - $ref: '#/components/parameters/StartDateQuery'
+        - $ref: '#/components/parameters/EndDateQuery'
+      responses:
+        '200':
+          description: The subtotal bands, in the order the report emits them.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionReportTotals'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/reports/statements:
+
+    description: >-
+      The account statement pair for one card or one account.
+
+    post:
+      operationId: generateStatement
+      tags:
+        - statements
+      x-required-authority: carddemo-user
+      summary: Renders the statement pair for one card or account.
+      description: >-
+        Assumptions: this is a POST although it changes nothing this context
+        owns, and the reason is the selector rather than the effect. Exactly one
+        of a sixteen-digit card number or an account identifier selects the
+        statement, and a card number may not travel in a target: the load
+        balancer records a target in full in its access log before any
+        application code runs, and a browser retains it in history, so a number
+        placed there is written to two stores no application-side control can
+        reach. A request body is recorded by neither. card-api.yaml takes its
+        one card-number input in a body for the same reason, and
+        infra/modules/api-gateway-http/variables.tf records that decision
+        against its /api/v1/cards/lookup route key.
+
+
+        The rendered artifacts are returned by URI rather than inline, because
+        the plain-text form is the byte-for-byte parity artifact compared
+        against the golden masters and inlining it into JSON would require an
+        encoding step that no longer preserves those bytes.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StatementRequest'
+      responses:
+        '200':
+          description: The statement summary and the URIs of its two renderings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Statement'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/reports/statements/transactions:
+
+    description: >-
+      The posted transactions one statement was rendered from.
+
+    post:
+      operationId: listStatementTransactions
+      tags:
+        - statements
+      x-required-authority: carddemo-user
+      summary: Reads the transactions behind one statement.
+      description: >-
+        Takes the same selector as the statement operation and for the same
+        reason, so the card number never reaches a target. The collection is not
+        paged: a statement covers one card's posted transactions for one period
+        and the reference generator bounds that set itself, so there is no
+        open-ended sequence for a cursor to walk.
+
+
+        Trade-offs: the reference generator's bound is a table arity rather than
+        a query limit, and it is unchecked -- tests/README.md records the two
+        measured thresholds in app/cbl/CBSTM03A.CBL, at 512 transactions for one
+        card and 51 distinct cards, beyond which it overruns and crashes. The
+        Java has no fixed arity, so this operation answers where the baseline
+        aborts. That is a documented divergence rather than a silent
+        improvement, registered in
+        docs/architecture/cobol-to-service-traceability.md, and it is why no
+        maximum item count is declared below.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StatementRequest'
+      responses:
+        '200':
+          description: The transactions the statement was rendered from.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatementTransactionCollection'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        An access token minted by the project's managed identity provider and
+        validated by this service acting as a resource server. The token's group
+        claim is converted to authorities, where the baseline user type 'A'
+        becomes the administrator group and 'U' becomes the ordinary user group.
+        Presenting no usable token yields 401; presenting a valid token that
+        lacks the authority an operation requires yields 403.
+
+  parameters:
+
+    CorrelationIdHeader:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      description: >-
+        A caller-supplied request identifier, echoed on the response and carried
+        into every log line the request produces. Omitting it is normal: the
+        shared filter mints one in the same shape. At most twenty-four
+        characters, which is the bound
+        services/common-lib/src/main/java/com/carddemo/common/web/CorrelationIdFilter.java
+        enforces before any handler runs.
+      schema:
+        $ref: '#/components/schemas/CorrelationId'
+
+    StartDateQuery:
+      name: startDate
+      in: query
+      required: true
+      description: >-
+        Inclusive lower bound of the processing-date range, as YYYY-MM-DD. It is
+        a parameter rather than a clock read so that a rerun over the same range
+        produces the same output, which is the property app/jcl/INTCALC.jcl
+        preserves by passing its business date as a step argument.
+      schema:
+        $ref: '#/components/schemas/IsoDate'
+
+    EndDateQuery:
+      name: endDate
+      in: query
+      required: true
+      description: >-
+        Inclusive upper bound of the processing-date range, as YYYY-MM-DD. The
+        bound is inclusive on both ends, matching the record-selection predicate
+        the report job's sort control expresses.
+      schema:
+        $ref: '#/components/schemas/IsoDate'
+
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: >-
+        An opaque sealed position issued by this service as the firstKey or
+        lastKey of a page already held. The direction it was issued for is
+        sealed into it, so replaying a backward position with direction next is
+        refused with 400 rather than answered with the wrong page.
+      schema:
+        $ref: '#/components/schemas/CursorToken'
+
+    PagingDirection:
+      name: direction
+      in: query
+      required: false
+      description: >-
+        Which way to read from the supplied cursor. Meaningful only alongside
+        one, and defaulted to next.
+      schema:
+        $ref: '#/components/schemas/PageDirection'
+
+  responses:
+
+    # WHY : Assumptions: the five refusals are declared once here and referenced
+    #       by every operation, rather than restated per operation. Restating
+    #       them is how one operation ends up declaring a different error shape
+    #       from its siblings, and a caller writing one error path for the whole
+    #       contract is exactly what a single shared advice class exists to make
+    #       possible.
+    BadRequest:
+      description: >-
+        The request did not satisfy a declared constraint. The body's
+        fieldErrors array names each failing property and carries the verbatim
+        message the baseline raises for it.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    Unauthorized:
+      description: >-
+        No usable token was presented. Decided by the filter chain before any
+        handler runs, and rendered with a body because SecurityConfig installs
+        the shared refusal handlers.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    Forbidden:
+      description: >-
+        A valid token was presented that carries neither group authority.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    NotFound:
+      description: >-
+        No card or account matches the selector. The response names no digit of
+        the value that was searched for.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    InternalError:
+      description: >-
+        An unexpected failure. The body carries a correlation identifier and a
+        code; it never carries the text of the underlying throwable.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+  schemas:
+
+    # -----------------------------------------------------------------------
+    # Scalar contracts
+    # -----------------------------------------------------------------------
+
+    # WHY : Assumptions: money is a STRING and not a number, and the width below
+    #       is that of the widest carrier plus its sign and decimal point rather
+    #       than a guess. app/cpy/CVACT01Y.cpy L7 declares
+    #       ACCT-CURR-BAL PIC S9(10)V99: ten integral digits, two fractional, one
+    #       sign, one point. A JSON number here would be parsed into an IEEE-754
+    #       binary double by most clients, which cannot represent every such value
+    #       exactly, so the loss would occur at the boundary the user reads.
+    MonetaryAmount:
+      type: string
+      pattern: '^-?[0-9]{1,10}\.[0-9]{2}$'
+      minLength: 4
+      maxLength: 14
+      description: >-
+        An exact fixed-point amount at scale 2, always carrying both fractional
+        digits and a leading minus when negative. Never a JSON number.
+
+    # WHY : Assumptions: the pattern requires the rendering to be MASKED and not
+    #       merely to be sixteen characters. ReportingDtoMapper masks every
+    #       position but the last four, so a value of sixteen digits has not been
+    #       masked at all; a pattern admitting one would let a masking failure
+    #       serialise as a valid response.
+    MaskedCardNumber:
+      type: string
+      pattern: '^\*{12}[0-9]{4}$'
+      minLength: 16
+      maxLength: 16
+      description: >-
+        A primary account number rendered to its last four digits. No operation
+        in this contract returns an unmasked one and none accepts one in a
+        target.
+
+    IsoDate:
+      type: string
+      pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+      minLength: 10
+      maxLength: 10
+      description: >-
+        A calendar date as YYYY-MM-DD. The order is already the one the baseline
+        stores, so a lexical comparison and a date comparison agree.
+
+    Timestamp26:
+      type: string
+      minLength: 26
+      maxLength: 26
+      description: >-
+        A timestamp as 'YYYY-MM-DD HH:MM:SS.mmmmmm', exactly twenty-six
+        characters, which is the width
+        services/common-lib/src/main/java/com/carddemo/common/time/TimestampFormatter.java
+        emits and the width the reference layouts declare.
+
+    ReturnMessage:
+      type:
+        - string
+        - 'null'
+      maxLength: 75
+      description: >-
+        A single line of user-visible text, at the seventy-five-character width
+        the baseline's CCARD-ERROR-MSG and CCARD-RETURN-MSG carriers declare.
+        Null when the outcome needs no message.
+
+    CursorToken:
+      type: string
+      minLength: 1
+      maxLength: 512
+      description: >-
+        An opaque authenticated position token. Its contents are not part of
+        this contract and a caller must not parse one; a modified token is
+        refused with 400.
+
+    PageDirection:
+      type: string
+      enum:
+        - next
+        - previous
+      default: next
+      description: >-
+        Reading direction relative to a supplied cursor. The two values are
+        spelled in lower case because that is the wire vocabulary the shared
+        request types accept.
+
+    CorrelationId:
+      type: string
+      pattern: '^[0-9A-Za-z-]{1,24}$'
+      minLength: 1
+      maxLength: 24
+      description: >-
+        A request-scoped identifier. At most twenty-four characters; a longer
+        value is refused with 400 before any handler runs.
+
+    # -----------------------------------------------------------------------
+    # Report submission
+    # -----------------------------------------------------------------------
+
+    # WHY : Assumptions: thirteen properties, and the number is arithmetic rather
+    #       than preference. app/bms/CORPT00.bms declares 42 DFHMDF definitions
+    #       and only 17 of them carry a name; the other 25 are captions,
+    #       separators and the function-key legend, which address no storage and
+    #       have nothing for a request to carry. Six of the 17 are the two
+    #       three-part range composites, each consolidated here into one value, so
+    #       the count is 17 minus 6 plus 2. This is the component list of
+    #       com.carddemo.reporting.dto.ReportRequest, name for name.
+    # WHY : Trade-offs: consolidating each three-part bound into one ten-character
+    #       value is a narrower wire shape than the screen offers, and a caller can
+    #       no longer submit a month without a year. Nothing observable is given up:
+    #       the twelve per-part messages app/cbl/CORPT00C.cbl raises at L261-L296
+    #       and L331-L374 remain reachable as fieldErrors entries, and the
+    #       assembled form is what the program itself works in -- WS-START-DATE at
+    #       its L60 and WS-END-DATE at its L66 each hold year, month then day
+    #       separated by literal hyphen FILLERs.
+    ReportRequest:
+      type: object
+      additionalProperties: false
+      description: >-
+        Selects a transaction report by type and, for a caller-supplied run, by
+        an inclusive range. Exactly one of monthly, yearly and custom must be
+        marked; marking none is refused with the verbatim message
+        app/cbl/CORPT00C.cbl raises at L438. No property is declared required,
+        because none of the thirteen is unconditionally present -- which of them
+        must be supplied depends on the type selected, and that is a rule the
+        service applies rather than one a schema can state.
+      properties:
+        transactionName:
+          type: string
+          maxLength: 4
+          description: The four-character transaction identifier the screen displays.
+        title01:
+          type: string
+          maxLength: 40
+          description: First title line, from the shared title constants.
+        currentDate:
+          type: string
+          maxLength: 8
+          description: The date stamp the screen renders, echoed unchanged.
+        programName:
+          type: string
+          maxLength: 8
+          description: The program name the screen displays.
+        title02:
+          type: string
+          maxLength: 40
+          description: Second title line, from the shared title constants.
+        currentTime:
+          type: string
+          maxLength: 8
+          description: The time stamp the screen renders, echoed unchanged.
+        monthly:
+          type: string
+          pattern: '[^\x00 ]'
+          maxLength: 1
+          description: >-
+            Marked to select the current-month report. Any character that is
+            neither a space nor a null counts as a mark, which is the test the
+            baseline applies.
+        yearly:
+          type: string
+          pattern: '[^\x00 ]'
+          maxLength: 1
+          description: Marked to select the current-year report.
+        custom:
+          type: string
+          pattern: '[^\x00 ]'
+          maxLength: 1
+          description: >-
+            Marked to select a caller-supplied range. This is the only type for
+            which startDate and endDate are read.
+        startDate:
+          $ref: '#/components/schemas/IsoDate'
+        endDate:
+          $ref: '#/components/schemas/IsoDate'
+        confirm:
+          type: string
+          pattern: '[YyNn]'
+          maxLength: 1
+          description: >-
+            The confirmation answer. 'Y' or 'y' starts the execution; 'N' or 'n'
+            is a deliberate cancellation answered with 200; any other value is a
+            validation failure answered with 400.
+        errorMessage:
+          type: string
+          maxLength: 78
+          description: >-
+            The screen's own message line. Present on the request record because
+            the symbolic map declares it; ignored on input.
+
+    ReportSubmissionPreview:
+      type: object
+      additionalProperties: false
+      required:
+        - submitted
+        - reportName
+        - startDate
+        - endDate
+      description: >-
+        The outcome of a request the caller declined to confirm. Nothing was
+        started, and this is not an error.
+      properties:
+        submitted:
+          type: boolean
+          const: false
+          description: >-
+            Always false on this response. Declared as a constant rather than as
+            a plain boolean so that a caller can distinguish this outcome from a
+            started one by shape as well as by status.
+        reportName:
+          type: string
+          maxLength: 10
+          description: The report type that would have run.
+        startDate:
+          $ref: '#/components/schemas/IsoDate'
+        endDate:
+          $ref: '#/components/schemas/IsoDate'
+        returnMessage:
+          $ref: '#/components/schemas/ReturnMessage'
+
+    ReportSubmission:
+      type: object
+      additionalProperties: false
+      required:
+        - executionArn
+        - reportName
+        - shortName
+        - longName
+        - startDate
+        - endDate
+        - submittedAt
+      description: >-
+        A started execution. This is the component list of
+        com.carddemo.reporting.dto.ReportSubmissionResponse, name for name.
+      properties:
+        executionArn:
+          type: string
+          minLength: 1
+          description: >-
+            The orchestrator's identity for the started execution. It replaces
+            the baseline's writing of job-control text to the transient data
+            queue app/csd/CARDDEMO.CSD L502 maps to the internal reader, which
+            returned no identity at all -- an operator had to find the job by
+            name.
+        reportName:
+          type: string
+          maxLength: 10
+          description: The report type that was started.
+        shortName:
+          type: string
+          maxLength: 38
+          description: The report's short display name.
+        longName:
+          type: string
+          maxLength: 41
+          description: The report's long display name.
+        startDate:
+          $ref: '#/components/schemas/IsoDate'
+        endDate:
+          $ref: '#/components/schemas/IsoDate'
+        submittedAt:
+          $ref: '#/components/schemas/Timestamp26'
+
+    # -----------------------------------------------------------------------
+    # Report content
+    # -----------------------------------------------------------------------
+
+    TransactionReportLine:
+      type: object
+      additionalProperties: false
+      required:
+        - transactionId
+        - accountId
+        - typeCode
+        - typeDescription
+        - categoryCode
+        - categoryDescription
+        - source
+        - amount
+      description: >-
+        One detail line of the transaction report. The component list of
+        com.carddemo.reporting.dto.TransactionReportLineResponse, name for name,
+        with every width taken from that record.
+      properties:
+        transactionId:
+          type: string
+          maxLength: 16
+        accountId:
+          type: string
+          pattern: '^[0-9]+$'
+          maxLength: 11
+        typeCode:
+          type: string
+          maxLength: 2
+        typeDescription:
+          type: string
+          maxLength: 15
+        categoryCode:
+          type: string
+          pattern: '^[0-9]+$'
+          maxLength: 4
+        categoryDescription:
+          type: string
+          maxLength: 29
+        source:
+          type: string
+          maxLength: 10
+        amount:
+          $ref: '#/components/schemas/MonetaryAmount'
+
+    TransactionReportLinePage:
+      type: object
+      additionalProperties: false
+      required:
+        - items
+        - firstKey
+        - lastKey
+        - hasNext
+      description: >-
+        One bounded keyset page. Four members and no more: the shared page
+        envelope in common-lib declares exactly these, so a fifth here would
+        describe a body no service sends.
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/TransactionReportLine'
+        firstKey:
+          oneOf:
+            - $ref: '#/components/schemas/CursorToken'
+            - type: 'null'
+          description: >-
+            The sealed position of the first row, and the cursor a backward step
+            is issued from. Null on an empty page, which is also how the absence
+            of a backward step is expressed -- there is no separate hasPrev
+            member to disagree with it.
+        lastKey:
+          oneOf:
+            - $ref: '#/components/schemas/CursorToken'
+            - type: 'null'
+          description: >-
+            The sealed position of the last row, and the cursor a forward step is
+            issued from. Null on an empty page.
+        hasNext:
+          type: boolean
+          description: >-
+            Whether a forward step would yield rows. Determined by reading one
+            row more than the page holds, which is the mechanism
+            app/cbl/COCRDLIC.cbl uses for its own next-page indicator.
+
+    ReportTotalBand:
+      type: object
+      additionalProperties: false
+      required:
+        - band
+        - label
+        - amount
+      description: >-
+        One subtotal band. The component list of
+        com.carddemo.reporting.dto.ReportTotalsResponse, name for name.
+      properties:
+        band:
+          type: string
+          enum:
+            - PAGE
+            - ACCOUNT
+            - GRAND
+          description: >-
+            Which subtotal this is. PAGE breaks on the printed page boundary
+            app/cbl/CBTRN03C.cbl computes from its twenty-line page size,
+            ACCOUNT breaks on the card number, and GRAND closes the report.
+        label:
+          type: string
+          enum:
+            - Page Total
+            - Account Total
+            - Grand Total
+          maxLength: 13
+          description: >-
+            The verbatim label its reference group declares at
+            app/cpy/CVTRA07Y.cpy L51, L57 and L63. Carried on the wire although
+            the band determines it, so a consumer renders a band line without
+            holding its own copy of the mapping; the enumeration is what keeps
+            that redundancy from becoming a second source of truth.
+        amount:
+          $ref: '#/components/schemas/MonetaryAmount'
+
+    TransactionReportTotals:
+      type: object
+      additionalProperties: false
+      required:
+        - bands
+      description: >-
+        The subtotal bands of one report run, in the order the report emits
+        them.
+      properties:
+        bands:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReportTotalBand'
+
+    # -----------------------------------------------------------------------
+    # Statements
+    # -----------------------------------------------------------------------
+
+    StatementRequest:
+      type: object
+      additionalProperties: false
+      description: >-
+        Names one card or one account. Exactly one of the two must be supplied;
+        neither is declared required because either may be the one omitted. The
+        component list of com.carddemo.reporting.dto.StatementRequest, name for
+        name.
+      properties:
+        cardNumber:
+          type: string
+          pattern: '^[0-9]+$'
+          maxLength: 16
+          description: >-
+            The card's unmasked number, as a user typed it. This is the only
+            place in this contract an unmasked number appears, and it appears in
+            a body rather than in a target so that neither the edge access log
+            nor the browser's history records it.
+        accountId:
+          type: string
+          pattern: '^[0-9]+$'
+          maxLength: 11
+          description: The account identifier, when the caller selected by account.
+
+    Statement:
+      type: object
+      additionalProperties: false
+      required:
+        - cardNumber
+        - accountId
+        - customerName
+        - totalAmount
+        - transactionCount
+        - plainTextUri
+        - htmlUri
+        - generatedAt
+      description: >-
+        The summary of one rendered statement and the location of its two
+        renderings. The component list of
+        com.carddemo.reporting.dto.StatementResponse, name for name.
+      properties:
+        cardNumber:
+          $ref: '#/components/schemas/MaskedCardNumber'
+        accountId:
+          type: string
+          maxLength: 20
+          description: >-
+            The account identifier as the statement layout carries it. Note the
+            width: app/cpy/COSTM01.CPY declares a twenty-character carrier here,
+            wider than the eleven-digit form the request accepts, and the
+            response reports the layout's width rather than the request's so
+            that a value the layout can hold is never truncated on the way out.
+        customerName:
+          type: string
+          maxLength: 75
+          description: The customer name as the statement layout composes it.
+        totalAmount:
+          $ref: '#/components/schemas/MonetaryAmount'
+        transactionCount:
+          type: integer
+          format: int32
+          minimum: 0
+          description: >-
+            How many transactions the statement covers. No maximum is declared:
+            see the divergence recorded on the statement-transaction operation.
+        plainTextUri:
+          type: string
+          description: >-
+            Where the plain-text rendering was written. It is returned by
+            reference rather than inline because that rendering is the
+            byte-for-byte parity artifact compared against the golden masters.
+        htmlUri:
+          type: string
+          description: >-
+            Where the HTML rendering was written. Every variable cell in it is
+            contextually escaped, so a merchant name or description carrying
+            markup is rendered as text rather than interpreted.
+        generatedAt:
+          $ref: '#/components/schemas/Timestamp26'
+
+    StatementTransaction:
+      type: object
+      additionalProperties: false
+      required:
+        - cardNumber
+        - transactionId
+        - typeCode
+        - categoryCode
+        - source
+        - description
+        - amount
+        - merchantId
+        - merchantName
+        - merchantCity
+        - merchantZip
+        - originTimestamp
+        - processingTimestamp
+      description: >-
+        One posted transaction as a statement carries it. The component list of
+        com.carddemo.reporting.dto.StatementTransactionResponse, name for name,
+        with every width taken from that record.
+      properties:
+        cardNumber:
+          $ref: '#/components/schemas/MaskedCardNumber'
+        transactionId:
+          type: string
+          maxLength: 16
+        typeCode:
+          type: string
+          maxLength: 2
+        categoryCode:
+          type: string
+          maxLength: 4
+        source:
+          type: string
+          maxLength: 10
+        description:
+          type: string
+          maxLength: 100
+        amount:
+          $ref: '#/components/schemas/MonetaryAmount'
+        merchantId:
+          type: string
+          maxLength: 9
+        merchantName:
+          type: string
+          maxLength: 50
+        merchantCity:
+          type: string
+          maxLength: 50
+        merchantZip:
+          type: string
+          maxLength: 10
+        originTimestamp:
+          $ref: '#/components/schemas/Timestamp26'
+        processingTimestamp:
+          $ref: '#/components/schemas/Timestamp26'
+
+    StatementTransactionCollection:
+      type: object
+      additionalProperties: false
+      required:
+        - items
+      description: >-
+        The transactions one statement was rendered from. Not a page: the set is
+        bounded by the statement's own period, so there is no open-ended
+        sequence for a cursor to walk.
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/StatementTransaction'
+
+    # -----------------------------------------------------------------------
+    # Shared problem shape
+    # -----------------------------------------------------------------------
+
+    # WHY : Assumptions: this is the shape
+    #       services/common-lib/src/main/java/com/carddemo/common/error/ApiError.java
+    #       renders, restated here because an OpenAPI document cannot reference a
+    #       schema in another file that no build step assembles. It is declared
+    #       identically in every sibling contract for the same reason, and a
+    #       divergence between any two of them would be a defect in whichever
+    #       diverged rather than a local choice.
+    ApiError:
+      type: object
+      additionalProperties: false
+      required:
+        - code
+        - secondaryCode
+        - severity
+        - subsystem
+        - status
+        - correlationId
+        - path
+        - timestamp
+        - fieldErrors
+      description: One problem document, rendered by the shared advice class.
+      properties:
+        code:
+          type: string
+          maxLength: 13
+        secondaryCode:
+          type: string
+          maxLength: 13
+        message:
+          $ref: '#/components/schemas/ReturnMessage'
+        severity:
+          $ref: '#/components/schemas/Severity'
+        subsystem:
+          $ref: '#/components/schemas/Subsystem'
+        status:
+          type: integer
+          format: int32
+          minimum: 400
+          maximum: 599
+        correlationId:
+          $ref: '#/components/schemas/CorrelationId'
+        path:
+          type: string
+        timestamp:
+          $ref: '#/components/schemas/Timestamp26'
+        fieldErrors:
+          type: array
+          items:
+            $ref: '#/components/schemas/FieldError'
+        abend:
+          oneOf:
+            - $ref: '#/components/schemas/AbendDetail'
+            - type: 'null'
+
+    FieldError:
+      type: object
+      additionalProperties: false
+      required:
+        - field
+        - state
+        - message
+      description: >-
+        One failing property. This is the structured form of the baseline's
+        FLG-*-NOT-OK and FLG-*-BLANK condition pattern together with the red
+        highlight app/cpy/CSSETATY.cpy applies, which the browser renders as a
+        field-level validation state.
+      properties:
+        field:
+          type: string
+          minLength: 1
+        state:
+          $ref: '#/components/schemas/FieldValidationState'
+        message:
+          type: string
+          minLength: 1
+          maxLength: 75
+
+    FieldValidationState:
+      type: string
+      enum:
+        - NOT_OK
+        - BLANK
+      description: >-
+        Which of the baseline's two failure conditions applies. BLANK
+        additionally causes the browser to render the literal asterisk marker
+        the reference copybook writes into an empty field.
+
+    Severity:
+      type: string
+      enum:
+        - LOG
+        - INFO
+        - WARNING
+        - CRITICAL
+
+    Subsystem:
+      type: string
+      enum:
+        - APPLICATION
+        - CICS
+        - IMS
+        - RELATIONAL
+        - QUEUE
+        - OBJECT_STORE
+
+    AbendDetail:
+      type: object
+      additionalProperties: false
+      required:
+        - abendCode
+        - abendCulprit
+        - abendReason
+        - abendMsg
+      description: >-
+        The structured equivalent of the baseline's ABEND-DATA group at
+        app/cpy/CSMSG02Y.cpy L45 to L53, at its declared widths.
+      properties:
+        abendCode:
+          type: string
+          maxLength: 4
+        abendCulprit:
+          type: string
+          maxLength: 8
+        abendReason:
+          type: string
+          maxLength: 50
+        abendMsg:
+          type: string
+          maxLength: 72

@@ -1,21 +1,27 @@
 /**
  * REST adapter surface of the pending credit-card authorization bounded context.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ * <h2>Target contract, and the tree state that realises it</h2>
  *
  * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
- * beside this one today. The migration lands its artifacts in plan order and this charter is
- * authored first, so at the checkpoint that authored it this directory holds this charter and
- * nothing else. A type named below that has no file yet is therefore <b>planned</b>, not missing,
- * and a count below is a target total rather than a measurement of the directory.</p>
+ * package's <b>target contract</b> as the migration plan assigns it, and that contract is now fully
+ * realised: this directory holds {@code PendingAuthController}, {@code FraudController} and this
+ * charter, and nothing else.</p>
  *
- * <p>Alternatives Considered: withholding this charter until the two controllers it governs exist.
+ * <p>Refactoring Rationale: an earlier revision of this section declared the two controllers
+ * <b>planned</b> rather than present, and stated that at the checkpoint that authored it the
+ * directory held this charter alone. Both sentences were true when written and are false now, so
+ * they are replaced rather than left standing: a charter that describes its package as empty tells a
+ * reader auditing the two classes beside it that they should not exist. The original reason for
+ * authoring the charter first is kept below, because it explains why the file is older than what it
+ * governs.</p>
+ *
+ * <p>Alternatives Considered: withholding this charter until the two controllers it governs existed.
  * Rejected, because the charter is what the authors of those classes work from -- which type
  * belongs here, which may not, and which dependency is refused outright -- so writing it last
  * would leave the package with no stated contract during exactly the interval in which one is
- * needed. The cost of authoring it first is that its inventory reads as present tense unless the
- * distinction is declared, which is what the paragraph above is for.</p>
+ * needed. The cost accepted was that its inventory read as present tense before it was true, which
+ * is a cost that ends when the classes land.</p>
  *
  * <p>Purpose: this package is the stateless HTTP boundary of authorization-service. It binds a
  * request, validates its fields, delegates to the service layer, and renders the result as a
@@ -23,13 +29,20 @@
  * logic: every rule transcribed from the reference COBOL lives one package over, in
  * {@code com.carddemo.authorization.service}.
  *
- * <p>Two controllers are planned here, and there is no third:
+ * <p>Two controllers sit here, and there is no third:
  *
  * <ul>
  *   <li>{@code PendingAuthController} -- the pending-authorization summary list, and the detail
- *       view of one pending authorization.</li>
- *   <li>{@code FraudController} -- setting the fraud state of one authorization message.</li>
+ *       view of one pending authorization. It serves the two operations the contract publishes as
+ *       {@code listPendingAuthorizations} and {@code getPendingAuthorization}.</li>
+ *   <li>{@code FraudController} -- setting the fraud state of one authorization message, published as
+ *       {@code setAuthorizationFraudState}. It is the only route here that changes state.</li>
  * </ul>
+ *
+ * <p>Assumptions: three operations across two controllers, which is the whole of this context's HTTP
+ * surface. The contract declares exactly those three and no fourth, so a method added here without a
+ * corresponding operation in that document would publish behaviour no client is told about, and an
+ * operation added there without a method here would promise behaviour nothing serves.</p>
  *
  * <h2>Lineage: two terminal transactions, three programs</h2>
  *

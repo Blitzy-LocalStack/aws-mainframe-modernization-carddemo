@@ -1,5 +1,8 @@
 package com.carddemo.common.error;
 
+import com.carddemo.common.validation.FieldValidationFlag;
+import java.util.List;
+
 import java.util.Objects;
 
 /**
@@ -70,9 +73,47 @@ public class ClientInputException extends IllegalArgumentException {
     private final String code;
 
     /**
-     * The logical field the refusal is attributed to, or {@code null} when the request as a whole is.
+     * The logical fields the refusal is attributed to, empty when the request as a whole is.
+     *
+     * <p>Refactoring Rationale: this is a LIST where an earlier revision held a single name, and the
+     * widening was forced by a class of refusal the single name cannot express: a cross-field
+     * disagreement. The pending-authorization fraud operation is the concrete case -- its request body
+     * repeats the three key components that its path selector already names, and
+     * {@code services/authorization-service/src/main/resources/openapi/authorization-api.yaml} publishes
+     * that a request in which they disagree is refused with the disagreeing members NAMED, plural,
+     * "rather than one of the two namings being preferred silently". With one name available, two of the
+     * three disagreements would have had to be dropped, and a client shown one of three wrong members
+     * corrects one and is refused again.</p>
+     *
+     * <p>Alternatives Considered: raising one exception per disagreeing member. Rejected because only the
+     * first would ever be rendered -- an exception unwinds the handler -- so the client would see a
+     * single-member refusal again, arrived at by a longer route. Alternatives Considered: a separate
+     * exception type carrying a list, leaving this one single-valued. Rejected because the shared advice
+     * would then need a second handler producing the identical body, and two handlers for one status and
+     * one shape are two places the shape can drift.</p>
+     *
+     * <p>Assumptions: the list is unmodifiable and never {@code null}. A refusal naming no member at all
+     * is the empty list rather than a null one, so the advice reads a single state for "no member" and
+     * the two absence encodings a nullable list would admit do not arise.</p>
      */
-    private final String field;
+    private final List<String> fields;
+
+    /**
+     * The per-field validation state a form draws its marker from, never {@code null}.
+     *
+     * <p>Assumptions: the state is carried on the refusal rather than decided by whatever renders it,
+     * because only the refusing code knows whether the control was left empty or filled with a value an
+     * edit rejected, and the baseline's templated highlight at lines 17 to 27 of
+     * {@code app/cpy/CSSETATY.cpy} draws a different marker for each -- an asterisk into the field for
+     * the blank case and the colour attribute alone for the rejected-value case. A renderer that assumed
+     * one state could express only one of the two.</p>
+     *
+     * <p>Trade-offs: the two older signatures store the rejected-value state, so their meaning is
+     * unchanged and no existing raise site had to be edited when this component was added. What is given
+     * up is that a caller wanting the blank state has to name it; what is bought is that no existing
+     * refusal silently changed the marker a form draws.</p>
+     */
+    private final FieldValidationFlag state;
 
     /**
      * Creates a refusal attributed to the request as a whole.
@@ -85,7 +126,12 @@ public class ClientInputException extends IllegalArgumentException {
      * @throws IllegalArgumentException if {@code code} is blank
      */
     public ClientInputException(String code, String message) {
-        this(code, null, message);
+        // WHY : Assumptions: the absent field is expressed as an EMPTY LIST rather than as a cast null,
+        //       because a bare null is ambiguous between the two three-argument constructors and a cast
+        //       null would name one of them only to have it convert the null straight back to this same
+        //       empty list. Delegating to the storing constructor is one step instead of two and states
+        //       the meaning -- no member is named -- rather than encoding it as an absent name.
+        this(code, List.<String>of(), message);
     }
 
     /**
@@ -101,6 +147,108 @@ public class ClientInputException extends IllegalArgumentException {
      * @throws IllegalArgumentException if {@code code} is blank
      */
     public ClientInputException(String code, String field, String message) {
+        this(code, singletonOrEmpty(field), FieldValidationFlag.NOT_OK, message);
+    }
+
+    /**
+     * Wraps one possibly-absent field name as the list the storing constructor takes.
+     *
+     * <p>Refactoring Rationale: this exists to keep the two constructors unambiguous, and the reason is
+     * a language rule rather than a style preference. Inlining the choice as a conditional expression
+     * makes it a POLY conditional -- one of its branches is a generic method invocation without explicit
+     * type arguments -- so its type is inferred from the target, and both constructors then appear
+     * applicable to the delegating call, which the compiler reports as an ambiguous reference. A
+     * statically typed helper resolves the type before the call is made, so exactly one constructor
+     * applies.</p>
+     *
+     * @param field the field name, or {@code null} when the request as a whole is at fault
+     * @return a one-element list holding {@code field}, or an empty list when it is {@code null}; never
+     *     {@code null}
+     */
+    private static List<String> singletonOrEmpty(String field) {
+        List<String> empty = List.of();
+        return field == null ? empty : List.of(field);
+    }
+
+    /**
+     * Creates a refusal attributed to several named fields at once.
+     *
+     * <p>Assumptions: the order of {@code fields} is PRESERVED and is significant, because the advice
+     * renders one per-field entry per name in the order supplied and a client rendering a form draws its
+     * markers in that order. A raise site that has a natural order -- a key's own component order, for
+     * instance -- should supply it rather than leave the order to a set's iteration.</p>
+     *
+     * <p>Trade-offs: a duplicate name is neither rejected nor collapsed. Rejecting it would put a
+     * validation concern on an exception constructor, which is a poor place to report a defect at a raise
+     * site, and collapsing it would silently discard an entry a caller meant to send; the two would each
+     * hide a mistake this class cannot distinguish from an intention.</p>
+     *
+     * @param code the stable token this refusal is matched on in operational tooling; must not be
+     *     {@code null} or blank
+     * @param fields the logical fields the refusal belongs to, as a client would key them, in the order
+     *     they should be rendered; must not be {@code null} and must contain no {@code null} element,
+     *     and may be empty when the request as a whole is at fault
+     * @param message the redacted diagnostic, naming the fields and the constraint and never reproducing
+     *     the value of a withheld field; must not be {@code null}
+     * @throws NullPointerException if {@code code}, {@code fields} or {@code message} is {@code null}, or
+     *     if any element of {@code fields} is {@code null}
+     * @throws IllegalArgumentException if {@code code} is blank
+     */
+    public ClientInputException(String code, List<String> fields, String message) {
+        this(code, fields, FieldValidationFlag.NOT_OK, message);
+    }
+
+    /**
+     * Creates a refusal naming the field, the state its control is in, and the diagnostic.
+     *
+     * <p>Refactoring Rationale: this signature exists because the others can express only the
+     * rejected-value state, and the migrated screens need both states rendered. Transformation rule T7
+     * turns the baseline's paired not-acceptable and blank condition names into one structured array
+     * entry per field, so a refusal unable to say which of the two it is forces whatever renders it to
+     * guess, and a form told that a blank control holds a rejected value draws no asterisk where the
+     * baseline draws one.</p>
+     *
+     * <p>Assumptions: the message supplied here carries the same obligation the class contract states for
+     * every other signature. It is composed from constants and from values that have passed a per-field
+     * sensitivity gate, never from text a caller supplied and never from a library's own report of what
+     * it could not parse.</p>
+     *
+     * @param code the stable token this refusal is matched on in operational tooling; must not be
+     *     {@code null} or blank
+     * @param field the logical field the refusal belongs to, as a client would key it, or {@code null}
+     *     when the request as a whole is at fault
+     * @param state the validation state the field's control is in; must not be {@code null}
+     * @param message the redacted diagnostic, naming the field and the constraint and never reproducing
+     *     the value of a withheld field; must not be {@code null}
+     * @throws NullPointerException if {@code code}, {@code state} or {@code message} is {@code null}
+     * @throws IllegalArgumentException if {@code code} is blank
+     */
+    public ClientInputException(String code, String field, FieldValidationFlag state, String message) {
+        this(code, singletonOrEmpty(field), state, message);
+    }
+
+    /**
+     * Creates a refusal attributed to several named fields at once, all in one state.
+     *
+     * <p>Assumptions: ONE state covers every name, and that is a deliberate bound rather than an
+     * oversight. The only multi-field raise site in this repository is a cross-field COMPARISON, where
+     * the two members fail together and for the same reason, so a state per name would offer a
+     * distinction no raise site can make. A refusal whose members genuinely differ in state is two
+     * refusals, and the advice already renders an array.</p>
+     *
+     * @param code the stable token this refusal is matched on in operational tooling; must not be
+     *     {@code null} or blank
+     * @param fields the logical fields the refusal belongs to, in rendering order; must not be
+     *     {@code null} and must contain no {@code null} element
+     * @param state the validation state every named field's control is in; must not be {@code null}
+     * @param message the redacted diagnostic; must not be {@code null}
+     * @throws NullPointerException if any argument is {@code null}, or if any element of {@code fields}
+     *     is {@code null}
+     * @throws IllegalArgumentException if {@code code} is blank
+     */
+    public ClientInputException(String code, List<String> fields, FieldValidationFlag state,
+            String message) {
+
         super(Objects.requireNonNull(message, "message must not be null"));
         Objects.requireNonNull(code, "code must not be null");
         if (code.isBlank()) {
@@ -111,7 +259,13 @@ public class ClientInputException extends IllegalArgumentException {
             throw new IllegalArgumentException("code must not be blank");
         }
         this.code = code;
-        this.field = field;
+        // WHY : Assumptions: the copy is defensive AND null-hostile in one step. List.copyOf rejects a
+        //       null element, which is what stops a per-field entry keyed by nothing reaching a client,
+        //       and it returns an unmodifiable view so a raise site that keeps its own list cannot alter
+        //       what the advice will render after the throw.
+        this.fields = List.copyOf(Objects.requireNonNull(fields, "fields must not be null"));
+        this.state = Objects.requireNonNull(state, "state must not be null");
+
     }
 
     /**
@@ -126,10 +280,36 @@ public class ClientInputException extends IllegalArgumentException {
     /**
      * Returns the logical field this refusal is attributed to.
      *
-     * @return the field name supplied at construction, or {@code null} when the request as a whole is
-     *     at fault and no single field can be named
+     * <p>Assumptions: this accessor is retained unchanged in meaning for the single-field case, which is
+     * every raise site in this repository other than the cross-field comparison that forced
+     * {@link #fields()} to exist. It answers the FIRST name when several were supplied, because a caller
+     * asking for one name from a multi-member refusal wants the one the client should be positioned on,
+     * and the constructor documents the supplied order as the rendering order.</p>
+     *
+     * @return the first field name supplied at construction, or {@code null} when no field was named and
+     *     the request as a whole is at fault
      */
     public String field() {
-        return this.field;
+        return this.fields.isEmpty() ? null : this.fields.get(0);
+    }
+
+    /**
+     * Returns every logical field this refusal is attributed to, in the order it should be rendered.
+     *
+     * @return an unmodifiable list of field names, empty when the request as a whole is at fault and no
+     *     member can be named; never {@code null}
+     */
+    public List<String> fields() {
+        return this.fields;
+    }
+
+    /**
+     * Returns the validation state the refused field's control is in.
+     *
+     * @return the state supplied at construction, the rejected-value one when no signature named a
+     *     state, never {@code null}
+     */
+    public FieldValidationFlag state() {
+        return this.state;
     }
 }

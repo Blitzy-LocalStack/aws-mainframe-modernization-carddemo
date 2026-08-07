@@ -1,28 +1,6 @@
 /**
  * Web-layer slice tests for the two REST adapters of the auth bounded context.
  *
- * <h2>Target contract, not a directory listing</h2>
- *
- * <p>Assumptions: every inventory, file name, class name and count in this charter states the
- * package's <b>target contract</b> as the migration plan assigns it. It is a specification of what
- * this package owns and of what it may never hold, so it is read against the plan rather than against
- * a listing of the directory beside it.</p>
- *
- * <p>Alternatives Considered: deriving the inventory from the directory instead of from the plan.
- * Rejected, because a charter that describes whatever happens to be present cannot say what may
- * <em>not</em> be added, and that is the half of a package contract a reader cannot reconstruct from
- * the files. Stating the closed set costs a charter that has to be revised when the contract itself
- * changes, and buys a boundary a reviewer can enforce against a proposed addition.</p>
- *
- * <p>Two classes execute here and nothing else does. {@code AuthControllerTest} is the slice test
- * for {@code com.carddemo.auth.api.AuthController}, whose behavioural specification is the 260-line
- * sign-on program at {@code app/cbl/COSGN00C.cbl}. {@code UserControllerTest} is the slice test for
- * {@code com.carddemo.auth.api.UserController}, whose specification is four programs rather than
- * one: {@code app/cbl/COUSR00C.cbl} at 695 lines, {@code app/cbl/COUSR01C.cbl} at 299,
- * {@code app/cbl/COUSR02C.cbl} at 414 and {@code app/cbl/COUSR03C.cbl} at 359. Both are built with
- * {@code @WebMvcTest}, so the web layer stands up in isolation and every collaborator beneath it is
- * supplied as a mock.</p>
- *
  * <h2>The adapter charter, and the line it draws</h2>
  *
  * <p>The {@code api} package owns exactly three concerns: transport validation, HTTP status mapping
@@ -121,65 +99,6 @@
  * adapter and the service surfaces at compile time or in the sibling service package, and never as
  * a silently passing assertion here.</p>
  *
- * <h2>The explainability obligation has no test carve-out</h2>
- *
- * <p>Two authorities establish that, and citing only one would leave the point arguable. The project
- * Explainability rule states its validation gate at line 43: every new or modified function must
- * have a docstring giving purpose, parameters and return values, every non-obvious implementation
- * decision must have an inline comment explaining why that approach was chosen using at least one
- * of the rule's four named categories, and code missing either fails review. The rule scopes that
- * to functions, classes and module entry points without qualification, and a test class is a class.
- * {@code tests/README.md} reaches the same conclusion from the other direction, for test code
- * specifically: its line 544 names "Every new test, fixture builder, helper, mock, and runner
- * routine", and its line 549 closes the requirement with "This is a hard review gate."</p>
- *
- * <p>What that means here is a checklist rather than a posture. Every class, every {@code @Test}
- * method and every {@code private} helper in the two classes of this package carries Javadoc; a
- * param tag appears for every parameter, for every component of every {@code record} and for every
- * type parameter; a return tag appears on every method returning a value; and a throws tag appears
- * for every exception a signature declares. A nested {@code record}, should either class declare
- * one, is a type in its own right and needs its own block with one param tag per component.</p>
- *
- * <h2>Where the machine now matches the rule, and the one place it is looser</h2>
- *
- * <p>Two gaps this package previously recorded have since been closed in
- * {@code config/checkstyle/checkstyle.xml}, and the correction is stated rather than quietly
- * dropped, because the earlier wording told a reader that private and overriding methods were a
- * review concern only. Both are now build failures. {@code MissingJavadocMethod} sets
- * {@code allowedAnnotations} to the empty list, so the {@code Override} default no longer exempts
- * an overriding method from carrying a block of its own; the rule never exempted one, at either
- * line 15 or line 43, and an inheritDoc tag alone still satisfies none of the rule's lines 18
- * through 21, since it supplies no purpose, no parameter description and no return description.
- * The same module also runs at {@code scope="private"}, and because Checkstyle orders its scopes
- * public, then protected, then package, then private and admits every narrower visibility, that
- * reaches a {@code private} method directly. Its sibling {@code JavadocMethod} lists private among
- * its access modifiers, so presence and completeness are now enforced by the same pair at the same
- * visibility. The half-measure is still the trap worth naming: a private helper given a summary but
- * no param tags is worse placed than one given nothing at all, because both modules can see it and
- * will report every tag it lacks on top of the block it needs.</p>
- *
- * <p>The one remaining looseness runs the other way, and is recorded so that nobody gold-plates it.
- * {@code JavadocVariable} is deliberately absent from the audit, so a field -- a {@code MockMvc}, an
- * {@code ObjectMapper}, a mocked collaborator bean -- needs no Javadoc block. The rule agrees,
- * because it scopes its docstring requirement to functions, classes and module entry points, and a
- * field is none of the three. A field that genuinely needs explaining takes an adjacent inline
- * comment under the rule's line 27, which is the placement the rule asks for in any case.</p>
- *
- * <p>The one place the machine is not the looser of the two is annotations. The skipped-annotations
- * list stays at its default, which exempts generated code and nothing else, so {@code @WebMvcTest},
- * {@code @Test}, {@code @MockitoBean} and {@code @Import} confer no exemption whatsoever on the
- * types and methods they decorate.</p>
- *
- * <p>Trade-offs: the audit governing this file cannot check the half of the rule that matters most,
- * and that compromise is stated rather than hidden. The forbidden-summary-fragment pattern on
- * {@code SummaryJavadoc} reads Javadoc summaries only and never reads an inline comment, so the
- * rule's line 27 on adjacency, line 28 on explaining why rather than what, line 38 on not restating
- * the code beside a comment and line 40 on not leaving a non-obvious choice undocumented are not
- * mechanically checkable at any severity. A build can therefore complete this gate while carrying
- * restate-the-code prose throughout, and that code still fails review under line 43. A green gate
- * is evidence about docstring presence and completeness and about nothing else; the reasoning half
- * is carried by review and by {@code docs/CODE_DOCUMENTATION_STANDARD.md}.</p>
- *
  * <h2>There is no executable oracle for this context</h2>
  *
  * <p>Every expected value in this package is derived by reading the reference source and its
@@ -203,67 +122,14 @@
  * lines 35 and 36 that its own tests encode the documented rules and do not redefine them, and this
  * package holds itself to that verb.</p>
  *
- * <h2>This gate is binary</h2>
+ * <h2>What this package may hold</h2>
  *
- * <p>Maven, Checkstyle, Surefire and JUnit each report pass or fail, with no tolerated middle band.
- * The documentation gate is bound to the {@code validate} phase with a fail-on-violation flag and a
- * violation threshold of warning, so it stops the build before compilation on a developer's own
- * machine and not only in a pipeline. The graded return-code rubric that the existing suite follows
- * -- five codes, aggregated to the worst code seen, whose usage code is listed last and out of
- * numeric sequence because it aborts immediately and never enters aggregation -- is documented in
- * section 8 of {@code tests/README.md} and governs that suite alone. It has no application to this
- * module, and a build here is never reported as having passed with tolerated warnings, because no
- * such state exists for it: the violation threshold is warning, so a warning is a failure.</p>
- *
- * <h2>Precedence when the three authorities disagree</h2>
- *
- * <p>The Explainability rule binds first, {@code config/checkstyle/checkstyle.xml} second and
- * {@code docs/CODE_DOCUMENTATION_STANDARD.md} third. The ordering only ever matters in one
- * direction, because the audit is nowhere stricter than the rule. Wherever the machine is the more
- * lenient of the two, as at each of the three gaps above, the rule is what gets satisfied and the
- * leniency is left untaken.</p>
- *
- * <h2>Contents of this package</h2>
- *
- * <p>Target contract -- three files and no fourth: {@code AuthControllerTest.java},
- * {@code UserControllerTest.java}
- * and this descriptor. There is deliberately no abstract base class, no suite aggregator, no
- * separate fixture builder and no test-scoped configuration class. Two test classes need no shared
- * scaffolding, and standing any of it up would move one class's setup into a second file, leaving a
- * reader two places to look and no way to tell which one applied.</p>
- *
- * <p>The auth service's declared test inventory is four classes in total: the two here, plus
- * {@code UserServiceTest} and {@code UserRepositoryIT} in their own sibling packages. Neither
- * {@code com} nor {@code com.carddemo} carries a descriptor of this kind, in this module or in the
- * shared library, and that omission is deliberate rather than overlooked. Each of those directories
- * contains no processed {@code .java} file, so {@code JavadocPackage} has nothing to fire on there
- * and the rule's line 15 has no entry point to attach to; adding one would document a package that
- * declares nothing.</p>
- *
- * <h2>Why this descriptor exists</h2>
- *
- * <p>The rule requires a docstring on every module entry point at its line 15, and in Java the
- * entry point of a package is the package declaration. {@code package-info.java} is the only
- * compilation unit able to carry package-level Javadoc, so this file is load-bearing rather than
- * decorative. Two audit modules enforce that requirement from opposite sides, and neither is
- * redundant. {@code JavadocPackage} runs at the file-set level and asserts only that this file
- * exists beside the audited sources in its directory; it never reads the contents, so on its own it
- * would pass a file holding a bare package statement or an ordinary block comment.
- * {@code MissingJavadocPackage} runs inside the syntax-tree walker and asserts that the declaration
- * carries a Javadoc block, so on its own it would never notice the file missing. Remove either and
- * the requirement is half-enforced. The gate is additionally configured to audit test sources
- * alongside main sources, which is why this directory falls inside it exactly as a main-tree
- * package does, and why this file is not optional here.</p>
- *
- * <p>One structural consequence is worth stating plainly, because it explains an omission that
- * would otherwise resemble the very thing the rule forbids. This compilation unit contains a single
- * statement, so the decision rationale the validation gate asks for has no adjacent executable code
- * to sit beside; it is carried inside this block, under the rule's own category labels, which is
- * the only placement a package makes available. The parameter, return-value and exception elements
- * of the rule's docstring specification describe callable code, and a package declaration is not
- * callable: it takes no argument, yields no value and raises nothing. Those elements are therefore
- * omitted deliberately rather than written out empty, and that is not a stylistic preference. The
- * completeness module auditing this build reports an at-clause carrying no description as a
- * violation in its own right, so an empty tag would fail the very gate it was added to satisfy.</p>
+ * <p>Assumptions: this package holds slice tests and this descriptor, and nothing else. There is
+ * deliberately no abstract base class, no suite aggregator, no separate fixture builder and no
+ * test-scoped configuration class: a handful of test classes need no shared scaffolding, and
+ * standing any of it up would move one class's setup into a second file, leaving a reader two
+ * places to look and no way to tell which one applied. The boundary is stated as a rule about what
+ * may be added rather than as a roster of files, because a roster is authoritative only until the
+ * next class arrives.</p>
  */
 package com.carddemo.auth.api;

@@ -148,9 +148,10 @@
         `maxRetries` (total attempts are one more than that value) and the
         enabling annotation is EnableResilientMethods, not the older
         EnableRetry, so a service that copies a Boot 3 example will not compile.
-      Assumptions: "declares none" is the precise claim, and an earlier revision
-        of this comment overstated it as "NO resilience library appears anywhere
-        in this build". That was measurably false. The path is
+      Assumptions: "declares none" is the precise claim, and it is narrower than
+        absence. One transitive copy of spring-retry IS on the classpath, so a
+        claim that no resilience library appears anywhere in this build would be
+        measurably false. The path is
         io.awspring.cloud:spring-cloud-aws-starter-sqs:4.1.0 ->
         io.awspring.cloud:spring-cloud-aws-sqs:4.1.0 ->
         org.springframework.retry:spring-retry:2.0.13 at COMPILE scope, and it
@@ -163,17 +164,21 @@
         `mvn -f services/pom.xml dependency:tree
         -Dincludes=org.springframework.retry:spring-retry`.
       Alternatives Considered: excluding spring-retry from the SQS starter so
-        that the original claim would become true. Rejected on the measurement
-        above: those six classes implement the listener container's own polling
-        back-off, so the exclusion would remove a type the integration loads at
-        run time and turn a documentation defect into a NoClassDefFoundError
-        under load. The claim was corrected instead of the dependency graph.
-      Trade-offs: what is therefore guaranteed is narrower than absence and is
-        the thing the decision actually needs - that no CardDemo class reaches
-        for a retry or resilience library. That is enforced rather than asserted:
-        rule A5 of the ArchUnit gate in the shared kernel fails the build if any
-        class under com.carddemo depends on org.springframework.retry.. or
-        io.github.resilience4j.., and it runs in every module of this reactor.
+        that absence would be literal. Rejected on the measurement above: those
+        six classes implement the listener container's own polling back-off, so
+        the exclusion would remove a type the integration loads at run time and
+        turn a clean dependency report into a NoClassDefFoundError under load.
+        That exclusion is also why the bannedDependencies rule further down sets
+        searchTransitive to false: a transitive ban would ban the SQS starter.
+      Trade-offs: what is therefore guaranteed is the thing the decision actually
+        needs - that no module DECLARES either coordinate and no CardDemo class
+        reaches for one. Both halves are enforced rather than asserted: the
+        bannedDependencies rule in the enforcer execution below fails validate on
+        a declaration, and rule A5 of the ArchUnit gate in the shared kernel fails
+        the build if any class under com.carddemo depends on
+        org.springframework.retry.. or io.github.resilience4j.., in every module of
+        this reactor. Manifest and source are the two ways a library gets adopted,
+        so each has its own gate.
       Alternatives Considered: io.github.resilience4j:resilience4j-spring-boot3
         was evaluated and rejected because its published artifact targets Spring
         Boot 3.x; org.springframework.retry:spring-retry was rejected as
@@ -327,6 +332,39 @@
           Parameter Store support actually receives releases; the legacy
           coordinate would resolve but leave the queue integration on an
           unmaintained code path.
+        Assumptions: this pin is DELIBERATELY one release line ahead of what its
+          own publisher builds against, and the mismatch is stated here because
+          it is real. io.awspring.cloud 4.1.0 inherits
+          org.springframework.cloud:spring-cloud-dependencies-parent:5.0.2,
+          whose own parent spring-cloud-build:5.0.2 declares
+          spring-boot.version as 4.0.7 (read from the published POMs on Maven
+          Central, not inferred) while the Boot parent above is 4.1.0. Boot
+          4.1.0 is frozen by the migration plan and is not negotiable here.
+        Alternatives Considered: pinning a Spring Cloud AWS release built
+          against Boot 4.1. There is none. 4.1.0 is the newest release of the
+          line (Maven Central's maven-metadata.xml for
+          spring-cloud-aws-dependencies lists nothing after it and marks it
+          latest) and every release of the line is built against Boot 4.0.x,
+          so the choice is not between a matched pin and a mismatched one.
+        Alternatives Considered: withdrawing these starters and hand-wiring the
+          AWS SDK clients instead, which is the other way to remove the
+          mismatch. Rejected: it would withdraw the configuration-import
+          mechanism that makes every endpoint and credential a runtime lookup
+          rather than a committed value, and the listener container the
+          authorization and inquiry consumers are built on, replacing a
+          verified integration with bespoke wiring that nothing verifies.
+        Trade-offs: what is accepted is that a Boot minor upgrade could break
+          an integration its publisher has not yet built against, and the
+          failure would be at STARTUP rather than at compile time. That is why
+          the acceptance is paired with tests rather than with a claim:
+          account-service holds AwsIntegrationStartupTest, which asserts that
+          the SQS, Parameter Store and Secrets Manager auto-configurations
+          produce their beans under this Boot and that the configuration-import
+          service-provider entries still name interfaces this Boot declares,
+          and AwsStarterRuntimeIT, which drives a real parameter-store import
+          and a real queue round trip against an emulator. Both were run and
+          both pass; a future Boot bump that breaks this pairing fails them
+          rather than failing a deployment.
     -->
     <spring-cloud-aws.version>4.1.0</spring-cloud-aws.version>
 
@@ -1027,6 +1065,37 @@
                     <ignore>com.carddemo:*</ignore>
                   </ignores>
                 </banDynamicVersions>
+
+                <!--
+                  Assumptions: this build adds no external resilience library,
+                    because Spring Framework 7 relocated retry into the framework
+                    core. The rule is what stops that decision from decaying into
+                    a preference: a module that DECLARES either coordinate fails
+                    at validate, so the choice recorded in
+                    docs/adr/ADR-002-compute-platform.md cannot be reversed by an
+                    unreviewed edit to one POM.
+                  Trade-offs: searchTransitive is false rather than the rule
+                    default of true. Spring Cloud AWS pulls one transitive copy of
+                    spring-retry in through spring-cloud-aws-sqs, and six SQS
+                    classes on the polling path reference it, so a transitive ban
+                    would fail every module that consumes a queue and an exclusion
+                    would break message polling outright. Declaring a dependency is
+                    the act this rule exists to catch; inheriting one through a
+                    starter is not.
+                  Alternatives Considered: an ArchUnit import ban alone. Rule A5 in
+                    LayeringRulesTest already refuses an import of either package
+                    and stays as the second gate, but it can only see code that was
+                    written; it cannot see a POM that adds the coordinate before any
+                    code uses it. Two gates at different lifecycle points is the
+                    reason both are kept.
+                -->
+                <bannedDependencies>
+                  <searchTransitive>false</searchTransitive>
+                  <excludes>
+                    <exclude>io.github.resilience4j</exclude>
+                    <exclude>org.springframework.retry:spring-retry</exclude>
+                  </excludes>
+                </bannedDependencies>
 
               </rules>
             </configuration>

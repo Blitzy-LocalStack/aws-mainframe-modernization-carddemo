@@ -858,11 +858,32 @@ public class Account {
     /**
      * Renders a short diagnostic summary of this account for a log line or an assertion message.
      *
-     * <p>Trade-offs: five of the thirteen members are named and the rest are omitted, because this
-     * is a diagnostic aid and not a serialisation format. The five chosen are the ones that
-     * identify a row and explain a posting decision about it: the identifier, the active status,
-     * the balance, the credit limit that the over-limit projection is compared against, and the
-     * group identifier that selects the interest rate.</p>
+     * <p>Refactoring Rationale: THE ACCOUNT IDENTIFIER, THE CURRENT BALANCE AND THE CREDIT LIMIT ARE
+     * OMITTED, and an earlier revision rendered all three. It argued that "no member of this record
+     * is a primary account number, a card verification value or a national identifier", and
+     * concluded that nothing here needed protecting. The premise is true and the conclusion does not
+     * follow from it. The sensitive-data logging contract in
+     * {@code docs/architecture/observability.md} names account identifiers explicitly, alongside
+     * persistence-bound values as a class, so a balance and a credit limit are covered by that
+     * second clause whether or not either is a card number. The rendering was reasoning from a list
+     * of three examples rather than from the contract.</p>
+     *
+     * <p>Trade-offs: the omission is total rather than partial, and abbreviating the identifier was
+     * considered and declined. Abbreviating a protected value IS masking, and masking has one owner
+     * per context -- {@code com.carddemo.batch.mapper} for this module -- so a second and slightly
+     * different rule inside an entity would give one value two renderings and make neither
+     * authoritative. What remains is a status code and a disclosure group code: enough to say which
+     * KIND of account an entry concerns, and not enough to say which account. The cost is real and
+     * is paid down elsewhere: a request-scoped line already carries the correlation identifier
+     * {@code com.carddemo.common.web.CorrelationIdFilter} publishes, and a batch line is locatable
+     * through the {@code batch.batch_run} step ledger, so an event stays traceable without a
+     * protected value in its text. The accessors above return every omitted member to a caller that
+     * needs one, so nothing is unavailable to the job itself.</p>
+     *
+     * <p>Assumptions: the exposure this closes is the RETAINED LOG rather than any request path. A
+     * posting run renders one such line per account across an entire daily feed, so the aggregate of
+     * a single run is a log holding every account identifier and every balance in the feed -- which
+     * is the account master's monetary content in a second place no migration control governs.</p>
      *
      * <p>Assumptions: this is expressly NOT the fixed-width parity emitter. The committed
      * expectation files under {@code tests/golden/posting} are compared against a 300-byte
@@ -870,25 +891,15 @@ public class Account {
      * {@code com.carddemo.common.codec.FixedWidthCodec}, and using this method for that comparison
      * would break parity silently, because it emits neither the declared field widths, nor the
      * zoned-decimal sign overpunch, nor the 178 pad bytes. The two renderings serve different
-     * purposes and only one of them is a contract.</p>
+     * purposes and only one of them is a contract. Nothing parses this string, so narrowing it
+     * cannot disturb any compared output.</p>
      *
-     * <p>Assumptions: no member of this record is a primary account number, a card verification
-     * value or a national identifier -- the account record declares none of them, and the card
-     * number lives in the card and cross-reference records instead. Nothing here therefore needs
-     * masking, and that is recorded so a change does not add a sensitive member to this
-     * rendering on the assumption that the method was already safe for one.</p>
-     *
-     * @return a single-line rendering naming the type and five of its members
+     * @return a single-line rendering naming the type, the active status and the disclosure group,
+     *     and carrying neither the account identifier nor any monetary value
      */
     @Override
     public String toString() {
-        // WHY : Trade-offs: the rendering includes only the fields needed to identify the row and
-        //       explain posting decisions. Including the full record would make logs noisier and invite
-        //       callers to mistake this diagnostic form for the fixed-width parity contract.
-        return "Account[accountId=" + accountId
-                + ", activeStatus=" + activeStatus
-                + ", currBal=" + currBal
-                + ", creditLimit=" + creditLimit
+        return "Account[activeStatus=" + activeStatus
                 + ", groupId=" + groupId + ']';
     }
 }

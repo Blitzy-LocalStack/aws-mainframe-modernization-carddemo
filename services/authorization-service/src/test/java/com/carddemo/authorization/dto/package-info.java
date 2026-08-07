@@ -5,10 +5,14 @@
  * than a target. {@code AuthorizationPayloadDomainTest} asserts the value domains the queue payloads
  * declare -- requiredness, the character domains the copybook pictures admit, the two closed response
  * domains and the non-negative amount domain -- and the truncation the detail response's composed reason
- * performs. {@code RowSelectorContractTest} asserts that a row is addressed only by an opaque sealed
- * selector, in both directions: the summary response refuses to publish anything else, and the fraud
- * request refuses to accept anything else. {@code AuthorizationRequestPayloadTest} covers the request
- * record's own declarations, {@code SummaryRenderingTest} the values a summary rendering withholds,
+ * performs. {@code RowSelectorContractTest} asserts how a row is addressed in each direction under the
+ * two DIFFERENT rules that govern them, the ends being deliberately asymmetric: outbound, the summary
+ * response publishes only an opaque sealed selector and never a raw row address; inbound, the fraud
+ * request carries the three decoded primary-key columns and holds each one to its own domain, including
+ * the component decomposition that refuses an impossible day, minute or second lying inside the
+ * published numeric range. {@code AuthorizationRequestPayloadTest} covers the request record's own
+ * declarations, including which of its eighteen components a diagnostic rendering withholds,
+ * {@code SummaryRenderingTest} the values a summary rendering withholds,
  * {@code PendingAuthSummarySegmentFixtureTest} the packed segment fixture the summary is decoded from,
  * and {@code AuthorizationWireContractTest} the published document against the two queue payload
  * records -- the corrected spelling, the wire ordinal it sits at, and that the eighteen request fields

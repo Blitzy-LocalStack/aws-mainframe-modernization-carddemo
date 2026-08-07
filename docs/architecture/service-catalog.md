@@ -505,7 +505,11 @@ responsibilities specified as adapters inside the contexts that own the underlyi
 tables. Nothing from the candidate list is dropped from the design. In the current
 source tree, however, only `batch-service` and `reporting-service` contain
 non-`package-info.java` main-source Java; the other six service modules do not yet
-contain their controllers, services, repositories or adapters.
+contain their controllers, services, repositories or adapters. Of those two,
+`reporting-service` is complete against its own charter: both controllers, all three
+services, all five read-only repository roles, all seven view projections and the
+published contract are authored, and its four operations are asserted against the
+handlers that serve them.
 
 
 ## The eight bounded contexts
@@ -524,7 +528,7 @@ none of those README files is authored yet.
 | `reference-service` | `services/reference-service` | `com.carddemo.reference` | `reference` | `COTRTLIC`, `COTRTUPC`, `COBTUPDT`, `CODATE01`, `CSUTLDTC` |
 | `batch-service` | `services/batch-service` | `com.carddemo.batch` | `batch`, plus scoped cross-schema grants | `CBTRN01C`, `CBTRN02C`, `CBACT04C`, `CBEXPORT`, `CBIMPORT` |
 | `authorization-service` | `services/authorization-service` | `com.carddemo.authorization` | `authorization` | `COPAUS0C`, `COPAUS1C`, `COPAUS2C`, `COPAUA0C`, `CBPAUP0C`, `PAUDBLOD`, `PAUDBUNL`, `DBUNLDGS` |
-| `reporting-service` | `services/reporting-service` | `com.carddemo.reporting` | `reporting` — **no tables**, read-only views only | `CORPT00C`, `CBTRN03C`, `CBSTM03A`, `CBSTM03B` |
+| `reporting-service` | `services/reporting-service` | `com.carddemo.reporting` | `reporting` — **this service owns no table**, and reads seven cross-schema views; the schema itself holds exactly one table the service may not read (see below) | `CORPT00C`, `CBTRN03C`, `CBSTM03A`, `CBSTM03B` |
 
 **Nine Maven modules, eight bounded contexts.** A ninth module, `common-lib`
 (package root `com.carddemo.common`), sits alongside the eight. It is the **shared
@@ -762,21 +766,40 @@ queue attributes the two identity columns feed are in
 |---|---|
 | Responsibilities | Transaction reports and statement generation, plus on-demand report submission |
 | Source programs | `CORPT00C` (report request), `CBTRN03C` (transaction report), `CBSTM03A` and `CBSTM03B` (statements) |
-| Owned schema | `reporting` — dedicated to this context, **holds no table**, and owned in the database by the non-login `carddemo_reporting_owner` role rather than by this context's own login role |
-| Owned tables | **None** — `data-migration/sql/V1__reporting_views.sql` authors the read-only cross-schema views |
+| Owned schema | `reporting` — dedicated to this context, owned in the database by the non-login `carddemo_reporting_owner` role rather than by this context's own login role, and holding exactly one table this context's login may not read |
+| Owned tables | **None owned by this service** — it authors no data-definition script and no migration. `data-migration/sql/V1__reporting_views.sql` authors the read-only cross-schema views AND the one table in the schema, `reporting.card_grouping_key`, which it assigns to `carddemo_reporting_owner` and revokes from `carddemo_reporting` |
 | Target synchronous dependencies | Read-only access to `ledger`, `account`, `card` and `reference` through those views. When the migration is applied, `carddemo_reporting` receives `USAGE` on `reporting` plus `SELECT` on its views and no base-table grant |
 | Target asynchronous dependencies | None. On-demand submission is designed to start an orchestration execution, replacing the baseline's transient-data-queue submission tunnel (`DEFINE TDQUEUE(JOBS)` with `DDNAME(INREADER)`, `app/csd/CARDDEMO.CSD` L499–L501) |
 
-**`reporting-service` owns no tables.** The authored SQL makes it a pure consumer:
-every mapped read goes through a read-only cross-schema view, and applying that SQL
-grants the login `SELECT` on those views only. The four Java projections are
-already mapped to those concrete views, but the report controller, repositories,
-services and orchestration submitter remain unauthored.
+**`reporting-service` owns no table, and the `reporting` schema is not empty of
+tables.** Those are three separate claims and all three are true, so they are stated
+separately here rather than compressed into one sentence that would be false whichever
+way a reader took it. (1) The SERVICE owns none: it authors no data-definition script,
+no migration artifact and no `db/migration` directory, and one appearing under that
+module would be a defect. (2) The SCHEMA holds exactly one table,
+`reporting.card_grouping_key`, created by `data-migration/sql/V1__reporting_views.sql`,
+which holds the secret that keeps the per-card statement grouping token
+non-invertible. (3) The service CANNOT READ that table: the same script assigns it to
+`carddemo_reporting_owner` and revokes it from `carddemo_reporting`, so the login this
+service authenticates as reaches the views and nothing else. The ownership authority is
+[`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md), which this
+section cites rather than restating.
+
+Refactoring Rationale: an earlier revision of this paragraph asserted the unqualified
+"owns no tables" and separately recorded that only four Java projections existed and
+that the controller, repositories, services and orchestration submitter remained
+unauthored. Both statements have since become false and are replaced rather than
+softened. The unqualified form reads as "the schema is empty", which would make the
+revoke that withholds `card_grouping_key` look like dead code; and all seven
+projections, five read-only repository roles, three services, both controllers and the
+orchestration client are now authored, with the four published operations settled by
+`services/reporting-service/src/main/resources/openapi/reporting-api.yaml` and held to
+the handlers by `ReportingApiContractTest`.
 
 **The eighth schema exists, and it is deliberately not owned by the reporting
-login.** The distinction is worth stating exactly, because "reporting owns no
-tables" and "there is no reporting schema" are different claims and only the first
-is true. `reporting` is created by
+login.** The distinction is worth stating exactly, because "this service owns no
+table", "there is no reporting schema" and "the reporting schema holds no table" are
+three different claims and only the first is true. `reporting` is created by
 [`data-migration/sql/V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql)
 as the eighth of eight schemas, and it is the one schema whose owner is not the
 login role named after it: it is owned by `carddemo_reporting_owner`, a role created
@@ -827,9 +850,11 @@ absent account and card source-table migrations before the view artifact can run
 
 The target ownership model is schema-per-service, with **eight schemas for eight
 contexts**. Six contexts own a schema and the tables designed for it; one owns a
-schema, its tables and narrowly-scoped write grants outside it; and one owns a
-schema that holds no table at all. The table states that target contract, not which
-service migrations are already authored.
+schema, its tables and narrowly-scoped write grants outside it; and one owns a schema
+in which IT owns no table -- the schema nonetheless holds exactly one,
+`reporting.card_grouping_key`, owned by a non-login role and revoked from the reporting
+login, as the reporting entry above sets out. The table states that target contract,
+not which service migrations are already authored.
 
 | Schema | Owning context | Written by | Read by |
 |---|---|---|---|
@@ -951,7 +976,7 @@ graph TB
         REF["reference-service<br/>schema: reference"]
         BATCH["batch-service<br/>schema: batch"]
         AUTZ["authorization-service<br/>schema: authorization"]
-        REPT["reporting-service<br/>schema: reporting (no tables)"]
+        REPT["reporting-service<br/>schema: reporting (owns no table)"]
     end
 
     LIB["common-lib<br/>shared kernel, not a service"]

@@ -132,6 +132,18 @@ therefore **migrated behaviour**, and they are attributed to the migration throu
 document. They are not a reading of the baseline flow at lines 213 to 215, and no statement
 here should be taken as one. The baseline's own arrangement is cited as it stands.
 
+**One design, stated once.** This folder describes exactly one target behaviour and no
+alternative: the three posting writes are discarded together **and** one reason 109 row is
+written. The row is written outside the rolled-back unit of work, because a row written
+inside it would be discarded by the same rollback it exists to explain. The pairing is not
+a preference between two readings -- discarding the writes without recording the event would
+leave an operator no way to learn that a record failed to post, and recording the event
+while leaving the writes would keep an inconsistency the data cannot explain. It is
+registered as `D-REJECT-109-DURABLE` in
+[`docs/architecture/cobol-to-service-traceability.md`](../../../../../../docs/architecture/cobol-to-service-traceability.md),
+where the accepted cost is stated: the migrated reject stream carries a row the baseline's
+stream does not, on exactly the records whose account rewrite failed.
+
 ---
 
 ## 3. The collision trap: 109 and 101 carry the same message
@@ -458,7 +470,10 @@ is written as a plain code span rather than a link.
   paths page by **key**, never by ordinal position, so fixture record order is significant
   wherever a page boundary is under test.
 - [`application-test.yml`](../../application-test.yml) -- **[present]**. It pins schema
-  resolution to `ledger` at its line 283 and pins the clock to one instant, which is what
+  resolution to `ledger` at its line 283. It does **not** pin the clock: its own exclusion
+  list rules out any clock or current-time property, and the pinned instant is
+  `TransactionRepositoryIT.FIXED_CLOCK` at that class's lines 259 and 260,
+  `Clock.fixed(Instant.parse("2022-07-18T00:00:00Z"), ZoneOffset.UTC)`, which is what
   makes any assertion on a 26-character timestamp reproducible.
 - [`V1__ledger.sql`](../../../../main/resources/db/migration/V1__ledger.sql) --
   **[present]**. It creates the four `ledger` tables these records seed and the two indexes

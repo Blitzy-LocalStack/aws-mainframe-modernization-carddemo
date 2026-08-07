@@ -1,136 +1,71 @@
 /**
- * The measured BMS-to-Ant-Design token bridge: the single place a CardDemo
- * design value is written down.
+ * The measured BMS-to-Ant-Design token bridge: the single place a CardDemo design
+ * value is written down.
  *
  * Purpose
  * -------
  * Every colour, typography, spacing, radius, elevation and motion value the SPA
- * renders resolves to a named Ant Design token declared in this module. Screens,
- * layout components and `ui/src/theme/antdTheme.ts` import those names from here
- * and never write a design value of their own, which is what makes the
- * zero-hardcoded-values rule enforceable by one reviewable module rather than by
- * discipline spread across 21 screen implementations. Under CSS-variable theming
- * a literal value does not merely duplicate a token — it opts that component out
- * of the theme silently, so a later token change leaves it behind and nothing
- * fails.
+ * renders resolves to a named Ant Design token declared here. Screens, layout
+ * components and `ui/src/theme/antdTheme.ts` import those names and never write a
+ * design value of their own, which is what makes the zero-hardcoded-values rule
+ * enforceable by one reviewable module rather than by discipline spread across every
+ * screen. Under CSS-variable theming a literal does not merely duplicate a token — it
+ * opts that component out of the theme silently, so a later token change leaves it
+ * behind and nothing fails.
  *
- * This module is also the **audit record** for the token snaps. A snap recorded
- * without the alternative it beat is unauditable: a later reader cannot tell
- * whether turquoise became an informational token by reasoning or by accident.
- * Every snapped entry in {@link BMS_SOURCE_HISTOGRAM} therefore carries its
- * measured source value, its measured frequency, and the alternative that was
- * rejected — as data, not only as prose — so the audit is machine-readable.
+ * This module is also the machine-readable half of the token audit. A snap recorded
+ * without the alternative it beat is unauditable, so every snapped entry in
+ * {@link BMS_SOURCE_HISTOGRAM} carries its measured source value, its measured
+ * frequency and the rejected alternative AS DATA, and
+ * {@link BMS_MEASURED_FIELD_COUNTS} carries the field-population figures so a test
+ * can assert them.
  *
- * Provenance
- * ----------
- * There is no design specification behind the 3270 screens to appeal to, so the
- * baseline itself is the design source and every figure below is a **measured
- * count** taken from it, never an estimate. The 3270 presentation layer carries
- * real presentational semantics in machine-readable form — the `COLOR`, `HILIGHT`
- * and `ATTRB` operands of each `DFHMDF` field definition — and those operands
- * were counted exhaustively. Sources, all reference-only and never modified:
+ * `docs/architecture/design-token-reference.md` is the prose half: it holds the full
+ * per-value derivation, the reconciliation that proves the counts, the exhaustive
+ * mapping table and the commands that re-measure the baseline. Trade-offs: the counts
+ * therefore exist in two places and can drift. Accepted because only one of the two
+ * can be asserted by a test, and that is this one.
  *
- * - `app/bms/*.bms` — the 17 base mapsets
- * - `app/app-authorization-ims-db2-mq/bms/COPAU00.bms`, `COPAU01.bms` and
- *   `app/app-transaction-type-db2/bms/COTRTLI.bms`, `COTRTUP.bms` — the 4
- *   extension mapsets
- * - `app/cpy/CSSETATY.cpy` — the field-error highlight template
- * - `app/cbl/CO*.cbl` and the extension screen programs — the `DFH*` colour
- *   constants moved into a field's colour attribute at run time
+ * Provenance (reference-only; `app/**` is never modified): there is no design
+ * specification behind the 3270 screens, so the baseline IS the design source and
+ * every figure here is a measured count from the `COLOR`, `HILIGHT` and `ATTRB`
+ * operands of `app/bms/*.bms`, the four extension mapsets, `app/cpy/CSSETATY.cpy` and
+ * the `DFH*` colour constants in the online programs.
  *
- * Two populations, never conflated
- * --------------------------------
- * Every count in this module names the population it was measured over, because
- * the two do not merely differ in magnitude — they differ in **rank**, and one
- * `COLOR` operand exists in only one of them:
- *
- * - **Base 17** — the 17 mapsets under `app/bms`: **902** `DFHMDF` definitions.
- * - **All 21** — those plus the 4 extension mapsets: **1166** `DFHMDF`
- *   definitions (`COPAU00` 104, `COTRTLI` 81, `COPAU01` 54, `COTRTUP` 25, so
- *   902 + 264 = 1166).
- *
- * `SIZE=(24,80)` appears in all 21, once each. Field density runs from 24
- * (`COBIL00`) to 128 (`COACTUP`).
- *
- * The reconciliation that proves the measurement
- * ----------------------------------------------
- * Over the base 17, the colour histogram sums to exactly the number of fields
- * carrying a colour operand, and that figure plus the fields carrying none
- * accounts for every field in the population:
- *
- * ```text
- * 289 + 127 + 76 + 60 + 55 + 38 + 17 = 662  fields WITH a COLOR= operand
- *                               902 - 662 = 240  fields WITH NONE
- *                                     662 + 240 = 902  total DFHMDF
- * ```
- *
- * Assumptions: that subtraction is arithmetic rather than coincidence only
- * because **no `DFHMDF` definition in any of the 21 mapsets carries more than one
- * `COLOR=` operand** — checked across both populations, not assumed. Were even one
- * field to carry two, operand occurrences would exceed coloured fields and the
- * 240 would be wrong. The same check over all 21 gives 1166 = 881 + 285. See
- * {@link BMS_MEASURED_FIELD_COUNTS}, which carries these figures as data so a
- * test can assert them rather than a reader having to trust them.
- *
- * Three findings a careful reader will otherwise get wrong
- * -------------------------------------------------------
- * 1. **The literal string `ATTRB=BRT` occurs zero times.** `BRT` is only ever an
- *    operand inside a parenthesised list, so grepping the literal returns nothing
- *    and invites the conclusion that the attribute is unused. It is not: see
- *    {@link BMS_SOURCE_HISTOGRAM}, and grep `ATTRB=(ASKIP,BRT)` and
- *    `ATTRB=(ASKIP,BRT,FSET)` instead.
- * 2. **`COLOR=PINK` is the eighth colour and is invisible to an `app/bms`-only
- *    measurement.** All 4 occurrences are in an extension mapset, so a scope
- *    restricted to the base 17 yields seven colours and reports them as
- *    exhaustive when the baseline uses eight.
- * 3. **`COLOR=GREEN` is the editable-input affordance colour, not a success
- *    colour.** 65 of its 76 base-17 fields are `UNPROT` inputs. Its mapping is a
- *    documented snap, not the exact match it first appears to be.
- *
- * What this module does not own
- * -----------------------------
- * Design values only. Every user-visible string belongs to
- * `ui/src/messages/messages.ts`; the screen title band to
- * `ui/src/layout/ScreenHeader.tsx`; the message band to
- * `ui/src/layout/MessageBand.tsx`; function-key semantics to
- * `ui/src/layout/PfKeyBar.tsx` and `ui/src/layout/usePfKeys.ts`; assembling the
- * theme object to `ui/src/theme/antdTheme.ts`; instantiating the configuration
- * provider to `ui/src/App.tsx`; and dependency pins to `ui/package.json`.
- * Duplicating any of those here would create a second source of truth.
+ * Assumptions: every count names the population it was measured over — the base 17
+ * mapsets or all 21 — because the two differ in RANK and not only in magnitude, and
+ * one `COLOR` operand exists in only one of them. Conflating them reports seven
+ * colours as exhaustive where the baseline uses eight.
  *
  * Design decisions
  * ----------------
- * Assumptions: the token names below are an external contract of one exactly
- * pinned package version, and they are constrained at compile time against that
- * version's own declarations through {@link AntdTokenName} rather than written as
- * free strings. A token renamed or relocated in a future major version would not
- * otherwise fail a build — a theme object simply carries a property the library
- * no longer reads — so the failure would be **silent** and found by eye. Binding
- * the names to `keyof GlobalToken` converts that class of silent breakage into a
- * compile error, which is why every constant here is typed rather than plain.
+ * Assumptions: the token names are an external contract of one exactly pinned package
+ * version, so they are constrained at compile time against that version's own
+ * declarations through {@link AntdTokenName} rather than written as free strings. A
+ * token renamed in a future major version would not otherwise fail a build — a theme
+ * object simply carries a property the library no longer reads — so the breakage would
+ * be SILENT. Binding the names to `keyof GlobalToken` converts that into a compile
+ * error, which is why every constant here is typed.
  *
- * Assumptions: the bridge is meaningful only because a colour reaches a field
- * through a predictable subfield. All in-program colour moves in the repository
- * target a symbolic-map field whose name ends in `C` — the colour attribute
- * subfield — while the field's data travels through the `O` suffixed subfield and
- * its protection attribute through the `A` suffixed one. That three-subfield
- * convention is the external contract a colour-token map depends on; see
- * {@link FIELD_ERROR_TOKENS} for the one place the baseline writes both a colour
- * and a value.
+ * Assumptions: the bridge is meaningful only because a colour reaches a field through
+ * a predictable subfield. Every in-program colour move targets a symbolic-map field
+ * whose name ends in `C`, the colour attribute subfield, while the data travels through
+ * the `O` subfield and the protection attribute through the `A` one. That convention is
+ * the external contract a colour-token map depends on; {@link FIELD_ERROR_TOKENS} is
+ * the one place the baseline writes both a colour and a value.
  *
- * Trade-offs: this module records **token names**, never colour values, swatches
- * or rendered previews. A value would be faster to read and is deliberately
- * absent, because the token name is the thing that is normative — a recorded
- * value silently disagrees with the theme the moment the token behind it moves,
- * and it cannot be diffed against the library the way a name can.
+ * Trade-offs: this module records token NAMES, never colour values, swatches or
+ * previews. A value would be faster to read and is deliberately absent, because the
+ * name is what is normative — a recorded value silently disagrees with the theme the
+ * moment the token behind it moves, and it cannot be diffed against the library the
+ * way a name can.
  *
- * Trade-offs: the measured counts are duplicated between this module and
- * `docs/architecture/design-token-reference.md`, which is the prose mirror of the
- * same bridge. Two copies can drift, and the cost is accepted because this module
- * is the machine-readable side: the figures here are typed data a test can assert
- * against, whereas a Markdown table can only be read. Where the two disagree, one
- * of them is defective; the counts here were re-derived directly from the
- * baseline rather than copied across.
+ * Assumptions: design values only. Every user-visible string belongs to
+ * `ui/src/messages/messages.ts`, the title band to `ui/src/layout/ScreenHeader.tsx`,
+ * the message band to `ui/src/layout/MessageBand.tsx`, function-key semantics to
+ * `ui/src/layout/PfKeyBar.tsx` and `usePfKeys.ts`, theme assembly to
+ * `ui/src/theme/antdTheme.ts`, provider instantiation to `ui/src/App.tsx` and
+ * dependency pins to `ui/package.json`.
  */
 
 import type { GlobalToken } from 'antd';
@@ -313,28 +248,18 @@ export const BMS_COLOR_TOKENS = {
  * these two entries exist; every other {@link BMS_COLOR_TOKENS} entry already
  * derives a distinct value and needs no anchor.
  *
- * Assumptions: each anchor is a token NAME and never a colour value. This module
- * records names and never values, and that invariant
- * survives here because these are names too — `blue` and `cyan` are settable
- * tokens of the design system's own seed layer, so the hue is read from the
- * library at run time rather than written down. A hex literal for turquoise was
- * the alternative and is rejected for the reason stated on the TURQUOISE entry
- * of {@link BMS_COLOR_TOKENS}: a literal has no recorded origin, cannot be
- * diffed against the library, and would keep its value through a palette change
- * while everything around it moved.
+ * Assumptions: each anchor is a token NAME and never a colour value, so the
+ * names-not-values invariant survives here — `blue` and `cyan` are settable tokens of
+ * the seed layer, so the hue is read from the library at run time. A hex literal for
+ * turquoise has no recorded origin, cannot be diffed against the library, and would
+ * keep its value through a palette change while everything around it moved. The names
+ * are constrained to {@link AntdTokenName} so a palette renamed by a future major
+ * version fails compilation rather than silently supplying `undefined`.
  *
- * Alternatives Considered: an anchor for every one of the eight measured
- * colours, for symmetry. Rejected because seven of the eight already resolve to
- * distinct derived values, so those entries would restate what the library
- * supplies and would pin seven palettes to defend one distinction — inviting
- * exactly the "override a value the algorithm would have produced anyway"
- * failure that `ui/src/theme/antdTheme.ts` records against filling its value
- * blocks wholesale.
- *
- * Assumptions: the names are constrained to {@link AntdTokenName} so that a
- * palette renamed or dropped by a future major version fails compilation here
- * rather than silently supplying `undefined` to the theme, which the library
- * would then ignore without complaint.
+ * Alternatives Considered: an anchor for every one of the eight measured colours, for
+ * symmetry. Rejected because seven already resolve to distinct derived values, so
+ * those entries would restate what the library supplies and pin seven palettes to
+ * defend one distinction.
  */
 export const BMS_SEED_PALETTE_ANCHORS = {
   /** Anchor behind `colorPrimary`, kept as the reference the link role follows. */
@@ -346,19 +271,15 @@ export const BMS_SEED_PALETTE_ANCHORS = {
 /**
  * Tokens for the five colour constants that executable programs move at run time.
  *
- * Assumptions: executable use is the primary count because commented statements
- * cannot repaint a field. `DFHRED` has 38 executable moves and one additional
- * textual move in the column-7 comment at `app/cbl/COACTUPC.cbl:3201`; the
- * resulting totals are 65 executable and 66 textual colour moves. Every target
- * name ends in `C`, the symbolic-map colour subfield.
- * `DFHGREEN` has 10 moves, `DFHNEUTR` 9, `DFHDFCOL` 6, and `DFHBLUE` 2
- * under either counting method. Both `DFHBLUE` moves are extension-only resets
- * in `COTRTLIC.cbl`, which is why an `app/cbl`-only count misses the fifth map
- * entry.
+ * Assumptions: executable moves are the primary count, because a commented statement
+ * cannot repaint a field, and every target name ends in `C`, the symbolic-map colour
+ * subfield. Both `DFHBLUE` moves are extension-only resets in `COTRTLIC.cbl`, which is
+ * why an `app/cbl`-only count misses the fifth entry.
+ * `docs/architecture/design-token-reference.md` carries the per-constant tallies.
  *
- * Alternatives Considered: entries for `DFHYELLO`, `DFHTURQ`, and `DFHPINK`.
- * They are omitted because exhaustive repository-wide measurement across
- * `.cbl` and `.cpy` files found zero executable or textual moves for all three.
+ * Alternatives Considered: entries for `DFHYELLO`, `DFHTURQ` and `DFHPINK`. Omitted
+ * because exhaustive repository-wide measurement across `.cbl` and `.cpy` found zero
+ * executable or textual moves for all three.
  */
 export const DFH_RUNTIME_COLOR_TOKENS = {
   DFHRED: 'colorError',

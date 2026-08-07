@@ -541,6 +541,21 @@ public record TransactionAddRequest(
     // WHY : Trade-offs: COTRN02.CPY line 90 keys sixty and CVTRA05Y.cpy line 9 holds a hundred.
     //       Constraining to sixty would discard capacity the record demonstrably holds; the cost is
     //       that a client rendering a fixed-width column may receive more than it can show.
+    // WHY : Assumptions: no character-set constraint is declared on this member, and its absence is
+    //       a decision rather than an omission. CVTRA05Y.cpy line 9 declares TRAN-DESC PIC X(100),
+    //       which admits every character in the code page, so a pattern here would refuse values the
+    //       reference accepts -- an ampersand in a merchant name being the ordinary case, not the
+    //       hostile one. AAP Rule T9 admits a behavioural change only as a documented divergence, and
+    //       narrowing an accepted domain to make an unrelated sink safe is the wrong place to spend
+    //       one.
+    // WHY : Trade-offs: this value is consequently UNTRUSTED free text that reaches a markup
+    //       artifact, and the control that makes that safe is output encoding at the sink rather than
+    //       input filtering here. reporting-service's StatementHtmlMapper routes every value it
+    //       embeds through the reporting statement mapper's own text-node escaping; the divergence from the
+    //       reference that creates is registered as D-STMT-HTML-ESCAPING in
+    //       docs/architecture/cobol-to-service-traceability.md. The trade accepted is that safety
+    //       depends on a control in another module: a value is safe or unsafe only relative to the
+    //       context it lands in, and this shape cannot know that context, whereas a sink always does.
     @NotBlank(message = DESCRIPTION_REQUIRED)
     @Size(max = DESCRIPTION_WIDTH)
     String description,
@@ -1164,51 +1179,66 @@ public record TransactionAddRequest(
    * most on precisely this type, because a request that fails validation is both the case that gets
    * logged and the case in which no handler has yet had a chance to mask anything.</p>
    *
-   * <p>Assumptions: the two key alternatives are treated differently, and the asymmetry is
-   * deliberate. The account identifier is rendered in full because it is a system key rather than
-   * protected data -- it addresses the resource in a request path and correlates a run, and the
-   * migrated contracts publish it unmasked -- while the card number is masked because the migration
-   * plan's sections 0.4.1.9 and 0.7.8 require exactly that everywhere but one administrative read.
-   * Masking both would make a log unusable for locating the submission while withholding nothing
-   * further.</p>
+   * <p>Refactoring Rationale: SEVEN OF THE FOURTEEN COMPONENTS ARE NOW OMITTED -- the account
+   * identifier, the description, the amount and the four merchant fields -- and an earlier revision
+   * rendered all of them, arguing the case for two of them explicitly. It held that the account
+   * identifier "is a system key rather than protected data" because it addresses the resource in a
+   * request path and the migrated contracts publish it unmasked, and that "the amount is not
+   * protected data on its own" because it is frequently the reason a submission was refused. The
+   * sensitive-data logging contract in {@code docs/architecture/observability.md} contradicts both:
+   * it names account and customer identifiers in a clause of their own, and it covers
+   * persistence-bound values as a class, which is what a posted amount becomes. The appeal to the
+   * published contract also compares two different surfaces -- a response body reaches one
+   * authenticated caller who already holds authority over that account and is not retained, whereas a
+   * log line is retained, aggregated and readable by every holder of log access -- so a value being
+   * disclosed to an authorised requester is not an argument for disclosing it to everyone who can
+   * read a log.</p>
    *
-   * <p>Alternatives Considered: omitting the card number entirely rather than masking it. Rejected
-   * because either key alternative may be the one a client supplied -- the reference fills whichever
-   * was omitted from the cross-reference -- so a rendering that drops the card number cannot show
-   * what a card-only submission actually contained, which is the submission whose validation
-   * failures most need diagnosing. The last four digits show it without supplying a usable
-   * number.</p>
+   * <p>Assumptions: the description and the four merchant fields are omitted for a reason of their
+   * own, distinct from the two above. Together with the masked card number and the two dates on the
+   * same line, a merchant name, city and postal code reconstruct a real cardholder purchase -- what
+   * was bought, roughly where and when -- which no single component discloses alone. The description
+   * is additionally free text that a submitter authors: it is the one component whose content nothing
+   * in this type constrains, so rendering it verbatim makes the log the sink for whatever arrives in
+   * it. The same field is why {@code com.carddemo.reporting.mapper.StatementHtmlMapper} encodes
+   * before emitting, and a log is no better a place to interpolate unconstrained text unencoded than
+   * a document is.</p>
    *
-   * <p>Trade-offs: the amount is rendered in full. It is not protected data on its own, it is
-   * frequently the reason a submission was refused, and the shared money type already renders it as
-   * an exact decimal rather than as an approximation.</p>
+   * <p>Alternatives Considered: omitting the card number entirely rather than masking it, which is
+   * what the sibling {@code com.carddemo.card.domain.Card} rendering does. Rejected HERE, and the
+   * difference between the two is the point. Either key alternative may be the one a client supplied
+   * -- the reference fills whichever was omitted from the cross-reference -- so a rendering that
+   * dropped the card number could not show what a card-only submission actually contained, which is
+   * the submission whose validation failures most need diagnosing. Masking rather than omitting is
+   * available here because this is a request shape and the mask is produced by the one shared owner
+   * of that rule, {@code com.carddemo.common.security.CardNumberMasker}; the entity declines it
+   * because an entity producing its own masked form would give one value a second rendering outside
+   * the mapper that owns it.</p>
    *
-   * @return a single-line rendering naming this type and all fourteen components, with the card
-   *     number reduced to a mask and its last four digits; the component is labelled as masked so
-   *     that no reader mistakes it for a value that could be resubmitted
+   * <p>Trade-offs: what survives is the two reference codes, the source, the masked card number, the
+   * two dates and the confirmation flag -- enough to say WHAT KIND of submission was refused and
+   * when, and not enough to say whose it was, what it was worth or where it was made. The cost is
+   * real: an operator reading a rejection from logs alone can no longer see the amount that breached
+   * a limit or the merchant a submission named, and must read the request body or the row to learn
+   * either. It is paid down by the correlation identifier
+   * {@code com.carddemo.common.web.CorrelationIdFilter} publishes on every request-scoped line, which
+   * ties a rejection to the request that caused it, and by the accessors above, which return every
+   * omitted component to any caller that needs one.</p>
+   *
+   * @return a single-line rendering naming this type, the two reference codes, the source, the card
+   *     number reduced to a mask and its last four digits, the two dates and the confirmation flag;
+   *     the masked component is labelled as masked so that no reader mistakes it for a value that
+   *     could be resubmitted, and no account identifier, monetary value, description or merchant
+   *     detail appears at all
    */
   @Override
   public String toString() {
-    return "TransactionAddRequest[accountId="
-        + accountId
-        + ", typeCode="
+    return "TransactionAddRequest[typeCode="
         + typeCode
         + ", categoryCode="
         + categoryCode
         + ", source="
         + source
-        + ", description="
-        + description
-        + ", amount="
-        + amount
-        + ", merchantId="
-        + merchantId
-        + ", merchantName="
-        + merchantName
-        + ", merchantCity="
-        + merchantCity
-        + ", merchantZip="
-        + merchantZip
         + ", maskedCardNumber="
         + CardNumberMasker.mask(cardNumber)
         + ", originDate="

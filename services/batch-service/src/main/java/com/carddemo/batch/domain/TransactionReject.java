@@ -160,12 +160,12 @@ import org.hibernate.type.SqlTypes;
 // WHY : Assumptions: this mapping is DDL-passive and declares no index, no unique constraint, no
 //       column definition and no check. The table, its columns and its primary key are created by
 //       the owning service's migration at
-//       services/transaction-service/src/main/resources/db/migration/V1__ledger.sql:542-654, and
+//       services/transaction-service/src/main/resources/db/migration/V1__ledger.sql:550-761, and
 //       the provider is never permitted to emit DDL in this module -- its schema setting is at most
 //       an assertion against the existing shape. BatchRun is the one mapping in this package whose
 //       table is genuinely owned here and therefore the only one that may declare a constraint.
 // WHY : Assumptions: a uniqueness assertion here would be wrong on the merits as well as out of
-//       bounds. That migration states at :633-646 that no unique constraint exists over the record
+//       bounds. That migration states at :665-678 that no unique constraint exists over the record
 //       image or over any combination of the three contract columns, because the source asserts
 //       uniqueness over nothing: app/cbl/CBTRN02C.cbl:46-49 declares the stream sequential with no
 //       record key and app/jcl/POSTTRAN.jcl:36 gives it a fixed-length format, so it is appended to
@@ -290,7 +290,7 @@ public class TransactionReject {
     // WHY : Alternatives Considered: sequence or automatic generation instead of identity. Both
     //       rejected because both imply a generator object named by the provider rather than by the
     //       owning migration, which declares this column as an identity column at
-    //       services/transaction-service/src/main/resources/db/migration/V1__ledger.sql:579. A
+    //       services/transaction-service/src/main/resources/db/migration/V1__ledger.sql:616. A
     //       provider-named sequence would be a second object to keep in step and would fail the
     //       start-up assertion against a migration that declares no such sequence.
     // WHY : Assumptions: identity generation is the one generation strategy compatible with this
@@ -335,7 +335,7 @@ public class TransactionReject {
     //       character after it, so the comparison fails at position 350 and at every position
     //       following, and the reported difference points nowhere near the cause. The fixed-width
     //       type makes the width structural instead of conventional, and the owning migration
-    //       declares it for exactly this reason at V1__ledger.sql:581-605.
+    //       declares it for exactly this reason at V1__ledger.sql:618-670.
     // WHY : Trade-offs: fixed-width comparison semantics ignore trailing blanks, so a query
     //       comparing a 350-character value against its trimmed form reports them equal, and the
     //       SQL length function reports the trimmed figure while the octet-length function reports
@@ -357,8 +357,27 @@ public class TransactionReject {
     //       masking discipline applies where a value leaves the system to a caller, and this module
     //       publishes no such surface for this record; what closes the remaining log exposure is the
     //       rendering decision at the end of this type.
+    // WHY : Refactoring Rationale: the column is NOT NULL, where an earlier revision of this member
+    //       left it nullable. A reject row EXISTS because a record was rejected, and the single
+    //       statement cited above copies the whole 350-byte area unconditionally before the write at
+    //       app/cbl/CBTRN02C.cbl:448, so the reference program has no path that appends a reject
+    //       carrying no image. A null image is an entry recording that something was rejected while
+    //       discarding the only evidence of what -- and the 430-byte parity comparison cannot be
+    //       performed against it at all. The owning migration declares the same NOT NULL.
     @JdbcTypeCode(SqlTypes.CHAR)
-    @Column(name = "raw_record", length = RAW_RECORD_LENGTH, updatable = false)
+    // WHY : Refactoring Rationale: nullable = false was ADDED to this member and to the two
+    //       below, matching the NOT NULL the columns now carry. app/cbl/CBTRN02C.cbl L446-L451
+    //       writes the reject record by moving two WHOLE group items into it, and a group move
+    //       transfers the full declared width every time -- so there is no branch on which any of
+    //       the three components is absent and no width at which one is short.
+    // WHY : Trade-offs: a null in any of the three would make the 430-byte record
+    //       UNRECONSTRUCTABLE rather than merely incomplete. A reconstruction concatenates the
+    //       padded 350-character image, the four-digit code and the 76-character description; a null
+    //       has no width, so every field after the gap would sit at the wrong offset and the record
+    //       would parse cleanly into different data. Declaring the constraint on the member as well
+    //       as on the column is what lets the provider refuse the instance before a flush, naming
+    //       the member rather than reporting a constraint violation from the driver.
+    @Column(name = "raw_record", nullable = false, length = RAW_RECORD_LENGTH, updatable = false)
     private String rawRecord;
 
     /**
@@ -381,13 +400,26 @@ public class TransactionReject {
     //       That padding belongs to the fixed-width emitter in com.carddemo.common.codec; this
     //       column stores the number. Rendering it as anything but four zero-padded characters
     //       displaces the 76 characters that follow.
-    // WHY : Assumptions: the wrapper type is used rather than a primitive because the owning
-    //       migration declares the column nullable at V1__ledger.sql:619, and a primitive member
-    //       cannot represent a row that carries no code. This module never writes such a row -- the
-    //       constructor refuses one -- but the mapping has to be able to read whatever the table
-    //       holds, so the member describes the column while the constructor carries the stricter
-    //       local invariant.
-    @Column(name = "reason_code")
+    // WHY : Refactoring Rationale: this column is now NOT NULL at V1__ledger.sql:697 and the
+    //       migration now bounds it to the picture's own domain with
+    //       CHECK (reason_code BETWEEN 0 AND 9999) at its L757. An earlier revision declared
+    //       neither, and read the PIC 9(04) domain only as the reason a small integer is WIDE
+    //       ENOUGH -- while leaving that type's whole 32767 range admissible, negative values
+    //       included, which an unsigned picture cannot express. The same reading that makes 9999 the
+    //       sufficiency argument makes it the BOUND. Each reject site moves a code and its text in
+    //       one pair of statements, so a null code is a state the program never produces, and it
+    //       would break the reject COUNT that :229 turns into the return code because a null neither
+    //       equals nor differs from any code a filter names.
+    // WHY : Assumptions: the WRAPPER type is retained even though the column is now NOT NULL, and
+    //       the reason the change makes DECISIVE rather than weaker is that ZERO is a legitimate
+    //       value of this domain: PIC 9(04) at CBTRN02C L181 admits 0000, and the constraint above
+    //       is inclusive at that end. A primitive member left unassigned would therefore read back
+    //       as a real reason code rather than as an unpopulated one. The provider instantiates
+    //       through the no-argument constructor below and assigns the members afterwards, so an
+    //       instance does exist in that intermediate state, and a null there fails loudly where a
+    //       zero would be silently plausible. Nullability of the MEMBER and nullability of the
+    //       COLUMN are different questions, and only the second is what NOT NULL answers.
+    @Column(name = "reason_code", nullable = false)
     private Short reasonCode;
 
     /**
@@ -407,8 +439,14 @@ public class TransactionReject {
     //       concern the emitter applies deterministically. The record image, by contrast, IS a
     //       fixed-width image whose padding is part of its content, because the padding is bytes the
     //       source record actually carried. The owning migration declares this column variable-width
-    //       at V1__ledger.sql:621-631 and the image fixed-width at :605 for that distinction.
-    @Column(name = "reason_desc", length = MAX_REASON_DESC_LENGTH)
+    //       at V1__ledger.sql:699-719 and the image fixed-width at :670 for that distinction.
+    // WHY : Refactoring Rationale: the column is NOT NULL, on the same reading as the two columns
+    //       above. Every reject site moves a reason code and its verbatim text in the same pair of
+    //       statements, so a row carrying a code and no text is a state the reference program cannot
+    //       reach. The texts are user-visible strings carried across character for character under
+    //       transformation rule T8, and a null one would silently drop the half of the 430-byte
+    //       trailer an operator actually reads.
+    @Column(name = "reason_desc", nullable = false, length = MAX_REASON_DESC_LENGTH)
     private String reasonDesc;
 
     /**
@@ -447,9 +485,22 @@ public class TransactionReject {
      * @throws IllegalArgumentException if the image is not exactly 350 characters, the description
      *     exceeds 76 characters, or the reason code falls outside the inclusive range 0 to 9999
      */
-    // WHY : Assumptions: the ordinal is not a parameter because the database assigns it. Accepting
-    //       one would let a caller overwrite an append position it does not own, and on this module's
-    //       write path there is no legitimate value to supply.
+    // WHY : Assumptions: the MAPPED IDENTITY of this row is `rejectSeq` -- the member carrying the
+    //       @Id annotation and the generated `reject_seq` identity column -- and it is deliberately
+    //       NOT a parameter of this constructor, because the database assigns it. None of the three
+    //       arguments below is or contributes to that identity: `rawRecord` is the 350-character
+    //       payload image, and the two trailer members classify it. Accepting an ordinal would let a
+    //       caller overwrite an append position it does not own, and on this module's write path
+    //       there is no legitimate value to supply.
+    // WHY : Assumptions: sequence identity is kept SEPARATE from the fixed-width payload content, and
+    //       the separation is what makes duplicate rejects representable. The source asserts
+    //       uniqueness over nothing -- app/cbl/CBTRN02C.cbl L46-L47 selects DALYREJS as ORGANIZATION
+    //       IS SEQUENTIAL with no RECORD KEY, and app/jcl/POSTTRAN.jcl L36 gives it RECFM=F, a flat
+    //       stream appended to and never keyed into -- so two identical 430-byte records are both
+    //       legitimate. Deriving identity from the image, or from the image plus its trailer, would
+    //       collapse those two occurrences into one row and undercount the reject total that
+    //       CBTRN02C L229-L230 turns into the job's return code. A generated ordinal distinguishes
+    //       them while leaving every payload byte free to repeat.
     // WHY : Assumptions: nothing is derived here. No generation, no run identifier and no timestamp
     //       is minted, because the 430-byte record carries none of the three and the generation that
     //       does exist is a property of the dataset rather than of a row.
@@ -635,7 +686,7 @@ public class TransactionReject {
     //       sibling BatchRun uses. Rejected because the two tables differ in exactly the property
     //       that decides this: BatchRun carries a named unique constraint over its business pair, so
     //       memory and database agree on what one row is, whereas the owning migration for this
-    //       table states at V1__ledger.sql:633-646 that no unique constraint exists over these
+    //       table states at V1__ledger.sql:721-745 that no unique constraint exists over these
     //       columns and that duplicate images remain legitimate. Business-member equality here would
     //       collapse two distinct rejects of one identical record into a single element of a hashed
     //       collection, which is the very thing the ordinal was added to prevent.
@@ -643,10 +694,15 @@ public class TransactionReject {
     //       must not compare equal however identical their members -- otherwise a set of pending
     //       rejects would silently lose all but one. Returning false while the ordinal is absent is
     //       the deliberate handling of that state rather than an unconsidered null check, and it is
-    //       why the sibling test asserts the unflushed case explicitly. The accepted consequence is
-    //       that an instance added to a hashed collection before a flush is not findable by an
-    //       instance re-read afterwards; callers hold rejects in an ordered collection while
-    //       building a run and address stored ones by ordinal.
+    //       why the sibling test asserts the unflushed case explicitly.
+    // WHY : Assumptions: this refusal is what the constant hash below is chosen against, and the two
+    //       together give the property a caller depends on: an instance placed in a hashed collection
+    //       while its ordinal was absent stays findable once the flush assigns one, both by itself
+    //       and by a distinct instance re-read on the same ordinal, because the bucket never moves
+    //       and the comparison then succeeds on the assigned value. The accepted consequence is
+    //       narrower than it looks -- while the ordinal is still absent an instance is findable only
+    //       by itself, never by an equal-membered twin -- and that is the state the reject stream
+    //       actually wants, since two unflushed rejects of one identical record are two entries.
     @Override
     public boolean equals(Object other) {
         if (this == other) {
@@ -662,18 +718,38 @@ public class TransactionReject {
     }
 
     /**
-     * Computes a hash from the ordinal alone, matching the equality contract above.
+     * Answers one constant for every row of this type, so the value cannot move when the database
+     * assigns the ordinal.
      *
-     * @return the int hash of the ordinal, or zero while the ordinal is absent
+     * @return the int hash of this class, the same value for every instance whatever its ordinal
      */
-    // WHY : Assumptions: the members excluded here are excluded because equality excludes them, so
-    //       the two remain consistent by construction. Hashing an unflushed instance to a constant
-    //       is the correct consequence of an equality that refuses to match on a null ordinal: such
-    //       instances collide in a bucket and are then separated by equality, which is inefficient
-    //       and correct rather than incorrect and fast.
+    // WHY : Assumptions: the ordinal is null until the row is flushed and non-null afterwards, so a
+    //       hash derived from it would take one value before the insert and a different one after.
+    //       The hashed collections in the JDK read the bucket once, at insertion, and never rehash
+    //       an element the collection already holds, so an instance added while the ordinal was
+    //       absent would sit in the bucket for the absent value and be unreachable from the bucket
+    //       the assigned value now selects -- contains would answer false for an element the
+    //       collection still contains, and remove would not remove it. A constant makes every
+    //       instance select one bucket for its whole lifetime, which is the property that removes
+    //       that failure altogether.
+    // WHY : Alternatives Considered: Objects.hash(rejectSeq), which is the form that pairs most
+    //       obviously with an equality over the ordinal. Rejected for the lifecycle reason above.
+    //       Two further details make the rejection concrete rather than theoretical. Objects.hash of
+    //       a single null argument answers 31 and not zero, because it hashes a one-element array
+    //       whose seed is 1, so the pre-insert and post-insert values are two different non-zero
+    //       numbers rather than a zero that a reader might expect to be treated specially. And this
+    //       type is inserted per rejected record inside a chunk, so the pre-insert state is the
+    //       normal state of an instance a caller holds rather than an edge case.
+    // WHY : Trade-offs: every instance of this type shares one bucket, so a hashed collection over
+    //       many rejects degrades to a linear scan through equals. That cost is accepted because the
+    //       posting job holds rejects in an ordered collection while building a chunk and addresses
+    //       stored ones by ordinal, so no large hashed collection of this type exists on any path;
+    //       what it buys is that membership never depends on when an instance was hashed relative to
+    //       its flush. The sibling DailyTransaction of this package answers a constant for the same
+    //       reason, so the two feed-side mappings behave alike.
     @Override
     public int hashCode() {
-        return Objects.hash(rejectSeq);
+        return TransactionReject.class.hashCode();
     }
 
     /**

@@ -9,7 +9,7 @@ connection, and an over-privileged alternate role still yields a successful load
 raises anything at the point of use, so the only place the behaviour can be pinned down is
 a test that asserts the refusals explicitly.
 
-WHY (Alternatives Considered)
+Alternatives Considered:
     Asserting the accept path against a real file staged under ``tmp_path`` was tried
     first and abandoned. The container this suite runs in has ``/tmp`` at mode 2777 --
     world-writable WITHOUT the sticky bit -- so every ancestor walk over a real temporary
@@ -19,14 +19,14 @@ WHY (Alternatives Considered)
     through a substituted filesystem, while every refusal path uses real files, because
     refusals are independent of the host's mode.
 
-WHY (Assumptions)
+Assumptions:
     The privilege adjudicator is tested without a database, because it is deliberately
     separated from the query that feeds it: ``alternate_database_user_verification_sql``
     returns text and ``require_equivalent_database_user`` judges a row. That split is what
     makes the rule assertable here; the query itself is exercised against a live cluster by
     ``data-migration/sql/verify/alternate_database_users.sql``.
 
-WHY (Trade-offs)
+Trade-offs:
     The tests assert on refusal MESSAGES as well as on the fact of refusal, but only on the
     stable part of each -- the named attribute, the variable name, the word describing the
     defect. Asserting whole messages would make every wording improvement a test failure;

@@ -3,8 +3,9 @@
 # -----------------------------------------------------------------------------
 # Purpose:
 #   The complete input surface of the `kms` module -- the module that provisions
-#   the four customer-managed encryption keys (Aurora, S3, Secrets Manager and
-#   SQS), their aliases, their rotation setting and their key policies. Every
+#   the five customer-managed encryption keys (Aurora, S3, Secrets Manager, SQS
+#   and application data), their aliases, their rotation setting and their key
+#   policies. Every
 #   value a calling environment root can configure is declared here, and
 #   nothing else is configurable: anything absent from the list below is a
 #   property of the module fixed in main.tf, not a per-environment choice.
@@ -15,28 +16,69 @@
 #   the two environments visible in their own terraform.tfvars files instead of
 #   hidden in this module.
 #
-# Parameters -- two required, eight optional:
-#   environment                string       REQUIRED. Selects which
+# Parameters -- TWENTY inputs, two required and eighteen optional, in three
+# groups. The count and the grouping are measurements over this file
+# (`grep -c '^variable "'`), not a description written once and left behind:
+#
+#   Shape of every key (5):
+#     environment              string       REQUIRED. Selects which
 #                                           environment's aliases the keys take.
-#   name_prefix                string       Common prefix for the alias names.
-#   enable_key_rotation        bool         Automatic rotation of key material.
-#   deletion_window_in_days    number       Pending-deletion window a destroyed
+#     name_prefix              string       Common prefix for the alias names.
+#     enable_key_rotation      bool         Automatic rotation of key material.
+#     deletion_window_in_days  number       Pending-deletion window a destroyed
 #                                           key waits out.
-#   tags                       map(string)  Key-specific tags, layered on the
+#     tags                     map(string)  Key-specific tags, layered on the
 #                                           root's default_tags.
-#   aurora_key_user_role_arns  list(string) Principals the Aurora key policy
-#                                           grants use to.
-#   s3_key_user_role_arns      list(string) The same, for the S3 key.
-#   cloudfront_distribution_arn string       REQUIRED. Exact SPA distribution
-#                                           allowed to decrypt the SSE-KMS
-#                                           origin.
-#   secrets_key_user_role_arns list(string) The same, for the Secrets Manager
-#                                           key.
-#   sqs_key_user_role_arns     list(string) The same, for the SQS key.
+#
+#   Trusted principals, one list per key (5):
+#     aurora_key_user_role_arns       list(string) Principals the Aurora key
+#                                                  policy grants use to.
+#     s3_key_user_role_arns           list(string) The same, for the S3 key.
+#     secrets_key_user_role_arns      list(string) The same, for the Secrets
+#                                                  Manager key.
+#     sqs_key_user_role_arns          list(string) The same, for the SQS key.
+#     application_key_user_role_arns  list(string) The same, for the
+#                                                  application-data key -- the
+#                                                  one key a workload role calls
+#                                                  directly.
+#
+#   Conditions that narrow those grants, and the service-principal grants (10):
+#     aurora_encryption_context_ids           list(string) aws:rds:db-id values.
+#     s3_encryption_context_bucket_arns       list(string) aws:s3:arn values.
+#     secrets_encryption_context_arns         list(string) SecretARN values.
+#     application_encryption_context_purposes list(string) carddemo:purpose
+#                                                          values -- the
+#                                                          application key's
+#                                                          narrowing condition,
+#                                                          in place of the
+#                                                          kms:ViaService the
+#                                                          other four use.
+#     cloudfront_distribution_arn             string       REQUIRED. Exact SPA
+#                                                          distribution allowed
+#                                                          to decrypt the
+#                                                          SSE-KMS origin.
+#     cloudfront_distribution_arns            list(string) Additional exact
+#                                                          distributions.
+#     s3_cloudfront_distribution_arns         list(string) The same, in the
+#                                                          spelling an earlier
+#                                                          caller used.
+#     cloudwatch_log_delivery_source_arns     list(string) Log-delivery sources
+#                                                          granted a data key.
+#     cloudwatch_log_group_arns               list(string) Exact log groups.
+#     sns_topic_arns                          list(string) Exact alert topics.
 #
 #   Each block below carries the full `type` and `description` that TFLint's
 #   terraform_typed_variables and terraform_documented_variables rules require;
 #   the summary above is a map of the surface, not a second copy of it.
+#
+#   Refactoring Rationale: this summary previously read "two required, eight
+#   optional" and listed ten of the inputs. It was stale rather than abridged --
+#   it named no encryption-context input, no CloudWatch or SNS input, and neither
+#   of the two application-data inputs -- so a reader consulting it would have
+#   concluded that narrowing a grant was not configurable from a calling root.
+#   It is now complete and grouped by what an input does, which is also what
+#   makes a future omission visible: a group whose count no longer matches its
+#   entries is a one-line discrepancy rather than an invisible absence.
 #
 # Return values:
 #   None. A variables.tf declares no output, so the key identifiers, key ARNs
@@ -44,22 +86,34 @@
 #   infra/modules/kms/outputs.tf.
 #
 # Errors / Exceptions:
-#   Four inputs carry a `validation` block, and each rejects a bad value during
-#   `terraform plan`, before any request leaves the machine, rather than letting
-#   the service reject it part-way through `terraform apply`: `environment`
-#   (not one of the two environments that have a root), `name_prefix`
-#   (characters an alias name cannot hold), and `deletion_window_in_days`
-#   (outside the range the service accepts, or fractional), and
-#   `cloudfront_distribution_arn` (not an exact distribution ARN).
+#   NINETEEN of the twenty inputs carry a `validation` block -- every one except
+#   `tags`, whose keys and values are opaque to this module -- and each rejects a
+#   bad value during `terraform plan`, before any request leaves the machine,
+#   rather than letting the service reject it part-way through
+#   `terraform apply`. The four scalars reject a value the service itself would
+#   reject later: `environment` (not one of the two environments that have a
+#   root), `name_prefix` (characters an alias name cannot hold),
+#   `enable_key_rotation` (anything but `true`), and `deletion_window_in_days`
+#   (outside the range the service accepts, or fractional). The fifteen list and
+#   ARN inputs reject the shapes that would silently WIDEN a grant rather than
+#   break it -- a wildcard, an assumed-role session ARN, a user, a root, a
+#   service principal, or a duplicate entry -- which is the class of mistake a
+#   plan-time failure is worth the most against, because the applied policy would
+#   otherwise be valid and permissive.
 #   `environment` and `cloudfront_distribution_arn` have no default, so omitting
 #   either stops the run with a missing-required-argument error.
+#   Refactoring Rationale: this paragraph previously said four, and named the
+#   four scalars. The figure is now a measurement (`grep -c '  validation {'`)
+#   because the list inputs acquired validation after the paragraph was written,
+#   and an understated count invites a contributor to add an unvalidated list
+#   input believing that is the established shape.
 #
 # WHY (non-obvious design decisions):
 #   - Alternatives Considered: one shared list of trusted principals rather than
-#     four. Rejected -- it would grant every trusted principal use of every key,
-#     erasing the per-domain boundary that provisioning four keys instead of one
-#     exists to create.
-#   - Assumptions: the four trust lists default to empty so the keys can exist
+#     five. Rejected -- it would grant every trusted principal use of every key,
+#     erasing the per-domain boundary that provisioning a key per data class
+#     instead of one exists to create.
+#   - Assumptions: the five trust lists default to empty so the keys can exist
 #     before the task roles that use them do. Those roles come from the
 #     `ecs-service` module, which consumes this module's key ARNs, so a
 #     non-empty requirement would make the grant a precondition of the key the
@@ -111,7 +165,7 @@
 # root tracks, so the check asserts the shape of the tree rather than a naming
 # preference.
 variable "environment" {
-  description = "Environment name interpolated into all four KMS alias names, so one environment's keys are distinguishable from the other's in the console and in any alias-based key reference; must be `dev` or `prod`, the two environments that have a Terraform root under infra/envs/."
+  description = "Environment name interpolated into all five KMS alias names, so one environment's keys are distinguishable from the other's in the console and in any alias-based key reference; must be `dev` or `prod`, the two environments that have a Terraform root under infra/envs/."
   type        = string
 
   validation {
@@ -139,7 +193,7 @@ variable "environment" {
 # its own. A `prefix` or `resource_prefix` variant would read as a different
 # concept and would have to be mapped at each call site.
 variable "name_prefix" {
-  description = "Prefix concatenated into each KMS alias name ahead of the key's purpose and the environment, giving the four keys one greppable identity shared with the rest of the stack's resource names; lowercase letters, digits and hyphens only, at most 32 characters, matching the characters an alias name accepts."
+  description = "Prefix concatenated into each KMS alias name ahead of the key's purpose and the environment, giving the five keys one greppable identity shared with the rest of the stack's resource names; lowercase letters, digits and hyphens only, at most 32 characters, matching the characters an alias name accepts."
   type        = string
   default     = "carddemo"
 
@@ -155,7 +209,7 @@ variable "name_prefix" {
 
 # WHY this is an input at all when the answer is already settled -- Assumptions:
 # rotation-on is the module's design intent, not a caller preference. The target
-# architecture specifies four customer-managed keys WITH rotation, so `true` is
+# architecture specifies customer-managed keys WITH rotation on every one, so `true` is
 # the only value either environment root is expected to pass. The variable
 # exists so that the setting is legible at the call site and in this module's
 # generated documentation -- an operator can see it and reason about it -- and
@@ -169,7 +223,7 @@ variable "name_prefix" {
 # different one, and an input that is never varied is one more knob a reader
 # must evaluate before discovering it does not matter.
 variable "enable_key_rotation" {
-  description = "Whether all four customer-managed keys rotate their key material automatically on the service's own interval. The module accepts only true because rotation is an architecture invariant rather than an environment preference."
+  description = "Whether all five customer-managed keys rotate their key material automatically on the service's own interval. The module accepts only true because rotation is an architecture invariant rather than an environment preference."
   type        = bool
   default     = true
 
@@ -179,7 +233,7 @@ variable "enable_key_rotation" {
   # callers and from the terraform-docs table that reviewers inspect.
   validation {
     condition     = var.enable_key_rotation
-    error_message = "enable_key_rotation must be true. All four customer-managed keys rotate in every environment, and callers cannot lower that invariant."
+    error_message = "enable_key_rotation must be true. All five customer-managed keys rotate in every environment, and callers cannot lower that invariant."
   }
 }
 
@@ -199,7 +253,7 @@ variable "enable_key_rotation" {
 # the range buy different things. A short window lets `terraform destroy`
 # release the keys sooner, which is what the acceptance criterion of a stack
 # that tears down cleanly asks for, and it stops a torn-down environment from
-# leaving four keys behind in a pending-deletion state that still bills. A long
+# leaving five keys behind in a pending-deletion state that still bills. A long
 # window preserves a longer interval in which a key deleted by mistake can be
 # recovered -- past its window a key is gone and every ciphertext under it is
 # permanently unreadable. The module default takes the short end because the
@@ -232,12 +286,12 @@ variable "deletion_window_in_days" {
 # Assumptions: the baseline tag set is not this module's to supply. Each
 # calling root configures `default_tags` on its own `provider "aws"` block, and
 # the provider merges that map into every taggable resource it creates, so the
-# four keys carry the root's common tags whether or not this variable is passed.
+# five keys carry the root's common tags whether or not this variable is passed.
 # What this input adds is the layer above that -- tags that distinguish these
 # keys from the rest of the root's resources. Without this note an empty default
 # looks like missing tagging, and it is not.
 variable "tags" {
-  description = "Key-specific tags merged onto each of the four keys, layered on top of the common tag set the calling root already applies through its provider's `default_tags`; defaults to none, because the baseline tags arrive from the root rather than from this module."
+  description = "Key-specific tags merged onto each of the five keys, layered on top of the common tag set the calling root already applies through its provider's `default_tags`; defaults to none, because the baseline tags arrive from the root rather than from this module."
   type        = map(string)
   default     = {}
 }
@@ -308,21 +362,27 @@ variable "s3_cloudfront_distribution_arns" {
 # Trusted key users -- one list per key
 # -----------------------------------------------------------------------------
 #
-# The four inputs below are the least-privilege half of each key policy: the
-# policy main.tf composes for a key grants cryptographic use of that key to the
-# principals its own list names, and to no others. The three notes in this
-# section are shared, and they govern all four declarations that follow -- which
-# are the last four in this file -- because the reasoning is identical across
-# them and repeating it four times would let the copies drift apart.
+# The five inputs of this shape are the least-privilege half of each key policy:
+# the policy main.tf composes for a key grants cryptographic use of that key to
+# the principals its own list names, and to no others. The three notes in this
+# section are shared, and they govern all five declarations of that shape --
+# `aurora_key_user_role_arns`, `s3_key_user_role_arns`,
+# `secrets_key_user_role_arns`, `application_key_user_role_arns` and
+# `sqs_key_user_role_arns` -- because the reasoning is identical across them and
+# repeating it five times would let the copies drift apart.
+# Refactoring Rationale: this note previously located the declarations it governs
+# by POSITION ("the last four in this file"), which stopped being true as soon as
+# the encryption-context and application-data inputs were interleaved among them.
+# They are now named, so the note stays correct under any future reordering.
 #
-# WHY four lists rather than one -- Alternatives Considered: a single
-# `key_user_role_arns` applied to all four policies is the obvious
+# WHY five lists rather than one -- Alternatives Considered: a single
+# `key_user_role_arns` applied to all five policies is the obvious
 # simplification, and it is rejected. It would grant every trusted principal use
 # of every key, so a service trusted only to read queue payloads could also
 # decrypt database ciphertext -- which erases the per-domain boundary that
-# provisioning four keys instead of one exists to create in the first place.
-# Keeping the lists separate confines a trust entry added to the wrong list to a
-# single data class instead of letting it reach all four.
+# provisioning a key per data class instead of one exists to create in the first
+# place. Keeping the lists separate confines a trust entry added to the wrong
+# list to a single data class instead of letting it reach all five.
 #
 # WHY each defaults to empty -- Assumptions: the principals these lists name are
 # the ECS task roles, and those roles are created by the `ecs-service` module --
@@ -339,7 +399,7 @@ variable "s3_cloudfront_distribution_arns" {
 # that a reader can see the shape the input expects, is the alternative and it is
 # refused. An ARN embeds an AWS account identifier, and no account identifier
 # belongs in this repository -- the project's no-secrets-in-source constraint
-# admits no exception. These four lists are inputs the caller supplies from its
+# admits no exception. These five lists are inputs the caller supplies from its
 # own state, while the key ARNs this module produces travel the other way, as
 # outputs.
 # Trade-offs: the expected shape is therefore conveyed in prose, by the `type`
@@ -400,6 +460,34 @@ variable "secrets_key_user_role_arns" {
       can(regex("^arn:(aws|aws-us-gov|aws-cn):iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_-]+(/[A-Za-z0-9+=,.@_-]+)*$", arn))
     ])
     error_message = "secrets_key_user_role_arns must contain unique, exact IAM role ARNs only. Wildcards and principals other than roles are not accepted; same-account enforcement is applied by the key-policy resource."
+  }
+}
+
+variable "application_key_user_role_arns" {
+  description = "Exact IAM role ARNs the application-data key policy permits to generate envelope data keys and decrypt them, confined to the encryption-context purposes declared below. Unlike the other four inputs of this shape there is no kms:ViaService condition on the resulting statement, because this key is called directly by a workload rather than through an integrated service. Wildcards, assumed-role session ARNs, users, roots and service principals are refused."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = length(distinct(var.application_key_user_role_arns)) == length(var.application_key_user_role_arns) && alltrue([
+      for arn in var.application_key_user_role_arns :
+      can(regex("^arn:(aws|aws-us-gov|aws-cn):iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_-]+(/[A-Za-z0-9+=,.@_-]+)*$", arn))
+    ])
+    error_message = "application_key_user_role_arns must contain unique, exact IAM role ARNs only. Wildcards and principals other than roles are not accepted; same-account enforcement is applied by the key-policy resource."
+  }
+}
+
+variable "application_encryption_context_purposes" {
+  description = "The kms:EncryptionContext:carddemo:purpose values the application-data key grant admits. This is the narrowing condition a directly-called key has in place of kms:ViaService, so a role holding the grant can work only with ciphertext produced for one of these purposes. The default names the one purpose the migration enciphers today, the card verification value produced by com.carddemo.card.service.CardVerificationValueCipher."
+  type        = list(string)
+  default     = ["card-cvv"]
+
+  validation {
+    condition = length(var.application_encryption_context_purposes) > 0 && length(distinct(var.application_encryption_context_purposes)) == length(var.application_encryption_context_purposes) && alltrue([
+      for purpose in var.application_encryption_context_purposes :
+      can(regex("^[a-z0-9]+(-[a-z0-9]+)*$", purpose))
+    ])
+    error_message = "application_encryption_context_purposes must be a non-empty list of unique lower-case hyphenated purpose names. An empty list would produce a condition matching nothing, which denies every request the grant exists for."
   }
 }
 
@@ -479,7 +567,7 @@ variable "cloudfront_distribution_arns" {
 }
 
 variable "cloudwatch_log_delivery_source_arns" {
-  description = "Exact same-account CloudWatch Logs delivery-source ARNs allowed to generate data keys for the CloudFront standard logging v2 S3 destination. Empty means no log-delivery service-principal grant is installed."
+  description = "Exact same-account CloudWatch Logs delivery-source ARNs allowed to generate data keys under this key for a CloudFront standard logging v2 destination. Scoping rather than exercise: the destination cloudfront-spa creates defaults to SSE-S3 because CloudFront delivery cannot write to an SSE-KMS bucket, so the grant is currently unexercised and exists so the policy stays narrow and a key-encrypted destination needs no policy change. Empty means no log-delivery service-principal grant is installed."
   type        = list(string)
   default     = []
 

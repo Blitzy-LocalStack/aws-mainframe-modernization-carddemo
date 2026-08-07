@@ -143,11 +143,6 @@ spring:
       #   a benefit rather than the thing holding compute awake that the
       #   environment was configured to release.
       #
-      # Trade-offs: five connections are held per task whether or not traffic
-      #   arrives, so the idle footprint is real and is multiplied by the same task
-      #   count as the ceiling above. What it buys is that the first request after
-      #   a quiet period does not pay establishment and the verifying handshake
-      #   inside the request, which in this profile is a user's request.
       minimum-idle: 5
 
       # Assumptions: this value is DELIBERATELY the base file's own, and the line
@@ -162,17 +157,7 @@ spring:
       #   capacity floor is held above zero and there is no resume to wait through,
       #   so the raise is not inherited.
       #
-      # Trade-offs: ten seconds rather than something longer means a genuinely slow
-      #   but recovering database sheds requests it would eventually have served.
-      #   Accepted because the alternative is the cascade this profile is the one
-      #   exposed to: under pool exhaustion a long wait occupies each waiting
-      #   request's servlet thread, the thread pool saturates, the health endpoint
-      #   served by that same pool stops answering, the load balancer deregisters
-      #   the task, and a database slowdown has become a task replacement loop. A
-      #   short wait fails the individual request and leaves the task answerable,
-      #   which is what keeps the two probes below able to get a reply.
       connection-timeout: 10000
-
 
   # ---------------------------------------------------------------------------
   # Assumptions: (1) the other six Flyway settings are declared in the base file and
@@ -203,30 +188,9 @@ spring:
     #   added. The divergence is recorded in
     #   docs/architecture/cobol-to-service-traceability.md.
     #
-    # Alternatives Considered: leaving this to the database role's privileges, or
-    #   to operator discipline. Both rejected because each fails silently under
-    #   exactly the condition that matters. The migration role must hold DDL rights
-    #   on this schema to apply V1__card.sql at all, so a grant narrow enough to
-    #   forbid a drop is not available without breaking migration; and discipline
-    #   is not a control when the operator is correctly privileged and merely
-    #   pointed at the wrong environment -- the case in which every other safeguard
-    #   is satisfied and the command still succeeds.
     #
-    # Trade-offs: a genuine operational capability is surrendered. An operator
-    #   faced with a wedged schema here CANNOT use the engine's own clean to reset
-    #   it, and must instead restore from an automated backup or roll forward with
-    #   a new versioned migration -- both slower, both requiring review. Accepted
-    #   because the failure mode it removes is categorically worse: an irreversible
-    #   drop of the sole card master, against data whose only recovery path is the
-    #   one this platform introduced.
     #
-    # Trade-offs: the pinned engine release already defaults this to true, so the
-    #   line changes no behaviour today and is kept regardless, because the
-    #   guarantee is then readable in the profile carrying the production risk
-    #   instead of being inferable only by knowing an engine default and trusting
-    #   that no later upgrade revisits it.
     clean-disabled: true
-
 
 # -----------------------------------------------------------------------------
 # Alternatives Considered: (1) they are lowered together because the dev overlay raises them
@@ -287,13 +251,6 @@ logging:
     #   suppressing task data in trace output. The target preserves that posture
     #   through a different mechanism.
     #
-    # Trade-offs: with both silent, a slow or wrong query cannot be read out of the
-    #   log here, and the keyset predicate behind a mispaged list is exactly what
-    #   becomes unreadable -- every part of it that decides a page boundary is a
-    #   bound parameter. The accepted cost is that such a question is reproduced
-    #   under the dev overlay against the seed extract rather than investigated in
-    #   place. Raising either of these here would be a data-exposure change and not
-    #   a verbosity change, and the base file forbids it in those terms.
     org.hibernate.SQL: WARN
 
     # Assumptions: this key is the one the dev overlay treats differently from its
@@ -308,7 +265,6 @@ logging:
     #   additional effect would be to discard a genuine warning this category might
     #   one day raise.
     org.hibernate.orm.jdbc.bind: WARN
-
 
 # -----------------------------------------------------------------------------
 # Assumptions: (1) the base path, the probe groups and the two health-detail
@@ -338,19 +294,6 @@ management:
         #   endpoints that remain is decided in SecurityConfig; this list only
         #   decides which endpoints exist.
         #
-        # Assumptions: prometheus stays for a different reason, and dropping it
-        #   would raise no error anywhere -- which is precisely why it is named
-        #   rather than left to a narrower list. It is the scrape path, and
-        #   io.micrometer:micrometer-registry-prometheus is a runtime dependency of
-        #   this module so that the path exists at all; common-lib's MetricsConfig
-        #   contributes the common tags service, environment and version that every
-        #   series is grouped by. The dashboards and alarms the
-        #   infra/modules/observability module provisions read that surface, so
-        #   closing it would leave the process starting and serving traffic while
-        #   ceasing to be scraped: panels would render empty and alarms would sit in
-        #   insufficient-data rather than firing, and nothing raises that. info is
-        #   retained because it identifies which build a task is running, which is
-        #   what makes a reported defect attributable to a version.
         #
         # Alternatives Considered: keeping the dev overlay's three additions and
         #   relying on network position, since these tasks sit in private
@@ -367,13 +310,6 @@ management:
         #   administrative card-detail path returns and the bearer tokens that
         #   authorised the requests in flight.
         #
-        # Trade-offs: what is given up is the whole diagnostic tier the dev overlay
-        #   publishes, so a production issue is diagnosed from logs, metrics and
-        #   traces and escalates to a reviewed configuration change and a redeploy
-        #   second. That is the same reasoning that keeps loggers off this list: it
-        #   can change a level at run time, and the point of confining the statement
-        #   and bind levels above to a file is that a reader can tell from the file
-        #   which environments emit them.
         include: health,info,prometheus
 
 # =============================================================================

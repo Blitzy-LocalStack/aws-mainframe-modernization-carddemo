@@ -18,30 +18,13 @@ cites by path and line and never modifies.
 > halves cannot diverge silently; the hand-written prose above it carries the
 > reasoning no generator can produce.
 
-**Why this file exists.** HCL has no docstring construct. The project's
-explainability rule is therefore discharged for Terraform in two halves: a
-file-header comment block, a `description` on every variable and output, and a
-why-comment on each non-obvious argument make up the in-code half, and a
-`README.md` in every module directory makes up the prose half. This document is
-that prose half — it is the one file in this folder owed to a project rule
-rather than to any migration requirement. The rule governs newly authored code
-only; the reference-only baseline carries no such obligation.
-
-That obligation reaches this Markdown through three explicit links: the project
-requires an analogous explanation where a language has no docstring construct;
-the infrastructure documentation contract requires a purpose-and-source-of-
-truth opening plus named rationale for non-obvious choices; and
+**Why this file exists.** HCL has no docstring construct, so the project's
+explainability rule is discharged for Terraform in two halves: a file-header
+comment block, a `description` on every variable and output and a why-comment on
+each non-obvious argument make up the in-code half, and this README makes up the
+prose half, under the category names
 [`docs/CODE_DOCUMENTATION_STANDARD.md`](../../../docs/CODE_DOCUMENTATION_STANDARD.md)
-binds Markdown rationale to the four plain-text, plural category names used
-below.
-
-Its layout follows the register of
-[`tests/README.md`](../../../tests/README.md) — numbered `## <n>.` headings,
-horizontal rules between sections, and a single blank line around every heading
-— rather than the two-blank-line, fence-free form of
-[`CONTRIBUTING.md`](../../../CONTRIBUTING.md), because this document needs
-fenced examples and generated tables and that is the house document which has
-them.
+fixes.
 
 ---
 
@@ -90,13 +73,28 @@ graph LR
 Seven of the eight migrated services are published here — auth, accounts,
 cards, transactions, reference, authorizations and reports. Two of those seven
 own a second top-level path segment, because their own OpenAPI contract
-publishes one: `auth-service` serves user administration at `/api/v1/users`
-beside sign-on at `/api/v1/auth`, and `transaction-service` serves its single
-bill-payment operation at `/api/v1/billpay`. Assumptions: a route key is
+publishes one: `card-service` serves its administrative card-detail read at
+`/api/v1/admin/cards/{cardNumber}` beside the card subtree at `/api/v1/cards`,
+and `transaction-service` serves its single bill-payment operation at
+`/api/v1/billpay` beside `/api/v1/transactions`. Assumptions: a route key is
 required for every segment a contract publishes, not for every service — an
 operation a contract publishes at a segment absent from the authorized route
 list is answered by this API's own 404 with no integration attempted, so the
-service appears not to implement it while running perfectly. `batch-service` is
+service appears not to implement it while running perfectly. Auth-service is
+deliberately *not* one of the two: its five user-administration operations are a
+subtree of its own prefix, at `/api/v1/auth/users` and
+`/api/v1/auth/users/{userId}`, so the greedy `ANY /api/v1/auth/{proxy+}` key
+already reaches every one of them and no second segment is needed.
+Refactoring Rationale: this paragraph previously named auth-service as one of
+the two and placed user administration at a top-level `/api/v1/users`. Both
+halves were wrong, and the pairing made the error self-consistent enough to
+survive a reading: `services/auth-service/src/main/resources/openapi/auth-api.yaml`
+publishes those operations beneath `/api/v1/auth`, `SecurityConfig` gates them
+at `/api/v1/auth/users` and `/api/v1/auth/users/**`, and the `/api/v1/users`
+pair this text described was withdrawn from the authorized route list precisely
+because it named an address no contract publishes (see the withdrawal note in
+`variables.tf`). The second-segment owner is card-service, which acquired
+`/api/v1/admin/cards` in the same correction. `batch-service` is
 deliberately absent because it has no load-balancer target to route to; it is
 reached only by the batch orchestrator's synchronous run-task call.
 Assumptions: that absence is enforced rather than merely intended — the
@@ -531,12 +529,6 @@ should be inferred:
 
 ## 10. Scope boundary
 
-**Authored and statically validated only.** This module has been formatted,
-validated, linted, drift-checked and policy-scanned. It has **not** been
-applied to a live AWS account, **not** been benchmarked, and **not** been load
-tested. Running `terraform apply` against a real account, and the cost that
-incurs, is an operator action outside the scope of this work.
-
 Deliberately not in this module, each with its reason:
 
 | Not here | Why |
@@ -610,7 +602,7 @@ cites the baseline by path and line and changes nothing in it.
 | <a name="input_public_route_throttling_burst_limit"></a> [public\_route\_throttling\_burst\_limit](#input\_public\_route\_throttling\_burst\_limit) | Token-bucket depth for the unauthenticated routes in public\_route\_keys, applied as a per-route override on the stage. Deliberately far below throttling\_burst\_limit because an anonymous route is reachable without any credential. | `number` | `20` | no |
 | <a name="input_public_route_throttling_rate_limit"></a> [public\_route\_throttling\_rate\_limit](#input\_public\_route\_throttling\_rate\_limit) | Steady-state requests per second sustained on the unauthenticated routes in public\_route\_keys, applied as a per-route override on the stage. Deliberately far below throttling\_rate\_limit for the same reason as its burst counterpart. | `number` | `10` | no |
 | <a name="input_route_authorization_scopes"></a> [route\_authorization\_scopes](#input\_route\_authorization\_scopes) | Scopes every route requires in the token's scope claim, applied by main.tf to each route's authorization\_scopes. Defaults to the Cognito user pool's built-in aws.cognito.signin.user.admin scope, which is the scope an interactively signed-in access token carries and which an identity token carries not at all, so the requirement rejects the wrong token kind at the edge. | `list(string)` | <pre>[<br/>  "aws.cognito.signin.user.admin"<br/>]</pre> | no |
-| <a name="input_route_keys"></a> [route\_keys](#input\_route\_keys) | HTTP API route keys to create, each attached to the JWT authorizer AND given var.route\_authorization\_scopes by main.tf. Every key is versioned under the published `/api/v1` path prefix. The default exposes the SEVEN online bounded contexts, most as a matched pair of keys -- the bare collection prefix and the greedy subtree beneath it -- under path segments matching the SPA's API client modules. One context publishes a SECOND top-level segment because its own OpenAPI contract does: transaction-service serves its single bill-payment operation at `/api/v1/billpay`, which is consequently a bare key with no greedy sibling. auth-service needs no second segment -- it serves sign-on, the challenge and renewal exchanges and all five user-administration operations beneath `/api/v1/auth`, which the greedy auth key already covers. batch-service is deliberately absent: it has no ALB target to route to. An environment root may extend the list without editing the module. | `list(string)` | <pre>[<br/>  "ANY /api/v1/auth",<br/>  "ANY /api/v1/auth/{proxy+}",<br/>  "ANY /api/v1/accounts",<br/>  "ANY /api/v1/accounts/{proxy+}",<br/>  "ANY /api/v1/cards",<br/>  "ANY /api/v1/cards/{cardNumber}",<br/>  "ANY /api/v1/admin/cards",<br/>  "ANY /api/v1/admin/cards/{cardNumber}",<br/>  "ANY /api/v1/transactions",<br/>  "ANY /api/v1/transactions/{proxy+}",<br/>  "ANY /api/v1/billpay",<br/>  "ANY /api/v1/reference",<br/>  "ANY /api/v1/reference/{proxy+}",<br/>  "ANY /api/v1/authorizations",<br/>  "ANY /api/v1/authorizations/{proxy+}",<br/>  "ANY /api/v1/reports",<br/>  "ANY /api/v1/reports/{proxy+}"<br/>]</pre> | no |
+| <a name="input_route_keys"></a> [route\_keys](#input\_route\_keys) | HTTP API route keys to create, each attached to the JWT authorizer AND given var.route\_authorization\_scopes by main.tf. Every key is versioned under the published `/api/v1` path prefix. The default exposes the SEVEN online bounded contexts, most as a matched pair of keys -- the bare collection prefix and the greedy subtree beneath it -- under path segments matching the SPA's API client modules. One context publishes a SECOND top-level segment because its own OpenAPI contract does: transaction-service serves its single bill-payment operation at `/api/v1/billpay`, which is consequently a bare key with no greedy sibling. card-service is the one context with a THIRD key beneath its own prefix rather than a pair: `/api/v1/cards/lookup` is a static sibling of the `{cardKey}` variable key, and it exists because that contract takes its one card-number input in a request body instead of in a target. auth-service needs no second segment -- it serves sign-on, the challenge and renewal exchanges and all five user-administration operations beneath `/api/v1/auth`, which the greedy auth key already covers. batch-service is deliberately absent: it has no ALB target to route to. An environment root may extend the list without editing the module. reporting-service publishes NO second top-level segment: its statement operations are declared at `/api/v1/reports/statements` and `/api/v1/reports/statements/transactions` by its own OpenAPI contract, so the greedy reports key already covers them and a separate `/api/v1/statements` key would forward a prefix no service answers. | `list(string)` | <pre>[<br/>  "ANY /api/v1/auth",<br/>  "ANY /api/v1/auth/{proxy+}",<br/>  "ANY /api/v1/accounts",<br/>  "ANY /api/v1/accounts/{proxy+}",<br/>  "ANY /api/v1/cards",<br/>  "ANY /api/v1/cards/lookup",<br/>  "ANY /api/v1/cards/{cardKey}",<br/>  "ANY /api/v1/admin/cards",<br/>  "ANY /api/v1/admin/cards/{cardKey}",<br/>  "ANY /api/v1/transactions",<br/>  "ANY /api/v1/transactions/{proxy+}",<br/>  "ANY /api/v1/billpay",<br/>  "ANY /api/v1/reference",<br/>  "ANY /api/v1/reference/{proxy+}",<br/>  "ANY /api/v1/authorizations",<br/>  "ANY /api/v1/authorizations/{proxy+}",<br/>  "ANY /api/v1/reports",<br/>  "ANY /api/v1/reports/{proxy+}"<br/>]</pre> | no |
 | <a name="input_stage_name"></a> [stage\_name](#input\_stage\_name) | Name of the single stage this module creates. `$default` is the reserved name for a stage that serves requests with no stage segment in the path. | `string` | `"$default"` | no |
 | <a name="input_tags"></a> [tags](#input\_tags) | Tags merged onto every taggable resource this module creates -- the HTTP API, the stage, the VPC Link and the access-log group. Supplied by the environment root, which owns the tagging scheme. | `map(string)` | `{}` | no |
 | <a name="input_throttling_burst_limit"></a> [throttling\_burst\_limit](#input\_throttling\_burst\_limit) | Token-bucket depth applied by default to every route on the stage: how many requests above the steady rate the edge absorbs before it starts rejecting. Shields the seven online services behind it from one client's spike. | `number` | `200` | no |

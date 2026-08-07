@@ -1,6 +1,7 @@
 package com.carddemo.common.error;
 
 import com.carddemo.common.observability.LogSafeText;
+import com.carddemo.common.observability.ThrowableDigest;
 import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.common.validation.FieldValidationFlag;
 import jakarta.servlet.http.HttpServletRequest;
@@ -10,6 +11,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -20,6 +22,7 @@ import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.validation.FieldError;
 import org.springframework.validation.ObjectError;
+import org.springframework.validation.method.ParameterErrors;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -53,9 +56,14 @@ import org.springframework.web.method.annotation.HandlerMethodValidationExceptio
  *
  * <p>Assumptions: nothing this class emits carries a credential, a connection string, a stack trace or
  * a vendor error code out to a client. Every problem shape is assembled from members
- * {@link ApiError} defines and never from the text of a caught exception; the caught exception goes to
- * the operational record instead, under the same correlation identity the response carries, so a
- * client can be answered with one short sentence while the failure stays fully diagnosable. The
+ * {@link ApiError} defines and never from the text of a caught exception; a reduced description of the
+ * caught exception goes to the operational record instead, under the same correlation identity the
+ * response carries, so a client can be answered with one short sentence while the failure stays
+ * diagnosable. Assumptions: "reduced" is exact rather than a hedge -- every site here logs the
+ * exception's TYPE and no site logs its message, the two deliberate exceptions being the
+ * repository-authored refusal sentence of {@link ClientInputException}, which is sanitised, and the
+ * type-and-frame digest of the generic five-hundred path. A provider's own message reaches neither a
+ * response nor a log line. The
  * restrict-on-delete mapping below is the sharpest case: a driver's constraint-violation text names
  * the schema, the table and the constraint, so returning it would both fail to tell the caller what to
  * do and disclose the internal shape of the store to an untrusted caller.</p>
@@ -404,9 +412,10 @@ public class GlobalExceptionHandler {
      *
      * <p>Assumptions: written to sit inside {@code ABEND-REASON PIC X(50)} at line 26 of
      * {@code app/cpy/CSMSG02Y.cpy}, so it reaches the operational record whole rather than shortened.
-     * It names the classification and not the cause: the cause is the throwable itself, which is passed
-     * to the logging facade as a throwable so that the appender configuration governs how much of it is
-     * rendered, rather than being interpolated into any string this class builds.</p>
+     * It names the classification and not the cause: the cause reaches the operational record as the
+     * reduced representation {@link com.carddemo.common.observability.ThrowableDigest} composes -- its
+     * chain of type names and originating frames -- rather than being interpolated into any string this
+     * class builds.</p>
      */
     public static final String ABEND_REASON_UNEXPECTED = "Unhandled failure reported by the shared advice";
 
@@ -520,6 +529,33 @@ public class GlobalExceptionHandler {
      * holds the unreduced path.</p>
      */
     private static final int ACCOUNT_NUMBER_MASK_THRESHOLD = 13;
+
+    /**
+     * The bean-validation constraint names that assert a value was supplied at all.
+     *
+     * <p>Assumptions: these three are the complete set of standard presence constraints. Every other
+     * standard constraint -- pattern, size, bounds, digits -- describes the SHAPE of a value that was
+     * supplied, and a shape edit is meaningless on a value that is not there, which is exactly why the
+     * reference programs run their presence edit first and stop.</p>
+     *
+     * <p>Trade-offs: a custom presence constraint carrying some other name ranks with the shape edits
+     * and so could supply the aggregate sentence for a never-supplied value. Accepted because a name
+     * list is checkable and reviewable, whereas inspecting a constraint's implementation to classify it
+     * would put reflection on an error path -- and an error path is the one place a surprise must not
+     * happen. A new presence constraint is added here by name.</p>
+     */
+    private static final Set<String> PRESENCE_CONSTRAINTS =
+            Set.of("NotNull", "NotBlank", "NotEmpty");
+
+    /**
+     * The sort rank given to a failed presence constraint, placing it ahead of every shape constraint.
+     */
+    private static final int CONSTRAINT_RANK_PRESENCE = 0;
+
+    /**
+     * The sort rank given to every constraint that is not a presence constraint.
+     */
+    private static final int CONSTRAINT_RANK_OTHER = 1;
 
     /**
      * The clock every emitted problem shape reads its timestamp from.
@@ -670,10 +706,36 @@ public class GlobalExceptionHandler {
      * catch-all below and be reported as an internal failure, which would tell a caller its own
      * malformed input was the service's fault.</p>
      *
+     * <p>Refactoring Rationale: the aggregate sentence is LATCHED from the first rejected parameter,
+     * where an earlier form always reported the generic one. The change is needed because several
+     * migrated screens edit a parameter rather than a body member and publish the reference program's own
+     * sentence for it -- the pending-authorization list is the case that forced it, whose contract
+     * publishes {@code Please enter Acct Id...} and {@code Acct Id must be Numeric ...} verbatim from
+     * lines 268 and 277 of {@code app/app-authorization-ims-db2-mq/cbl/COPAUS0C.cbl} as the aggregate of
+     * a 400 and not only as a per-field entry. With a generic aggregate those responses were
+     * unreachable, so transformation rule T8's requirement that a user-visible string be carried across
+     * character for character could not be met for any parameter edit.</p>
+     *
+     * <p>Assumptions: the FIRST entry is the one latched, and first means the earliest rejected parameter
+     * in the handler method's own signature order, which is the order the framework reports its results
+     * in. That reproduces the reference behaviour rather than approximating it: those programs short-circuit,
+     * testing the next edit only when the previous one passed, so the sentence a terminal displayed was
+     * always the first failing edit's. The per-field entries still accumulate, which is the other half of
+     * the baseline's behaviour and is why both are kept.</p>
+     *
+     * <p>Alternatives Considered: latching only when some marker interface is present, the way the body
+     * handler consults a declared field order. Rejected because a parameter list has no bound object to
+     * carry such a marker -- that absence is why this handler exists at all -- so the condition would have
+     * to be expressed somewhere other than on the thing it governs. Alternatives Considered: leaving the
+     * generic aggregate and asking each contract to publish it. Rejected because it would require editing
+     * every published example away from the reference wording, which is the opposite of what rule T8
+     * requires.</p>
+     *
      * @param failure the parameter validation failure the framework raised; must not be {@code null}
      * @param request the request that failed, read only for its path
-     * @return HTTP 400 carrying {@link ApiError#CODE_VALIDATION} and one per-field entry for each
-     *     rejected parameter, never {@code null}
+     * @return HTTP 400 carrying {@link ApiError#CODE_VALIDATION}, one per-field entry for each rejected
+     *     parameter, and the first such entry's own sentence as the aggregate, or the generic sentence
+     *     when the failure carried no entry at all; never {@code null}
      */
     @ExceptionHandler(HandlerMethodValidationException.class)
     public ResponseEntity<ApiError> onInvalidParameter(HandlerMethodValidationException failure,
@@ -681,6 +743,34 @@ public class GlobalExceptionHandler {
 
         List<ApiError.FieldError> fieldErrors = new ArrayList<>();
         for (var parameterResult : failure.getParameterValidationResults()) {
+            // WHY : Refactoring Rationale: a NESTED body member is keyed by its own name and not by the
+            //       parameter that carried it. This branch is reached because the framework routes a
+            //       @Valid @RequestBody through THIS exception -- rather than through the bound-body
+            //       exception below -- whenever the same handler method also carries a constraint on a
+            //       path variable or a query parameter, which every operation with a sealed path selector
+            //       does. Without the branch every such rejection was keyed by the parameter name, so a
+            //       body member out of its domain arrived as an entry keyed "request", and a client could
+            //       not mark the control at fault. The published contracts name body members as their
+            //       per-field keys, so the parameter name is the one name that is never right here.
+            if (parameterResult instanceof ParameterErrors nested) {
+                for (FieldError rejected : nested.getFieldErrors()) {
+                    FieldValidationFlag state = isNeverSupplied(rejected.getRejectedValue())
+                            ? FieldValidationFlag.BLANK
+                            : FieldValidationFlag.NOT_OK;
+                    fieldErrors.add(new ApiError.FieldError(rejected.getField(), state,
+                            messageOf(rejected)));
+                }
+                // WHY : Assumptions: a class-level violation on a nested body names no member, so it is
+                //       carried keyed by the object name for the same reason the bound-body handler
+                //       carries one: reading only the field errors would DROP it and answer 400 with an
+                //       empty array, which is a rejection with nothing for the client to display.
+                for (ObjectError global : nested.getGlobalErrors()) {
+                    fieldErrors.add(new ApiError.FieldError(global.getObjectName(),
+                            FieldValidationFlag.NOT_OK, messageOf(global)));
+                }
+                continue;
+            }
+
             String field = parameterResult.getMethodParameter().getParameterName();
             // WHY : Assumptions: a class compiled without parameter names reports null here, but the
             //       method-parameter index is still available. The indexed fallback stays non-empty,
@@ -691,7 +781,33 @@ public class GlobalExceptionHandler {
             String fieldIdentity = field == null
                     ? "parameter[" + parameterResult.getMethodParameter().getParameterIndex() + "]"
                     : field;
-            for (MessageSourceResolvable resolvable : parameterResult.getResolvableErrors()) {
+            // WHY : Refactoring Rationale: two constraints failing on ONE parameter are ordered
+            //       presence-constraint first, because the validation provider evaluates the constraints
+            //       of a parameter in no defined order and the aggregate sentence is taken from the first
+            //       entry. The reference programs test blank BEFORE format and stop at the first failure
+            //       -- the account scope of the pending-authorization list is the case that forced this,
+            //       rejecting a blank value at line 264 of
+            //       app/app-authorization-ims-db2-mq/cbl/COPAUS0C.cbl and reaching its numeric test only
+            //       at line 273 -- so an empty value must report the blank sentence and not the format
+            //       one. Without this ordering the aggregate was whichever of the two the provider
+            //       happened to produce first, which is not stable between runs and cannot be made to
+            //       match a published example.
+            // WHY : Refactoring Rationale: the rank is taken from the FAILING CONSTRAINT and not from the
+            //       rejected VALUE, which is what an earlier revision of this branch got wrong. The state
+            //       below is a property of the value, so a never-supplied value makes EVERY entry of that
+            //       parameter blank -- both the presence entry and the format entry -- and a comparator
+            //       keyed on the state therefore compared equal on exactly the pair it had to separate,
+            //       leaving the provider's arbitrary order in place. Ranking by constraint separates them
+            //       whatever the value is.
+            // WHY : Assumptions: the sort is STABLE and is applied per PARAMETER rather than across the
+            //       whole list, so two entries of one rank keep their encounter order and a later
+            //       parameter's presence entry cannot overtake an earlier parameter's format entry.
+            //       Sorting the whole list would reorder parameters against the handler's signature
+            //       order, which is the order the reference edits run in.
+            List<MessageSourceResolvable> ordered =
+                    new ArrayList<>(parameterResult.getResolvableErrors());
+            ordered.sort(Comparator.comparingInt(GlobalExceptionHandler::constraintRank));
+            for (MessageSourceResolvable resolvable : ordered) {
                 FieldValidationFlag state = isNeverSupplied(parameterResult.getArgument())
                         ? FieldValidationFlag.BLANK
                         : FieldValidationFlag.NOT_OK;
@@ -703,7 +819,15 @@ public class GlobalExceptionHandler {
         LOG.warn("event=api.request.rejected code={} status=400 path={} parameters={}",
                 ApiError.CODE_VALIDATION, pathOf(request), fieldErrors.size());
 
-        return ResponseEntity.badRequest().body(ApiError.ofFieldErrors(MESSAGE_VALIDATION_FAILED,
+        // WHY : Assumptions: the empty case falls back to the generic sentence rather than to an empty
+        //       aggregate. A validation failure carrying no resolvable error at all should not be
+        //       reachable, but if it ever is, a 400 whose aggregate is blank tells a caller nothing,
+        //       whereas the generic sentence at least names the class of failure.
+        String aggregate = fieldErrors.isEmpty()
+                ? MESSAGE_VALIDATION_FAILED
+                : fieldErrors.get(0).message();
+
+        return ResponseEntity.badRequest().body(ApiError.ofFieldErrors(aggregate,
                 HttpStatus.BAD_REQUEST.value(), correlationId(), pathOf(request), fieldErrors,
                 this.clock));
     }
@@ -760,9 +884,17 @@ public class GlobalExceptionHandler {
         LOG.warn("event=api.record.absent code={} status=404 path={} exception={}",
                 ApiError.CODE_NOT_FOUND, pathOf(request), failure.getClass().getName());
 
+        // WHY : Refactoring Rationale: a bounded context needing the reference's own absence wording now
+        //       gets it by raising the standard no-such-element type with that sentence, which
+        //       referenceMessageOrNull proves came from the catalogue. Before this the sentence was
+        //       discarded and the fixed one returned, so the wording each contract promises for a 404
+        //       -- "Transaction ID NOT found..." at line 285 of app/cbl/COTRN01C.cbl among them -- was
+        //       unreachable through this advice.
+        String rendered = referenceMessageOrNull(failure.getMessage());
+
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ApiError.of(ApiError.CODE_NOT_FOUND,
-                MESSAGE_NOT_FOUND, HttpStatus.NOT_FOUND.value(), correlationId(), pathOf(request),
-                this.clock));
+                rendered == null ? MESSAGE_NOT_FOUND : rendered, HttpStatus.NOT_FOUND.value(),
+                correlationId(), pathOf(request), this.clock));
     }
 
     /**
@@ -939,6 +1071,96 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * The three-dot ending every operator sentence the reference screens emit is written with.
+     *
+     * <p>Assumptions: this terminator is what distinguishes a sentence composed in this repository from a
+     * message a library produced. Every screen message in the reference programs ends this way -- the
+     * empty-identifier complaint at line 149 of {@code app/cbl/COTRN01C.cbl}, the absent-record one at
+     * line 285 and the failed-read one at line 292 all do -- and no exception text a framework, a parser
+     * or a driver produces does. Recognising the shape is therefore a test for provenance rather than a
+     * test for content.</p>
+     */
+    private static final String REFERENCE_MESSAGE_TERMINATOR = "...";
+
+    /**
+     * The greatest number of characters a carried sentence may hold to be rendered.
+     *
+     * <p>Assumptions: this is the declared width of the reference message field, so a sentence longer
+     * than this could not have come from the message catalogue whatever else it looks like. The bound is
+     * a second, independent reason to refuse a library message and it also keeps the rendered aggregate
+     * inside the width the published contracts declare for it.</p>
+     */
+    private static final int MAX_REFERENCE_MESSAGE_LENGTH = 75;
+
+    /**
+     * The number of consecutive digits at which a run is treated as an account or card identifier.
+     *
+     * <p>Assumptions: the shortest primary account number in circulation is thirteen digits, so a run of
+     * that length is refused whether or not it is one. The correlation filter applies the same threshold
+     * to the identifier a client supplies, and using one number in both places keeps a single rule rather
+     * than two that could drift.</p>
+     */
+    private static final int SENSITIVE_DIGIT_RUN = 13;
+
+    /**
+     * Returns a carried sentence when it is provably one of this repository's own, otherwise
+     * {@code null}.
+     *
+     * <p>Refactoring Rationale: this gate exists because the three rendering paths below used to answer
+     * with a fixed sentence and discard the one the service raised, and the published contracts of six
+     * bounded contexts promise the reference wording verbatim -- transformation rule T8 requires it, and
+     * a client shown "Please correct the highlighted fields" where the document promises
+     * "Tran ID can NOT be empty..." is being shown something the contract does not describe. Discarding
+     * the message was not an oversight: it is what kept a library's own report of what it could not parse
+     * out of a response body and out of log storage, which is the one destination the masking applied at
+     * the API edge does not reach. The gate keeps that property and stops paying for it with the
+     * contract, by deciding provenance from the SHAPE of the sentence rather than trusting the raise
+     * site to have been careful.</p>
+     *
+     * <p>Alternatives Considered: carrying a renderable flag on the exception, so that a raise site could
+     * declare its own message safe. It was rejected because it moves the decision to the place with the
+     * least reason to think about it and the most reason to want a shortcut: a service wrapping a driver
+     * failure would set the flag to get a better message out, and nothing downstream could tell that
+     * apart from a catalogue constant. A shape test cannot be talked into anything.</p>
+     *
+     * <p>Assumptions: four independent conditions must all hold. The sentence ends with the reference
+     * terminator, which no framework message does; it is no longer than the reference field width; every
+     * character is printable seven-bit text, which excludes the control characters a forged log record
+     * needs and the multi-byte content a decoded record could carry; and it holds no digit run long
+     * enough to be an account or card number. A catalogue constant satisfies all four by construction. A
+     * driver message quoting the value it rejected fails the last, a parser message quoting a token fails
+     * the first, and a stack-derived message fails the second.</p>
+     *
+     * <p>Trade-offs: a library message that happened to satisfy all four would be rendered, and that is
+     * the residual risk accepted here. What is bought is that the six contracts promising reference
+     * wording are satisfiable at all without every service reaching into this class to say so. The
+     * balance is defensible because the terminator condition alone is not something a message written
+     * anywhere but this repository's catalogue ends with.</p>
+     *
+     * @param message the sentence the failure carried, or {@code null} when it carried none
+     * @return the same sentence when all four conditions hold, otherwise {@code null}
+     */
+    private static String referenceMessageOrNull(String message) {
+        if (message == null || !message.endsWith(REFERENCE_MESSAGE_TERMINATOR)
+                || message.length() > MAX_REFERENCE_MESSAGE_LENGTH) {
+            return null;
+        }
+
+        int digitRun = 0;
+        for (int index = 0; index < message.length(); index++) {
+            char character = message.charAt(index);
+            if (character < ' ' || character > '~') {
+                return null;
+            }
+            digitRun = character >= '0' && character <= '9' ? digitRun + 1 : 0;
+            if (digitRun >= SENSITIVE_DIGIT_RUN) {
+                return null;
+            }
+        }
+        return message;
+    }
+
+    /**
      * Reports whether a failure is, descends from, or wraps the named exception type.
      *
      * <p>Assumptions: this private helper carries the same complete Javadoc a public method does, and it
@@ -1025,8 +1247,14 @@ public class GlobalExceptionHandler {
      * escape. Without it, an exception no other handler claims is rendered by the framework's own
      * default, whose body carries the exception message for many exception types -- and a persistence
      * or client-library message routinely carries a statement, a connection detail or a vendor code.
-     * The caught throwable is logged with its stack trace through the logging pipeline, where the
-     * appender configuration governs it, and the response carries only the fixed sentence.</p>
+     * The caught throwable is logged as its type chain and originating frames, with every message
+     * dropped by {@link com.carddemo.common.observability.ThrowableDigest}, and the response carries
+     * only the fixed sentence. Refactoring Rationale: this sentence used to say the throwable was
+     * logged with its stack trace "where the appender configuration governs it". It named a control
+     * that does not exist -- this repository ships no appender configuration at all -- and it named it
+     * two paragraphs after correctly observing that a provider message "routinely carries a statement,
+     * a connection detail or a vendor code". The reduction now happens at the call site, where it
+     * cannot be configured away.</p>
      *
      * <p>Trade-offs: {@link Exception} is caught rather than {@link Throwable}. An {@link Error} signals
      * that the virtual machine itself is in trouble -- exhausted memory, an unlinkable class -- and
@@ -1080,7 +1308,9 @@ public class GlobalExceptionHandler {
      * message-off nowhere; reducing both states to one representation would erase a difference the
      * baseline can still see.</p>
      *
-     * @param failure the unclaimed failure; logged with its stack trace, never rendered. The declared
+     * @param failure the unclaimed failure; recorded as the reduced representation
+     *     {@link ThrowableDigest} produces -- its chain of type names and originating frames, with every
+     *     message dropped -- and never rendered into the response. The declared
      *     type is the checked-and-unchecked parent, and the type actually reaching this method is most
      *     often a {@link RuntimeException} forwarded from
      *     {@link #onRuntimeFailure(RuntimeException, HttpServletRequest)} once none of its three
@@ -1093,23 +1323,63 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiError> onUnexpectedFailure(Exception failure,
             HttpServletRequest request) {
 
-        // WHY : Assumptions: the exception TYPE is a structured field and the trace is carried as the
-        //       throwable argument, so the message text is never interpolated into the log line itself.
-        //       Passing the throwable rather than formatting it is what leaves redaction and layout to
-        //       the appender configuration, which one place owns, instead of to this call site.
-        LOG.error("event=api.request.failed code={} status=500 path={} exception={}",
-                ApiError.CODE_INTERNAL, pathOf(request), failure.getClass().getName(), failure);
+        // WHY : (1) Refactoring Rationale: the throwable was formerly passed as a trailing argument, and
+        //       the note here said that doing so "leaves redaction and layout to the appender
+        //       configuration, which one place owns". No such place exists. This repository ships no
+        //       logback.xml, logback-spring.xml or log4j2.xml anywhere, and deliberately so -- three
+        //       environment profiles record that adding one would take over the appender chain wholesale
+        //       -- so the chain is the framework default and no repository-owned filter sits in it. The
+        //       facade renders a trailing throwable by printing its message, then every cause's message;
+        //       those sentences are composed by drivers, parsers and validation libraries, not here, and
+        //       any of them can carry a primary account number or a whole request record. This handler is
+        //       by definition the one that fires for failures nobody anticipated, so the content was
+        //       unbounded by construction and the named control was fictional.
+        //       (2) Assumptions: what is logged instead is a reduced representation that keeps the type
+        //       chain and the originating frames and drops every message. That split is not a compromise
+        //       between safety and usefulness: a type name and a frame are facts about CODE, so no request
+        //       value can reach either, while a message is the only part of a throwable a value can be
+        //       interpolated into. The two questions an operator asks first -- what failed, and where --
+        //       are both answered by what survives.
+        //       (3) Trade-offs: a driver's account of a constraint violation, a parser's position in a
+        //       document and a validator's rule name are all messages, so none of them survives here.
+        //       Recovering one is a deliberate, scoped act -- raising debug logging for the specific
+        //       package and reproducing the failure -- rather than the default posture of every 500.
+        //       (4) Assumptions: the digest is sanitised even though a type name and a frame cannot
+        //       ordinarily carry a control character, because a generated proxy or lambda name is still a
+        //       string this code did not author, and a value of external provenance entering a structured
+        //       line is exactly what that helper exists for.
+        LOG.error("event=api.request.failed code={} status=500 path={} exception={} failure={}",
+                ApiError.CODE_INTERNAL, pathOf(request), failure.getClass().getName(),
+                LogSafeText.sanitize(ThrowableDigest.of(failure)));
 
         // WHY : Assumptions: the four components are supplied as constants rather than composed from the
         //       caught throwable. A culprit or reason built from an exception's own class name or message
         //       would put provider-internal text into a value that is operator-facing prose, and the
         //       message component is the one place a caught message could plausibly be routed to a
         //       structured field. Supplying fixed text removes that route rather than filtering it.
+        // WHY : Refactoring Rationale: the aggregate is the sentence the failure carried only when the
+        //       thrown type is EXACTLY the standard illegal-state one and referenceMessageOrNull proves
+        //       the sentence came from the catalogue. Both tests are needed and neither alone would do.
+        //       The type test is an equality rather than an instance test on purpose: every persistence
+        //       and cloud failure that reaches here arrives as a SUBCLASS of a framework exception, so
+        //       an instance test would admit provider text that the shape test might not catch, whereas
+        //       nothing but code in this repository throws the bare type. This is what makes the
+        //       failed-read wording each contract promises -- "Unable to lookup Transaction..." at line
+        //       292 of app/cbl/COTRN01C.cbl -- reachable without opening a route for provider internals.
+        // WHY : Assumptions: the abend detail's own four components stay fixed even when the aggregate
+        //       is the carried sentence. Those are operator-facing prose about where the failure was
+        //       recognised rather than about what the caller asked for, and the reference's own abend
+        //       fields at lines 45 to 53 of app/cpy/CSMSG02Y.cpy carry the same kind of content.
+        String carried = failure.getClass() == IllegalStateException.class
+                ? referenceMessageOrNull(failure.getMessage())
+                : null;
+        String aggregate = carried == null ? MESSAGE_INTERNAL : carried;
+
         AbendDetail abend = new AbendDetail(ABEND_CODE_UNEXPECTED, ABEND_CULPRIT_ADVICE,
                 ABEND_REASON_UNEXPECTED, MESSAGE_INTERNAL);
 
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(ApiError.ofAbend(MESSAGE_INTERNAL, correlationId(), pathOf(request), abend,
+                .body(ApiError.ofAbend(aggregate, correlationId(), pathOf(request), abend,
                         this.clock));
     }
 
@@ -1159,8 +1429,9 @@ public class GlobalExceptionHandler {
      *     {@code null} on any path the framework reaches this method by
      * @param request the request that failed, read only for its path
      * @return HTTP 400 carrying {@link ApiError#CODE_VALIDATION}, {@link #MESSAGE_VALIDATION_FAILED},
-     *     warning severity, no abend detail and one field entry keyed by the refusal's own field when it
-     *     names one and by the request otherwise; never {@code null}
+     *     warning severity, no abend detail, and one field entry per member the refusal names, in the
+     *     order it named them, or a single entry keyed by the request when it names none; never
+     *     {@code null}
      */
     @ExceptionHandler(ClientInputException.class)
     public ResponseEntity<ApiError> onRejectedCallerInput(ClientInputException failure,
@@ -1183,7 +1454,7 @@ public class GlobalExceptionHandler {
                 ApiError.CODE_VALIDATION, pathOf(request), failure.code(),
                 failure.getClass().getName(), LogSafeText.sanitize(failure.getMessage()));
 
-        // WHY : Assumptions: the entry is keyed by the refusal's own field when it names one, and by a
+        // WHY : Assumptions: the entries are keyed by the refusal's own fields when it names any, and by a
         //       name for the request as a whole when it does not. Keying by the field is what lets a form
         //       draw its marker against the right control, which transformation rule T7 requires and
         //       which the earlier form could not do because the exception carried no field identity. The
@@ -1194,11 +1465,41 @@ public class GlobalExceptionHandler {
         //       value is not empty. Answering with an EMPTY array was rejected: rule T7 makes the array
         //       the way a rejection is expressed, and an empty one gives a client a 400 with nothing to
         //       display.
-        String fieldKey = failure.field() == null ? FIELD_REQUEST : failure.field();
-        List<ApiError.FieldError> fieldErrors = List.of(new ApiError.FieldError(
-                fieldKey, FieldValidationFlag.NOT_OK, MESSAGE_VALIDATION_FAILED));
+        // WHY : Refactoring Rationale: EVERY named member gets an entry, where an earlier form emitted
+        //       exactly one. The change is forced by cross-field refusals, whose whole content is that
+        //       several members disagree: the pending-authorization fraud operation repeats its three key
+        //       components in its body and its contract publishes that a disagreement names the
+        //       disagreeing members rather than preferring one naming silently. Emitting one entry meant a
+        //       client corrected one member and was refused again on the next, learning the set one round
+        //       trip at a time.
+        // WHY : Refactoring Rationale: the sentence is the one the refusal CARRIED when
+        //       referenceMessageOrNull proves it came from this repository's catalogue, and the fixed one
+        //       otherwise. An earlier form always used the fixed one, which is why six published
+        //       contracts promised reference wording that no response could produce.
+        // WHY : Assumptions: the state comes from the refusal rather than being fixed at the
+        //       rejected-value one, so the blank case can draw the asterisk the reference draws for it.
+        //       A signature that names no state stores the rejected-value one, so every older raise site
+        //       renders exactly as it did before.
+        // WHY : Assumptions: one state and one sentence cover every named member, because the only
+        //       multi-member refusal this repository raises is a cross-field COMPARISON -- the members
+        //       fail together and for the same reason, so a per-member sentence would repeat one
+        //       sentence and a per-member state would offer a distinction no raise site can make.
+        String rendered = referenceMessageOrNull(failure.getMessage());
+        String aggregate = rendered == null ? MESSAGE_VALIDATION_FAILED : rendered;
+        List<ApiError.FieldError> fieldErrors;
+        if (failure.fields().isEmpty()) {
+            fieldErrors = List.of(new ApiError.FieldError(
+                    FIELD_REQUEST, failure.state(), aggregate));
+        } else {
+            List<ApiError.FieldError> named = new ArrayList<>(failure.fields().size());
+            for (String fieldKey : failure.fields()) {
+                named.add(new ApiError.FieldError(fieldKey, failure.state(), aggregate));
+            }
+            fieldErrors = List.copyOf(named);
+        }
 
-        return ResponseEntity.badRequest().body(ApiError.ofFieldErrors(MESSAGE_VALIDATION_FAILED,
+
+        return ResponseEntity.badRequest().body(ApiError.ofFieldErrors(aggregate,
                 HttpStatus.BAD_REQUEST.value(), correlationId(), pathOf(request), fieldErrors,
                 this.clock));
     }
@@ -1454,6 +1755,49 @@ public class GlobalExceptionHandler {
         //       message would raise inside this advice and turn a rejected request into an internal
         //       failure.
         return (resolved == null || resolved.isBlank()) ? MESSAGE_VALIDATION_FAILED : resolved;
+    }
+
+    /**
+     * Ranks a rejected parameter constraint so that presence edits sort ahead of every other edit.
+     *
+     * <p>Assumptions: the constraint's own name is the LAST entry of the resolvable's code array. The
+     * framework builds those codes most specific first -- handler-and-parameter qualified, then
+     * parameter qualified, then type qualified, then bare -- so the bare annotation name is always the
+     * final element. The name is additionally cut at its first {@code '.'}, which is a no-op for the
+     * bare form and keeps the rank correct if a future framework release stops emitting one.</p>
+     *
+     * <p>Alternatives Considered: reading the constraint annotation off the violation descriptor
+     * instead. That would need the bean-validation violation, which this advice deliberately does not
+     * depend on -- it handles the framework's own validation failure type so that a service without a
+     * validation provider on its path still gets the same response shape -- so the resolvable's codes
+     * are the only identity available here.</p>
+     *
+     * <p>Trade-offs: package-private rather than private, so that a test can assert the rank of a
+     * presence constraint against the rank of a shape constraint directly. Accepted because the
+     * alternative leaves the behaviour effectively unassertable: the validation provider reports the
+     * constraints of one element in an order derived from a hash set, so a request-level test observes
+     * whichever order that hash happens to give and cannot be made to observe the other one. A
+     * request-level test therefore cannot fail when this ranking is removed, whereas a direct assertion
+     * can. The method stays out of the published surface -- nothing outside this package can reach
+     * it.</p>
+     *
+     * @param resolvable the framework's own resolvable error for one failed constraint on one parameter
+     * @return {@link #CONSTRAINT_RANK_PRESENCE} when the failed constraint asserts that a value was
+     *     supplied at all, otherwise {@link #CONSTRAINT_RANK_OTHER}
+     */
+    static int constraintRank(MessageSourceResolvable resolvable) {
+        String[] codes = resolvable.getCodes();
+        if (codes == null || codes.length == 0) {
+            return CONSTRAINT_RANK_OTHER;
+        }
+        String constraint = codes[codes.length - 1];
+        int qualifier = constraint.indexOf('.');
+        if (qualifier >= 0) {
+            constraint = constraint.substring(0, qualifier);
+        }
+        return PRESENCE_CONSTRAINTS.contains(constraint)
+                ? CONSTRAINT_RANK_PRESENCE
+                : CONSTRAINT_RANK_OTHER;
     }
 
     /**

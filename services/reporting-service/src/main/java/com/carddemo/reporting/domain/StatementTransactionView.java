@@ -672,8 +672,37 @@ public class StatementTransactionView {
      * everywhere outside the administrative card detail read, and that read belongs to another
      * context.</p>
      *
+     * <p>Refactoring Rationale: THE AMOUNT AND THE MERCHANT IDENTIFIER ARE ALSO OMITTED, and an earlier
+     * revision rendered both. That revision reasoned about ONE prohibition -- the primary account
+     * number -- concluded correctly that the masked key satisfied it, and then treated the remaining
+     * attributes as unremarkable, leaving out only the three free-text attributes and leaving those two
+     * in. The sensitive-data logging contract in {@code docs/architecture/observability.md} covers
+     * persistence-bound values as a class, and both of these are exactly that: the amount is the
+     * monetary content of a statement line, and the merchant identifier names the counterparty of a
+     * real cardholder purchase. The earlier reasoning also cited BREVITY as part of its case for
+     * omitting the free-text attributes -- two hundred characters "that identify nothing" -- which is
+     * the wrong axis. Brevity and disclosure are separate concerns, and reaching the right answer on
+     * length is what stopped it examining these two on content.</p>
+     *
+     * <p>Assumptions: the exposure closed here is the RETAINED LOG, and a statement run is the worst
+     * shape of it in this context. One rendered line per statement row means the aggregate of a single
+     * run is a log holding every amount and every counterparty of every statement produced -- the
+     * statement file's whole substance in a second place no migration control governs, and readable by
+     * every holder of log access rather than only by the one cardholder each statement is addressed
+     * to.</p>
+     *
+     * <p>Trade-offs: what survives is the masked key, the two reference codes, the source and the
+     * processing timestamp -- enough to say WHICH ROW and WHAT KIND, and nothing about what it was worth
+     * or with whom. The source and the timestamp are kept deliberately: a ten-character source code is
+     * a closed reference domain, and the sibling {@code ReportTransactionView} renders its processing
+     * timestamp for the same reason, so keeping both here leaves the two projections of the same base
+     * table consistent. The omission is total rather than partial, because abbreviating or rounding a
+     * monetary value IS masking and masking has one owner per context. The cost is that a reader
+     * reconciling a statement discrepancy from logs alone must query the view, which the accessors above
+     * serve.</p>
+     *
      * @return a single-line rendering carrying the masked key, the type code, the category code, the
-     *     source, the amount, the merchant identifier and the processing timestamp
+     *     source and the processing timestamp, and neither the amount nor the merchant identifier
      */
     @Override
     public String toString() {
@@ -681,8 +710,6 @@ public class StatementTransactionView {
                 + ", typeCode=" + typeCode
                 + ", categoryCode=" + categoryCode
                 + ", source=" + source
-                + ", amount=" + amount
-                + ", merchantId=" + merchantId
                 + ", processingTimestamp=" + processingTimestamp
                 + "]";
     }

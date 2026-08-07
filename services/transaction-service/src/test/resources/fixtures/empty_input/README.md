@@ -1,36 +1,22 @@
 # empty_input -- a present-but-empty primary input
 
-Scenario README for `fixtures/empty_input/`. It carries the documentation obligation
-for this whole directory. The three files beside it are fixed-width positional
-records with no comment construct of any kind -- master section 3.1 establishes that
-the reading layer rejects any row whose length is not exactly the record length, so a
-comment line placed in one of them would be read as a malformed record rather than as
-prose -- and one of them has no bytes at all. Rule 1 (Explainability), whose text is
-available through the `review_rules` tool, is therefore discharged for this folder
-here, in the form
-[`docs/CODE_DOCUMENTATION_STANDARD.md`](../../../../../../../docs/CODE_DOCUMENTATION_STANDARD.md)
-prescribes.
+Scenario README for `fixtures/empty_input/`. It carries the documentation obligation for
+this whole directory, because the three files beside it are fixed-width positional
+records with no comment construct of any kind -- master section 3.1 establishes that the
+reading layer rejects any row whose length is not exactly the record length, so a comment
+line placed in one of them would be read as a malformed record -- and one of them has no
+bytes at all. Sections 1 through 4 below are the four items master section 9.1 requires
+of a scenario README, in its order: intent, the rule exercised, the expected outcome, and
+the fixture bytes and governance.
 
-This document is required rather than offered. Master section 9.1 states in `MUST`
-wording that every scenario subfolder carry a README, and it fixes the four items one
-must contain: the scenario intent, the exact business rule it exercises, the expected
-outcome, and the fixture bytes and governance. Sections 1 through 4 below are those
-four items in that order. Folder section 8 is the folder-level restatement of the same
-obligation and adds the form requirements this document is written to.
-
-Two documents own material this file deliberately does not repeat, and both are cited
-below by section number only. The encoding contract -- how wide a record is, where a
-field sits, how a sign is carried, where the decimal is implied, how a line ends --
-belongs to
-[`tests/fixtures/README.md`](../../../../../../../tests/fixtures/README.md), referred
-to throughout as the master. Everything true of all ten scenarios rather than of this
-one -- which three files a scenario ships, why an account master and a card
-cross-reference are not among them, the rationale label canon, the availability
-markers -- belongs to the folder index at [`../README.md`](../README.md). Copying
-either here would give this folder a private duplicate of a rule it does not own,
-and duplicates diverge; the reader who later finds the two versions in conflict has
-no way to know which one the loader actually obeys. What this file adds is only what
-is true of this scenario and of these four files.
+Two documents own material this file deliberately does not repeat, and both are cited by
+section number only. The encoding contract -- record width, field position, sign carriage,
+implied decimal, line ending -- belongs to
+[`tests/fixtures/README.md`](../../../../../../../tests/fixtures/README.md), referred to
+throughout as the master. Everything true of all ten scenarios rather than of this one
+belongs to the folder index at [`../README.md`](../README.md). Copying either here would
+give this folder a private duplicate of a rule it does not own, and a reader who later
+found the two versions in conflict would have no way to know which one the loader obeys.
 
 ---
 
@@ -67,22 +53,20 @@ populated deliberately, which section 5.4 explains.
 >   at line 144, so line 361 sets the loop sentinel declared at line 146 and the loop
 >   at line 202 ends having processed nothing. The run completes normally.
 >
-> This scenario is the second of those two, and only the second. Master section 7
-> prescribes exactly that shape for an `empty_input` scenario: the primary input is to
-> be there and to hold zero records, so that what gets tested is a successful open
-> followed by no data rather than an open that never succeeds. That section also
-> obliges each scenario to say which kind of empty it uses, and section 4.1 answers
-> in bytes.
+> This scenario is the second of those two, and only the second, which is the shape
+> master section 7 prescribes for an `empty_input` scenario: what gets tested is a
+> successful open followed by no data rather than an open that never succeeds. Section
+> 4.1 answers in bytes which kind of empty it uses.
 
 ---
 
 ## 2. The rule it exercises
 
 The rule is `CBTRN02C`'s no-work path: the read loop terminates on its first read, so
-validation, posting, the reject write and the category-balance fork are all
-unreached. Every line below was opened and confirmed in
-[`app/cbl/CBTRN02C.cbl`](../../../../../../../app/cbl/CBTRN02C.cbl) before being
-written down, which folder section 8 requires of a citation.
+validation, posting, the reject write and the category-balance fork are all unreached.
+Every line below was confirmed in
+[`app/cbl/CBTRN02C.cbl`](../../../../../../../app/cbl/CBTRN02C.cbl), which is read as
+specification and never modified.
 
 | Anchor | Line | Role in this scenario |
 |---|---|---|
@@ -97,14 +81,13 @@ written down, which folder section 8 requires of a citation.
 | `END-PERFORM.` | 219 | closes the read loop |
 | `IF WS-REJECT-COUNT > 0` | 229 | the trailing reject gate; the counter never leaves the zero it is initialised to at line 186, so this test never fires |
 
-The table records where each paragraph sits; the causal chain is why none of them
-runs. The loop at line 202 tests its sentinel before each iteration and the body
-re-tests it at line 205 after the read. On a zero-record input the read at line 346
-sets that sentinel immediately, so the second test fails on the first pass and the
-body's remaining work -- the counter at line 206, the validation call at line 210, and
-the mutually exclusive post and reject calls at lines 212 and 215 -- is skipped in its
-entirety. Nothing downstream of the read is entered even once, so the reject counter
-stays at the zero it starts from and the gate at line 229 never fires.
+The causal chain is why none of them runs. The loop at line 202 tests its sentinel before
+each iteration and the body re-tests it at line 205 after the read. On a zero-record input
+the read at line 346 sets that sentinel immediately, so the second test fails on the first
+pass and the body's remaining work -- the counter at line 206, the validation call at line
+210 and the mutually exclusive post and reject calls at lines 212 and 215 -- is skipped
+entirely. The reject counter stays at the zero it starts from and the gate at line 229
+never fires.
 
 Two consequences of that chain are the whole content of this scenario: because
 `2500-WRITE-REJECT-REC.` is unreached no reject row exists to inspect, and because
@@ -160,9 +143,8 @@ README exists.
 
 #### `dailytran.txt` is a genuine zero-length file
 
-Master section 7 requires each `empty_input` scenario to say which kind of empty it
-ships, because both kinds are loosely called empty and the reading layer must be told
-which one it faces. This one is unambiguous:
+Both kinds are loosely called empty and the reading layer must be told which one it
+faces. This one is unambiguous:
 
 > `dailytran.txt` is a **genuine zero-length file -- 0 bytes, 0 records, `wc -l` of
 > 0, no line ending, and not a single byte of any kind**. It is **not** a file
@@ -178,12 +160,9 @@ failure path, which is a different test with a different expected outcome. Maste
 section 3.1 is equally explicit on the other side: the only input treated as empty is
 a genuinely zero-byte dataset.
 
-The choice also follows measured precedent rather than being invented here. The
-reference scenario `tests/fixtures/posting/empty_input/dailytran.txt` is 0 bytes, and
-`tests/fixtures/posting/zero_balance/tcatbal.txt` is 0 bytes as well; both were
-measured directly rather than assumed. Folder section 3.3 counts the two zero-byte
-files in this folder and reports that they carry no bytes at all to terminate, which
-is the same fact from the folder's side.
+The choice follows measured precedent rather than being invented here:
+`tests/fixtures/posting/empty_input/dailytran.txt` and
+`tests/fixtures/posting/zero_balance/tcatbal.txt` are both 0 bytes, measured directly.
 
 #### `tcatbal.txt`
 
@@ -201,14 +180,10 @@ to the seed row those bytes come from: the seed writes that range as zeros, and 
 fixture that blanked it would differ from its own source in 22 of 50 bytes for a
 reason unrelated to anything under test.
 
-The balance decodes to **+100.00**, and the derivation is written out because the
-field looks like a smaller number than it is. `TRAN-CAT-BAL` is `S9(09)V99`, so it
-holds eleven digit positions. The trailing `{` is a positive-zero overpunch that
-carries both the sign and the low-order digit, so the eleven digit positions read
-`00000010000`, and the implied `V99` of master section 3.5 makes the last two of them
-cents: `000000100` and `00`, which is +100.00. Master section 3.4 owns the overpunch
-table and its worked examples; applying that section's own method to this field is
-what yields the value above.
+The balance decodes to **+100.00** under master sections 3.4 and 3.5, which own the
+overpunch table and the implied decimal. It is worth stating because the field is easy to
+misread by one decimal place: the trailing `{` supplies the low-order digit as well as the
+sign, so +100.00 and not +10.00, which would be the different byte string `0000000100{`.
 
 #### `transact.txt`
 
@@ -231,30 +206,23 @@ line 438 moves its result into this field. A literal is the only form of that fi
 repeatable assertion can be written against, and being a literal rather than a clock
 read is precisely what keeps it deterministic.
 
-Folder section 6 is the authority for the wider determinism rule, and reading it
-alongside this paragraph needs one distinction. Its requirement that positions 305-330
-be blank governs the **daily-feed** record, where that range is the only
-runtime-varying input and where the seed itself carries 26 blanks. The posted image in
-`transact.txt` is the other side of the nullability pair of section 5.4 and must carry
-a value, so the two statements address two different files rather than disagreeing.
-The originating timestamp at 279-304 is load-bearing input data in both files and is
-literal in both.
+One distinction avoids a false conflict with folder section 6: its requirement that
+positions 305-330 be blank governs the **daily-feed** record, where the seed itself
+carries 26 blanks, whereas the posted image here is the other side of the nullability pair
+of section 5.4 and must carry a value. The originating timestamp at 279-304 is
+load-bearing input in both files and literal in both.
 
-`transact.txt` has **no ASCII seed to copy from**. `app/data/ASCII/` holds exactly
-nine files and none of them is named `transact.txt`, because in the baseline the
-posted-transaction dataset is an **output** and never an input. Folder section 4.2
-item 7 records the same fact and requires each scenario to attest these bytes in its
-own words, which section 4.2 below does.
+`transact.txt` has **no ASCII seed to copy from**: `app/data/ASCII/` holds nine files and
+none is named `transact.txt`, because in the baseline the posted-transaction dataset is an
+**output** and never an input. Section 4.2 attests its bytes accordingly.
 
 #### What this folder does not contain
 
-There is no `acctdata.txt` and no `cardxref.txt` here, and no fifth file or
-subdirectory of any kind. Folder section 3.1 is the authority for that scope: those
-two records belong to the `account` and `card` schemas rather than to `ledger`, and
-`CBTRN02C` itself is batch-service's program. This folder holds the three record
-images the `ledger` schema owns and nothing else. The reference tree makes the other
-choice for its own reasons, so the difference is recorded rather than left to look
-like an oversight.
+There is no `acctdata.txt`, no `cardxref.txt` and no fifth file of any kind. Those two
+records belong to the `account` and `card` schemas rather than to `ledger`, and
+`CBTRN02C` itself is batch-service's program, so this folder holds the three record images
+the `ledger` schema owns and nothing else. The reference tree makes the other choice for
+its own reasons, so the difference is recorded rather than left to look like an oversight.
 
 ### 4.2 Provenance attestation
 
@@ -304,26 +272,12 @@ source. Both populated files carry identity-shaped data, so the attestation appl
      reshaped. Absence is the scenario itself and not a reshaping, which is why it is
      recorded here as a third item and not counted among the two fields above.
 
-No identity byte was altered in either file. Only the two business-rule fields above
-were reshaped, which is the discipline master section 10.2 describes and folder
-section 4.2 illustrates.
-
-Assumptions: the trailing `{` of that balance supplies the low-order digit as well as
-the sign, so the eleven decoded digits are `00000010000` and the rightmost two are
-cents under master sections 3.4 and 3.5 -- `+100.00`, not `+10.00`, which would be the
-different byte string `0000000100{`. The distinction is recorded because the field is
-easy to misread by one decimal place, and this scenario asserts that an empty primary
-input leaves the row at exactly the value loaded.
+No identity byte was altered in either file. Only the two business-rule fields above were
+reshaped, which is the discipline master section 10.2 describes.
 
 ---
 
 ## 5. The decisions behind this scenario
-
-Each rationale below is tagged with one of the four labels the folder section 8 canon
-permits, written in the single form
-[`docs/CODE_DOCUMENTATION_STANDARD.md`](../../../../../../../docs/CODE_DOCUMENTATION_STANDARD.md)
-allows at its lines 209-226 -- plural, unparenthesised, colon retained, and with no
-emphasis markup.
 
 ### 5.1 Why the file is zero bytes rather than blank or absent
 
@@ -342,15 +296,12 @@ appearing to cover it. Omitting the file would additionally contradict folder se
 3.1, which commits every scenario here to the same three record images, so the folder
 index would become false.
 
-Trade-offs: a file of zero bytes is indistinguishable, on sight, from a file somebody
-meant to fill in and forgot, and no tool will flag the difference because there is no
-malformed byte to find. That risk is accepted because both alternatives are worse, and
-it is mitigated the only way it can be -- in this document, which records that the
-emptiness is deliberate, and in folder section 3.3, which counts the folder's
-zero-length files as an expected result rather than as a finding. One consequence is
-worth stating for whoever audits the folder: two files here are deliberately empty,
-this one and `zero_balance/tcatbal.txt`, and they are empty for unrelated reasons, so
-neither scenario's README covers the other's file.
+Trade-offs: a file of zero bytes is indistinguishable, on sight, from one somebody meant
+to fill in and forgot, and no tool will flag the difference because there is no malformed
+byte to find. The risk is accepted because both alternatives are worse, and it is mitigated
+the only way it can be -- here, and in folder section 3.3, which counts the folder's
+zero-length files as an expected result rather than a finding. Two files in this folder are
+deliberately empty, this one and `zero_balance/tcatbal.txt`, for unrelated reasons.
 
 ### 5.2 What a zero-record run is expected to produce
 
@@ -379,17 +330,12 @@ with CRLF record terminators -- master sections 3.2 and 8 both name it among the
 three seeds that do -- and this fixture is written LF-only, so it does not reproduce
 its source byte for byte in that one respect.
 
-The specific consequence of the alternative is what settles it. One physical line is
-read as one record of fixed length, so a carriage return is not stepped over -- it
-lands inside the trailing `FILLER` at positions 29-50 and carries the record to 51
-bytes where 50 are declared. The last field is then wrong and the row is one byte too
-long, which master section 3.1 rejects on length rather than loading.
-The measurement behind that is available in the seed itself and is reported in folder
-section 3.3, which reconciles the seed's 2599 bytes as 50 records of 50 logical bytes
-plus 49 carriage returns plus 50 line feeds. What is given up is byte-for-byte
-fidelity to the seed's line endings; what is bought is a record that parses at its
-declared width. Master section 3.2 also requires the opposite choice to be documented
-explicitly in the scenario that makes it, which no scenario in this folder does.
+The consequence of the alternative settles it. One physical line is read as one record of
+fixed length, so a carriage return is not stepped over -- it lands inside the trailing
+`FILLER` at positions 29-50 and carries the record to 51 bytes where 50 are declared, which
+master section 3.1 rejects on length rather than loading. What is given up is byte-for-byte
+fidelity to the seed's line endings; what is bought is a record that parses at its declared
+width.
 
 ### 5.4 Why `transact.txt` carries a record at all
 
@@ -423,40 +369,44 @@ zero or absent row would prove nothing.
 
 ## 6. What consumes these fixtures
 
-This section states the fixtures' consumer contract and the artifacts they are loaded
-against. Assumptions: it is written as a contract rather than as a roster of the
-classes presently in the module, because a roster answers "what reads this today" --
-a question a reader can settle with one search and which is wrong the moment a test is
-added -- while the contract answers "what must a reader supply to use these rows",
-which does not change unless the rows do.
+Assumptions: this is written as a contract rather than as a roster of the classes
+presently in the module. A roster answers "what reads this today", which a reader can
+settle with one search and which is wrong the moment a test is added; the contract answers
+"what must a reader supply to use these rows", which does not change unless the rows do.
 
-- **The consumer contract.** These images are read in two capacities, and the
-  distinction is worth keeping. `com.carddemo.transaction.fixtures.TransactionFixtureContractTest`
-  reads all three today and asserts the byte contract this document states -- the
-  record widths, the record counts, the zero-byte primary input and the trailing
-  newline -- so no claim here can drift without a test failing. The row expectations of
-  section 3 are for a fixture-loading integration test against a real engine in
-  `com.carddemo.transaction.repository`, which loads the images as a starting state.
-  That is the whole intended consumption: the images are not request bodies, not golden
-  masters and not inputs to any unit test of a mapper or a request shape. A test that
-  needs a transaction shape rather than a table state constructs it in code instead,
-  which is why nothing here is referenced from the module's contract or fixed-width
-  tests.
+- **The consumer contract.** These images are read in two capacities.
+  `com.carddemo.transaction.fixtures.TransactionFixtureContractTest` asserts the byte
+  contract this document states -- record widths, record counts, the zero-byte primary
+  input and the trailing newline -- so no claim here can drift without a test failing. The
+  row expectations of section 3 are for a fixture-loading integration test against a real
+  engine in `com.carddemo.transaction.repository`, which loads the images as a starting
+  state. That is the whole intended consumption: the images are not request bodies, not
+  golden masters and not inputs to any unit test. A test that needs a transaction shape
+  rather than a table state constructs it in code instead.
 - [`../../application-test.yml`](../../application-test.yml) -- the sibling profile.
-  It pins schema resolution and the migration location for the module's
-  tests, and it pins the clock to a single instant, which is what lets an assertion
-  on a 26-character timestamp be repeatable. It carries no connection coordinates by
-  design, and none are supplied here either.
+  It pins schema resolution and the migration location for the module's tests. It
+  carries no connection coordinates by design, and none are supplied here either --
+  and it carries no clock either. Assumptions: the pinned instant that lets an
+  assertion on a 26-character timestamp be repeatable is
+  `TransactionRepositoryIT.FIXED_CLOCK`, declared at that class's lines 259 and 260
+  as `Clock.fixed(Instant.parse("2022-07-18T00:00:00Z"), ZoneOffset.UTC)`. This
+  bullet previously attributed the pin to the profile, which is the one file that
+  positively documents its absence: "any clock or current-time property" is item 8
+  of that profile's own exclusion list, and the rationale there names `Clock.fixed`
+  as the mechanism precisely because `common-lib`'s `TimestampFormatter` takes the
+  clock as a collaborator rather than reading the ambient one. Attributing an
+  injected-determinism control to configuration is worse than leaving it uncited: a
+  maintainer chasing a non-reproducible timestamp would have edited a profile that
+  has no such key and concluded the mechanism was broken.
 - [`V1__ledger.sql`](../../../../main/resources/db/migration/V1__ledger.sql) -- the
   migration that creates the four `ledger` tables section 3 names. These images are
   loaded into the schema it produces, never into a hand-built one.
-- A real PostgreSQL instance supplied through Testcontainers. Folder section 5 gives
-  the reason no in-memory stand-in is used: the index
-  behaviour and the key-ordered reads these rows are meant to exercise belong to the
-  engine itself, so a green result against a substitute would say nothing about the
-  behaviour being claimed. Where these rows feed a list path, that path advances by
-  key rather than by ordinal position, which is why the order of records within a
-  fixture is itself meaningful.
+- A real PostgreSQL instance supplied through Testcontainers. Folder section 5 gives the
+  reason no in-memory stand-in is used: the index behaviour and key-ordered reads these
+  rows exercise belong to the engine itself, so a green result against a substitute would
+  say nothing about the behaviour being claimed. Where these rows feed a list path, that
+  path advances by key rather than by ordinal position, which is why the order of records
+  within a fixture is itself meaningful.
 - [`tests/fixtures/README.md`](../../../../../../../tests/fixtures/README.md) -- the
   authoritative byte contract this document cites throughout and never restates.
 - [`../README.md`](../README.md) -- the folder index that owns every convention cited

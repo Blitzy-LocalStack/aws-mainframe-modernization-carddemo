@@ -48,9 +48,10 @@
  * <p>Assumptions: every class name and count below describes this package's <b>target
  * contract</b> as the migration plan assigns it, not the set of files present beside this one at
  * the checkpoint that authored it. The migration lands its artifacts in plan order, so a class
- * named here that has no file yet is <b>planned</b>, not missing. Measured at that checkpoint this
- * directory holds this charter and {@code DataSourceConfig}, and {@code BatchConfig} and
- * {@code SqsConfig} are assigned to other indexes of the same plan. The distinction is declared
+ * named here that has no file yet is <b>planned</b>, not missing. Measured at this revision this
+ * directory still holds only this charter and {@code DataSourceConfig}; {@code BatchConfig} and
+ * {@code SqsConfig} remain assigned to other indexes of the same plan and are described below as
+ * targets. The distinction is declared
  * because the roster otherwise reads as present tense, and a roster a reader cannot tell apart
  * from an inventory stops being usable the moment one named class turns out to be absent. The
  * parent charter at {@code com.carddemo.batch} makes the same declaration for the subtree as a
@@ -69,12 +70,30 @@
  * the table mappings to {@code domain}. A reader asking why a transaction was rejected, or how a
  * monthly interest figure was reached, will not find the answer in this directory.</p>
  *
- * <h2>The membership canon: three configuration classes, four source files</h2>
+ * <h2>The membership canon: three configuration classes at the target, one delivered</h2>
  *
  * <p>The set is closed at three {@code @Configuration} classes, so the question "which
  * configuration class does this bean belong on" keeps a definite answer as the module grows. Three
- * production classes plus this charter is four {@code .java} files in this directory, and there is
- * no fifth type.</p>
+ * production classes plus this charter is four {@code .java} files at the target, and there is no fifth
+ * type.</p>
+ *
+ * <p>Refactoring Rationale: exactly ONE of the three is delivered. {@code DataSourceConfig} is present;
+ * {@code BatchConfig} and {@code SqsConfig} are not, and every capability the two entries below describe
+ * -- the chunk-oriented step infrastructure, the durable job repository, the job-parameter interlock, the
+ * publish-only error sink and its message attributes -- is consequently a TARGET description and not a
+ * delivered one. That distinction is restated here because the entries themselves read in the present
+ * tense, and a reader who took them at face value would look for a chunk-step bean, a job repository or a
+ * message publisher and find none. The prose is left in place rather than deleted because it is the
+ * agreed contract for those two classes and is what the authoring of each must satisfy; what is corrected
+ * is the impression that satisfying it has already happened.</p>
+ *
+ * <p>Assumptions: the two absent classes are NOT authored as empty configurations to make the roster
+ * true. A configuration class contributing no bean would be a placeholder occupying the name of a
+ * reviewed contract, and the step infrastructure in particular cannot be authored honestly ahead of the
+ * jobs whose steps it wires. What HAS landed in their place is narrower and real: the durable step ledger
+ * is exercised through {@code BatchStepLedger} in the sibling service package rather than through a job
+ * repository bean, so the redrive no-op behaviour exists and is asserted even though the framework's own
+ * batch infrastructure is not yet wired.</p>
  *
  * <ul>
  *   <li>{@code BatchConfig} owns the chunk-oriented step infrastructure, the durable job

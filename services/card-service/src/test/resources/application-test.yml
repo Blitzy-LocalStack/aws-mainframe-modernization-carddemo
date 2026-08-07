@@ -116,23 +116,31 @@
 server:
   ssl:
     # LOAD-BEARING. Without this line a context that starts a real listener
-    # fails at startup on a file whose name is the literal placeholder text.
+    # fails at startup because it cannot open a keystore.
     #
-    # Assumptions: the base file enables transport security and reads the
-    #   certificate and its private key from two placeholders that carry no
-    #   fallback, on purpose, so a deployment cannot come up in cleartext by
-    #   accident. Nothing injects those two values in a test, and binding
-    #   tolerates an unresolvable placeholder by leaving it a literal string, so
-    #   the failure is a resource loader looking up that string as a path -- and
-    #   its message names a placeholder rather than a profile, so without this
-    #   override the fix is not discoverable from the failure.
+    # Refactoring Rationale: this note used to say the failure is a
+    #   `FileNotFoundException` naming the literal placeholder text
+    #   `${SERVER_SSL_CERTIFICATE}`, because the base file read PEM content from
+    #   two unresolvable placeholders. Both properties are gone. The base file now
+    #   reads a PKCS#12 keystore that the IMAGE ENTRY POINT mints per task
+    #   (config/docker/generate-listener-material.sh), and a test runs no entry
+    #   point, so no keystore exists and `server.ssl.key-store-password` -- which
+    #   deliberately carries no fallback -- resolves to nothing. The override is
+    #   still load-bearing; only the shape of the failure changed.
     #
-    # Trade-offs: the inbound hop is cleartext in a test, which gives up nothing
-    #   this profile could otherwise have had. There is no load balancer here,
-    #   both ends of the hop are the same machine, and a certificate issued for
-    #   a task's registered name could not be accepted for a loopback address.
-    #   Generating a throwaway pair was rejected: it would place private key
-    #   material in the repository to encrypt a hop that carries no traffic.
+    # Assumptions: the base file enables TLS on purpose and gives its password
+    #   placeholder no fallback, so a deployment cannot come up in cleartext by
+    #   accident. A mock MVC slice constructs no listener, so this setting is inert
+    #   for a @WebMvcTest class and matters to any test that asks for a real port.
+    #
+    # Trade-offs: the inbound hop is cleartext in a test, and that gives up nothing
+    #   this profile could otherwise have. The property exists in the base to keep
+    #   encryption from stopping at the load balancer; in a test there is no load
+    #   balancer and both ends of the hop are the same machine. Alternatives
+    #   Considered: running the entry point, or committing a throwaway keystore.
+    #   The first makes every test depend on `keytool` and on a writable path; the
+    #   second puts private-key material in the repository to encrypt a hop that
+    #   carries no traffic.
     enabled: false
 
 spring:
@@ -391,6 +399,59 @@ spring:
     #   unnoticed and diverge later, inside comparisons.
     baseline-on-migrate: false
 
+    # Assumptions: `user` and `password` are deliberately ABSENT here while
+    #   application.yml binds both to SPRING_FLYWAY_* with no fallback, and the
+    #   absence resolves rather than conflicts. Boot only reads those two keys
+    #   through PropertiesFlywayConnectionDetails, which
+    #   FlywayAutoConfiguration creates @ConditionalOnMissingBean
+    #   (FlywayConnectionDetails.class). The container below carries
+    #   @ServiceConnection, whose JdbcConnectionDetails is adapted into a
+    #   FlywayConnectionDetails bean by
+    #   JdbcAdaptingFlywayConnectionDetailsFactory -- measured, not assumed: with
+    #   the keys added and no SPRING_FLYWAY_USER in the environment, the context
+    #   reached Flyway and failed on the SQL below rather than on an unresolved
+    #   placeholder. So the container's own generated credential migrates here,
+    #   and no stand-in credential has to be invented for a role this profile
+    #   never creates with a password.
+    #
+    # Refactoring Rationale: `init-sqls` IS restated, and it has to be. The base
+    #   file's single statement is `SET ROLE carddemo_card_owner`, naming the
+    #   NOLOGIN role data-migration/sql/V0__schemas_and_roles.sql creates and this
+    #   container has never heard of; left inherited, every test in the four
+    #   *RepositoryIT classes failed context load with
+    #   `role "carddemo_card_owner" does not exist`.
+    #
+    # Alternatives Considered: overriding this to an empty list, or to a no-op
+    #   statement, so the ownership split simply does not happen under test.
+    #   Rejected: it would leave the mechanism the deployed configuration depends
+    #   on asserted by nothing, and the mechanism is the whole of the control --
+    #   objects a migration creates must belong to the NOLOGIN owner, because every
+    #   ALTER DEFAULT PRIVILEGES FOR ROLE clause in the bootstrap SQL is keyed on
+    #   the CREATING role and is inert otherwise. The statements below reproduce it
+    #   instead: the role is created if absent, granted CREATE on whichever
+    #   database the container generated, and then assumed -- so Flyway creates the
+    #   schema, the history table and every V1 object as carddemo_card_owner,
+    #   exactly as it does in a deployed environment.
+    #
+    # Assumptions: the first statement is idempotent because Flyway runs every
+    #   string here on EACH connection it opens, not once per migration. The role
+    #   test and the grant are both re-runnable, and the grant is issued through
+    #   `format` with `%I` on `current_database()` rather than a literal, because
+    #   Testcontainers generates the database name and no fixed value would match
+    #   it. CREATE on the database is required and is not implied by role
+    #   creation: a fresh role holds only the PUBLIC grants, which are CONNECT and
+    #   TEMPORARY, so without it `CREATE SCHEMA` fails once the SET ROLE takes
+    #   effect.
+    # Trade-offs: the container's user is a superuser and could therefore assume
+    #   this role with no grant at all, which would make the GRANT look
+    #   superfluous. It is kept because the grant is what the OWNER needs to create
+    #   the schema, not what the connecting user needs to become it -- and
+    #   `SET ROLE` drops the superuser attribute for the remainder of the session.
+    init-sqls:
+      - "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'carddemo_card_owner') THEN CREATE ROLE carddemo_card_owner NOLOGIN; END IF; EXECUTE format('GRANT CREATE ON DATABASE %I TO carddemo_card_owner', current_database()); END $$;"
+      - "SET ROLE carddemo_card_owner;"
+
+
   security:
     oauth2:
       resourceserver:
@@ -577,6 +638,26 @@ carddemo:
       expected-client-id: card-test-app-client
       expected-token-use: access
       required-scope: aws.cognito.signin.user.admin
+
+    # WHY : (1) Assumptions: present here for exactly the reason the block above is.
+    #       com.carddemo.card.service.CardVerificationValueCipher takes this value
+    #       through @Value, which calls resolveRequiredPlaceholders and RAISES on an
+    #       unresolved placeholder - so the base file's
+    #       ${CARDDEMO_SECURITY_CVV_KEY_ID} would abort bean creation on every build
+    #       host, none of which sets that variable. Without this key every
+    #       context-loading test in this module fails before its first assertion.
+    #       (2) Assumptions: this is NOT a credential and NOT a secret. A
+    #       key-management alias is a public name; the value below is additionally
+    #       fabricated and visibly non-production, so it identifies no key that
+    #       exists. What it buys is that the cipher is CONSTRUCTED with a non-blank
+    #       identifier, which is what its own blank-value refusal has to differ from.
+    #       (3) Assumptions: no test reaches a real key through it. The cipher's own
+    #       tests hand it a mocked key-management client, so the identifier travels
+    #       into a request that is captured and asserted rather than sent - which is
+    #       why a fabricated alias is sufficient and a real one would be worse,
+    #       coupling the suite to an account.
+    cvv:
+      key-id: alias/carddemo-card-cvv-test
 
 
 # =============================================================================

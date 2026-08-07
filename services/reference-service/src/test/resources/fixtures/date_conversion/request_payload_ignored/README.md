@@ -8,12 +8,28 @@ than `DATE` and the key differs from the control case, and the reply is nonethel
 the same system-date reply. A reader who assumed a malformed function code produces
 an error, or that the key selects anything, is corrected by this fixture.
 
-Refactoring Rationale: this directory was previously named `invalid_date_rejected`
-and its README asserted an invalid-date rejection. That behaviour does not exist to
-be exercised -- see item 5 -- so the directory was renamed to the property the bytes
-can actually demonstrate. The rename is recorded rather than performed silently,
-because a scenario name is what a future author trusts when choosing where to add a
-case.
+Assumptions: this directory's record is **byte-identical** to the one under the sibling
+scenario `invalid_date_rejected`, and the duplication is deliberate rather than an
+oversight. Both scenarios need the same well-formed envelope, and they are separate
+directories because they assert different things about it: this one asserts that
+`CODATE01` produces the control reply from a payload it never examines -- see item 5 --
+while the sibling pairs the same envelope with a date the date-edit rules refuse, a
+refusal that reaches the rule as a parameter beside the bytes rather than as a field
+inside them. Sharing one directory would have forced one name to describe both
+properties, and a scenario name is what a future author trusts when choosing where to
+add a case. `ReferenceFixtureContractTest` resolves both paths and asserts the equality,
+so the pair cannot silently drift apart.
+
+Refactoring Rationale: the rename left the old directory standing beside this one, holding a
+README that documented a 1000-byte `date-request.txt` it did not contain -- so the old name still
+resolved for a reader, still described an executable fixture, and still pointed at a branch this
+program has no path to. The directory has now been removed rather than completed. Adding the
+record it described was considered and rejected on two grounds: the bytes would have been
+identical to this scenario's, because both READMEs specify the same function code and the same
+key, so the tree would carry two names for one fixture; and the name itself is the false claim,
+since the refusal it promises is not a branch `CODATE01.cbl` contains. The contract test pins the
+rename by asserting THIS name resolves rather than that the old one does not, which is the
+direction that cannot pass or fail for reasons of build hygiene.
 
 ---
 
@@ -150,7 +166,8 @@ Their labels are given unemphasised, as
 requires -- the second derivation wrote them in bold, which that document lists among the
 four ways the label has actually been written wrongly.
 
-- Assumptions: the deviation this fixture carries is in the FUNCTION code, not in a date. The record has no date field at all - it is a function code, an account key and padding - so a scenario in this domain can only be made invalid by its function code or its key. The directory name describes the outcome the migrated endpoint produces, which is a rejected date-conversion request.
+- Assumptions: the deviation this fixture carries is in the FUNCTION code, not in a date. The record has no date field at all - it is a function code, an account key and padding - so a scenario in this domain can only deviate in its function code or its key.
+- Refactoring Rationale: this bullet previously ended by stating that "the directory name describes the outcome the migrated endpoint produces, which is a rejected date-conversion request." That sentence survived the rename recorded in section 1 and contradicted both this directory's name and its own section 3, which state that the reply is indistinguishable from `happy_path`. It is corrected rather than left standing: the migrated consumer, `services/reference-service/src/main/java/com/carddemo/reference/service/DateInquiryMessageListener.java`, now exists and applies **no** guard, exactly as `CODATE01` applies none, and `DateInquiryMessageListenerTest` asserts that these bytes and `happy_path`'s produce byte-identical replies. A sentence describing a rejection that neither the baseline nor the target performs would have sent a reader looking for a branch that does not exist.
 - Assumptions: the tables above list the fields **this scenario gives a value to**, each with its offset, its `PICTURE` and the copybook or program line that declares it. The complete record layout, including any field this scenario does not vary and the fill regime for each, is tabled once in the tree charter section 3.7 and is cited rather than restated in full. Copying a whole layout table into each scenario directory would create as many places for the geometry to drift as there are scenarios, which the charter forbids at its section 5.8; citing a line per field costs nothing and points a reader at the normative source rather than at a copy of it.
 - Alternatives Considered: making the request invalid by its KEY instead - an account number absent from the seed, or a non-numeric one. Rejected because the key is `PIC 9(11)` and the accepted sibling already fixes its shape, so a key deviation would exercise a lookup miss rather than a request-validation refusal, which is a different scenario and would need its own name.
 - Trade-offs: the two scenarios differ in their keys as well as their function codes, `00000000002` against `00000000001`. Holding the key constant would isolate the variable more tightly; distinct keys are used instead so that a consumer reading both files can tell which one it has from the key alone, which is worth more here than the isolation, since neither field affects the other's validation.

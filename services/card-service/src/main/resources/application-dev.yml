@@ -102,25 +102,25 @@
 #   endpoint that cannot contribute is omitted from its own response rather than
 #   failing startup, and a log level cannot abort a context.
 #
-# WHY (non-obvious design decisions):
+# Assumptions:
 #   1. Pool sizing has no baseline number to preserve, because the baseline
-#      platform's card-file concurrency ceiling was one. Recorded on
-#      spring.datasource.hikari.maximum-pool-size.
+#   platform's card-file concurrency ceiling was one. Recorded on
+#   spring.datasource.hikari.maximum-pool-size.
 #   2. The idle floor is zero rather than merely small, because a connection
-#      left open is precisely what holds a zero-capacity instance awake.
-#      Recorded on spring.datasource.hikari.minimum-idle.
+#   left open is precisely what holds a zero-capacity instance awake.
+#   Recorded on spring.datasource.hikari.minimum-idle.
 #   3. The connect budget is raised past the documented resume time instead of
-#      being inherited, because the inherited value sits inside it. Recorded on
-#      spring.datasource.hikari.connection-timeout.
+#   being inherited, because the inherited value sits inside it. Recorded on
+#   spring.datasource.hikari.connection-timeout.
 #   4. SQL statement text is raised here while bind logging remains at warn, and
-#      the split is driven by cardholder data reaching log storage rather than log
-#      volume. Recorded on logging.level.
+#   the split is driven by cardholder data reaching log storage rather than log
+#   volume. Recorded on logging.level.
 #   5. The exposure list gains three endpoints and still refuses the wildcard.
-#      Recorded on management.endpoints.web.exposure.include.
+#   Recorded on management.endpoints.web.exposure.include.
 #   6. Only three of the four permitted axes appear, and the six forbidden axes
-#      are not restated at all, not even at their base values. Recorded in the
-#      closing block.
-# =============================================================================
+#   are not restated at all, not even at their base values. Recorded in the
+#   closing block.
+#   =============================================================================
 
 # -----------------------------------------------------------------------------
 # Assumptions: (1) the pool name, the connection lifetime, the isolation level, the
@@ -170,12 +170,6 @@ spring:
       #   retaining it -- so failure mode 1 above is still reached at startup
       #   rather than deferred to the first request.
       #
-      # Trade-offs: with no floor, the first request after a quiet period pays
-      #   connection establishment inside the request, and the resume too if the
-      #   instance has paused. That is the accepted compromise: a slower first
-      #   request in exchange for an environment that can actually reach zero
-      #   capacity. Production keeps a floor, because there the first request is a
-      #   user's and the instance is not expected to pause.
       minimum-idle: 0
 
       # Assumptions: this value has to clear the resume, not the steady state. The
@@ -274,17 +268,6 @@ logging:
     #   data, and a profile is a runtime choice that can be activated against any
     #   database. A property whose safety depends on which data happens to be
     #   loaded is not safe.
-    # Trade-offs: the diagnostic this gives up is the parameter half of a keyset
-    #   predicate, and org.hibernate.SQL above still yields the statement text with
-    #   its parameters shown as placeholders. That is genuinely less informative
-    #   for debugging a page boundary, and the compensating diagnostic is the
-    #   page envelope the response itself carries -- firstKey, lastKey and hasNext
-    #   are returned to the caller on every page, so the values the predicate used
-    #   are observable without being logged.
-    # Assumptions: WARN is stated explicitly rather than simply omitted, so that
-    #   raising a broader category cannot raise this one by inheritance. An omitted
-    #   entry inherits, and the entry above it is DEBUG; pinning it means the only
-    #   way to turn it up is to edit this line, which is a reviewable change.
     org.hibernate.orm.jdbc.bind: WARN
 
 # -----------------------------------------------------------------------------
@@ -314,17 +297,6 @@ management:
         #   because nothing raises it. info identifies which build a task is
         #   running.
         #
-        # Assumptions: the three added names are acceptable because of where this
-        #   service sits, not because of what they return. The dev service is
-        #   reached the same way production is, through an HTTP API in front of an
-        #   internal load balancer with the tasks in private application subnets,
-        #   so it has no route from the internet -- and that is the property being
-        #   relied on rather than any claim these endpoints are harmless.
-        #   configprops and env describe the resolved configuration of a service
-        #   whose configuration names a database and the role it connects as, and
-        #   mappings enumerates every route the service answers. On an
-        #   internet-reachable service that combination is a map for someone else;
-        #   here it is a map for whoever is diagnosing the service.
         #
         # Alternatives Considered: the wildcard, the conventional way to open a
         #   development surface. Refused because it also publishes heapdump, whose
@@ -345,10 +317,6 @@ management:
         #   raised statement level and explicit bind floor above to this file is
         #   that a reader can tell from the file which environments emit values.
         #
-        # Trade-offs: what is given up is a broader read-only surface inside the
-        #   private network. What is bought is establishing what a task actually
-        #   resolved and what it serves, without building an image and redeploying
-        #   to find out. application-prod.yml narrows this list back to three.
         include: health,info,prometheus,configprops,env,mappings
 
 # =============================================================================

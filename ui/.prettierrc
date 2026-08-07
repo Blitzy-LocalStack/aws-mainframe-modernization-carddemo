@@ -2,160 +2,106 @@
 # ui/.prettierrc
 # -----------------------------------------------------------------------------
 # Purpose:
-#   Prettier configuration for the CardDemo SPA. It fixes the formatting applied
-#   to the TypeScript, TSX, JSON, YAML, HTML and Markdown files under ui/, and it
-#   is the configuration resolved by the `format` (`prettier --check .`) and
-#   `format:write` scripts in ui/package.json. The `format` script is a required
-#   step in .github/workflows/ui-ci.yml, so these values are a build contract
-#   rather than an editor preference: a value that disagrees with the committed
-#   tree fails that job.
+#   Prettier configuration for the CardDemo SPA, resolved by the `format`
+#   (`prettier --check .`) and `format:write` scripts in ui/package.json. `format` is
+#   a required step in .github/workflows/ui-ci.yml, so these values are a build
+#   contract rather than an editor preference: a value that disagrees with the
+#   committed tree fails that job.
 # Parameters:
 #   Not applicable. This file declares formatter options and takes no inputs.
 # Return values:
 #   Not applicable. Configuration resolution produces no application value.
 # Exceptions or errors:
-#   Invalid YAML prevents configuration resolution; the format gate surfaces
-#   that non-zero exit rather than ignoring it.
+#   Invalid YAML prevents configuration resolution; the format gate surfaces that
+#   non-zero exit rather than ignoring it.
 #
-# WHY (non-obvious design decisions):
-#   - Alternatives Considered: this file is YAML, not JSON. Prettier resolves an
-#     extensionless `.prettierrc` as either, and JSON was rejected because strict
-#     JSON admits no comments, which would move every rationale below away from
-#     the option it explains. ui/package.json shows that cost directly: being
-#     strict JSON, it has to collect its pin rationale in a separate
-#     `carddemoDependencyRationale` key.
-#   - Alternatives Considered: eslint-config-prettier and eslint-plugin-prettier
-#     are deliberately absent, so formatting and linting stay independent checks.
-#     Neither is in the pinned dependency set, and keeping them apart means a
-#     formatting disagreement can never justify relaxing a `jsdoc/require-*` rule
-#     in ui/eslint.config.js. That is safe because the ESLint config enables no
-#     stylistic rule at all, so there is nothing for Prettier to contradict.
-#   - Assumptions: seven of the nine values below equal Prettier's default in the
-#     pinned version and are asserted anyway, because Prettier changes its own
-#     defaults across major versions -- 2.0 changed trailingComma, arrowParens
-#     and endOfLine, and 3.0 changed trailingComma again -- so an unset option
-#     turns a dependency bump into a tree-wide reformat. An omitted option can
-#     also still be supplied by a contributor's editor settings, which moves the
-#     decision somewhere unreviewable rather than leaving it open.
-#   - Trade-offs: the two values that do NOT track the default are printWidth and
-#     singleQuote, and departing from the default is what earns them their place
-#     here rather than what argues against it. An asserted default only guards
-#     against a future Prettier changing its mind; an asserted non-default states
-#     a decision this tree made. Adopting the pair reformatted 25 files in one
-#     mechanical pass under the pinned prettier 3.9.6, which is a real cost and is
-#     paid once: `format:write` performs it, `format` then holds it, and no
-#     subsequent edit re-incurs it. It was accepted rather than avoided because
-#     the alternative -- choosing the option that happened to match the tree as
-#     first written -- lets whichever file was authored first set the house style
-#     for the other 24, which is not a decision but an accident. Options whose
-#     defaults suit this tree are left unset rather than asserted.
+# Alternatives Considered:
+#   This file is YAML, not JSON. Prettier resolves an extensionless `.prettierrc` as
+#   either, and JSON was rejected because strict JSON admits no comments, which would
+#   move every rationale below away from the option it explains. ui/package.json shows
+#   that cost directly: being strict JSON, it collects its pin rationale in a separate
+#   `carddemoDependencyRationale` key.
+# Alternatives Considered:
+#   eslint-config-prettier and eslint-plugin-prettier are deliberately absent, so
+#   formatting and linting stay independent checks. Keeping them apart means a
+#   formatting disagreement can never justify relaxing a `jsdoc/require-*` rule in
+#   ui/eslint.config.js, and it is safe because that config enables no stylistic rule
+#   for Prettier to contradict.
+# Assumptions:
+#   Most values below equal Prettier's default in the pinned version and are asserted
+#   anyway, because Prettier changes its own defaults across major versions -- 2.0
+#   changed trailingComma, arrowParens and endOfLine, and 3.0 changed trailingComma
+#   again -- so an unset option turns a dependency bump into a tree-wide reformat, and
+#   can also be supplied by a contributor's editor settings instead. Options whose
+#   defaults suit this tree and carry no decision are left unset.
 # =============================================================================
 
-# Trade-offs: 100 rather than Prettier's default 80, for a reason specific to this
-# tree and measured rather than assumed. Two things here are long by construction.
-# Identifiers are traceable to the COBOL records they carry -- displayCardNumber,
-# transactionCategoryBalance -- because that traceability is the point, and generic
-# type arguments stack because keyset pagination is expressed as an envelope:
-# `Promise<PageResponse<CardSummary>>` is 34 characters of return type before the
-# parameter list. At 80 those combine to break a single typed signature across three
-# lines; at 100 the same signature is one line. `listCards` in ui/src/api/cards.ts
-# is the concrete case -- three lines before, one after -- and across five
-# representative files the width removed 65 lines, 1524 down to 1459, entirely by
-# rejoining signatures, import lists and generic call sites that carried no other
-# reason to break.
-# Trade-offs: the cost is that a reader in a narrow split view meets soft wrapping.
-# That is a viewer setting each reader controls, whereas a hard wrap is committed
-# into the diff for everyone -- which is the asymmetry that decides this.
-# Alternatives Considered: 80, which is both Prettier's default and the width the
-# tree was first written to, so it is the safer-SOUNDING choice. It lost because
-# "the width the tree already uses" can only ever ratify whatever was authored
-# first, which decides nothing. 120 was rejected in the other direction: it stops
-# two files fitting side by side on a common display, and this tree is read as
-# screen-plus-test pairs.
+# Trade-offs: 100 rather than Prettier's default 80, because two things here are long
+# by construction. Identifiers are traceable to the COBOL records they carry
+# (displayCardNumber, transactionCategoryBalance), and generic type arguments stack
+# because keyset pagination is expressed as an envelope -- `Promise<PageResponse<
+# CardSummary>>` is 34 characters of return type before the parameter list. At 80 those
+# combine to break one typed signature across three lines. The cost is soft wrapping in
+# a narrow split view, which is a per-reader viewer setting, whereas a hard wrap is
+# committed into the diff for everyone.
+# Alternatives Considered: 80, and 120. 80 is the default and the width the tree was
+# first written to, which is precisely why it lost -- deferring to what was authored
+# first ratifies an accident rather than deciding anything. 120 stops two files fitting
+# side by side on a common display, and this tree is read as screen-plus-test pairs.
 # Assumptions: no width can corrupt the verbatim message catalog in
-# ui/src/messages/messages.ts, because Prettier never breaks a string literal. That
-# file holds a 205-character line and passes the check unchanged at either width,
-# which is measured evidence rather than an inference, and it is why a width change
-# cannot put Transformation Rule T8's character-for-character message guarantee at
-# risk.
+# ui/src/messages/messages.ts, because Prettier never breaks a string literal. That is
+# what keeps a width change clear of Transformation Rule T8's character-for-character
+# message guarantee.
 printWidth: 100
 
-# Assumptions: indentation is spaces so one level occupies the same width in every
-# viewer. A tab renders at whatever tab stop the reader configured, which would
+# Assumptions: spaces, and two of them, so one indent level occupies the same width in
+# every viewer. A tab renders at whatever tab stop the reader configured, which would
 # make both the indent and the remaining printWidth budget viewer-dependent.
 useTabs: false
-
-# Assumptions: two spaces is the indent the committed tree uses, and with useTabs
-# above the indent is exactly two characters rather than a tab-stop-dependent
-# distance, which is what makes the printWidth budget mean the same to everyone.
 tabWidth: 2
 
-# Assumptions: semicolons are always printed to remove the automatic-semicolon-
-# insertion hazard, where a statement beginning with `(` or `[` parses as a
-# continuation of the previous line. Omitting them instead relies on Prettier
-# inserting a defensive leading semicolon on exactly those lines.
+# Assumptions: semicolons are always printed to remove the automatic-semicolon-insertion
+# hazard, where a statement beginning with `(` or `[` parses as a continuation of the
+# previous line. Omitting them instead relies on Prettier inserting a defensive leading
+# semicolon on exactly those lines.
 semi: true
 
-# Trade-offs: single quotes for TypeScript string literals, which is a departure
-# from Prettier's default and from how this tree was first written. It is chosen to
-# work WITH jsxSingleQuote below rather than on its own: this option governs
-# JavaScript literals and that one governs JSX attribute values, so setting them to
-# opposite sides makes the quote character carry information inside a .tsx file that
-# mixes both on one line -- 8 files here do. A double quote is then always markup
-# (`gap="large"`, `placeholder="Card number"`) and a single quote is always
-# JavaScript (`useState('')`, `'next'`), so a reader parses which language a line is
-# speaking before reading the line. Setting both to the same side, as the default
-# does, erases that distinction; the cost is that neither option can be justified in
-# isolation, which is why both comments cross-reference each other.
-# Assumptions: this changes delimiters only and can never change a string's
-# CONTENT. Prettier re-quotes a literal by swapping the delimiter and adjusting
-# escapes, so a verbatim message constant survives byte-identical -- which is what
-# makes a formatter setting safe to apply to a file whose whole purpose is
-# character-for-character fidelity under Transformation Rule T8. The 25-file
-# reformat this triggered was verified on exactly that point rather than assumed:
-# the decoded string-literal multiset of all 26 TypeScript and JavaScript files was
-# compared before and against after, and all 26 matched.
-# Assumptions: no message constant needs escaping either way, which was measured
-# rather than supposed -- ui/src/messages/messages.ts holds no literal containing an
-# apostrophe, and none is expected, because the COBOL constants these transcribe are
-# themselves apostrophe-delimited and a search of app/cpy finds zero doubled-quote
-# escapes. So this option cannot introduce a backslash into a verbatim string, which
-# is the one way a formatter could have made a message harder to read.
-# Alternatives Considered: false, matching both the default and the tree as first
-# authored. It lost for the reason recorded under printWidth -- deferring to what was
-# written first ratifies an accident rather than deciding anything -- and because the
-# JSX-versus-JavaScript signal above exists only on this side of the option.
+# Trade-offs: this option and jsxSingleQuote below are ONE decision set to opposite
+# sides, which is why neither can be justified alone. This one governs JavaScript
+# literals and that one governs JSX attribute values, so in a .tsx file mixing both on
+# one line a double quote is always markup (`gap="large"`) and a single quote is always
+# JavaScript (`useState('')`) -- the quote character tells a reader which language the
+# line is speaking. Setting both to the same side, as the default does, erases that.
+# Assumptions: this changes delimiters only and can never change a string's CONTENT.
+# Prettier re-quotes a literal by swapping the delimiter and adjusting escapes, so a
+# verbatim message constant survives byte-identical, which is what makes the setting
+# safe for a file whose whole purpose is Rule T8 fidelity. No message constant needs
+# escaping either way: the COBOL constants these transcribe are themselves
+# apostrophe-delimited and app/cpy carries no doubled-quote escapes, so this option
+# cannot introduce a backslash into a verbatim string.
 singleQuote: true
 
-# Assumptions: JSX attribute values stay double-quoted, matching ui/index.html, so
-# a reader moving between the entry document and a component meets one convention
-# for markup attributes.
-# Trade-offs: this is deliberately the OPPOSITE side from singleQuote above, and the
-# split is the decision rather than an oversight -- the two options are one choice
-# and the reasoning is stated at singleQuote. JSX attribute syntax is HTML's, where a
-# double-quoted attribute is the universal form; a TypeScript string literal is
-# JavaScript's. Keeping each on its own language's convention is what lets the quote
-# character distinguish them. Aligning JSX to the TypeScript side would additionally
-# diverge every component from ui/index.html, which a reader meets first.
+# Assumptions: JSX attribute values stay double-quoted, which is HTML's convention and
+# matches ui/index.html, the document a reader meets first. See singleQuote above for
+# why the two options are deliberately on opposite sides.
 jsxSingleQuote: false
 
-# Trade-offs: a trailing comma is printed wherever valid, which makes appending an
-# entry to a multi-line list a one-line diff instead of two -- material for the
-# long literal tables here, such as the message catalog and the theme token map --
-# at the cost of a comma some readers find redundant. It is also the option
-# Prettier has changed most, so it is the one most worth stating explicitly.
+# Trade-offs: a trailing comma wherever valid makes appending an entry to a multi-line
+# list a one-line diff instead of two -- material for the long literal tables here, such
+# as the message catalog and the theme token map -- at the cost of a comma some readers
+# find redundant. It is also the option Prettier has changed most, so the one most worth
+# stating explicitly.
 trailingComma: 'all'
 
-# Trade-offs: a sole arrow-function parameter keeps its parentheses, so adding a
-# type annotation or a second parameter changes only the text inside parentheses
-# that already exist and the diff shows the change alone. The cost is slight noise
-# on short callbacks; omitting them was Prettier's pre-2.0 default and was changed
-# for this reason.
+# Trade-offs: a sole arrow-function parameter keeps its parentheses, so adding a type
+# annotation or a second parameter changes only the text inside parentheses that already
+# exist and the diff shows the change alone. The cost is slight noise on short callbacks;
+# omitting them was Prettier's pre-2.0 default and was changed for this reason.
 arrowParens: 'always'
 
-# Assumptions: line endings are normalised to LF because this application is built
-# and served on Linux. The concrete failure mode prevented is a file committed with
-# CRLF from a Windows checkout: it looks correct locally and fails
-# `prettier --check .` in CI. Fixing it at the formatter removes the class of
-# problem rather than depending on every contributor's git autocrlf setting.
+# Assumptions: line endings are normalised to LF because this application is built and
+# served on Linux. The failure mode prevented is a file committed with CRLF from a
+# Windows checkout: it looks correct locally and fails `prettier --check .` in CI.
+# Fixing it at the formatter removes the class of problem rather than depending on every
+# contributor's git autocrlf setting.
 endOfLine: 'lf'

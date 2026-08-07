@@ -176,6 +176,15 @@ locals {
     role_name => "${local.secret_name_root}/${role_name}"
   }
 
+  # WHY : Assumptions: every name this map produces sits under the `aurora` segment
+  #       because every entry this module creates IS a database credential. That is
+  #       a shape data-migration/src/carddemo_migration/config.py derives
+  #       independently and resolves a DATABASE role's credential from, so an entry
+  #       with no database role behind it would be discoverable by a reader that
+  #       expects to find one and would carry a value no ALTER ROLE could ever bind.
+  #       This is why the machine-identity signing key is created by the environment
+  #       root under its own `internal-identity` segment and not here -- see the
+  #       withdrawal note at the foot of this file.
   # WHY : Assumptions: a rotation schedule is attached only when the calling root
   #       supplies BOTH a function ARN and an interval. This module creates no
   #       rotation function of its own -- see the header -- so an interval with no
@@ -203,14 +212,28 @@ locals {
 # -----------------------------------------------------------------------------
 # Per-service database role credentials
 #
-# One credential per element of var.service_credential_names -- the eight roles
-# data-migration/sql/V0__schemas_and_roles.sql creates: the seven owning one
-# schema per bounded context (auth, account, card, ledger, reference, batch and
-# authorization) plus carddemo_reporting, the read-only role the reporting
-# service connects as. That script is the source of truth for the names, and the
-# secret entry each credential is written to has to match a role name character
-# for character, which is why the inventory arrives as an input validated
-# against a closed list rather than being restated here.
+# One credential per element of var.service_credential_names -- the fifteen
+# LOGIN roles data-migration/sql/V0__schemas_and_roles.sql creates, in two
+# tiers. Eight are RUNTIME roles, one per connecting workload: the seven bounded
+# contexts (carddemo_auth, carddemo_account, carddemo_card, carddemo_ledger,
+# carddemo_reference, carddemo_batch and carddemo_authorization) plus
+# carddemo_reporting, the read-only role the reporting service connects as.
+# Seven are MIGRATION roles -- carddemo_<context>_migrator, one for each context
+# that ships a Flyway migration -- and reporting has none, because
+# reporting-service owns no db/migration directory. That script is the source of
+# truth for the names, and the secret entry each credential is written to has to
+# match a role name character for character, which is why the inventory arrives
+# as an input validated against a closed list rather than being restated here.
+#
+# WHY : Assumptions: the eight SCHEMA-OWNING roles V0 also creates --
+#       carddemo_<context>_owner -- deliberately have no entry here. They are
+#       NOLOGIN, so they hold no password for this module to store and no
+#       credential for an attacker to present; a migration role reaches its
+#       owner's authority with SET ROLE inside an already-authenticated session
+#       rather than by authenticating as it. Creating an entry for a role that
+#       cannot log in would publish a credential that grants nothing while
+#       implying the DDL-capable identity is reachable by authentication, which
+#       is the precise property the NOLOGIN split removes.
 #
 # WHY : Alternatives Considered: ONE secret holding every service credential as
 #       a single JSON document, which is fewer resources and one name to
@@ -223,9 +246,15 @@ locals {
 #       separated per bounded context, so a shared secret would hand back at the
 #       credential layer exactly the separation the database layer was built to
 #       enforce. One secret per role is what keeps a grant expressible.
-# WHY : Trade-offs: one secret per role costs eight resources and is what lets
-#       each ECS execution role receive one exact GetSecretValue resource rather
-#       than a document containing every bounded context's credential.
+# WHY : Trade-offs: one secret per role costs fifteen resources and is what lets
+#       each ECS execution role receive exactly the resources its workload
+#       needs -- its runtime credential and, separately, its migration
+#       credential -- rather than a document containing every bounded context's
+#       credential. Splitting runtime from migration doubles the entry count for
+#       the seven migrating contexts, and that cost buys the property F-10
+#       exists to establish: the credential a long-running task holds cannot
+#       create, alter or drop anything, because the identity that can is reached
+#       only through a second, separately granted secret.
 # -----------------------------------------------------------------------------
 
 ephemeral "random_password" "service" {
@@ -259,7 +288,18 @@ resource "aws_secretsmanager_secret" "service" {
   #       legible in a connection string and in a runbook; naming it here is what
   #       lets an operator tell which of eight near-identical entries they are
   #       looking at, using a field that `DescribeSecret` returns unencrypted.
-  description = "Login credential for the ${each.key} database role in the ${var.environment} CardDemo stack. Initial value is generated ephemerally and never written to Terraform state; subsequent values are managed by the rotation Lambda."
+  # WHY : Refactoring Rationale: the second sentence previously read "subsequent
+  #       values are managed by the rotation Lambda". No rotation Lambda exists.
+  #       This module implements no rotation, as variables.tf states at length, and
+  #       neither environment root supplies a rotation ARN, so both leave the hook
+  #       null and no rotation schedule is attached. The sentence described a
+  #       control that ships nowhere, in the one field DescribeSecret returns
+  #       unencrypted -- which is exactly where an operator would read it and stop
+  #       looking. It is replaced with what actually happens to a subsequent value:
+  #       nothing does, until an operator re-issues it. The re-issue procedure and
+  #       the risk accepted for a static credential are recorded in
+  #       docs/adr/ADR-002-compute-platform.md.
+  description = "Login credential for the ${each.key} database role in the ${var.environment} CardDemo stack. Initial value is generated ephemerally and never written to Terraform state. The value is STATIC: no rotation is configured for this stack, so it changes only when an operator re-issues it."
 
   # WHY : Refactoring Rationale: every service credential is encrypted under
   #       the dedicated Secrets Manager CMK. The baseline stored credentials in
@@ -306,10 +346,18 @@ resource "aws_secretsmanager_secret_version" "service" {
   #       a stored credential merely because the ephemeral generator produced
   #       fresh bytes, and the only reason to advance it would be a deliberate
   #       re-issue of every initial value -- an operation this module has no way
-  #       to distinguish from an accidental increment, and one that overwrites
-  #       whatever a rotation function has since put in place. Accepted cost: a
-  #       deliberate re-issue now means editing this file under review rather than
-  #       flipping a tfvars number.
+  #       to distinguish from an accidental increment. Accepted cost: a deliberate
+  #       re-issue now means editing this file under review rather than flipping a
+  #       tfvars number, and it replaces ALL of the entries at once because this
+  #       literal is shared by every one of them. The procedure and the risk
+  #       accepted for a static credential are recorded in
+  #       docs/adr/ADR-002-compute-platform.md.
+  # WHY : Refactoring Rationale: this rationale previously added "and one that
+  #       overwrites whatever a rotation function has since put in place". That
+  #       clause presupposed a rotation function. There is none: this module
+  #       implements no rotation, as variables.tf states, and neither environment
+  #       root supplies one, so nothing has since put anything in place and an
+  #       increment overwrites only the value this module itself wrote.
   secret_string_wo_version = 1
 }
 
@@ -343,6 +391,40 @@ resource "aws_secretsmanager_secret_rotation" "service" {
     aws_secretsmanager_secret_version.service,
   ]
 }
+
+# -----------------------------------------------------------------------------
+# The shared workload credential -- WITHDRAWN.
+#
+# Refactoring Rationale: this module created one shared Secrets Manager entry
+#   holding a message-authentication key that the pending-authorization context
+#   used to sign, and the account context to verify, the calls made on behalf of
+#   the platform rather than of a signed-on user. It has been removed, along with
+#   its generator, its version and its output.
+#
+#   Two mechanisms existed for that one hop and one had to go. The surviving one
+#   is a signed JWT: com.carddemo.common.security.InternalServiceToken mints a
+#   short-lived token carrying an issuer, a subject, an audience, a scope and an
+#   expiry, and com.carddemo.account.config.InternalApiSecurityConfig verifies it
+#   with the framework's own NimbusJwtDecoder on an earlier-ordered filter chain
+#   whose security matcher names the three internal paths and nothing else. Its
+#   key material is the internal-identity entry the environment roots create and
+#   inject into exactly those two task definitions as
+#   CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY.
+#
+# Assumptions: the withdrawn form's one advantage is not lost. It bound the
+#   method and the path INTO the signature, so a captured credential could not be
+#   replayed against another operation. The surviving form asserts the same
+#   property on the verifying side instead: its token is accepted only on the
+#   three exact paths that chain matches, so a replay elsewhere reaches a chain
+#   that knows nothing about it and is refused. What is gained in exchange is that
+#   expiry, length and signature checking are the framework's audited code rather
+#   than this repository's.
+#
+# Trade-offs: an entry that no root consumed would still have been created,
+#   costing a stored secret per environment and inviting a reader to wire a
+#   service to the mechanism that no longer verifies anything. Removing it makes
+#   the provisioned stack match the code that runs.
+# -----------------------------------------------------------------------------
 
 # =============================================================================
 # Ownership exclusions.

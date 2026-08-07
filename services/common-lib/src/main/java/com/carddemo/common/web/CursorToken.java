@@ -152,6 +152,30 @@ public final class CursorToken {
      */
     private static final char PAYLOAD_SEPARATOR = ':';
 
+    /**
+     * The character {@link #binding(String, String, String)} writes between a part's length and the
+     * part itself.
+     *
+     * <p>Assumptions: this is a punctuation mark inside a length-prefixed encoding and not a
+     * delimiter between parts. The distinction matters: a length prefix makes the composition
+     * injective with no escaping at all, whereas a delimiter -- however it is escaped by doubling --
+     * is not, because the doubled form and the delimiter are the same character. The concrete case
+     * that proved it: joining with a bar and doubling an embedded bar renders the subject
+     * {@code "s|"} with scope {@code "x"} and the subject {@code "s"} with scope {@code "|x"} as one
+     * identical string, so a token issued under either would open under the other.</p>
+     */
+    private static final char BINDING_LENGTH_MARK = ':';
+
+    /**
+     * The scope a query that narrows nothing declares.
+     *
+     * <p>Assumptions: a listing over a whole table has no narrowing predicate to bind, and this
+     * constant is how that is stated rather than passed as an empty string. An empty string would be
+     * indistinguishable from a scope a caller forgot to render, whereas this value reads as a decision
+     * at the call site and can be searched for when a query later acquires a predicate.</p>
+     */
+    public static final String SCOPE_NONE = "scope:none";
+
     /** The key material the authentication code is computed with, held as an immutable copy. */
     private final byte[] key;
 
@@ -375,6 +399,77 @@ public final class CursorToken {
                     "cursor token carries a " + epochSeconds.length()
                             + "-character issue instant that is not a whole number of epoch seconds");
         }
+    }
+
+    /**
+     * Composes the binding a cursor of one query, one subject and one query scope is sealed under.
+     *
+     * <p><b>Purpose.</b> The binding is what stops a token issued for one query or one user being
+     * redeemed on another, and it only does that if the caller actually puts the query, the subject
+     * and the narrowing scope into it. This is the one place that composition happens, so a sealing
+     * site and its opening site cannot compose it differently.</p>
+     *
+     * <p>Refactoring Rationale: every paging service composed its own binding, and the first one to do
+     * so used a bare query-name constant with no subject in it at all -- which made the token
+     * transferable between authorized users, contradicting the promise this class's own contract and
+     * the published {@code CursorToken} schema both make. A constant is the natural thing to write
+     * when the method being called takes a single string, so the remedy is a method whose parameters
+     * are the three parts rather than a convention that each caller must remember.</p>
+     *
+     * <p>Assumptions: the parts are LENGTH-PREFIXED rather than delimited, so the composition is
+     * injective -- two different part triples cannot compose one binding -- with no escaping needed.
+     * Refactoring Rationale: an earlier revision joined the parts with a bar and doubled an embedded
+     * bar. That is not injective, because the escape and the delimiter are the same character: the
+     * triple {@code ("q", "s|", "x")} and the triple {@code ("q", "s", "|x")} both render as
+     * {@code q|s|||x}, so a token issued under either would open under the other and the isolation
+     * this method exists to provide would silently not hold for a subject containing a bar.
+     * Alternatives Considered: escaping with a second escape character, which is injective and is what
+     * a delimited encoding needs. Rejected as more moving parts than a length prefix for the same
+     * guarantee. Alternatives Considered: hashing each part and concatenating the digests. Rejected
+     * because it makes a binding unreadable in a debugger and in a failure message.</p>
+     *
+     * <p>Trade-offs: {@code queryScope} is required rather than optional, and a query with no
+     * narrowing predicate passes {@link #SCOPE_NONE} explicitly. An optional parameter would let a
+     * caller omit a scope it should have supplied and get a working token, which is the failure this
+     * method exists to prevent; naming the absence makes it a decision that appears at the call
+     * site.</p>
+     *
+     * @param queryName the stable name of the query being paged, such as the resource being listed;
+     *     must not be {@code null} or blank
+     * @param subject the authenticated principal the token is issued to, which for a bearer-token
+     *     caller is the token's subject claim; must not be {@code null} or blank, because a token
+     *     bound to no subject is transferable between callers
+     * @param queryScope the narrowing predicate this page was produced under, rendered so that two
+     *     different predicates render differently, or {@link #SCOPE_NONE} when the query narrows
+     *     nothing; must not be {@code null}
+     * @return the composed binding, never {@code null} and never blank
+     * @throws NullPointerException if any argument is {@code null}
+     * @throws IllegalArgumentException if {@code queryName} or {@code subject} is blank
+     */
+    public static String binding(String queryName, String subject, String queryScope) {
+        Objects.requireNonNull(queryName, "queryName must not be null");
+        Objects.requireNonNull(subject, "subject must not be null");
+        Objects.requireNonNull(queryScope, "queryScope must not be null");
+        if (queryName.isBlank()) {
+            throw new IllegalArgumentException("queryName must not be blank; a binding that does not"
+                    + " name its query lets a token issued for one listing open on another");
+        }
+        if (subject.isBlank()) {
+            throw new IllegalArgumentException("subject must not be blank; a binding that does not"
+                    + " name its subject lets a token be redeemed by a different authorized caller");
+        }
+
+        return lengthPrefixed(queryName) + lengthPrefixed(subject) + lengthPrefixed(queryScope);
+    }
+
+    /**
+     * Renders one part as its character count, a length mark and the part itself.
+     *
+     * @param part the part to render; must not be {@code null}
+     * @return the length-prefixed rendering, which no other part value can produce
+     */
+    private static String lengthPrefixed(String part) {
+        return part.length() + String.valueOf(BINDING_LENGTH_MARK) + part;
     }
 
     /**

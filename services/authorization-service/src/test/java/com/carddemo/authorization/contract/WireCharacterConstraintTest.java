@@ -46,7 +46,7 @@ class WireCharacterConstraintTest {
     private static final String CONTRACT_RESOURCE = "/openapi/authorization-api.yaml";
 
     /** The committed canonical request payload, one line, no trailing delimiter. */
-    private static final String CANONICAL_FIXTURE = "/fixtures/auth-request-canonical-wire169.csv";
+    private static final String CANONICAL_FIXTURE = "/fixtures/auth-request-canonical-wire170.csv";
 
     /** The schema every wire member must reference for its character policy. */
     private static final String SHARED_CONSTRAINT = "WireCharacterField";
@@ -54,8 +54,8 @@ class WireCharacterConstraintTest {
     /** The JSON-pointer form of that reference, as it appears in the document. */
     private static final String SHARED_CONSTRAINT_REF = "#/components/schemas/" + SHARED_CONSTRAINT;
 
-    /** Transmitted length of the request payload: 152 declared characters plus 17 separators. */
-    private static final int REQUEST_WIRE_LENGTH = 169;
+    /** Transmitted length of the request payload: 153 declared characters plus 17 separators. */
+    private static final int REQUEST_WIRE_LENGTH = 170;
 
     /** Members of the request message, one per field of the reference copybook. */
     private static final int REQUEST_MEMBER_COUNT = 18;
@@ -175,12 +175,12 @@ class WireCharacterConstraintTest {
      * round-trips at the wrong length would leave the published arithmetic unverified.</p>
      */
     @Test
-    @DisplayName("the canonical fixture is 169 characters and re-encodes byte for byte")
+    @DisplayName("the canonical fixture is 170 characters and re-encodes byte for byte")
     void canonicalFixtureIsTheDeclaredLengthAndReEncodesUnchanged() {
         String payload = canonicalPayload();
 
         assertThat(payload.length())
-                .as("152 declared characters plus 17 separators is the transmitted length of this wire")
+                .as("153 declared characters plus 17 separators is the transmitted length of this wire")
                 .isEqualTo(REQUEST_WIRE_LENGTH);
         assertThat(CsvAuthCodec.encodeRequest(CsvAuthCodec.decodeRequest(payload)))
                 .as("the fixture must be a payload this repository's own producer would emit")

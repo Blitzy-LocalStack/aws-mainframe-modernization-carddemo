@@ -1987,27 +1987,29 @@ variable "secret_arns" {
   # WHY : Assumptions: the environment-variable names and JSON member names are
   #       the shared application contract used by every online service. Batch
   #       has no load balancer and is deliberately exempt.
-  # WHY : Assumptions: the two names below are the ones the container images
-  #       actually read -- every service's application.yml resolves its listener
-  #       material from ${CARDDEMO_SERVER_TLS_CERTIFICATE} and
-  #       ${CARDDEMO_SERVER_TLS_PRIVATE_KEY} -- so this check ties the task
-  #       definition to the image contract rather than to a naming convention.
-  #       A load-balanced service whose listener has no certificate fails its
-  #       target-group health check and is then replaced repeatedly, which reads as
-  #       a crash loop rather than as a missing secret, so the omission is refused
-  #       at plan time instead.
-  #       Trade-offs: the check names the JSON keys as OPTIONAL. Both a two-scalar
-  #       secret layout and a single JSON document with `certificate` and
-  #       `private_key` keys are accepted, because the two layouts are equivalent
-  #       to the container and the choice belongs to whoever provisions the
-  #       material; what is not accepted is the value being absent.
-  validation {
-    condition = !(var.create_service && var.attach_load_balancer) || (
-      can(var.secret_arns["CARDDEMO_SERVER_TLS_CERTIFICATE"]) &&
-      can(var.secret_arns["CARDDEMO_SERVER_TLS_PRIVATE_KEY"])
-    )
-    error_message = "A load-balanced service must inject CARDDEMO_SERVER_TLS_CERTIFICATE and CARDDEMO_SERVER_TLS_PRIVATE_KEY through secret_arns: those are the names every service's application.yml reads for its own TLS listener, and without them the HTTPS target group and health check cannot complete."
-  }
+  # WHY : Refactoring Rationale: a validation here REQUIRED every load-balanced
+  #       service to inject CARDDEMO_SERVER_TLS_CERTIFICATE and
+  #       CARDDEMO_SERVER_TLS_PRIVATE_KEY through this input, on the reasoning
+  #       that a listener with no certificate fails its target-group health check
+  #       and presents as a crash loop rather than as a missing secret. The
+  #       reasoning was sound and the requirement is now WRONG, because the
+  #       material is no longer a deployment input: each image's entry point
+  #       (config/docker/generate-listener-material.sh) mints that task's OWN key
+  #       pair and self-signed certificate before the JVM starts. Keeping the rule
+  #       would refuse every correct call.
+  # WHY : Assumptions: the concern the deleted rule served has not been abandoned,
+  #       it has been made unfalsifiable. A task cannot start without listener
+  #       material now, because the entry point exits non-zero before `exec java`
+  #       if keytool fails, and server.ssl.key-store-password carries no fallback
+  #       so an absent password stops context startup. Both failures happen before
+  #       the port opens, so there is no path on which a load-balanced task serves
+  #       cleartext -- which is a stronger guarantee than a plan-time check on the
+  #       presence of two ARNs, and it needs no input to assert it.
+  # WHY : Trade-offs: this variable now carries no listener-specific rule at all,
+  #       so a reader looking for where TLS is enforced will not find it here. The
+  #       enforcement moved into the image, and the two places that record it are
+  #       that script's header and the server.ssl block in each service's
+  #       application.yml.
 }
 
 # -----------------------------------------------------------------------------

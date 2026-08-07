@@ -37,17 +37,9 @@
  * CsvAuthCodec        delimiter-positional authorization CSV codec: the request and the reply payload
  * </pre>
  *
- * <p>Assumptions: every named exception and every carrier type these tests construct, catch or read
- * is NESTED inside one of those five classes and is not a top-level file of its own. The refusals are
- * {@code CopybookLayout.LayoutException}, {@code ZonedDecimalCodec.ZonedDecimalException},
- * {@code PackedDecimalCodec.PackedDecimalException}, {@code FixedWidthCodec.RecordLengthException},
- * {@code FixedWidthCodec.FieldCodecException} and {@code CsvAuthCodec.AuthMessageFormatException}.
- * The carriers are {@code CopybookLayout.FieldSpec}, {@code CopybookLayout.RecordSpec},
- * {@code CopybookLayout.Kind}, {@code CopybookLayout.Provenance},
- * {@code ZonedDecimalCodec.FieldContext}, {@code CsvAuthCodec.AuthRequest} and
- * {@code CsvAuthCodec.AuthReply}. Stating that they are nested settles two things a reader would
- * otherwise get wrong: a file count for the package under test does not grow by thirteen, and an
- * import in a test names the enclosing class rather than a type that has no file.</p>
+ * <p>Assumptions: every named refusal and every carrier type these tests construct, catch or read is
+ * NESTED inside one of those five classes and is not a top-level file of its own, so an import in a
+ * test names the enclosing class rather than a type that has no file of its own.</p>
  *
  * <h2>Geometry is declared, never inferred</h2>
  *
@@ -177,33 +169,12 @@
  * <h2>The sign convention, and the naming trap inside it</h2>
  *
  * <p>Assumptions: the compiler setting {@code -fsign=EBCDIC} names the TRAILING-SIGN CONVENTION and
- * not the character set of the bytes, and the whole zoned regime rests on that distinction.
- * {@code tests/README.md} lines 273 and 274 state the constraint: "{@code -fsign=EBCDIC} is REQUIRED
- * - the default {@code -fsign=ASCII} misreads the zoned-decimal sign overpunch and silently corrupts
- * negative balances." Line 268 of the same file records the invocation it belongs to,
- * {@code cobc -fixed -fsign=EBCDIC --std=ibm-strict -I app/cpy}. The shared kernel consumes the
- * seven-bit ASCII fixture bytes that invocation produces and performs NO conversion through IBM code
- * page 037 in the zoned path; the convention is implemented directly, in one mode only, so there is no
- * setting here to get wrong.</p>
- *
- * <p>Assumptions: the overpunch alphabets are ordinary printable characters, and the position within
- * each alphabet is the digit value, which is what makes an encode a direct index and a decode a direct
- * search:</p>
- *
- * <pre>
- * sign     alphabet      reading
- * plus     {ABCDEFGHI    position n means +n, so the opening brace is +0 and I is +9
- * minus    }JKLMNOPQR    position n means -n, so the closing brace is -0 and R is -9
- * </pre>
- *
- * <p>Assumptions: the two character-set names trap the unwary and the trap is recorded so that nobody
- * later concludes the mode is redundant. {@code tests/helpers/record_codec.py} line 135 describes this
- * same mapping as "the canonical IBM ASCII trailing-sign mapping", while the compiler setting that
- * selects it is named for the other character set. Both statements are correct and they are about
- * different things: the overpunch characters themselves are ASCII-printable, whereas the CONVENTION
- * assigning them digit-and-sign meanings is the EBCDIC one. Reading the pair as a contradiction, and
- * choosing the setting whose name matches the characters, is exactly what corrupts the negative
- * balances the quoted sentence warns about.</p>
+ * not the character set of the bytes, and the whole zoned regime rests on that distinction. The
+ * convention, the two overpunch alphabets and the naming trap between the two character-set names are
+ * stated once on {@code ZonedDecimalCodec} and are not restated here; a test asserts against that one
+ * implemented mode, so there is no setting here to get wrong. The shared kernel consumes the
+ * seven-bit ASCII fixture bytes the reference invocation produces and performs no conversion through
+ * IBM code page 037 in the zoned path.</p>
  *
  * <p>Assumptions: code page 037 does enter the module, at one narrow place that is not this one, and
  * the separation is asserted rather than assumed. The whole-record entry points default to US-ASCII,
@@ -276,36 +247,9 @@
  *
  * <h2>What this package contains, and what it never will</h2>
  *
- * <p>This test package holds exactly five test classes and this charter, so six compilation units in
- * all -- one test class per production class, which is why the roster below and the roster of the
- * five classes under test are the same length:</p>
- *
- * <pre>
- * test class               pins
- * ZonedDecimalCodecTest    the trailing-sign convention, the overpunch alphabets and every refusal
- * PackedDecimalCodecTest   the packed nibbles, the binary width tiers and their refusals
- * FixedWidthCodecTest      whole-record decode and encode, and the layout registry through them
- * CsvAuthCodecTest         the request and reply payloads, their masks and their refusals
- * CopybookLayoutTest       the registry's published set and every layout's internal geometry
- * </pre>
- *
- * <p>Refactoring Rationale: an earlier revision of this section said the package held exactly four
- * test classes, stated in its closed-set assumption that there is no {@code CopybookLayoutTest}, and
- * carried an Alternatives Considered paragraph recording that a fifth class named for the layout
- * registry had been "evaluated and rejected". That class is present, so the denial was the most
- * damaging kind of inaccuracy a charter can carry: it did not merely under-count, it instructed a
- * reader that a file beside it was a design the package had refused, which invites its deletion as an
- * unauthorised addition. The reasoning behind the refusal was also wrong on the merits, and it is
- * corrected rather than quietly dropped, because the argument it made is one a reader could
- * legitimately make again. It held that a descriptor is a declaration, so a test reading one back
- * would assert that a constant equals itself and would pass whether or not the geometry is usable.
- * That is true of a test that reads a single field's offset back. It is not true of the class that
- * landed, which asserts relational properties no single declaration contains: that every layout covers
- * its declared length contiguously with no gap and no overlap, that every declared key lies wholly
- * inside the record it keys, that field names are distinct within a layout, that each base master's
- * length matches its dataset contract and each derived record's matches its producing pipeline, and
- * that the packed form is never wider than the zoned form for the same digits. A constant cannot
- * satisfy those by construction; a wrong offset breaks contiguity and the suite fails.</p>
+ * <p>Assumptions: this package holds one test class per production class and this charter, and the
+ * one-to-one pairing is the contract rather than any particular file count -- a second test class for
+ * one production class has to argue why its subject is not already owned.</p>
  *
  * <p>Trade-offs: the whole-record test continues to exercise the registry through a decode and an
  * encode, so the two classes overlap deliberately rather than by oversight. The overlap is worth its
@@ -316,24 +260,12 @@
  * refusals remain exercised in both places: at the codec that rejects a malformed descriptor, and at
  * the registry itself for an unknown layout name and a digit count beyond the platform maximum.</p>
  *
- * <p>Assumptions: the contents above are the closed set. There is no sixth test class, no
- * helper, base or parameter-source class, no integration-test class whose name ends in the reactor's
- * integration suffix, no test resource, no copy of a fixture and no nested folder beneath this
- * package. Parameterised cases are supplied by methods and annotations on the class that consumes
- * them, which is why no parameter-source class is needed to reach the per-layout coverage the
- * registry test carries. Every expectation is a literal transcribed from a reference
- * artifact, so no test here reads a clock, a file under {@code app}, an environment variable, a database
- * or a network resource, and the whole package therefore runs on a machine with no emulator and no COBOL
- * compiler. Stating the closure is what lets a reader tell a class the contract never admitted from one
- * that has gone missing.</p>
-
- *
- * <p>Assumptions: two directories in this repository are called tests and they are not the same thing.
- * The repository root's {@code tests} directory is the COBOL three-layer functional-parity oracle, with
- * its own guide, its unit, integration and golden-master layers, and its fixtures, goldens, helpers and
- * mocks; it is reference-only, and it grades its outcome on a mainframe condition-code rubric in which a
- * warning-level result is its green state. This package lives in the module's own test tree and its
- * build is binary: the documentation gate, the compiler and the test runner each pass or fail, and no
- * result here is ever described in the oracle's graded terms.</p>
+ * <p>Assumptions: nothing else belongs here -- no helper, base or parameter-source class, no
+ * integration-test class whose name ends in the reactor's integration suffix, no test resource, no
+ * copy of a fixture and no nested folder. Parameterised cases are supplied by methods and annotations
+ * on the class that consumes them. Every expectation is a literal transcribed from a reference
+ * artifact, so no test here reads a clock, a file under {@code app}, an environment variable, a
+ * database or a network resource, and the package therefore runs on a machine with no emulator and no
+ * COBOL compiler.</p>
  */
 package com.carddemo.common.codec;

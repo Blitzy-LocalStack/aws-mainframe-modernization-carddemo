@@ -40,7 +40,7 @@ import type { ReactElement } from 'react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { getCard, listCards, updateCard } from '../api/cards';
+import { getCard, listCards, lookupCard, updateCard } from '../api/cards';
 import type { CardDetail, CardSummary, PageResponse } from '../api/cards';
 import { MESSAGE_BAND_TEST_ID } from '../layout/MessageBand';
 import { CARD_DETAIL_ROUTE, CARD_EDIT_ROUTE } from '../routes/cards';
@@ -65,6 +65,7 @@ function mockCardTransportModule(): Record<string, unknown> {
     listCards: vi.fn(),
     getCard: vi.fn(),
     updateCard: vi.fn(),
+    lookupCard: vi.fn(),
   };
 }
 
@@ -78,9 +79,11 @@ function mockCardTransportModule(): Record<string, unknown> {
  */
 vi.mock('../api/cards', mockCardTransportModule);
 
-// Assumptions: a card is addressed by its sixteen-digit number, so a concrete route needs one.
-// This is the reserved test prefix with a fixed tail and identifies no real card.
-const CARD_NUMBER = '4111111111110011';
+// Assumptions: a card is addressed by an opaque SELECTOR, so a concrete route needs one of those and
+// not a card number. This literal is synthetic: it has the published length and alphabet, so it
+// satisfies the route guard, and it seals nothing, so it addresses no real card. Using a number here
+// would make every route in this file fail its own guard.
+const CARD_SELECTOR = 'fake-selector-example-not-a-real-sealed-value-0000000000000';
 
 const EMPTY_PAGE: PageResponse<CardSummary> = {
   items: [],
@@ -96,6 +99,7 @@ const EMPTY_PAGE: PageResponse<CardSummary> = {
  * a test file for no assertion's benefit.
  */
 const CARD: CardDetail = {
+  key: CARD_SELECTOR,
   displayCardNumber: '************0011',
   accountId: '00000000011',
   embossedName: 'PAUL BUCK',
@@ -152,6 +156,7 @@ function resetTransportMocks(): void {
   vi.mocked(listCards).mockReset();
   vi.mocked(getCard).mockReset();
   vi.mocked(updateCard).mockReset();
+  vi.mocked(lookupCard).mockReset();
 }
 
 /**
@@ -186,7 +191,7 @@ async function listSendsFailureToTheBand(): Promise<void> {
 async function detailReservesBandWhenThereIsNoMessage(): Promise<void> {
   vi.mocked(getCard).mockResolvedValue(CARD);
 
-  renderAt(`/cards/${CARD_NUMBER}`, CARD_DETAIL_ROUTE, <CardDetailScreen />);
+  renderAt(`/cards/${CARD_SELECTOR}`, CARD_DETAIL_ROUTE, <CardDetailScreen />);
 
   expect(await screen.findByTestId(MESSAGE_BAND_TEST_ID)).toBeEmptyDOMElement();
 }
@@ -198,7 +203,7 @@ async function detailReservesBandWhenThereIsNoMessage(): Promise<void> {
 async function detailSendsFailureToTheBand(): Promise<void> {
   vi.mocked(getCard).mockRejectedValue(new Error('transport'));
 
-  renderAt(`/cards/${CARD_NUMBER}`, CARD_DETAIL_ROUTE, <CardDetailScreen />);
+  renderAt(`/cards/${CARD_SELECTOR}`, CARD_DETAIL_ROUTE, <CardDetailScreen />);
 
   await expectFailureInsideBand();
 }
@@ -210,7 +215,7 @@ async function detailSendsFailureToTheBand(): Promise<void> {
 async function updateReservesBandWhenThereIsNoMessage(): Promise<void> {
   vi.mocked(getCard).mockResolvedValue(CARD);
 
-  renderAt(`/cards/${CARD_NUMBER}/edit`, CARD_EDIT_ROUTE, <CardUpdateScreen />);
+  renderAt(`/cards/${CARD_SELECTOR}/edit`, CARD_EDIT_ROUTE, <CardUpdateScreen />);
 
   expect(await screen.findByTestId(MESSAGE_BAND_TEST_ID)).toBeEmptyDOMElement();
 }
@@ -222,7 +227,7 @@ async function updateReservesBandWhenThereIsNoMessage(): Promise<void> {
 async function updateSendsFailureToTheBand(): Promise<void> {
   vi.mocked(getCard).mockRejectedValue(new Error('transport'));
 
-  renderAt(`/cards/${CARD_NUMBER}/edit`, CARD_EDIT_ROUTE, <CardUpdateScreen />);
+  renderAt(`/cards/${CARD_SELECTOR}/edit`, CARD_EDIT_ROUTE, <CardUpdateScreen />);
 
   await expectFailureInsideBand();
 }

@@ -77,16 +77,12 @@ rather than left to be rediscovered.
 not.** `app/jcl/CBEXPORT.jcl:43` reads `//STEP02 EXEC PGM=CBEXPORT` and
 `app/jcl/CBIMPORT.jcl:22` reads `//STEP01 EXEC PGM=CBIMPORT`; both members are named
 after the program they drive, which is why a search for a driver has to match on
-`PGM=` rather than on the member name. Refactoring Rationale: an earlier revision of
-this table recorded `none` in both cells. The error was a real one rather than a
-typo — it generalised the genuine absence of a driver for `CBTRN01C`, stated
-immediately below, to the two other programs the baseline cannot compile under the
-open-source compiler (§8.1). Those are independent facts: `CBEXPORT` and `CBIMPORT`
-are undriveable *by that compiler* because of the file-description defect, and they
-are separately *driven* by JCL on the mainframe. Conflating "the parity oracle
-cannot run it" with "the baseline never scheduled it" understates what these two
-jobs are migrated from, because the driver is what fixes the step's position in the
-batch chain and its dataset dispositions.
+`PGM=` rather than on the member name. Assumptions: "the parity oracle cannot run
+it" and "the baseline never scheduled it" are independent facts and must not be
+conflated. `CBEXPORT` and `CBIMPORT` are undriveable *by the open-source compiler*
+because of the file-description defect (§8.1), and they are separately *driven* by
+JCL on the mainframe — the driver is what fixes each step's position in the batch
+chain and its dataset dispositions.
 
 **`CBTRN01C` has no JCL driver anywhere in the baseline.** A search across all 38
 members of `app/jcl` for that program name returns nothing; only an integration
@@ -398,15 +394,18 @@ computationally different — it yields different cents on many inputs, because 
 intermediate quotient is rounded before the multiplication rather than after.
 Re-ordering is forbidden, and the ordering is asserted by test to the cent.
 
-**There is no `ROUNDED` phrase, so the baseline truncates.** The result is stored
-into `WS-MONTHLY-INT PIC S9(09)V99` at `:168`, and a COBOL `COMPUTE` without
-`ROUNDED` truncates toward zero at the receiving field's scale — here two decimal
-places. Alternatives Considered: the Java therefore uses `RoundingMode.DOWN` for
-**this divide only**, while `RoundingMode.HALF_UP` remains the default everywhere
-else under transformation rule T3. Both are stated because presenting either one
-silently would be wrong in the other's territory: `HALF_UP` here would round a
-half-cent up where the baseline discards it, and `DOWN` elsewhere would truncate
-where the rest of the system rounds.
+**The quotient is rounded `HALF_UP`, under one money contract.** Transformation
+rule T3 states scale-2 `HALF_UP` for the whole money path without exception, so
+`Money.monthlyInterest` takes no rounding-mode parameter and no call site can
+select another. Assumptions: the baseline truncates instead — the result is stored
+into `WS-MONTHLY-INT PIC S9(09)V99` at `:168` and a COBOL `COMPUTE` without
+`ROUNDED` discards the surplus digits toward zero — so the two differ by one cent
+on a quotient landing exactly on a half cent. That is registered as divergence
+**C-ROUNDING** in `docs/architecture/cobol-to-service-traceability.md`.
+Alternatives Considered: keeping a mode parameter so a parity caller could ask for
+truncation. Rejected because a selectable mode is a second money contract in
+disguise: two call sites computing the same accrual could disagree by a cent with
+nothing signalling that they had chosen differently.
 
 The operand types set the shape of the arithmetic:
 
@@ -419,11 +418,12 @@ is the twelve months times the hundred of a percentage in one constant. Storing
 the rate as a fraction instead would need the divisor changed in step, and the
 seeded reference data is expressed as percentages.
 
-**Interest is truncated per category row and then summed**, not accumulated at
-full precision and truncated once: `:467` reads
-`ADD WS-MONTHLY-INT TO WS-TOTAL-INT`, after the truncating `COMPUTE`. Assumptions:
-the order of truncation and summation is observable in the account balance, and
-summing first would produce a total that differs by cents on a multi-row account.
+**Interest is reduced per category row and then summed**, not accumulated at full
+precision and reduced once: `:467` reads `ADD WS-MONTHLY-INT TO WS-TOTAL-INT`,
+after the `COMPUTE` has already stored into a two-place field. Assumptions: the
+order of reduction and summation is observable in the account balance, because
+rounding does not distribute over addition — summing first would produce a total
+that differs by cents on a multi-row account.
 
 **One transaction row is written per category row, not per account.** `:468`
 performs `1300-B-WRITE-TX` from *inside* `1300-COMPUTE-INTEREST`, and the gate is
@@ -543,7 +543,7 @@ reproduced exactly:
 | `TRAN-CAT-CD` | `'05'` | `:483` | The field is `PIC 9(04)`, so the two-character literal is stored as **`0005`**, not `05` followed by blanks |
 | `TRAN-SOURCE` | `'System'` | `:484` | `X(10)`, blank-padded |
 | `TRAN-DESC` | `'Int. for a/c '` ‖ account id | `:485-489` | `X(100)`, blank-padded |
-| `TRAN-AMT` | the truncated monthly interest | `:490` | `S9(09)V99` |
+| `TRAN-AMT` | the reduced monthly interest | `:490` | `S9(09)V99` |
 | `TRAN-MERCHANT-ID` | `0` | `:491` | |
 | `TRAN-MERCHANT-NAME` / `-CITY` / `-ZIP` | spaces | `:492-494` | |
 | `TRAN-CARD-NUM` | the cross-reference card number | `:495` | Read by account id — see §4.11 |
@@ -1135,7 +1135,7 @@ exactly and a column here would answer it only until the next commit.
 | `PostingValidationServiceTest` | All four reject reasons with their exact message text, **and both inclusive boundaries** — exactly at the credit limit posts, one cent over rejects `102`; equal to the expiration date posts, one day past rejects `103` |
 | The exit-status test | A run with rejects reports `4` **and emits the counter line verbatim**, two spaces before the colon; a clean run reports `0` |
 | `CategoryBalanceServiceTest` | The create path and the update path **separately**, so an upsert that collapsed them would fail |
-| `InterestCalculationServiceTest` | The multiply-before-divide result **to the cent** across a multi-row fixture set, the truncating rounding mode, the `DEFAULT` fallback, and the corrected final-account flush |
+| `InterestCalculationServiceTest` | The multiply-before-divide result **to the cent** across a multi-row fixture set, the single `HALF_UP` reduction, the `DEFAULT` fallback, and the corrected final-account flush |
 | `ExportJob` / `ImportJob` round trip | The 500-byte packed-decimal record survives a write-then-read unchanged, including the three usages of one picture at `app/cpy/CVEXPORT.cpy:50-57` |
 | The business-date test | The date comes from a **parameter**: injecting a fixed date twice produces byte-identical output, and no code path reads a clock for it |
 | `*RepositoryIT` | Against a real PostgreSQL container, the three-write unit of work **commits atomically and rolls back atomically**, across `ledger.*` and `account.*`, in **one** transaction |
@@ -1382,7 +1382,7 @@ abbreviation is not an accepted variant.
 | The control break's account update also zeroes both cycle buckets — a billing-cycle reset | Assumptions: | `app/cbl/CBACT04C.cbl:352-354` | §4.8 |
 | The rate gate compares numerically rather than by equality, because scale makes a zero rate unequal to zero | Assumptions: | `app/cbl/CBACT04C.cbl:214` | §4.4 |
 | A malformed command line exits at 8 rather than at the oracle's usage tier of 2, which the run-predicate would accept | Alternatives Considered: | `tests/README.md` §8 defines 2 as the usage tier; gate spelled `rc <= 4` | §3.1 |
-| Interest is truncated per category row and then summed, not summed and then truncated | Assumptions: | `app/cbl/CBACT04C.cbl:464-467` | §4.4 |
+| Interest is reduced per category row and then summed, not summed and then reduced | Assumptions: | `app/cbl/CBACT04C.cbl:464-467` | §4.4 |
 | The interest sequence counter increments before use and is never reset across the run | Assumptions: | `app/cbl/CBACT04C.cbl:474`, counter `:173` | §4.7 |
 | A two-character literal moved into a four-digit numeric field is stored as `0005` | Assumptions: | `app/cbl/CBACT04C.cbl:483`, field `app/cpy/CVTRA05Y.cpy:7` | §4.7 |
 | The repository integration test pays a real container start rather than using an in-memory engine | Trade-offs: | `app/cbl/CBTRN02C.cbl:440-442`; grants in `data-migration/sql/V0__schemas_and_roles.sql`; demonstrated by `services/transaction-service/src/test/java/com/carddemo/transaction/repository/TransactionRepositoryIT.java` | §10.4 |

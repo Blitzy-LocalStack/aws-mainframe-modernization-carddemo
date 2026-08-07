@@ -199,29 +199,53 @@ server:
     #       place rather than moving it to 8443.
     enabled: true
 
-    # WHY : (1) Alternatives Considered: a keystore file baked into the image.
-    #       Rejected because a private key in an image layer is readable by anyone
-    #       who can pull the image, and one key in one image is one key shared by
-    #       dev and prod.
-    #       (2) Assumptions: both values arrive from Secrets Manager, injected by
-    #       the task definition as CARDDEMO_SERVER_TLS_CERTIFICATE and
-    #       CARDDEMO_SERVER_TLS_PRIVATE_KEY through the ECS container secrets
-    #       mechanism, so neither is stored in the task definition, in Terraform
-    #       state or in plan output. They must be passed through the ecs-service
-    #       module's secret_arns input and not through environment_variables,
-    #       whose validation refuses a name ending in KEY for this reason.
-    #       (3) Assumptions: these properties accept PEM CONTENT as well as a
-    #       path, which is what lets an environment-injected value work. Verified
-    #       against the pinned Spring Boot 4.1.0 rather than assumed:
-    #       org.springframework.boot.ssl.pem.PemContent exposes
-    #       isPresentInText(String), and the loader tests for PEM markers before
-    #       treating the value as a resource location.
-    #       (4) Trade-offs: no fallback on either placeholder, matching the
-    #       datasource contract below. An absent certificate stops startup rather
-    #       than falling back to cleartext, which would present as a healthy
-    #       service that had stopped meeting the requirement this block exists for.
-    certificate: ${CARDDEMO_SERVER_TLS_CERTIFICATE}
-    certificate-private-key: ${CARDDEMO_SERVER_TLS_PRIVATE_KEY}
+    # WHY : Refactoring Rationale: these four properties replace a
+    #       `certificate` / `certificate-private-key` pair that read PEM CONTENT
+    #       from two environment variables injected from Secrets Manager. The
+    #       comment that stood here claimed the material was "not stored in the
+    #       task definition, in Terraform state or in plan output"; the first and
+    #       last were true and the middle one was FALSE. The pair was produced by
+    #       a managed `tls_private_key` resource in each environment root, so the
+    #       private key was written to Terraform state, and the SAME key was then
+    #       copied into two Secrets Manager entries and injected into every online
+    #       task -- one key for all eight services, held by anyone who could read
+    #       the state file. The claim is withdrawn and the mechanism is changed
+    #       rather than the sentence rewritten.
+    # WHY : Assumptions: the keystore is minted by THIS TASK at startup, by
+    #       config/docker/generate-listener-material.sh, which is the image's
+    #       entry point. It draws a fresh 2048-bit RSA key and a self-signed leaf
+    #       with keytool, writes them mode 0600 on the task's own encrypted
+    #       ephemeral volume, exports the three placeholders below, and then
+    #       `exec`s the JVM. No key is expressible in source, reaches Terraform
+    #       state, reaches Secrets Manager, or is shared by two tasks. That
+    #       script's header records the three alternatives measured and rejected,
+    #       including why an ephemeral `tls_private_key` cannot be used here.
+    # WHY : Assumptions: an Application Load Balancer does NOT validate the
+    #       certificate a target in an HTTPS target group presents, so a per-task
+    #       self-signed leaf is accepted at that hop exactly as the previous
+    #       shared self-signed leaf was. The certificate that IS verified -- the
+    #       one API Gateway checks against `server_name_to_verify` -- belongs to
+    #       the load balancer's own listener and is the operator-supplied ACM
+    #       certificate, which this change does not touch.
+    # WHY : Alternatives Considered: keeping PEM properties and having the script
+    #       write cert.pem and key.pem for `file:` locations, which these
+    #       properties also accept. Rejected on a measured limitation rather than
+    #       a preference: keytool exports a certificate as PEM but cannot export a
+    #       private key at all, so a PEM pair would need openssl, which is absent
+    #       from the pinned runtime digest. PKCS#12 is the one format the tooling
+    #       already in the image can produce.
+    # WHY : Trade-offs: `key-store` and `key-alias` carry defaults matching what
+    #       the script writes, so a local `java -jar` run against a hand-made
+    #       keystore needs only the password. `key-store-password` deliberately
+    #       carries NO default: a literal here would read as a committed secret to
+    #       every reader and to the repository's secret scanner, and an absent
+    #       password must stop startup rather than fall back to cleartext, which
+    #       would present as a healthy service that had quietly stopped meeting
+    #       the requirement this block exists for.
+    key-store: ${CARDDEMO_SERVER_TLS_KEYSTORE:file:/tmp/carddemo-tls/listener.p12}
+    key-store-type: PKCS12
+    key-store-password: ${CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD}
+    key-alias: ${CARDDEMO_SERVER_TLS_KEY_ALIAS:carddemo-listener}
 
     # WHY : (1) Assumptions: the two versions are named rather than left to the
     #       JDK default, which still negotiates the withdrawn TLS 1.1 and, on some
@@ -574,9 +598,10 @@ spring:
 
     # Assumptions: data-migration/sql/V0__schemas_and_roles.sql is the EXCLUSIVE
     #   authority for schemas, roles and grants in this system. It creates all
-    #   eight schemas together with the eight login roles, the NOLOGIN owner of
-    #   the reporting schema, the credential binding for every role, and the
-    #   whole cross-schema privilege graph. Its completion is a deployment
+    #   eight schemas together with the three tiers of role behind them -- eight
+    #   NOLOGIN schema owners, seven migration logins and eight runtime logins --
+    #   the credential binding for every login role, and the whole cross-schema
+    #   privilege graph. Its completion is a deployment
     #   precondition of this service rather than something this service can
     #   substitute for, so this flag is false: Flyway may migrate the `card`
     #   schema and may not create it.
@@ -620,6 +645,71 @@ spring:
   #       (2) only the issuer is configured here - which routes require which
   #       authority is code, and lives in config/SecurityConfig.java.
   # -----------------------------------------------------------------------------
+
+    # Assumptions: Flyway authenticates as a DIFFERENT database role than the one
+    #   the datasource above uses, and the two are not interchangeable.
+    #   data-migration/sql/V0__schemas_and_roles.sql creates three tiers of role
+    #   per bounded context: a NOLOGIN carddemo_card_owner that owns the
+    #   schema and everything in it, a carddemo_card_migrator login that is a
+    #   member of that owner, and the carddemo_card login this service serves
+    #   requests as. The runtime role holds USAGE on the schema plus SELECT,
+    #   INSERT and UPDATE on its tables -- CREATE is explicitly REVOKEd from it --
+    #   so it could not apply this migration even if asked to, and equally cannot
+    #   drop or alter the tables it reads.
+    # Refactoring Rationale: these two keys did not exist, and Flyway therefore
+    #   migrated under the runtime credential. That made the runtime role the
+    #   owner of the schema and of every table the migration created, so the one
+    #   long-lived credential every request ran under also held DDL authority over
+    #   the data it served. Naming a separate migration credential here is what
+    #   allows the bootstrap SQL to reduce the runtime role to named DML.
+    # Trade-offs: no fallback value, for the same reason the datasource
+    #   credential above has none -- a default would let the process start against
+    #   a credential nobody chose. The consequence is deliberate: a deployment
+    #   that injects the runtime credential and forgets this one fails at startup
+    #   on an unresolved placeholder, which names the variable it is missing,
+    #   rather than migrating as the wrong identity and succeeding.
+    # Assumptions: setting spring.flyway.user is also what gives Flyway its own
+    #   DataSource. Spring Boot builds a separate SimpleDriverDataSource derived
+    #   from the application DataSource whenever this key is set -- verified
+    #   against FlywayAutoConfiguration in spring-boot-flyway 4.1.0, whose
+    #   getMigrationDataSource falls to a derivedFrom builder when the Flyway URL
+    #   is absent and the Flyway user is not -- so the URL, driver and TLS terms
+    #   are inherited while the credential is replaced. That separation matters
+    #   beyond tidiness: sharing the Hikari pool would leave the SET ROLE below
+    #   applied to pooled connections that later serve runtime queries.
+    user: ${SPRING_FLYWAY_USER}
+    password: ${SPRING_FLYWAY_PASSWORD}
+
+    # Assumptions: this is the other half of the ownership split, and without it
+    #   the migration credential alone achieves nothing. V0 grants
+    #   carddemo_card_migrator its owner WITH INHERIT FALSE, so a session
+    #   authenticated as the migrator holds NO privilege at all until it assumes
+    #   the owner explicitly. Flyway runs every string here on each connection it
+    #   opens, before any migration statement, so every object V1 creates is owned
+    #   by carddemo_card_owner rather than by the credential that connected.
+    # Trade-offs: INHERIT FALSE plus an explicit SET ROLE is more moving parts
+    #   than granting the migrator ownership directly, and it buys two properties
+    #   that arrangement cannot have. A stolen migrator credential used without
+    #   this statement can read and write nothing, and every
+    #   ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_card_owner clause in the
+    #   bootstrap SQL fires -- those clauses are keyed on the CREATING role, so a
+    #   migration that created tables as the migrator would leave them all inert
+    #   and the runtime role would receive no grants on the tables it must read.
+    # Alternatives Considered: ALTER ROLE carddemo_card_migrator SET role,
+    #   which is a per-role server-side default and needs nothing in this file.
+    #   Rejected because it makes a privilege decision invisible at the point it
+    #   takes effect: a reader of this configuration would see a migration running
+    #   as the migrator and have no way to learn that the server silently
+    #   substitutes another identity.
+    init-sqls:
+    # Assumptions: the statement is TERMINATED. Spring Boot joins this list with a
+    #   newline and hands Flyway one script, so an unterminated statement is
+    #   concatenated with whatever follows it -- measured against PostgreSQL 17 as
+    #   `syntax error at or near "SET"` when a second entry was added under the test
+    #   profile. One entry cannot hit that today; the semicolon is what keeps a second
+    #   entry from breaking the first.
+      - "SET ROLE carddemo_card_owner;"
+
   security:
     oauth2:
       resourceserver:
@@ -754,16 +844,19 @@ management:
 springdoc:
 
   # Assumptions: services/card-service/src/main/resources/openapi/card-api.yaml
-  #   is to be the hand-authored OpenAPI 3.1 contract of record for this service,
-  #   and ui/src/api/cards.ts is to be written against it. The document springdoc
-  #   generates from the controllers is therefore not a second source of truth -
-  #   it is a check on the first. The two must agree, and any difference between
-  #   them is a bug in whichever side drifted, not a formatting artifact to be
-  #   tolerated. Neither that contract, nor the controllers a generated document
-  #   would come from, nor the browser client exists at this checkpoint; each is
-  #   authored at a later index of the same plan, so the keys below settle where
-  #   the contract will be published rather than describing a document served
-  #   today.
+  #   is the hand-authored OpenAPI 3.1 contract of record for this service, and
+  #   ui/src/api/cards.ts is written against it. The document springdoc generates
+  #   from the controllers is therefore not a second source of truth - it is a
+  #   check on the first. The two must agree, and any difference between them is a
+  #   bug in whichever side drifted, not a formatting artifact to be tolerated.
+  # Refactoring Rationale: this note previously said that neither the contract,
+  #   nor the controllers, nor the browser client existed at this checkpoint. Two
+  #   of those three now do: the contract declares five operations and
+  #   ui/src/api/cards.ts implements exactly those five, which
+  #   ui/src/api/contracts.test.ts asserts in both directions. Only the
+  #   controllers a generated document would come from are still to be written, so
+  #   the keys below describe where the contract IS published while the comparison
+  #   they exist to make possible waits on the handler side alone.
   api-docs:
 
     # Assumptions: stated explicitly because the library's two defaults for this
@@ -936,6 +1029,37 @@ carddemo:
     cognito:
       admin-group-name: ${CARDDEMO_COGNITO_ADMIN_GROUP_NAME:carddemo-admin}
       user-group-name: ${CARDDEMO_COGNITO_USER_GROUP_NAME:carddemo-user}
+
+    # WHY : (1) Assumptions: this names the customer-managed key that DATA KEYS are
+    #       generated under, not a key the value is enciphered with directly.
+    #       com.carddemo.card.service.CardVerificationValueCipher asks the
+    #       key-management service for one data key per value, enciphers locally
+    #       with it and stores the enciphered data key inside the envelope. The
+    #       alternative - enciphering the three digits directly under this key -
+    #       would put the plaintext on the wire to a second service and into that
+    #       service's request path, which is the one path a card verification value
+    #       must not travel.
+    #       (2) Assumptions: NO DEFAULT, deliberately. Every other value in this
+    #       block either has a default that matches what the infrastructure fixes or
+    #       is required; this one is required because a default would be a key this
+    #       code chose on a deployment's behalf, and the wrong key is not a
+    #       recoverable mistake once values have been written under it - the
+    #       ciphertext is only readable through the key that produced its data key.
+    #       An unset variable therefore stops start-up, which is the same policy the
+    #       datasource and issuer placeholders in this file follow.
+    #       (3) Assumptions: an alias, an identifier or an ARN are all accepted,
+    #       because the key-management service resolves all three and the
+    #       infrastructure publishes whichever it holds. The cipher refuses only a
+    #       BLANK value, and it refuses it at construction rather than on first use,
+    #       so a deployment that failed to supply the variable does not start rather
+    #       than failing on whichever card write happens to be first.
+    #       (4) Trade-offs: the key is named per environment rather than shared, so
+    #       a value enciphered in one environment cannot be read in another. That is
+    #       the intended blast radius: a development database restored into
+    #       production, or the reverse, yields envelopes that fail to decipher
+    #       instead of yielding verification values across an environment boundary.
+    cvv:
+      key-id: ${CARDDEMO_SECURITY_CVV_KEY_ID}
 
   card:
     list:

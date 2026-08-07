@@ -1,26 +1,6 @@
 /**
  * JPA keyed operations plus exactly two keyset browse queries. No offset paging.
  *
- * <h2>Target contract, not a directory listing</h2>
- *
- * <p>Assumptions: every inventory, file name, class name and count in this charter states the
- * package's <b>target contract</b> as the migration plan assigns it. It is a specification of what
- * this package owns and of what it may never hold, so it is read against the plan rather than against
- * a listing of the directory beside it.</p>
- *
- * <p>Alternatives Considered: deriving the inventory from the directory instead of from the plan.
- * Rejected, because a charter that describes whatever happens to be present cannot say what may
- * <em>not</em> be added, and that is the half of a package contract a reader cannot reconstruct from
- * the files. Stating the closed set costs a charter that has to be revised when the contract itself
- * changes, and buys a boundary a reviewer can enforce against a proposed addition.</p>
- *
- * <p>This package holds the Testcontainers-backed integration test for the auth bounded context's
- * persistence layer. It exercises the main-tree {@code com.carddemo.auth.repository.UserRepository}
- * and the {@code com.carddemo.auth.domain.User} entity against a real PostgreSQL container, and
- * Flyway applies the single migration {@code V1__auth.sql} for real against that container before
- * the first test runs, so the schema under test is the production schema rather than a generated
- * approximation of it.</p>
- *
  * <h2>The data contract this package is built on</h2>
  *
  * <p>The {@code auth.users} table derives from the 80-byte {@code SEC-USER-DATA} record declared at
@@ -133,72 +113,12 @@
  * asserting against an in-process stand-in, so this choice follows the house precedent rather than
  * departing from it.</p>
  *
- * <h2>The explainability obligation has no test carve-out</h2>
+ * <h2>What this package may hold</h2>
  *
- * <p>Two authorities establish that together, and neither is redundant. The project Explainability
- * rule states its validation gate at line 43: every new or modified function must have a docstring
- * with purpose, parameters and return values, every non-obvious implementation decision must have an
- * inline comment explaining why that approach was chosen using at least one of the rule's named
- * categories, and code missing either fails review. {@code tests/README.md} reaches the same
- * conclusion for test code specifically, its line 544 naming "Every new test, fixture builder,
- * helper, mock, and runner routine" and its line 549 closing the requirement with "This is a hard
- * review gate." The consequence for this package is concrete rather than aspirational: the test
- * class, every test method and every private helper in {@code UserRepositoryIT} carries full
- * Javadoc.</p>
- *
- * <p>Two places where the machine was looser than the rule have since been closed in
- * {@code config/checkstyle/checkstyle.xml}, and the correction is recorded here rather than
- * overwritten, because the earlier wording invited a reader to treat both as review-only. First,
- * {@code MissingJavadocMethod} now runs at {@code scope="private"}; Checkstyle orders its scopes
- * PUBLIC, then PROTECTED, then PACKAGE, then PRIVATE and admits every narrower visibility, so that
- * setting reaches a {@code private} method directly instead of stopping short of it. Its sibling
- * {@code JavadocMethod} already listed {@code private} among its {@code accessModifiers}, so
- * presence and completeness are now enforced by the same pair at the same visibility, which is what
- * the rule's own lines 15 and 43 always required by carrying no visibility qualifier. Second,
- * {@code allowedAnnotations} is now the empty list rather than its {@code Override} default, so a
- * wholly missing Javadoc block on an overriding method fails the build; an {@code inheritDoc} tag on
- * its own still satisfies none of the rule's lines 18 through 21. Neither correction relaxes what
- * this package does: the test class, every test method and every private helper in
- * {@code UserRepositoryIT} carried full Javadoc before the gate could see them and still does.</p>
- *
- * <p>The limit of mechanical enforcement is worth stating plainly rather than leaving implied. The
- * {@code SummaryJavadoc} module's {@code forbiddenSummaryFragments} pattern scans Javadoc summaries
- * only and never inline comments, so the rule's lines 27, 28, 38 and 40, which require a comment to
- * sit adjacent to what it explains, to say why rather than what, not to restate the code beside it,
- * and not to leave a non-obvious choice undocumented, are not machine-checkable at any severity. A
- * build can therefore complete the documentation gate while carrying restate-the-code prose and
- * still fail review under line 43, and a green gate here should be read as evidence about docstring
- * presence and completeness only.</p>
- *
- * <h2>Contents of this package</h2>
- *
- * <p>Target contract -- exactly two {@code .java} files: {@code UserRepositoryIT.java},
- * which holds the integration
- * test described above, and this descriptor. There is deliberately no abstract base class, no suite
- * aggregator and no separate fixture builder, because a package containing one test class needs none
- * of them; introducing a base class for a single subclass would spread one test's setup across two
- * files and give a reader two places to look for it instead of one.</p>
- *
- * <h2>Why this descriptor exists</h2>
- *
- * <p>The Explainability rule requires a docstring on every module entry point at its line 15, and a
- * Java package declaration is that entry point. {@code package-info.java} is the only compilation
- * unit in which package-level Javadoc can be carried, so this file is required rather than
- * decorative. Two Checkstyle modules enforce that requirement independently and neither is
- * redundant: {@code JavadocPackage} requires that this file exist in any directory holding an
- * audited source file, while {@code MissingJavadocPackage} requires that the file carry a Javadoc
- * block on its package declaration, so a descriptor holding nothing but a bare package statement
- * would satisfy the first and fail the second. Because the documentation gate is configured to audit
- * test sources as well as main sources, this directory falls inside its scope exactly as a main-tree
- * package would.</p>
- *
- * <p>Because this compilation unit contains a single statement, the decision rationale that the
- * rule's validation gate requires alongside the docstring has no adjacent executable code to sit
- * beside. It is therefore carried inside this block under the rule's own category labels, which is
- * the only placement the language makes available for a package. The parameter, return value and
- * exception elements of the rule's docstring specification describe callable code and do not apply
- * to a package declaration, so they are omitted deliberately rather than written out empty: an
- * at-clause carrying no description would itself be a violation of the completeness module that
- * audits this build.</p>
+ * <p>Assumptions: this package holds the container-backed integration tests described above and
+ * this descriptor, and nothing else. There is deliberately no abstract base class, no suite
+ * aggregator and no separate fixture builder: introducing a base class for a single subclass would
+ * spread one test's setup across two files and give a reader two places to look for it. The
+ * boundary is stated as a rule about what may be added rather than as a roster of files.</p>
  */
 package com.carddemo.auth.repository;

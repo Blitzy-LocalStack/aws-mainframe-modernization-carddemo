@@ -569,10 +569,16 @@ present ones.
   errors suppressed, both an unknown user and a bad password return
   `Wrong Password. Try again ...`; unrelated provider failures return
   `Unable to verify the User ...`. The baseline's
-  `User not found. Try again ...` remains catalogued for traceability or a
-  deliberately selected legacy posture, but it is not a distinguishable public
-  response in the selected target posture. This is a security-driven behavioural
-  divergence, not preservation of all three sign-on messages.
+  `User not found. Try again ...` remains catalogued for traceability **only**: it
+  is not a public response of any published operation, and there is no posture in
+  which it becomes one, because `infra/modules/cognito` fixes
+  `PreventUserExistenceErrors` inside the module and deliberately publishes no
+  input that could relax it. An earlier revision of this bullet offered "a
+  deliberately selected legacy posture" as the second possibility; that posture
+  does not exist and the clause is withdrawn. This is a security-driven
+  behavioural divergence, not preservation of all three sign-on messages, and it
+  is registered as `D-SIGNON-EXISTENCE-UNIFORM` in section 7.4 of the
+  [divergence register](cobol-to-service-traceability.md).
 - Trade-offs: **reporting reads go to the writer through read-only cross-schema
   views, and there is deliberately no read-replica node.** The alternative — adding a
   replica and pointing reporting at it — was considered and is **out of scope**. It

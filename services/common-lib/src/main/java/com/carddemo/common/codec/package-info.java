@@ -244,36 +244,22 @@
  * themselves bytes:
  *
  * <pre>
- * payload   fields   emitted   delimiters   on the wire   source
- * request       18   152       17 commas    169           CCPAURQY.cpy lines 19 to 36, and
- *                                                         COPAUA0C.cbl line 63 for field 9
- * reply          6    57        6 commas     63           CCPAURLY.cpy lines 19 to 24
+ * payload   fields   declared   delimiters   on the wire   source
+ * request       18   153        17 commas    170           CCPAURQY.cpy lines 19 to 36
+ * reply          6    57         6 commas     63           CCPAURLY.cpy lines 19 to 24
  * </pre>
  *
- * <p>Assumptions: the request's emitted sum is 152 and not the 153 its copybook
- * declares, because its ordinal-nine money token is emitted at THIRTEEN
- * characters -- the width of the receiving field
- * {@code WS-TRANSACTION-AMT-AN PIC X(13)} at line 63 of {@code COPAUA0C.cbl},
- * into which the {@code UNSTRING} at line 364 places that token before line 376
- * converts it with {@code FUNCTION NUMVAL}. Emitting the copybook's fourteen
- * loses the final character to an alphanumeric move and divides the cents by
- * ten, silently. The 169 is this codec's own emission rather than an observed
- * producer contract: the reference intake is delimiter-driven and imposes no
- * total length, and no request producer exists in the repository.
+ * <p>Assumptions: every request field is emitted at the width its copybook declares, the
+ * ordinal-nine money token included at the fourteen characters
+ * {@code PA-RQ-TRANSACTION-AMT PIC +9(10).99} spends on a forced sign, ten digits, the point and
+ * two decimals. The reference consumer copies that token into a thirteen-character intermediate
+ * before converting it, which is source context rather than a narrower contract; the narrower
+ * token is accepted on decode and re-emitted at the declared width.
  *
  * <p>Assumptions: the reply carries six commas for six fields, one of them
  * trailing, which is why its wire length is 63 and not 62. A decoder that splits
  * on the delimiter and then rejects a trailing empty element would reject every
  * well-formed reply the baseline produces.
- *
- * <p>Assumptions: the request length is 169 and NOT 170, and the figure 170 is
- * recorded here because it is arrived at honestly and is still wrong. It is the
- * declaration arithmetic -- the 153 bytes the copybook declares plus seventeen
- * commas -- and adopting it means emitting the money token at the fourteen
- * characters line 27 declares, which the thirteen-character receiver at line 63
- * of {@code COPAUA0C.cbl} then truncates by its last character, the second cents
- * digit. Anyone reconciling a document or a scope statement that says 170 against
- * this package should change the statement, not the codec.
  *
  * <h2>Two padding conventions, and which codec applies which</h2>
  *

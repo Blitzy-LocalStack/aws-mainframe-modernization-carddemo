@@ -1,0 +1,511 @@
+package com.carddemo.reporting.api;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import com.carddemo.reporting.config.OpenApiConfig;
+import io.swagger.v3.oas.models.OpenAPI;
+import io.swagger.v3.oas.models.security.SecurityScheme;
+import java.io.InputStream;
+import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.yaml.snakeyaml.Yaml;
+
+/**
+ * Pins the packaged OpenAPI contract of this bounded context against the document its
+ * {@link OpenApiConfig} bean serves, and against the two deployed artifacts that route to it.
+ *
+ * <p>Refactoring Rationale: this class exists because the three statements it checks were previously
+ * made in prose only, and one of them was false. {@code OpenApiConfig} named
+ * {@code src/main/resources/openapi/reporting-api.yaml} the contract of record in the same Javadoc
+ * block that recorded the file as "not yet present in the tree"; {@code pom.xml} asserted the same
+ * file and a browser client written against it; and the package charter of
+ * {@code com.carddemo.reporting} restated both. Prose cannot fail a build, so the contradiction
+ * survived every green run. The contract now exists, and every claim about it that a reader would
+ * otherwise have to take on trust is asserted here instead, so a claim and the tree can no longer
+ * disagree while the build stays green.</p>
+ *
+ * <p>Assumptions: this is a plain unit test with no Spring context. The bean under comparison is a
+ * pure factory over class constants -- it reads no property, injects nothing and touches no
+ * environment -- so instantiating {@link OpenApiConfig} directly compares exactly the values a
+ * running application would serve, without a context to start. Comparing against literals restated
+ * here was the alternative, and it was rejected because a literal copied into a test agrees with the
+ * test rather than with the bean: renaming the contract in the bean would leave both the test and
+ * the document unchanged and the mismatch undetected.</p>
+ *
+ * <p>Trade-offs: the reference check below is textual rather than a schema walk. A walk would follow
+ * only the references reachable from the paths block, so a component referenced solely from another
+ * component -- which is most of the shared problem shape here -- would go unchecked, and a reference
+ * whose target had been renamed would be reported as an absent branch rather than as a broken link.
+ * The cost accepted is that the pattern has to match the document's reference spelling exactly; the
+ * offsetting benefit is that a self-check fails loudly if the pattern ever stops matching, so the
+ * check cannot silently degrade into asserting nothing.</p>
+ */
+class ReportingApiContractTest {
+
+    /**
+     * Classpath location of the packaged contract.
+     *
+     * <p>Assumptions: the leading slash is required. A relative name would resolve against this
+     * test's own package and find nothing, and the failure would read as an absent contract rather
+     * than as a mislocated lookup.</p>
+     */
+    private static final String CONTRACT_RESOURCE = "/openapi/reporting-api.yaml";
+
+    /**
+     * Path prefix every published operation of this context must sit beneath.
+     *
+     * <p>Assumptions: this value is not a convention of this document. It is the forwarding pattern
+     * the load balancer applies to this workload, {@code "/api/v1/reports"} together with its
+     * wildcard sibling in the {@code local.online_services} entry of
+     * {@code infra/envs/{dev,prod}/main.tf}, and the route key
+     * {@code "ANY /api/v1/reports/{proxy+}"} the public HTTP API publishes from the
+     * {@code route_keys} default in {@code infra/modules/api-gateway-http/variables.tf}. An
+     * operation declared outside it is unreachable through both hops while remaining a perfectly
+     * valid OpenAPI declaration, which is exactly the failure this constant exists to catch.</p>
+     */
+    private static final String ROUTED_PREFIX = "/api/v1/reports";
+
+    /** The two authority values the document's own authority model admits. */
+    private static final Set<String> ADMITTED_AUTHORITIES = Set.of("carddemo-user", "carddemo-admin");
+
+    /**
+     * The authority this context's filter chain actually requires of every operation.
+     *
+     * <p>Assumptions: the ordinary group and not the administrative one, because
+     * {@code SecurityConfig}'s catch-all rule admits a token carrying either group and refuses one
+     * carrying neither. Declaring the administrative authority on any operation here would describe
+     * a restriction the chain does not apply, which is the drift this constant pins.</p>
+     */
+    private static final String ENFORCED_AUTHORITY = "carddemo-user";
+
+    /** Number of references the document is known to declare, guarding the textual check below. */
+    private static final int MINIMUM_EXPECTED_REFERENCES = 20;
+
+    /** Matches one internal component reference exactly as this document spells it. */
+    private static final Pattern REFERENCE = Pattern.compile("\\$ref: '#/components/(\\w+)/(\\w+)'");
+
+    /**
+     * Verifies that the packaged contract is present and parses as a mapping.
+     *
+     * @throws Exception if the document is absent from the classpath or unreadable, either of which
+     *     means the packaged contract is not the one under test
+     */
+    @Test
+    @DisplayName("the packaged contract is present on the classpath and parses")
+    void theContractIsPackagedAndParses() throws Exception {
+        Map<String, Object> root = contractRoot();
+
+        assertThat(root).containsKeys("openapi", "info", "servers", "security", "paths", "components");
+    }
+
+    /**
+     * Verifies that the document's specification version equals the one the bean serves.
+     *
+     * @throws Exception if the packaged document is absent or unreadable
+     */
+    @Test
+    @DisplayName("the contract declares the same specification version the bean serves")
+    void theSpecificationVersionAgreesWithTheBean() throws Exception {
+        OpenAPI served = new OpenApiConfig().reportingServiceOpenApi();
+
+        assertThat(contractRoot().get("openapi")).isEqualTo(served.getOpenapi());
+    }
+
+    /**
+     * Verifies that the document's information block equals the one the bean serves, member by
+     * member.
+     *
+     * <p>Assumptions: all five members are compared and not merely the title, because each is read
+     * for a different purpose -- the title and version identify the contract to a consumer, the
+     * summary and description tell a caller what it covers, and the licence is machine-readable. A
+     * comparison of one member would let the other four drift.</p>
+     *
+     * @throws Exception if the packaged document is absent or unreadable
+     */
+    @Test
+    @DisplayName("the contract information block equals the one the bean serves")
+    void theInformationBlockAgreesWithTheBean() throws Exception {
+        OpenAPI served = new OpenApiConfig().reportingServiceOpenApi();
+        Map<String, Object> info = mapping(contractRoot(), "info");
+
+        assertThat(info.get("title")).isEqualTo(served.getInfo().getTitle());
+        assertThat(info.get("version")).isEqualTo(served.getInfo().getVersion());
+        assertThat(info.get("summary")).isEqualTo(served.getInfo().getSummary());
+        assertThat(info.get("description")).isEqualTo(served.getInfo().getDescription());
+
+        Map<String, Object> license = mapping(info, "license");
+        assertThat(license.get("name")).isEqualTo(served.getInfo().getLicense().getName());
+        assertThat(license.get("identifier")).isEqualTo(served.getInfo().getLicense().getIdentifier());
+    }
+
+    /**
+     * Verifies that the document declares the same single security scheme the bean declares, and
+     * requires it at document level.
+     *
+     * @throws Exception if the packaged document is absent or unreadable
+     */
+    @Test
+    @DisplayName("the contract declares the bean's bearer scheme and requires it at document level")
+    void theSecuritySchemeAgreesWithTheBean() throws Exception {
+        OpenAPI served = new OpenApiConfig().reportingServiceOpenApi();
+        String schemeName = served.getComponents().getSecuritySchemes().keySet().iterator().next();
+        SecurityScheme servedScheme = served.getComponents().getSecuritySchemes().get(schemeName);
+
+        Map<String, Object> schemes =
+                mapping(mapping(contractRoot(), "components"), "securitySchemes");
+        assertThat(schemes).hasSize(1).containsKey(schemeName);
+
+        Map<String, Object> declared = mapping(schemes, schemeName);
+        assertThat(declared.get("type")).isEqualTo(servedScheme.getType().toString());
+        assertThat(declared.get("scheme")).isEqualTo(servedScheme.getScheme());
+        assertThat(declared.get("bearerFormat")).isEqualTo(servedScheme.getBearerFormat());
+        assertThat(declared.get("description")).isEqualTo(servedScheme.getDescription());
+
+        List<Map<String, Object>> requirements = sequence(contractRoot(), "security");
+        assertThat(requirements)
+                .as("the requirement must be asserted once at document level, not per operation")
+                .hasSize(1);
+        assertThat(requirements.get(0)).containsOnlyKeys(schemeName);
+        // WHY : Assumptions: the scope list must be EMPTY and not merely present. The specification
+        //       requires an empty list for any scheme that is neither of the two identity-federation
+        //       types, and this one is of HTTP type, so a populated list here would be invalid rather
+        //       than merely unusual -- and an absent list would be indistinguishable from a forgotten
+        //       one.
+        assertThat(requirements.get(0).get(schemeName)).isInstanceOf(List.class);
+        assertThat((List<?>) requirements.get(0).get(schemeName)).isEmpty();
+    }
+
+    /**
+     * Pins the published surface to exactly the five paths and five operation identifiers this
+     * context declares.
+     *
+     * <p>Refactoring Rationale: the surface is pinned by an exact set rather than by a lower bound,
+     * following the convention {@code AccountContextContractTest} establishes for the sibling
+     * contract. A lower bound would let an operation be added to the document without a
+     * corresponding route key in {@code infra/modules/api-gateway-http/variables.tf}, which
+     * publishes an address the edge answers with its own 404 while the service is running, healthy
+     * and correct -- the least diagnosable of the two possible mismatches.</p>
+     *
+     * @throws Exception if the packaged document is absent or unreadable
+     */
+    @Test
+    @DisplayName("the contract publishes exactly the five declared operations")
+    void thePublishedSurfaceIsPinned() throws Exception {
+        Map<String, Object> paths = mapping(contractRoot(), "paths");
+
+        assertThat(paths.keySet())
+                .containsExactlyInAnyOrder(
+                        ROUTED_PREFIX + "/transaction-report",
+                        ROUTED_PREFIX + "/transaction-report/lines",
+                        ROUTED_PREFIX + "/transaction-report/totals",
+                        ROUTED_PREFIX + "/statements",
+                        ROUTED_PREFIX + "/statements/transactions");
+        assertThat(operationIdentifiers())
+                .containsExactlyInAnyOrder(
+                        "submitTransactionReport",
+                        "listTransactionReportLines",
+                        "readTransactionReportTotals",
+                        "generateStatement",
+                        "listStatementTransactions");
+    }
+
+    /**
+     * Verifies that every declared path sits beneath the prefix the two routing hops forward.
+     *
+     * @throws Exception if the packaged document is absent or unreadable
+     */
+    @Test
+    @DisplayName("every declared path sits beneath the routed prefix")
+    void everyPathIsReachableThroughBothHops() throws Exception {
+        Set<String> paths = mapping(contractRoot(), "paths").keySet();
+
+        assertThat(paths).isNotEmpty();
+        assertThat(paths).allSatisfy(path -> assertThat(path).startsWith(ROUTED_PREFIX + "/"));
+    }
+
+    /**
+     * Verifies that every operation carries a unique identifier and the authority the chain
+     * enforces.
+     *
+     * @throws Exception if the packaged document is absent or unreadable
+     */
+    @Test
+    @DisplayName("every operation carries a unique identifier and the enforced authority")
+    void everyOperationIsIdentifiedAndAuthorized() throws Exception {
+        List<String> identifiers = new ArrayList<>();
+
+        for (Map.Entry<String, Object> pathEntry : mapping(contractRoot(), "paths").entrySet()) {
+            Map<String, Object> item = asMapping(pathEntry.getValue(), pathEntry.getKey());
+            for (Map.Entry<String, Object> methodEntry : item.entrySet()) {
+                if (!isHttpMethod(methodEntry.getKey())) {
+                    continue;
+                }
+                Map<String, Object> operation =
+                        asMapping(methodEntry.getValue(), pathEntry.getKey() + '.' + methodEntry.getKey());
+
+                Object identifier = operation.get("operationId");
+                assertThat(identifier)
+                        .as("%s %s must declare an operationId", methodEntry.getKey(), pathEntry.getKey())
+                        .isInstanceOf(String.class);
+                identifiers.add((String) identifier);
+
+                Object authority = operation.get("x-required-authority");
+                assertThat(authority)
+                        .as("%s must declare x-required-authority", identifier)
+                        .isEqualTo(ENFORCED_AUTHORITY);
+                assertThat(ADMITTED_AUTHORITIES).contains((String) authority);
+            }
+        }
+
+        assertThat(identifiers).isNotEmpty().doesNotHaveDuplicates();
+    }
+
+    /**
+     * Verifies that every internal reference in the document resolves to a declared component.
+     *
+     * <p>Assumptions: the reference count is asserted before the resolution loop runs. Without that
+     * self-check a pattern that stopped matching would make this test vacuously green, which is the
+     * one failure mode a textual check has and an unchecked one would hide.</p>
+     *
+     * @throws Exception if the packaged document is absent or unreadable
+     */
+    @Test
+    @DisplayName("every internal reference resolves to a declared component")
+    void everyReferenceResolves() throws Exception {
+        Map<String, Object> components = mapping(contractRoot(), "components");
+        Set<String> seen = new LinkedHashSet<>();
+        List<String> unresolved = new ArrayList<>();
+
+        Matcher matcher = REFERENCE.matcher(contractText());
+        while (matcher.find()) {
+            String kind = matcher.group(1);
+            String name = matcher.group(2);
+            seen.add(kind + '/' + name);
+            Object bucket = components.get(kind);
+            if (!(bucket instanceof Map<?, ?> declared) || !declared.containsKey(name)) {
+                unresolved.add(kind + '/' + name);
+            }
+        }
+
+        assertThat(seen)
+                .as("the reference pattern must still match this document's spelling")
+                .hasSizeGreaterThanOrEqualTo(MINIMUM_EXPECTED_REFERENCES);
+        assertThat(unresolved).isEmpty();
+    }
+
+    /**
+     * Verifies that no card number reaches a target and that the published rendering is masked.
+     *
+     * <p>Assumptions: the target check is a check on the PATH TEMPLATES and not on the schemas,
+     * because a target is composed before this service sees the request. The load balancer writes
+     * the template's resolved value into its access log before any handler runs and the browser
+     * retains it in history, so neither store is reachable by anything this module could add: a
+     * number kept out of a target is the only control that acts on them. The one place an unmasked
+     * number is admitted is a request body, which neither store retains.</p>
+     *
+     * @throws Exception if the packaged document is absent or unreadable
+     */
+    @Test
+    @DisplayName("no card number appears in a path template and the published rendering is masked")
+    void noCardNumberReachesATarget() throws Exception {
+        for (String path : mapping(contractRoot(), "paths").keySet()) {
+            assertThat(path.toLowerCase(java.util.Locale.ROOT))
+                    .as("%s must not address a card by number", path)
+                    .doesNotContain("card");
+        }
+
+        Map<String, Object> schemas = mapping(mapping(contractRoot(), "components"), "schemas");
+        assertThat(mapping(schemas, "MaskedCardNumber").get("pattern"))
+                .isEqualTo("^\\*{12}[0-9]{4}$");
+    }
+
+    /**
+     * Collects the identifier of every operation the contract declares.
+     *
+     * <p>Assumptions: a path item carries members that are not methods -- a description and a shared
+     * parameter list -- so the walk filters on the five method names rather than taking every member,
+     * which would read a description as an operation and fail for the wrong reason.</p>
+     *
+     * @return one identifier per declared operation, in document order, never {@code null}
+     * @throws Exception if the packaged document is absent or unreadable
+     */
+    private List<String> operationIdentifiers() throws Exception {
+        List<String> identifiers = new ArrayList<>();
+        for (Map.Entry<String, Object> pathEntry : mapping(contractRoot(), "paths").entrySet()) {
+            Map<String, Object> item = asMapping(pathEntry.getValue(), pathEntry.getKey());
+            for (Map.Entry<String, Object> methodEntry : item.entrySet()) {
+                if (isHttpMethod(methodEntry.getKey())) {
+                    Map<String, Object> operation = asMapping(
+                            methodEntry.getValue(), pathEntry.getKey() + '.' + methodEntry.getKey());
+                    identifiers.add(String.valueOf(operation.get("operationId")));
+                }
+            }
+        }
+        return identifiers;
+    }
+
+    /**
+     * Reads the packaged contract as a mapping.
+     *
+     * @return the document root keyed by top-level member, never {@code null}
+     * @throws Exception if the document is absent from the classpath or is not readable as a mapping
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> contractRoot() throws Exception {
+        try (InputStream document = getClass().getResourceAsStream(CONTRACT_RESOURCE)) {
+            assertThat(document).as("%s must be on the classpath", CONTRACT_RESOURCE).isNotNull();
+            Map<String, Object> root = new Yaml().load(document);
+            assertThat(root).as("%s must parse as a mapping", CONTRACT_RESOURCE).isNotNull();
+            return root;
+        }
+    }
+
+    /**
+     * Reads the packaged contract as text.
+     *
+     * @return the whole document, decoded as UTF-8, never {@code null}
+     * @throws Exception if the document is absent from the classpath or unreadable
+     */
+    private String contractText() throws Exception {
+        try (InputStream document = getClass().getResourceAsStream(CONTRACT_RESOURCE)) {
+            assertThat(document).as("%s must be on the classpath", CONTRACT_RESOURCE).isNotNull();
+            return new String(document.readAllBytes(), StandardCharsets.UTF_8);
+        }
+    }
+
+    /**
+     * Extracts one nested mapping, failing rather than returning null when it is absent.
+     *
+     * @param parent the mapping to read from
+     * @param key the member to extract
+     * @return the nested mapping, never {@code null}
+     */
+    private static Map<String, Object> mapping(Map<String, Object> parent, String key) {
+        assertThat(parent).containsKey(key);
+        return asMapping(parent.get(key), key);
+    }
+
+    /**
+     * Narrows one parsed value to a mapping, naming the member on failure.
+     *
+     * @param value the parsed value
+     * @param name the member name, used only in the failure description
+     * @return the value as a mapping, never {@code null}
+     */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> asMapping(Object value, String name) {
+        assertThat(value).as("%s must be a mapping", name).isInstanceOf(Map.class);
+        return (Map<String, Object>) value;
+    }
+
+    /**
+     * Extracts one nested sequence of mappings.
+     *
+     * @param parent the mapping to read from
+     * @param key the member to extract
+     * @return the sequence entries, never {@code null}
+     */
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> sequence(Map<String, Object> parent, String key) {
+        assertThat(parent).containsKey(key);
+        assertThat(parent.get(key)).as("%s must be a sequence", key).isInstanceOf(List.class);
+        return (List<Map<String, Object>>) parent.get(key);
+    }
+
+    /**
+     * Reports whether a path-item member names an HTTP method rather than a description or a shared
+     * parameter list.
+     *
+     * @param member the path-item member name
+     * @return {@code true} when the member is one of the five methods this contract may declare
+     */
+    private static boolean isHttpMethod(String member) {
+        return List.of("get", "post", "put", "delete", "patch").contains(member);
+    }
+
+    /**
+     * Every published operation is served by a declared handler, and every handler is published.
+     *
+     * <p>Purpose: a path template and an HTTP method cross the wire as text, so a document declaring
+     * one route and a controller mapping another both compile, both pass their own tests, and disagree
+     * only in front of a client. This case is the comparison, and it is made in BOTH directions: a
+     * documented route with no handler answers 404 to every caller that reads the document, and a
+     * handler on an undocumented route is unreachable through the edge, which forwards only the
+     * prefix this document declares.
+     *
+     * <p>Assumptions: the handlers are read by REFLECTION over their mapping annotations rather than
+     * by standing up a web context. The declared route table is exactly what the annotations hold, and
+     * reflection reaches it without a server, a data source or a token issuer -- none of which this
+     * module can start from a unit test. The runtime counterpart, one mock request per route, belongs
+     * to the sibling controller tests.
+     *
+     * @throws Exception if the packaged document is absent or unreadable
+     */
+    @Test
+    @DisplayName("the published routes and the declared handler routes agree in both directions")
+    void publishedRoutesAndDeclaredHandlersAgree() throws Exception {
+        Set<String> published = new LinkedHashSet<>();
+        for (Map.Entry<String, Object> pathEntry : mapping(contractRoot(), "paths").entrySet()) {
+            Map<String, Object> item = asMapping(pathEntry.getValue(), pathEntry.getKey());
+            for (String member : item.keySet()) {
+                if (isHttpMethod(member)) {
+                    published.add(member + " " + pathEntry.getKey());
+                }
+            }
+        }
+
+        assertThat(declaredRoutes())
+                .as("every documented route is served and every served route is documented")
+                .containsExactlyInAnyOrderElementsOf(published);
+    }
+
+    /**
+     * Reads the route table the two controllers declare through their mapping annotations.
+     *
+     * <p>Assumptions: the class-level mapping supplies the root and the method-level mapping supplies
+     * the remainder, which is how Spring composes the path, so the two are concatenated here rather
+     * than either being read alone. A method carrying no path contributes the root itself, which is
+     * how a collection-root operation is declared.
+     *
+     * @return the declared routes as {@code method path} pairs, never {@code null}
+     */
+    private static Set<String> declaredRoutes() {
+        Set<String> routes = new LinkedHashSet<>();
+        for (Class<?> controller : List.of(ReportController.class, StatementController.class)) {
+            String root = controller.getAnnotation(RequestMapping.class).path()[0];
+            for (Method handler : controller.getDeclaredMethods()) {
+                GetMapping read = handler.getAnnotation(GetMapping.class);
+                if (read != null) {
+                    routes.add("get " + root + suffix(read.path()));
+                }
+                PostMapping write = handler.getAnnotation(PostMapping.class);
+                if (write != null) {
+                    routes.add("post " + root + suffix(write.path()));
+                }
+            }
+        }
+        return routes;
+    }
+
+    /**
+     * Yields the method-level path of a handler, or the empty string when it declares none.
+     *
+     * @param declared the path member of a mapping annotation, which is empty when unset
+     * @return the single declared sub-path, or the empty string
+     */
+    private static String suffix(String[] declared) {
+        return declared.length == 0 ? "" : declared[0];
+    }
+}

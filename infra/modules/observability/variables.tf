@@ -329,7 +329,7 @@ variable "vpc_flow_log_group_name" {
 #       never uses for resources or alarms. Supplying an identifier enables only
 #       the widget and preserves the module's single-provider contract.
 variable "cloudfront_distribution_id" {
-  description = "Optional CloudFront distribution identifier shown on the dashboard. Null omits the widget; no CloudFront alarm is created because global distribution metrics require a different provider region."
+  description = "Optional CloudFront distribution identifier shown on the dashboard and alarmed for server-error rate. Null omits both the widget and the alarm. The alarm is additionally conditional on the provider region being us-east-1, because CloudFront publishes distribution metrics to us-east-1 alone; an earlier revision of this description said global metrics require a different provider region, which turned that conditional constraint into a blanket impossibility and omitted a signal both environment roots can in fact create, since both set aws_region to us-east-1."
   type        = string
   default     = null
 
@@ -598,6 +598,39 @@ variable "database_cpu_threshold_percent" {
     #       never be crossed, and both are accepted silently without this check.
     condition     = var.database_cpu_threshold_percent >= 1 && var.database_cpu_threshold_percent <= 100
     error_message = "database_cpu_threshold_percent must be between 1 and 100 inclusive, because the metric it is compared against is a percentage."
+  }
+}
+
+variable "database_connection_threshold" {
+  description = "Cluster connection count that raises the connection-saturation alarm, or null to create no such alarm. This is a DERIVED value, not a tuned one: ADR-003 states the relationship as tasks times pool size rather than tasks plus pool size, so a caller computes the product of its service task count and its per-task connection-pool size and passes that. Null is the correct value only for a composition that runs no pooled service, because otherwise cluster connections can be exhausted by scale-out while processor utilisation and serverless capacity both stay well inside their own alarms."
+  type        = number
+  default     = null
+
+  validation {
+    # WHY : Assumptions: null is a valid answer and must survive the check, so
+    #       the condition short-circuits on it rather than comparing null to a
+    #       number. A floor of 1 is used instead of 0 because a threshold of 0
+    #       is crossed by an idle cluster that has merely opened a health-check
+    #       connection, which would alarm permanently and train a reader to
+    #       ignore the channel.
+    condition     = var.database_connection_threshold == null || var.database_connection_threshold >= 1
+    error_message = "database_connection_threshold must be null or a positive connection count; 0 would be breached by an idle cluster's own housekeeping connections."
+  }
+}
+
+variable "cloudfront_5xx_error_rate_threshold_percent" {
+  description = "Percentage of viewer requests answered with a server error that raises the distribution alarm. A rate rather than a count, because a static single-page application's request volume differs by orders of magnitude between working hours and overnight, and a count meaningful at one volume is noise or silence at the other. Ignored when cloudfront_distribution_id is null or when the provider region is not us-east-1, because CloudFront publishes distribution metrics to us-east-1 alone."
+  type        = number
+  default     = 5
+
+  validation {
+    # WHY : Assumptions: 1 to 100 because the metric is a percentage. A floor of
+    #       1 rather than 0 keeps a permanently-breaching configuration
+    #       unreachable, matching the processor-utilisation threshold above; the
+    #       two are validated the same way deliberately, so a reader tuning one
+    #       does not have to check whether the other behaves differently.
+    condition     = var.cloudfront_5xx_error_rate_threshold_percent >= 1 && var.cloudfront_5xx_error_rate_threshold_percent <= 100
+    error_message = "cloudfront_5xx_error_rate_threshold_percent must be between 1 and 100 inclusive, because the metric it is compared against is a percentage."
   }
 }
 

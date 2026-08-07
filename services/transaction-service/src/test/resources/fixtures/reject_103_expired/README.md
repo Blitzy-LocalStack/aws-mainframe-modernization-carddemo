@@ -594,10 +594,13 @@ link in this folder resolves to nothing.
   needs in code through `save(...)` calls on literal values, and runs against a real
   PostgreSQL container rather than an in-memory substitute.
 - [`../../application-test.yml`](../../application-test.yml) -- **[present]**. It
-  pins schema resolution to `ledger` for both the connection and the migration tool,
-  and pins the clock to a single instant. That last one is what makes any assertion
-  on a 26-character timestamp reproducible at all, because otherwise the value would
-  change between runs.
+  pins schema resolution to `ledger` for both the connection and the migration tool.
+  It does **not** pin the clock -- its own exclusion list rules out any clock or
+  current-time property -- and the pinned instant is instead
+  `TransactionRepositoryIT.FIXED_CLOCK` at that class's lines 259 and 260,
+  `Clock.fixed(Instant.parse("2022-07-18T00:00:00Z"), ZoneOffset.UTC)`. A pinned
+  instant is what makes any assertion on a 26-character timestamp reproducible at
+  all, because otherwise the value would change between runs.
 - [`V1__ledger.sql`](../../../../main/resources/db/migration/V1__ledger.sql) --
   **[present]**. It creates the four `ledger` tables these files load into,
   including `ledger.transaction_rejects` with the three columns section 3 asserts

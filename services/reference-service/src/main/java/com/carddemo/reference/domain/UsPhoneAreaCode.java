@@ -1,27 +1,12 @@
 //=============================================================================
-// services/reference-service/src/main/java/com/carddemo/reference/domain/
-// UsPhoneAreaCode.java
+// services/reference-service/.../domain/UsPhoneAreaCode.java
 //
-// WHY : Assumptions: every column name, SQL type, width and nullability bound
-//       below was read out of
-//       services/reference-service/src/main/resources/db/migration/
-//       V1__reference.sql, which this package's charter names as the authority
-//       for the physical shape of the reference schema. That authority carries
-//       more weight here than for any sibling entity, because this table has no
-//       baseline DDL to inherit a name from: its source is a set of 88-level
-//       literal lists inside a copybook, so V1 is not merely the preferred
-//       source of column names, it is the only one. Each binding is therefore
-//       written out explicitly rather than left to an implicit naming strategy,
-//       which would derive area_cd from areaCode by convention and would
-//       derive something else, without reporting anything, as soon as either
-//       name moved.
-// WHY : Trade-offs: the argument for a single table carrying a two-value
-//       classification column is set out at length in the class documentation
-//       rather than summarised here, because it is the one decision in this
-//       file a reader is most likely to undo. The package charter records the
-//       same ruling at package scope; the class documentation supplies the
-//       arithmetic and the program line the ruling rests on, so that the two
-//       can be checked against each other instead of taken on trust.
+// Assumptions: every column name, SQL type, width and nullability bound below
+//     was read out of db/migration/V1__reference.sql, which is the only source
+//     for this table because it has no baseline DDL to inherit a name from.
+//     Each binding is written out explicitly rather than left to an implicit
+//     naming strategy, which would derive a different name, without reporting
+//     anything, as soon as either name moved.
 //=============================================================================
 package com.carddemo.reference.domain;
 
@@ -46,16 +31,10 @@ import org.hibernate.type.SqlTypes;
  *
  * <h2>Baseline lineage</h2>
  *
- * <p>{@code app/cpy/CSLKPCDY.cpy} is the sole source, and it is read as reference material and
- * never modified. Its L2 to L5 header names the three assets the copybook carries, of which the
- * North American phone area codes are the first, and its L26 to L28 comment records that the list
- * was obtained from the North American Numbering Plan Administrator's numbering-plan-area report.
- * L24 declares the value being validated as
- * {@code 01 WS-US-PHONE-AREA-CODE-TO-EDIT PIC XXX}, written in that form rather than with a
- * parenthesised repeat count. Three condition names sit over that one three-byte field:
- * {@code VALID-PHONE-AREA-CODE} at L30 carrying 490 literals,
- * {@code VALID-GENERAL-PURP-CODE} at L521 carrying 410, and
- * {@code VALID-EASY-RECOG-AREA-CODE} at L931 carrying 80. </p>
+ * <p>{@code app/cpy/CSLKPCDY.cpy} is the sole source, read as reference material and never
+ * modified. L24 declares the value being validated as
+ * {@code 01 WS-US-PHONE-AREA-CODE-TO-EDIT PIC XXX}, and three condition names sit over that one
+ * three-byte field:</p>
  *
  * <pre>
  * CSLKPCDY.cpy  condition name              literals  maps to code_class
@@ -68,72 +47,45 @@ import org.hibernate.type.SqlTypes;
  *
  * <h2>Decisions</h2>
  *
- * <p>What follows discharges the obligation user-specified Rule 1 (Explainability) states at L43,
- * using the four categories it names at L31 to L34, for every choice in this file that a
- * reasonable alternative could have gone the other way on. L40 forbids leaving such a choice
- * undocumented and L41 forbids a rationale that carries no specific justification, so each entry
- * below names the line, the literal count or the migration block it rests on. </p>
- *
  * <p>Refactoring Rationale: the structure being replaced is a condition-name list compiled into a
- * program, and the reasons it cannot carry across unchanged are worth stating rather than implying.
- * In the baseline the literals live inside {@code app/cpy/CSLKPCDY.cpy} and reach the single program
- * that reads them, {@code app/cbl/COACTUPC.cbl}, through a copy directive, so the allow-list is part
- * of that program's compiled image: amending one code means recompiling the program, and a second
- * consumer cannot consult the list without copying the literals and being recompiled in turn.
- * Membership is also unqueryable, because a condition name yields a truth value and never the set
- * behind it, so the baseline can answer whether one candidate is acceptable but cannot enumerate
- * what is. A relation answers both from data, which is what lets this context publish the lookup to
- * its caller over a contract rather than duplicate the literals into it. What deliberately does not
- * change is the set itself, or which class of it the baseline accepts. </p>
+ * program, and it cannot carry across unchanged for two reasons. The literals reach their single
+ * consumer, {@code app/cbl/COACTUPC.cbl}, through a copy directive, so the allow-list is part of
+ * that program's compiled image and amending one code means recompiling it. And membership is
+ * unqueryable, because a condition name yields a truth value and never the set behind it, so the
+ * baseline can answer whether one candidate is acceptable but cannot enumerate what is. A relation
+ * answers both from data, which is what lets this context publish the lookup to its caller over a
+ * contract. What deliberately does not change is the set itself, or which class of it the baseline
+ * accepts. </p>
  *
- * <p>Assumptions: <b>one table carrying a two-value classification column, and the two sub-lists
- * are a partition of the broad list.</b> This is the package charter's fourth ruling, and the
- * evidence is a property of the copybook that can be computed rather than estimated. Counting the
- * literals in {@code app/cpy/CSLKPCDY.cpy} gives 490 under {@code VALID-PHONE-AREA-CODE} at L30,
- * 410 under {@code VALID-GENERAL-PURP-CODE} at L521 and 80 under
- * {@code VALID-EASY-RECOG-AREA-CODE} at L931. None of the three lists contains a duplicate. The
- * general-purpose and easily-recognisable sets are <b>disjoint</b>, sharing no member at all, and
- * their union is <b>exhaustive</b> over the broad set: subtracting the union from the 490 leaves
- * nothing, and subtracting the 490 from the union leaves nothing either, which is the same
- * property that 410 plus 80 equalling 490 reflects. Every one of the 490 codes therefore belongs
- * to <b>exactly one</b> class, which is precisely what a single table with one classification
- * column expresses: because the partition is total the column is not nullable and has no absent
- * case to represent, and because it is disjoint one column suffices where a pair of independent
- * flags would additionally admit both-true and both-false rows that the copybook cannot
- * express. </p>
+ * <p>Assumptions: <b>one table carrying a two-value classification column, because the two
+ * sub-lists are a partition of the broad list.</b> The counts above are computed rather than
+ * estimated, none of the three lists contains a duplicate, the two sub-lists share no member, and
+ * their union leaves nothing over in either direction. Every one of the 490 codes therefore belongs
+ * to exactly one class, which is what a single table with one classification column expresses:
+ * because the partition is total the column is not nullable, and because it is disjoint one column
+ * suffices where a pair of independent flags would additionally admit both-true and both-false rows
+ * the copybook cannot express. </p>
  *
  * <p>Assumptions: <b>the classification column is load-bearing behaviour rather than a modelling
- * convenience, and this is the stronger half of the ruling.</b> {@code app/cpy/CSLKPCDY.cpy} is
- * copied by exactly one program, {@code app/cbl/COACTUPC.cbl}, and that program's phone-area-code
- * check at L2298 reads {@code IF VALID-GENERAL-PURP-CODE}. The baseline therefore validates an
- * area code against the 410-member general-purpose sub-list at that path and line, while the
- * 490-literal broad list at L30 and the 80-literal easily-recognisable list at L931 are declared
- * and tested by no program at all. Acceptance is restricted to the general-purpose class, and the
- * Java preserves that restriction by classifying every stored code. A single table <b>without</b>
- * this column would accept the 80 easily-recognisable codes that the baseline declines, and it
- * would do so without reporting anything, which is why the column is not optional. Any divergence
- * from baseline behaviour is registered in
- * {@code docs/architecture/cobol-to-service-traceability.md}. The program's other two checks
- * belong to sibling entities and not here: L2495 {@code IF VALID-US-STATE-CODE} to
- * {@code UsState}, and L2542 {@code IF VALID-US-STATE-ZIP-CD2-COMBO} to
- * {@code UsStateZipPrefix}. </p>
+ * convenience.</b> {@code app/cpy/CSLKPCDY.cpy} is copied by exactly one program, and that
+ * program's phone-area-code check at {@code app/cbl/COACTUPC.cbl} L2298 reads
+ * {@code IF VALID-GENERAL-PURP-CODE}, so acceptance is restricted to the 410-member general-purpose
+ * class while the broad and easily-recognisable lists are declared and tested by no program at all.
+ * A table without this column would accept the 80 easily-recognisable codes the baseline declines,
+ * and would do so without reporting anything. The program's other two checks belong to sibling
+ * entities: L2495 to {@code UsState} and L2542 to {@code UsStateZipPrefix}. </p>
  *
- * <p>Alternatives Considered: two shapes were weighed against the single classified table and both
- * were rejected. <b>Two separate tables</b>, one per sub-list, was rejected because the two sets
- * partition one domain that the copybook keeps on one field, so two tables would duplicate the key
- * space and would turn the question of whether a code is a member of the broad list at all into a
- * union across two relations rather than a primary-key probe. <b>A single table with no
- * classification column</b> was rejected because it cannot express the general-purpose restriction
- * the baseline enforces at {@code app/cbl/COACTUPC.cbl} L2298: with membership alone recorded, a
- * reader has no way to tell a general-purpose code from an easily-recognisable one and would
- * accept both. </p>
+ * <p>Alternatives Considered: <b>two separate tables</b>, one per sub-list, rejected because the
+ * two sets partition one domain the copybook keeps on one field, so two tables would duplicate the
+ * key space and turn broad-list membership into a union across two relations rather than a
+ * primary-key probe. And <b>a single table with no classification column</b>, rejected because it
+ * cannot express the general-purpose restriction the baseline enforces, leaving a reader unable to
+ * tell a general-purpose code from an easily-recognisable one. </p>
  *
- * <p>Trade-offs: the cost of keeping the restriction is that a consumer filters by classification
- * instead of simply testing whether a row exists, so the general-purpose probe is a two-column
- * predicate rather than a one-column one. That cost is accepted deliberately. The alternative
- * shapes are cheaper to query and cannot state which of the two baseline sub-lists a code came
- * from, and losing that is losing the only property that distinguishes an accepted code from a
- * declined one. </p>
+ * <p>Trade-offs: the cost of keeping the restriction is that the general-purpose probe is a
+ * two-column predicate rather than a one-column one. That is accepted because the cheaper shapes
+ * cannot state which sub-list a code came from, which is the only property distinguishing an
+ * accepted code from a declined one. </p>
  *
  * <p>Assumptions: <b>the key is character data three bytes wide.</b>
  * {@code app/cpy/CSLKPCDY.cpy} L24 declares
@@ -141,58 +93,56 @@ import org.hibernate.type.SqlTypes;
  * every literal on all three lists is a quoted three-character value compared as characters rather
  * than evaluated as a number. The declared width is part of the contract, so the column is
  * {@code CHAR(3)} and the member is a {@code String}. Two consequences make the choice worth
- * stating rather than assuming. A numeric column would discard a leading zero, and the
- * easily-recognisable list at L931 opens with {@code '200'}, so a numeric key could not represent
- * the codes of that class faithfully. {@code CHAR} rather than a varying-width type also matters,
+ * stating rather than assuming. Refactoring Rationale: an earlier revision of this paragraph
+ * justified the character binding by claiming that the easily-recognisable list at L931 opens with a
+ * code demonstrating a leading zero. It does not -- that list opens with {@code '200'}, and no seeded
+ * area code begins with a zero at all, because the North American numbering plan has never assigned
+ * one. The claim was therefore false evidence for a conclusion that is nonetheless correct, and false
+ * evidence is worse than none: a reader checking it finds it does not hold and has no way to tell
+ * whether the conclusion survives. What actually decides the binding is the declared type itself. The
+ * source field is alphanumeric, every literal on all three lists is a quoted three-character value,
+ * and the comparison the baseline performs is a character comparison of a fixed-width field -- so the
+ * width and the character semantics ARE the contract, and a numeric column would be a different
+ * contract that merely happens to round-trip today's values. The stronger form of the point is that it
+ * does not depend on the data: were a code beginning with zero ever assigned, a numeric column would
+ * lose it silently, and a binding chosen from the declared type is already correct for that day
+ * whereas one chosen from the current list would have to be revisited. {@code CHAR} rather than a varying-width type also matters,
  * because a blank-padded comparison ignores trailing spaces, so a value arriving from a
  * declared-width source still matches its row where a varying-width column would return nothing
  * and would raise no error either. Both members below therefore declare the character JDBC binding
  * explicitly, since a {@code String} left to its default would present as varying width and would
  * no longer describe the column V1 declares; the rationale sits beside each member. </p>
  *
- * <p>Assumptions: <b>there is no baseline table for this entity, so
- * {@code V1__reference.sql} is the only source of column names.</b> This is stated explicitly so
- * that a reader does not go looking for a definition that does not exist. The source is a set of
- * 88-level literal lists over a working-storage field in a copybook, not a keyed data set and not
- * a relational table, so unlike the transaction-type and transaction-category entities of this
- * package there is no earlier column name to carry across, no declared record length to reconcile
- * and no padding member to leave unmapped. Both bindings below, {@code area_cd} and
- * {@code code_class}, together with their character type, their widths, their nullability and the
- * two values the check constraint admits, were taken from the {@code us_phone_area_codes} block of
- * that migration. If this mapping and that migration ever disagree, the migration is right and this
- * file is the defect, and this service's test profile is configured to say so at startup rather
- * than leave the disagreement to a query. </p>
+ * <p>Assumptions: <b>there is no baseline table for this entity, so {@code V1__reference.sql} is
+ * the only source of column names,</b> stated so that a reader does not go looking for a definition
+ * that does not exist. The source is a set of 88-level literal lists over a working-storage field,
+ * so unlike the transaction-type and transaction-category entities there is no earlier column name
+ * to carry across and no declared record length to reconcile. If this mapping and that migration
+ * ever disagree, the migration is right and this file is the defect. </p>
  *
  * <p>Assumptions: <b>the reader of this lookup sits in another bounded context and may not import
- * this type.</b> The consumer is {@code account-service} and its address validation, which
- * neither owns nor seeds this table. The shared architecture gate at
+ * this type.</b> The consumer is {@code account-service} and its address validation, which neither
+ * owns nor seeds this table, and
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java}
- * forbids a class under one bounded-context package root from depending on a {@code domain} class
- * owned by a different root, so that service reaches this data through this service's published
- * contract and its transfer objects and may never import {@code com.carddemo.reference.domain}.
- * Sharing this entity across the boundary would give one schema a second owner, so it is not
- * available as a shortcut. One consequence follows from the same arrangement and is easy to
- * mistake for a defect here: a code absent from the seed does not fail in this service at all, it
- * surfaces as an address declined during account maintenance in the other one. </p>
+ * forbids a class under one bounded-context root from depending on a {@code domain} class owned by
+ * another, so that service reaches this data through this service's published contract. One
+ * consequence is easy to mistake for a defect here: a code absent from the seed does not fail in
+ * this service at all, it surfaces as an address declined during account maintenance in the other
+ * one. </p>
  *
  * <p>Trade-offs: <b>the rows are exactly the 490 the baseline declares, and no code is
  * invented.</b> Functional parity is measured against the copybook lists and not against the
  * administrator's present-day numbering plan, so a code the baseline omits is omitted here even
  * where an external register carries it, and a code the baseline carries is kept even where an
- * external register has retired it. Widening the set would accept an address the baseline
- * declines, which is a behavioural change rather than a data refresh. Loading those rows is owned
- * by {@code V2__seed_reference.sql}, not by this type: that migration inserts all 490, split 410
- * as {@code 'G'} and 80 as {@code 'E'}, and derives each row's class from which copybook list
- * contains the code rather than from the shape of its digits. </p>
+ * external register has retired it -- widening the set would accept an address the baseline
+ * declines. Loading those rows belongs to {@code V2__seed_reference.sql}, which derives each row's
+ * class from which copybook list contains the code rather than from the shape of its digits. </p>
  *
- * <p>Assumptions: <b>this entity declares no optimistic-locking version member.</b> The package
- * charter rules that a version counter exists on two of the six entities of this package and on no
- * others, and this is one of the four that carry none. The physical reason is immediate:
+ * <p>Assumptions: <b>this entity declares no optimistic-locking version member.</b>
  * {@code V1__reference.sql} declares no version column on {@code us_phone_area_codes}, so a mapped
- * counter would name a column that does not exist. The reason the table declares none is that this
- * is seeded lookup data with read-only operations, so a counter here would be written once and
- * never read while advertising a maintenance path that this context does not offer for these
- * rows. </p>
+ * counter would name a column that does not exist. The table declares none because this is seeded
+ * lookup data with read-only operations, so a counter would be written once and never read while
+ * advertising a maintenance path this context does not offer for these rows. </p>
  */
 @Entity
 @Table(name = "us_phone_area_codes", schema = "reference")
@@ -229,39 +179,46 @@ public class UsPhoneAreaCode {
      */
     public static final String CODE_CLASS_EASILY_RECOGNISABLE = "E";
 
-    // WHY : Assumptions: three characters because app/cpy/CSLKPCDY.cpy L24 declares
-    //       01 WS-US-PHONE-AREA-CODE-TO-EDIT PIC XXX, and character rather than numeric because
-    //       every literal on the three lists is quoted and compared as characters. The column name
-    //       is area_cd, taken from the us_phone_area_codes block of V1__reference.sql, which is the
-    //       only source there is for it; the name is bound explicitly so that renaming this member
-    //       cannot move the column an implicit naming strategy would otherwise derive from it.
-    // WHY : Alternatives Considered: the JDBC type code selects the standard character binding
-    //       because relying on the declared length alone does not reproduce V1's declared type. A
-    //       Java String otherwise selects the JDBC VARCHAR binding, and schema validation then
-    //       rejects this schema's CHAR(3) column even though the two widths agree; this service's
-    //       own test profile sets ddl-auto to validate expressly to catch that drift, so the
-    //       mismatch would abort a repository test at context startup. Spelling the physical type
-    //       into a columnDefinition was rejected as well, because that duplicates vendor DDL inside
-    //       a mapping which has no authority to create the table, leaving the definition in two
-    //       places no build compares. The type code leaves the physical definition wholly with
-    //       V1__reference.sql and is the mechanism the auth, batch, transaction and authorization
-    //       contexts already use for the identical reason.
+    // Assumptions: three characters because app/cpy/CSLKPCDY.cpy L24 declares
+    //     01 WS-US-PHONE-AREA-CODE-TO-EDIT PIC XXX, and character rather than numeric because
+    //     every literal on the three lists is quoted and compared as characters. The column name
+    //     is area_cd, taken from the us_phone_area_codes block of V1__reference.sql, which is the
+    //     only source there is for it; the name is bound explicitly so that renaming this member
+    //     cannot move the column an implicit naming strategy would otherwise derive from it.
+    // Alternatives Considered: the JDBC type code selects the standard character binding
+    //     because relying on the declared length alone does not reproduce V1's declared type. A
+    //     Java String otherwise selects the JDBC VARCHAR binding, and schema validation then
+    //     rejects this schema's CHAR(3) column even though the two widths agree; this service's
+    //     own test profile sets ddl-auto to validate expressly to catch that drift, so the
+    //     mismatch would abort a repository test at context startup. Spelling the physical type
+    //     into a columnDefinition was rejected as well, because that duplicates vendor DDL inside
+    //     a mapping which has no authority to create the table, leaving the definition in two
+    //     places no build compares. The type code leaves the physical definition wholly with
+    //     V1__reference.sql and is the mechanism the auth, batch, transaction and authorization
+    //     contexts already use for the identical reason.
+    // Assumptions: the column is declared NOT UPDATABLE and no method reassigns it. The
+    //     identifier of a seeded lookup row is its identity rather than one of its attributes:
+    //     this three-character code is the value a telephone number is validated
+    //     against, so reassigning it in place would move a row's identity while the seed data that
+    //     declared it stayed unchanged. Withholding the write from both the provider and the caller
+    //     makes that impossible rather than merely discouraged.
+    // Refactoring Rationale: an earlier revision offered a public setter for this member, which
+    //     gave application code a second assembly route that was strictly weaker than the
+    //     constructor below -- it accepted a null the constructor refuses, and it accepted a call on
+    //     an already-persistent instance, which is the case that corrupts an identity rather than
+    //     merely building one badly. Removing it leaves one way to build this row and no way to
+    //     alter what it is.
     @Id
     @JdbcTypeCode(SqlTypes.CHAR)
-    @Column(name = "area_cd", length = 3, nullable = false)
+    @Column(name = "area_cd", length = 3, nullable = false, updatable = false)
     private String areaCode;
 
-    // WHY : Assumptions: one character, not nullable, and constrained by V1__reference.sql to the
-    //       two values the constants above name. It is a String rather than a boolean because the
-    //       schema stores 'G' and 'E' and a boolean cannot carry either, and rather than a
-    //       persisted enumeration because that would bind the stored letter to a Java constant
-    //       name; the class documentation records both alternatives. The column name is code_class,
-    //       again from V1 and bound explicitly.
-    // WHY : Assumptions: the character binding is applied here for the same reason it is applied to
-    //       the key above, and it matters just as much on one character as on three. V1 declares
-    //       this column CHAR(1), so without the type code the mapping would present VARCHAR and
-    //       validation would refuse the table. It also keeps a read faithful: a comparison against
-    //       either constant is a comparison against the single character the column stores.
+    // Assumptions: one character, not nullable, and constrained by V1__reference.sql to the
+    //     two values the constants above name. It is a String rather than a boolean because the
+    //     schema stores 'G' and 'E' and a boolean cannot carry either, and rather than a
+    //     persisted enumeration because that would bind the stored letter to a Java constant
+    //     name; the class documentation records both alternatives. The column name is code_class,
+    //     again from V1 and bound explicitly.
     @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "code_class", length = 1, nullable = false)
     private String codeClass;
@@ -326,17 +283,6 @@ public class UsPhoneAreaCode {
     }
 
     /**
-     * Replaces the three-character area code this row is keyed by.
-     *
-     * @param areaCode the {@code String} area code to store in the {@code area_cd} column, three
-     *     characters wide
-     *     per {@code app/cpy/CSLKPCDY.cpy} L24
-     */
-    public void setAreaCode(String areaCode) {
-        this.areaCode = areaCode;
-    }
-
-    /**
      * Returns the baseline class this area code belongs to.
      *
      * @return the {@code String} value of the {@code code_class} column, equal to either
@@ -367,10 +313,6 @@ public class UsPhoneAreaCode {
      * had not loaded or had been reclassified, which would make row identity depend on an attribute
      * of the row rather than on its key. The classification remains reachable through its accessor
      * for a caller that needs to distinguish the two baseline sub-lists. </p>
-     *
-     * <p>Assumptions: the test is a pattern match rather than an exact-class comparison, because a
-     * persistence provider may return a generated subclass of a mapped type and an exact-class
-     * comparison would then report two representations of one row unequal. </p>
      *
      * @param other the {@code Object} to compare against, which may be of any type and may be null
      * @return the {@code boolean} true when the argument is an area-code row carrying an equal area
@@ -414,11 +356,6 @@ public class UsPhoneAreaCode {
      * account numbers, card verification values and national identifiers has nothing to act on
      * here. Withholding either value would leave a reader of a failed address validation without the
      * two facts that explain it. </p>
-     *
-     * <p>Trade-offs: this rendering is for diagnostics and is not a published contract. The wire
-     * shape is owned by the transfer objects of {@code com.carddemo.reference.dto}, which compose it
-     * from the accessors above, so reordering or widening this string cannot disturb what a caller
-     * receives. </p>
      *
      * @return the {@code String} single-line rendering naming the type, the area code and the
      *     classification

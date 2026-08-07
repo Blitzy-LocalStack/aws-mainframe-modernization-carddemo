@@ -165,9 +165,21 @@ public class UsStateZipPrefix {
     //       for this lookup and for its two siblings. No architecture gate is affected, since the
     //       domain-isolation rule names AWS SDK, Spring Web and Servlet roots and the charter
     //       records that persistence mapping types are permitted here by design.
+    // WHY : Assumptions: the column is declared NOT UPDATABLE and no method reassigns it. The
+    //       identifier of a seeded lookup row is its identity rather than one of its attributes, and
+    //       here the whole row IS the key -- this type maps a table of one column, so reassigning the
+    //       combination would not modify a row, it would replace one row with a different one while
+    //       the provider believed it was updating the first. Withholding the write from both the
+    //       provider and the caller makes that impossible rather than merely discouraged.
+    // WHY : Refactoring Rationale: an earlier revision offered a public setter for this member, which
+    //       gave application code a second assembly route that was strictly weaker than the
+    //       constructor below -- it accepted a null the constructor refuses, and it accepted a call on
+    //       an already-persistent instance, which is the case that corrupts an identity rather than
+    //       merely building one badly. Removing it leaves one way to build this row and no way to
+    //       alter what it is.
     @Id
     @JdbcTypeCode(SqlTypes.CHAR)
-    @Column(name = "state_zip_cd", length = 4, nullable = false)
+    @Column(name = "state_zip_cd", length = 4, nullable = false, updatable = false)
     private String stateZipCd;
 
     /**
@@ -210,16 +222,6 @@ public class UsStateZipPrefix {
      */
     public String getStateZipCd() {
         return stateZipCd;
-    }
-
-    /**
-     * Replaces the state and postal-prefix combination this row holds.
-     *
-     * @param stateZipCd the combination to store, a {@code String} of four characters made of a
-     *     two-letter state code followed by the two leading digits of a postal code
-     */
-    public void setStateZipCd(String stateZipCd) {
-        this.stateZipCd = stateZipCd;
     }
 
     /**

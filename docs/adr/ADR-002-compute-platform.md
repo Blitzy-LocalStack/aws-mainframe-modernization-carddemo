@@ -23,24 +23,21 @@
   [The glue tier is bounded by role, not by count](#the-glue-tier-is-bounded-by-role-not-by-count)
   so that "glue only" stays a checkable claim. One platform, three provisioning
   shapes.
-- **Refactoring Rationale.** An earlier revision of this record said "the eight
-  service deployables" and reasoned about eight always-on tiers throughout. That
-  did not match what the environment roots compose, and the mismatch inflated
-  every count and every cost figure that followed from it. What the roots
-  actually build is set out in [Decision](#decision) below and read from
-  `local.online_services` and `local.workloads` in
-  [`infra/envs/dev/main.tf`](../../infra/envs/dev/main.tf): **nine** workloads
-  receive a task definition, **seven** of them receive a service, a target group
-  and autoscaling, and **two** — batch-service and the data-migration ETL — receive
-  a task definition and nothing else, because nothing about them runs between
-  invocations.
-- **Refactoring Rationale.** The same bullet also used to bound the glue tier at
-  "three of the eleven states, and nothing else". The inventory further down
-  contradicts it: two of the five functions are invoked from outside the chain
-  altogether and two of the in-chain functions carry a second duty, so a count of
-  chain states is not a count of functions. The bound is therefore stated by ROLE
-  and evidenced by that inventory, which is a claim a reader can check, rather
-  than by a number that the record itself refutes.
+- Assumptions: Every count and cost figure below is read from what the
+  environment roots actually compose — `local.online_services` and
+  `local.workloads` in
+  [`infra/envs/dev/main.tf`](../../infra/envs/dev/main.tf) — rather than from the
+  number of service modules. **Nine** workloads receive a task definition,
+  **seven** of them receive a service, a target group and autoscaling, and **two**
+  — batch-service and the data-migration ETL — receive a task definition and
+  nothing else, because nothing about them runs between invocations. Reasoning from
+  eight always-on tiers instead inflates every figure that follows.
+- Refactoring Rationale: The glue tier is bounded by ROLE and evidenced by the
+  inventory below, never by a count of chain states, because the two are different
+  quantities: two of the five functions are invoked from outside the chain
+  altogether and two of the in-chain functions carry a second duty. A role boundary
+  is also a claim a reader can check against the Terraform, where a count goes
+  stale the moment an operational function is added.
 - **Scope of this record.** The compute substrate, and nothing else. The
   language and runtime belong to [ADR-001](ADR-001-language-and-runtime.md), the
   datastore to [ADR-003](ADR-003-datastore-targets.md), the queues to
@@ -223,9 +220,10 @@ three against the baseline jobs whose behaviour they carry. Every other state in
 the chain — the ones that stage datasets, post transactions, accrue interest,
 back up, combine, generate statements and generate reports — is a Fargate task.
 
-The complete inventory is five functions carrying six duties. Two of the five are
-invoked from outside the chain entirely, and two of the in-chain functions carry a
-second duty, so a count of chain states is not a count of functions:
+The complete inventory is four functions carrying six duties. All four are declared
+in the environment roots and nowhere else; one of the four is invoked from outside
+the chain entirely, and two of the in-chain functions carry a second duty, so a
+count of chain states is not a count of functions:
 
 | Function | Declared in | Duty |
 |---|---|---|
@@ -233,7 +231,6 @@ second duty, so a count of chain states is not a count of functions:
 | `resume` | each environment root | Chain state 11 — clears the flag; **also** the target of the bracket-finalizer rule (`aws_cloudwatch_event_rule.daily_finalizer`), which releases the flag when an execution ends FAILED, TIMED\_OUT or ABORTED without reaching state 11 |
 | `database_admin` | each environment root | Chain state 10 — runs `ANALYZE`; **also** invoked once at apply time to run the schema-and-role bootstrap transactionally |
 | `dataset_retention` | each environment root | Not a chain state — triggered by object creation in the dataset bucket to enforce generation retention |
-| `rotation` | [`infra/modules/secrets`](../../infra/modules/secrets) | Not a chain state — Secrets Manager credential rotation |
 
 Two clarifications the inventory earns. The maintenance statement is plain
 `ANALYZE`, not `VACUUM ANALYZE`: the Data API wraps a statement in a transaction
@@ -243,8 +240,79 @@ Cognito module is **not** a Lambda despite the shape of its name — it runs as 
 local provisioner at apply time — so it is absent from the table on purpose.
 
 What makes the claim hold is the role boundary, not the number: not one of these
-five holds a connection pool for request serving, and not one of them carries a
+four holds a connection pool for request serving, and not one of them carries a
 batch step's work. That is the whole content of "glue only".
+
+Refactoring Rationale: a fifth row named `rotation`, attributed to
+[`infra/modules/secrets`](../../infra/modules/secrets), stood in the table above
+and has been removed, together with the "five functions" count and the claim that
+two of them ran outside the chain. **No rotation function exists anywhere in this
+package.** That module implements no rotation and says so at length in its
+[`variables.tf`](../../infra/modules/secrets/variables.tf), which records that its
+rotation input is a pass-through hook and closes with the instruction not to read
+the presence of the variable as a claim that rotation ships working; both
+environment roots leave that hook null; and both roots leave the observability
+module's `rotation_lambda_function_names` at its empty default precisely so that no
+alarm is created for a function that is not there. The row was the only artifact in
+the repository asserting the opposite, and it asserted it in the record a reader
+consults to learn what the compute tier contains — which is the worst place for it,
+because a control listed as delivered stops being looked for.
+
+### Credentials are static, and the re-issue procedure is the compensating control
+
+The consequence of the paragraph above has to be stated plainly rather than left as
+an absence: **the eight service database credentials do not rotate.** Each is
+generated at apply time by an ephemeral `random_password` and written straight into
+Secrets Manager through a write-only argument, so no value reaches Terraform state
+— that part of the design is intact and is what
+[ADR-008](ADR-008-security-and-identity.md) relies on. What is missing is any
+schedule that replaces the value afterwards, so a credential's lifetime is the
+lifetime of the stack unless an operator intervenes.
+
+Re-issuing is a single deliberate action, and it is deliberate rather than
+automatic. It is also **all-or-nothing**: the trigger is one literal shared by every
+entry, so a re-issue replaces all eight credentials together and there is no
+per-role variant.
+
+1. Advance `secret_string_wo_version` in
+   [`infra/modules/secrets/main.tf`](../../infra/modules/secrets/main.tf) from its
+   current literal. That is the only trigger: a write-only argument is re-sent to the
+   provider only when its paired version number changes, so an ephemeral generator
+   producing fresh bytes on an unrelated plan does **not** rewrite a stored
+   credential. The literal is pinned rather than exposed as an input on purpose, and
+   the module records the reason at its point of use — a module cannot tell a
+   deliberate increment from an accidental one, and an accidental one would replace
+   every live credential at once.
+2. `terraform apply` the environment root. Eight new values are generated ephemerally
+   and written as new secret versions; each previous version remains staged, so a
+   rollback needs no regeneration. No credential value is typed by an operator and
+   none is committed.
+3. Roll every ECS service, so that tasks holding a pool opened under a previous value
+   re-resolve it. The pool is opened at task start, so a task is the unit of adoption.
+4. Confirm no previous version is still referenced before allowing it to be removed by
+   the recovery window.
+
+Risk accepted, explicitly. A static credential's exposure window is unbounded in
+time, so a value disclosed and not noticed stays usable until step 1 is performed —
+and step 1 is a reviewed source edit rather than a parameter change, which raises the
+friction of the remedy at the same time as it protects against an accidental mass
+replacement. Three things bound the consequence rather than the window: the credential admits
+only a PostgreSQL session, and the cluster sits in isolated subnets with no
+internet route, so possession of the value is not sufficient to reach the database
+from outside the VPC; each of the eight roles is scoped to one schema, so one
+disclosed credential is not eight; and the value is never in Terraform state, so the
+state file — the artifact most likely to be copied to a workstation — does not
+carry it. Alternatives Considered: shipping a rotation function inside the secrets
+module, which is what an earlier revision of that module actually did. It was
+removed there for a reason recorded at its point of use — it pulled eight inputs
+into the module's contract that existed only to serve a function the module has no
+remit to own, and it required a third Terraform provider to build the deployment
+package — and re-adding it here would recreate that coupling to close a window
+that the two structural bounds above already narrow. Trade-offs: the accepted cost
+is a manual step in a runbook rather than a schedule in code, and the honest
+statement of that cost is this section. A deployment that requires scheduled
+rotation supplies a function ARN to the pass-through hook the secrets module already
+exposes; nothing in this package has to change for it to take effect.
 
 Refactoring Rationale: an earlier revision of this record said "three of the
 eleven states in the nightly chain, and nothing else". The clause was false in two
@@ -458,9 +526,8 @@ group's health is the service's health, replaced. That health block is declared 
 and is created only when a load balancer is attached, which is the same condition
 that creates the service at all.
 
-Refactoring Rationale: an earlier revision of this fact said the image's own
-`HEALTHCHECK` was a **second ECS health signal** that caused the service to
-replace a task. That was wrong on the mechanism. ECS acts on a **task-definition**
+Assumptions: the image's own `HEALTHCHECK` is **not** an ECS health signal, and
+reading it as one mistakes the mechanism. ECS acts on a **task-definition**
 `healthCheck`, and this module deliberately declares none — the rationale is
 recorded at the container definition itself: the command a container health check
 runs must exist inside the image, only each Dockerfile knows what its pinned base
@@ -735,15 +802,13 @@ service's `prod` pool against the effective `prod` ceiling of 4 tasks and each
 | batch (1 task, no autoscaling) | 4 × 1 = 4 | 4 × 1 = 4 |
 | **Tier total** | **56** | **500** |
 
-Refactoring Rationale: an earlier revision quoted the module defaults as though
-they were the deployed bounds. That is an error that stays invisible until it
-matters — it overstates `dev`'s floor and both ceilings, so a reader sizing the
-database against this record, or carrying a figure into an
-[ADR-003](ADR-003-datastore-targets.md) capacity conversation, would have
-provisioned for a scale-out that cannot happen while still not knowing what the
-real one is. A later revision corrected the bounds but quoted only the single
-largest product — 10 in `dev` and 80 in `prod` — and the per-service products,
-which are the numbers that actually have to fit together, were absent altogether.
+Assumptions: the module DEFAULTS are not the deployed bounds, and quoting them as
+though they were is an error that stays invisible until it matters — it overstates
+`dev`'s floor and both ceilings, so a reader sizing the database against this record,
+or carrying a figure into an [ADR-003](ADR-003-datastore-targets.md) capacity
+conversation, would provision for a scale-out that cannot happen while still not
+knowing what the real one is. Quoting only the single largest product is not enough
+either: the per-service products are the numbers that have to fit together.
 Trade-offs: naming the module value and both effective values in one table, and
 then every service's product in a second, is more numbers than a bound and a
 maximum would be. That is the cost of keeping the module's own contract visible
@@ -801,36 +866,33 @@ deployed environment.
 ## Additional Decisions Recorded Here
 
 AAP §0.5.1.13 assigns two further decisions to this record by name, and §0.6.1.1
-closes its resilience discussion by directing the reader here. Each is recorded
-below in its own right, because each is a non-obvious choice with an alternative
-that looks reasonable until the fact against it is known.
+closes its resilience discussion by directing the reader here. A third is
+recorded below as well: the dependency-compatibility decision behind the
+`spring-cloud-aws.version` pin, which belongs with the other two because it is
+the same kind of choice — a version fact that is invisible in a green build.
+Each is recorded in its own right, because each is a non-obvious choice with an
+alternative that looks reasonable until the fact against it is known.
 
 ### 1. Container base image pin
 
-Every base image named below is pinned to an exact tag rather than a floating
-one, and each of the **nine Dockerfiles that exist today** additionally pins the
-immutable content digest alongside its tag, so a rebuild resolves the same bytes
-even if a tag is republished. The **tenth** image — the browser SPA — has no
-Dockerfile authored yet, so for that one the two rows below record the tags the
-image will be built from rather than a pin any file enforces; the paragraph after
-the table states exactly where that stands and why it is not counted.
+Every base image named below is pinned to an exact tag rather than a floating one,
+and **all ten Dockerfiles** additionally pin the immutable content digest alongside
+the tag, so a rebuild resolves the same bytes even if a tag is republished.
 
 | Stage | Image | Used by |
 |---|---|---|
 | Java runtime | `public.ecr.aws/amazoncorretto/amazoncorretto:21.0.12-al2023-headless` | The eight service images |
 | Java build | `maven:3.9.16-amazoncorretto-21-al2023` | The build stage of the same eight |
-| SPA build | `node:22.23.1-alpine` | The user-interface image — **Dockerfile not yet authored**, see below |
-| SPA runtime | `nginx:1.30.4-alpine` | The user-interface image — **Dockerfile not yet authored**, see below |
+| SPA build | `node:22.23.1-alpine` | The build stage of the user-interface image |
+| SPA runtime | `nginx:1.30.4-alpine` | The runtime stage of the user-interface image |
 | ETL | `python:3.13.14-slim-trixie` | The data-migration image |
 
-Four properties of that table are decisions rather than defaults, and one row
-of it is a forward reference rather than an enforced pin.
+Four properties of that table are decisions rather than defaults.
 
 **There is no Alpine variant of the Corretto image, and assuming one costs a
 build.** Alternatives Considered: `21-alpine` is the tag a reader would reach for
-to shrink the runtime layer, and an earlier draft of the migration plan named
-exactly that. **That tag does not exist and would have failed every image
-build.** The repository publishes only `-al2` and `-al2023` tags, carried with
+to shrink the runtime layer, and it is the tag the migration plan names.
+**That tag does not exist and fails every image build.** The repository publishes only `-al2` and `-al2023` tags, carried with
 `headful`, `headless`, `generic` and `jdk` suffixes; there is no Alpine or musl
 variant at all, and the highest 21.x available at the time of verification is
 `21.0.12`. The `-headless` suffix is the size reduction that *is* available here,
@@ -861,40 +923,26 @@ not raise an error — it produces a plausible number that is wrong. The
 per-field decoding rule this depends on belongs to
 [`data-migration/README.md`](../../data-migration/README.md).
 
-**The tenth Dockerfile does not exist yet, and this record scopes its claim to
-the nine that do rather than counting it.** All nine are authored and every one
-carries a digest beside its tag: the eight service images —
+**Every digest is the multi-platform INDEX digest, not a platform manifest
+digest.** Assumptions: the two are different values for the same tag, and
+`docker images` reports the second while `docker buildx imagetools inspect`
+reports the first. Pinning a platform manifest would resolve on one builder
+architecture and fail on the other, so the index digest is the only form that
+lets a linux/amd64 and a linux/arm64 builder both reproduce the image. The ten
+files are the eight service images —
 [`services/auth-service/Dockerfile`](../../services/auth-service/Dockerfile) and
-its seven siblings, each pinning both the Maven build tag and the Corretto
-runtime tag — and the ETL image
-([`data-migration/Dockerfile`](../../data-migration/Dockerfile)), which pins its
-one tag in both stages. `ui/Dockerfile` is written here as a plain path rather
-than a link because there is no file to link to. Its two tags are nevertheless
-already committed elsewhere, which is why the table can name them: `ui/nginx.conf`
-records `nginx:1.30.4-alpine` and `ui/tsconfig.json` records
-`node:22.23.1-alpine`, and
-[`.github/workflows/deploy.yml`](../../.github/workflows/deploy.yml) already
-lists `ui/Dockerfile` in the build table it iterates — so the path used here is
-the path that file will occupy, not a guess at one.
+its seven siblings, each pinning both the Maven build tag and the Corretto runtime
+tag — the ETL image
+([`data-migration/Dockerfile`](../../data-migration/Dockerfile)), which pins its one
+tag in both stages, and the browser SPA image
+([`ui/Dockerfile`](../../ui/Dockerfile)), which pins the Node build tag and the
+nginx runtime tag.
 
-Refactoring Rationale: the claim opening this section used to be universal —
-every deployable pinned, the Dockerfiles pinning the digest — while this
-paragraph simultaneously admitted one of the ten was absent. A record cannot
-assert a property of ten artifacts and then except one of them four paragraphs
-later: a reader auditing digest pinning takes the count on trust, finds the gap
-independently, and then has to re-verify everything else the section says.
-Scoping the claim to nine and naming the tenth explicitly makes the audit finish
-where it starts.
-
-Trade-offs: the alternative was to author `ui/Dockerfile` here so that the
-universal claim became true. It was declined because the user-interface source
-tree is still partial — `ui/src` holds the application shell, the routing and the
-three card screens, and `npm run build` does not yet succeed across it — so the
-file would be an image definition whose build cannot be exercised, and an
-unbuildable artifact committed to the repository is a worse defect than an
-accurately-scoped claim. Authoring it belongs with the remainder of the UI tree,
-where the build can be run; when it lands, the count in this section moves from
-nine to ten and the two rows above lose their qualifier.
+**The SPA runtime is the stable nginx branch rather than mainline.**
+Alternatives Considered: mainline 1.31.x, which carries newer features. Declined
+because a static asset server needs none of them and stable receives the longer
+patch window, so the branch that changes least is the one serving a bundle that
+changes on every deployment.
 
 **Private registry references are placeholders, and that is deliberate.** The
 public base images above are named verbatim because they are public registry
@@ -918,8 +966,10 @@ echo "<aws-account-id>.dkr.ecr.<region>.amazonaws.com/<repository>:<tag>"
 
 ### 2. No external resilience library
 
-**Decision: this build declares no external resilience library and no CardDemo
-class uses one** — neither `resilience4j` nor the superseded `spring-retry`.
+**Decision: no resilience library is added at all** — neither
+`io.github.resilience4j:resilience4j-spring-boot3` nor the superseded
+`org.springframework.retry:spring-retry` is adopted, declared or used by any
+CardDemo class. This is AAP §0.6.1.1 verbatim and this record does not reopen it.
 
 The capability that would have justified one is already on the classpath. Spring
 Framework 7, which arrives inside the Spring Boot parent chosen in
@@ -929,58 +979,60 @@ framework core: `@Retryable`, `@ConcurrencyLimit` and a programmatic
 `excludes`, `maxRetries`, `delay`, `jitter`, `multiplier` and `maxDelay`. Adding
 a library would duplicate a capability already present and would have to be
 re-evaluated at every framework upgrade.
+`io.github.resilience4j:resilience4j-spring-boot3` is additionally rejected
+because its published artifact targets the previous Spring Boot generation.
 
-**The decision is about declaration and use, not about the classpath, and the
-distinction is recorded because an earlier revision of this record stated the
-stronger claim that "no external resilience library is added to this build at
-all".** That reading is measurably false. The resolution path is
+**The decision is enforced in two places rather than asserted once.**
+
+1. `services/pom.xml` declares a `maven-enforcer-plugin` `bannedDependencies`
+   rule over both coordinates with `searchTransitive` set to `false`, so a module
+   that DECLARES either library fails at `validate` — before compilation, in the
+   same execution that already pins the toolchain and bans dynamic versions.
+2. Rule **A5** of the ArchUnit gate in the shared kernel
+   ([`LayeringRulesTest`](../../services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java))
+   fails the build if any class under `com.carddemo` depends on
+   `org.springframework.retry..` or `io.github.resilience4j..`, and that gate runs
+   in every module of the reactor rather than only in the module declaring it.
+
+Together those cover the two ways a library gets adopted: named in a manifest, or
+imported in source. The day a service reaches for either one the build stops,
+instead of a reviewer having to notice.
+
+**Assumptions: one transitive copy of `spring-retry` is on the classpath and is
+neither adopted nor removable.** The resolution path is
 `io.awspring.cloud:spring-cloud-aws-starter-sqs:4.1.0` →
 `io.awspring.cloud:spring-cloud-aws-sqs:4.1.0` →
-`org.springframework.retry:spring-retry:2.0.13`, at **compile** scope, in **four
-of the nine modules** — account, reference, batch and authorization services,
-being the four that consume the SQS starter. That artifact references
-`org/springframework/retry` from six of its own classes, among them
+`org.springframework.retry:spring-retry:2.0.13`, at **compile** scope, in the four
+modules that consume the SQS starter — account, reference, batch and authorization
+services. It belongs to the AWS integration and not to this project: that artifact
+references `org/springframework/retry` from six of its own classes, among them
 `AbstractPollingMessageSource`, `ContainerOptions`, `ContainerOptionsBuilder` and
 `AbstractPollingMessageSource$NoOpsBackOffContext`. The command that shows it is:
 
 ```bash
 # WHAT: list every path by which Spring Retry reaches this reactor.
-# WHY : the claim in this record is a claim about the dependency graph, so it is
-#       stated with the command that checks it rather than left to be trusted.
+# Assumptions: this is a claim about the dependency graph, so it is stated with the
+#   command that checks it rather than left to be trusted.
 mvn -f services/pom.xml dependency:tree \
     -Dincludes=org.springframework.retry:spring-retry
 ```
 
-Alternatives Considered: **excluding `spring-retry` from the SQS starter**, so
-that the stronger claim would become true as written. Rejected on that same
+Alternatives Considered: **excluding `spring-retry` from the SQS starter**, so the
+artifact would be absent from the classpath entirely. Rejected on that same
 measurement: those six classes implement the listener container's own polling
 back-off, so the exclusion would delete a type the integration loads at run time
-and convert a documentation defect into a `NoClassDefFoundError` that appears
-only once a queue is being polled. The wording was corrected instead of the
-dependency graph, because the dependency is correct and the sentence was not.
+and turn a clean dependency report into a `NoClassDefFoundError` that appears only
+once a queue is being polled. The enforcer rule is therefore scoped to DIRECT
+declarations deliberately — `searchTransitive=false` — because banning the
+coordinate transitively would ban the SQS starter with it.
 
-**What replaces the overstated claim is a narrower one that is enforced rather
-than asserted.** Rule **A5** of the ArchUnit gate in the shared kernel
-(`services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java`)
-fails the build if any class under `com.carddemo` depends on
-`org.springframework.retry..` or `io.github.resilience4j..`, and that gate runs
-in every module of the reactor rather than only in the module declaring it.
-Trade-offs: the guarantee is weaker than absence — a transitive copy remains on
-the classpath and an operator reading a dependency report will find it — and
-stronger than a document, because the day a service reaches for either library
-the build stops instead of a reviewer having to notice.
-
-Alternatives Considered: both candidates were named and rejected on checkable
-grounds, and the rejection is recorded at the point of use as well as here — in
-the dependency rationale in [`services/pom.xml`](../../services/pom.xml), and as
-item 9 of
-[`docs/CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md),
-where it serves as a worked example of a documented non-obvious choice.
-`io.github.resilience4j:resilience4j-spring-boot3` is rejected because its
-published artifact targets the previous Spring Boot generation;
-`org.springframework.retry:spring-retry` is rejected as superseded by the core
-relocation above. This record is the decision of record for both rejections; the
-other two locations restate it where a reader of that file needs it.
+Alternatives Considered: both candidates are rejected at the point of use as well
+as here — in the dependency rationale in
+[`services/pom.xml`](../../services/pom.xml), and as item 9 of
+[`docs/CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md), where
+it serves as a worked example of a documented non-obvious choice. This record is
+the decision of record for both rejections; the other two locations restate it
+where a reader of that file needs it.
 
 **Two API details are recorded because getting either wrong costs a debugging
 cycle**, and both differ from the shape a reader will find in an example written
@@ -1028,6 +1080,73 @@ give the same brevity with members a reader and a documentation gate can both
 see. It is grouped here with the other decisions to add nothing, and the
 rejection is recorded at its point of use in
 [`services/pom.xml`](../../services/pom.xml) beside the gate that forced it.
+
+### 3. Spring Cloud AWS runs one Boot minor ahead of what it is built against
+
+**Decision: `io.awspring.cloud` stays pinned at 4.1.0 under Spring Boot 4.1.0,
+the mismatch is stated rather than implied, and the combination is held to
+account by tests instead of by a claim.**
+
+The fact first, because it is checkable. `io.awspring.cloud:spring-cloud-aws-dependencies:4.1.0`
+inherits `org.springframework.cloud:spring-cloud-dependencies-parent:5.0.2`,
+whose own parent `spring-cloud-build:5.0.2` declares `spring-boot.version` as
+**4.0.7**. This reactor's parent is Boot **4.1.0**, pinned by AAP §0.6.1.1 and
+not negotiable here. So the starters this system depends on for its queue
+consumers and for every runtime endpoint lookup are running one Boot minor ahead
+of the release their publisher builds and tests against. A compiling build says
+nothing about that, because no module here compiles against the affected types:
+the risk is entirely at startup, where a relocated Boot type surfaces as a
+`NoClassDefFoundError`, a changed bean signature as an unsatisfied dependency,
+and — worst of the three because it is silent — a moved configuration-data
+service-provider interface as a `spring.config.import` location that resolves to
+nothing at all.
+
+**Alternatives Considered: pin a Spring Cloud AWS release built against Boot
+4.1. There is none to pin.** 4.1.0 is the newest release of the line, and every
+release of the line is built against Boot 4.0.x, so this is not a choice between
+a matched pair and a mismatched one.
+
+**Alternatives Considered: withdraw the starters and hand-wire AWS SDK clients.**
+Rejected. It would remove the configuration-import mechanism that makes every
+endpoint and credential a runtime lookup rather than a committed value — the
+mechanism [ADR-008](ADR-008-security-and-identity.md) relies on for "no secrets
+in source" — and the listener container the authorization and inquiry consumers
+are built on, replacing a published integration with bespoke wiring that nothing
+verifies. That trades a stated, tested risk for an unstated, untested one.
+
+**What makes the acceptance legitimate is that it is verified, at two levels.**
+[`AwsIntegrationStartupTest`](../../services/account-service/src/test/java/com/carddemo/account/config/AwsIntegrationStartupTest.java)
+runs on every build with no network and no container: it asserts that the SQS,
+Parameter Store and Secrets Manager auto-configurations produce their client,
+template and listener-container-factory beans under this Boot, and that the
+`ConfigDataLocationResolver` and `ConfigDataLoader` service-provider keys still
+name interfaces this Boot declares and that the AWS implementations behind them
+still implement those interfaces. That last assertion exists for the silent
+failure mode above.
+[`AwsStarterRuntimeIT`](../../services/account-service/src/test/java/com/carddemo/account/config/AwsStarterRuntimeIT.java)
+goes further where a container runtime is available: it seeds a real emulator,
+imports a parameter path through `spring.config.import=aws-parameterstore:` and
+asserts the value reaches the environment, then publishes through `SqsTemplate`
+and asserts an `@SqsListener` method receives it. Both were run against the
+pinned emulator release and both pass.
+
+**Trade-offs: the integration test is opt-in, and that is a real limitation
+rather than a convenience.** The pinned emulator release refuses to start without
+a licence token — it exits with status 55 — so the test skips when
+`LOCALSTACK_AUTH_TOKEN` is absent, and `CARDDEMO_REQUIRE_LOCALSTACK=1` turns that
+skip into a failure for a run that meant to exercise the layer. This mirrors the
+convention the repository's existing COBOL harness already applies to the same
+problem, so one rule governs both. What is given up is that a pipeline without
+emulator credentials verifies the startup half and not the endpoint half; what is
+kept is that such a pipeline reports honestly instead of appearing to verify
+something it skipped.
+
+**Risk — a Boot patch or minor upgrade could break an integration whose
+publisher has not built against it.** The mitigation is the pairing above: the
+failure lands on a test rather than on a deployment, and the property carrying
+the pin in [`services/pom.xml`](../../services/pom.xml) names both tests beside
+it so whoever raises the Boot version finds the obligation at the point of the
+edit.
 
 
 ## Consequences
@@ -1161,6 +1280,8 @@ that anything in the baseline was altered.
 
 **Authored artifacts this record cites.**
 [`services/pom.xml`](../../services/pom.xml) ·
+[`services/account-service/src/test/java/com/carddemo/account/config/AwsIntegrationStartupTest.java`](../../services/account-service/src/test/java/com/carddemo/account/config/AwsIntegrationStartupTest.java) ·
+[`services/account-service/src/test/java/com/carddemo/account/config/AwsStarterRuntimeIT.java`](../../services/account-service/src/test/java/com/carddemo/account/config/AwsStarterRuntimeIT.java) ·
 [`services/batch-service/Dockerfile`](../../services/batch-service/Dockerfile) ·
 [`services/account-service/src/main/resources/application.yml`](../../services/account-service/src/main/resources/application.yml) ·
 [`infra/modules/ecs-service/variables.tf`](../../infra/modules/ecs-service/variables.tf) ·
@@ -1169,7 +1290,7 @@ that anything in the baseline was altered.
 [`infra/envs/prod/terraform.tfvars`](../../infra/envs/prod/terraform.tfvars) ·
 [`infra/README.md`](../../infra/README.md) ·
 [`data-migration/README.md`](../../data-migration/README.md) ·
-`ui/Dockerfile`
+[`ui/Dockerfile`](../../ui/Dockerfile)
 
 **Conventions.**
 [code documentation standard](../CODE_DOCUMENTATION_STANDARD.md) ·

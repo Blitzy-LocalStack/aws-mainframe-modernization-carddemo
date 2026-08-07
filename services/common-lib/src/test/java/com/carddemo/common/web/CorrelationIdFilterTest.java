@@ -31,6 +31,15 @@ class CorrelationIdFilterTest {
     private static final String PAN_SHAPED_ID = "4111111111111111";
 
     /**
+     * The same synthetic value written with the three separators this header admits.
+     *
+     * <p>Assumptions: it is named beside the contiguous form because the two are one value under the
+     * digit-counting rule, and an assertion that admitted one while refusing the other would be
+     * asserting the defect rather than the rule.</p>
+     */
+    private static final String SEPARATED_PAN_SHAPED_ID = "4111-1111-1111-11";
+
+    /**
      * Confirms a sixteen-digit correlation identity is refused rather than published, which is the
      * exposure this test exists to close: a conforming value reaches the logging context and therefore
      * every log line of the request.
@@ -157,6 +166,14 @@ class CorrelationIdFilterTest {
      * separators before counting, so both forms are refused and the echo contract is unchanged for
      * everything that is not a run of digits.</p>
      *
+     * <p>Assumptions: non-reflection is asserted against the WHOLE supplied value and its
+     * separator-stripped form, never against a short substring of it. The refusal body carries a
+     * freshly minted identity of twenty-two uppercase hexadecimal characters, whose alphabet includes
+     * every decimal digit, so any four-digit window of the supplied value occurs in it by chance on
+     * roughly one run in three thousand five hundred -- a flake that reports as a masking failure and
+     * sends a reader to the filter rather than to the assertion. Neither form asserted here can appear
+     * in a minted identity: one carries hyphens, and the other is a sixteen-digit run.</p>
+     *
      * @throws IOException if the mock chain reports one, which it does not
      * @throws ServletException if the mock chain reports one, which it does not
      */
@@ -164,7 +181,7 @@ class CorrelationIdFilterTest {
     @DisplayName("a separator-bearing identity of card-number digit count is refused")
     void separatedCardShapedIdentityIsRefused() throws IOException, ServletException {
         MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/accounts/11");
-        request.addHeader(CorrelationIdFilter.CORRELATION_ID_HEADER, "4111-1111-1111-11");
+        request.addHeader(CorrelationIdFilter.CORRELATION_ID_HEADER, SEPARATED_PAN_SHAPED_ID);
         MockHttpServletResponse response = new MockHttpServletResponse();
         RecordingChain chain = new RecordingChain();
 
@@ -172,7 +189,11 @@ class CorrelationIdFilterTest {
 
         assertThat(response.getStatus()).isEqualTo(400);
         assertThat(chain.invoked).isFalse();
-        assertThat(response.getContentAsString()).doesNotContain("4111");
+        assertThat(response.getContentAsString())
+                .doesNotContain(SEPARATED_PAN_SHAPED_ID)
+                .doesNotContain(PAN_SHAPED_ID);
+        assertThat(response.getHeader(CorrelationIdFilter.CORRELATION_ID_HEADER))
+                .isNotEqualTo(SEPARATED_PAN_SHAPED_ID);
     }
 
     /**

@@ -18,6 +18,8 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 import java.util.Objects;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 /**
  * One transaction type row of the {@code reference} schema: a two-character code, the description a
@@ -225,8 +227,28 @@ public class TransactionType {
     //       relationship read alike. The absent suffix at L5 is not an error in the baseline, which
     //       stands unmodified and keeps running; the divergence in identifier is recorded in
     //       docs/architecture/cobol-to-service-traceability.md.
+    // WHY : Refactoring Rationale: the JDBC type code is declared HERE and an earlier revision of this
+    //       file omitted it, which made this the one key in the package bound differently from the
+    //       column it maps. V1__reference.sql L106 declares type_cd CHAR(2), and without this
+    //       annotation the provider binds a String parameter as VARCHAR; PostgreSQL then compares a
+    //       blank-padded CHAR column against an unpadded VARCHAR parameter, which is a comparison
+    //       across two types rather than within one. The three sibling keys of this package all carry
+    //       the annotation, so the omission also made the package inconsistent with itself.
+    // WHY : Assumptions: the practical consequence is narrow but real and is worth naming rather than
+    //       asserting in the abstract. Every value this key carries today is exactly two characters,
+    //       so no padding difference arises and no lookup is currently wrong. What the annotation buys
+    //       is that a one-character code -- which the two-position column admits and would store as a
+    //       character followed by a blank -- is found by a lookup for that one character, and it lets
+    //       the index on a CHAR column be used without an implicit cast.
+    // WHY : Assumptions: the column is declared NOT UPDATABLE. The identifier of a seeded reference
+    //       row is its identity rather than one of its attributes: the two-character code is what a
+    //       category's foreign key at V1__reference.sql L267 points at, so changing it in place would
+    //       silently break every child row that references it. The provider is told not to write the
+    //       column on an update, which turns an attempt to reassign an identity into a no-op at the
+    //       database boundary rather than a corrupted relationship.
     @Id
-    @Column(name = "type_cd", length = 2, nullable = false)
+    @JdbcTypeCode(SqlTypes.CHAR)
+    @Column(name = "type_cd", length = 2, nullable = false, updatable = false)
     private String typeCd;
 
     // WHY : Assumptions: taken verbatim from V1__reference.sql, which declares
@@ -261,8 +283,18 @@ public class TransactionType {
     //       comparing that instead was rejected, because it checks only the members a caller chose
     //       to echo, so a column added to this table would fall silently outside the check, whereas
     //       a counter covers the whole row by construction.
+    // WHY : Refactoring Rationale: the column is declared NOT NULL here as well as in the migration,
+    //       and an earlier revision of this mapping omitted it. The omission was not inert. A mapping
+    //       that under-states nullability describes a column able to hold a value the schema forbids,
+    //       so any tool deriving a definition from this metadata -- a schema comparison, a test-time
+    //       creation, a documentation pass -- would emit a nullable column and disagree with the one
+    //       V1__reference.sql declares. Where that disagreement is actually read is worth stating
+    //       exactly rather than overstating: the production profile sets ddl-auto to none, so nothing
+    //       compares the two at start-up there, while src/test/resources/application-test.yml sets it
+    //       to validate specifically so a migration test asserts entity drift against the Flyway
+    //       output. The metadata and the migration now say the same thing under both.
     @Version
-    @Column(name = "version")
+    @Column(name = "version", nullable = false)
     private long version;
 
     /**
@@ -318,16 +350,6 @@ public class TransactionType {
      */
     public String getTypeCd() {
         return typeCd;
-    }
-
-    /**
-     * Replaces the two-character code this row is keyed by.
-     *
-     * @param typeCd the code to store in the {@code type_cd} column, of declared width two per
-     *     {@code app/cpy/CVTRA03Y.cpy} L5
-     */
-    public void setTypeCd(String typeCd) {
-        this.typeCd = typeCd;
     }
 
     /**

@@ -17,11 +17,19 @@ AAP section 0.4.4 names three shared shell elements, and `ui/src/layout/**`
 authors each once rather than repeating it across the 21 screen routes. Their
 consumers differ by design, so the table records which composes which:
 
-| Shared element                | Composed by      | State                                              |
-| ----------------------------- | ---------------- | -------------------------------------------------- |
-| `MessageBand`                 | each screen body | wired by `cardDetail`, `cardList` and `cardUpdate` |
-| `ScreenHeader`                | the app shell    | awaiting `AppShell.tsx`                            |
-| `PfKeyBar` (with `usePfKeys`) | the app shell    | awaiting `AppShell.tsx`                            |
+| Shared element                | Composed by      | State                              |
+| ----------------------------- | ---------------- | ---------------------------------- |
+| `MessageBand`                 | each screen body | wired by all four authored screens |
+| `ScreenHeader`                | each screen body | wired by all four authored screens |
+| `PfKeyBar` (with `usePfKeys`) | each screen body | wired by all four authored screens |
+
+The four authored screens are `signon`, `cardList`, `cardDetail` and `cardUpdate`.
+Each composes all three elements, and
+`ui/src/screens/cardScreenShell.test.tsx` plus
+`ui/src/screens/signon/signon.test.tsx` assert that per screen -- the header band
+naming that screen's own transaction and program, and the key bar painting exactly
+the keys its mapset paints. The remaining 17 routes are not authored; each will
+compose the same three when it lands.
 
 `MessageBand` is composed per screen because the message it carries is that
 screen's own outcome: it is the browser form of terminal row 23, which each
@@ -32,14 +40,49 @@ exactly one band and hands it text plus a severity, and no screen renders a raw
 the reserved-space behaviour that keeps a message appearing or clearing from
 moving the content around it.
 
-`ScreenHeader` and `PfKeyBar` are deliberately **not** composed by a screen.
-Their content is constant across the mapsets -- the transaction and program slots
-with the two shared titles and the paint-time clock on row 1 to 3, and the
-function-key legend on row 24 -- so composing either inside a screen body would
-repeat it 21 times and contradict the split the AAP fixes. Their single intended
-consumer is `AppShell.tsx`, which is not yet authored; each module's own header
-records that expectation, so their present lack of an importer is the documented
-composition order rather than dead code.
+`ScreenHeader` and `PfKeyBar` are composed **per screen**, for the same reason
+`MessageBand` is: their content is per-screen data, not a constant.
+
+Refactoring Rationale: this section previously said the opposite -- that both were
+deliberately withheld from screens because their content is "constant across the
+mapsets", pending an `AppShell.tsx` that would compose them once. That premise does
+not hold, and the components' own interfaces are the first evidence against it:
+`ScreenHeaderProps` requires `transactionId` and `programName`, and `PfKeyBarProps`
+requires the `keys` bindings and an `onInvoke` callback. None of those four values
+exists at shell level. The mapsets are the second and decisive evidence -- row 24
+is **not** a shared literal:
+
+| Mapset    | Legend literal it paints  |
+| --------- | ------------------------- |
+| `COSGN00` | `ENTER=Sign-on  F3=Exit`  |
+| `COMEN01` | `ENTER=Continue  F3=Exit` |
+| `COACTUP` | `F12=Cancel`              |
+
+So a single shell-level bar could not render any screen's legend correctly, and
+`usePfKeys` is built for the per-screen shape it actually has: a screen declares
+which attention identifiers it handles, and the hook returns the bindings the bar
+renders. Composing at shell level was never reachable from this API. The consequence
+recorded honestly: `AppShell.tsx` is not authored and is **no longer required** for
+either element.
+
+The four legends the authored screens paint show why the per-screen shape is the
+only workable one -- each is read from that screen's own mapset, and one screen
+paints two legend fields rather than one:
+
+| Screen       | Mapset    | Legend the mapset paints            | Note                                                                                          |
+| ------------ | --------- | ----------------------------------- | --------------------------------------------------------------------------------------------- |
+| `signon`     | `COSGN00` | `ENTER=Sign-on  F3=Exit`            | two keys                                                                                      |
+| `cardList`   | `COCRDLI` | `  F3=Exit F7=Backward  F8=Forward` | no Enter legend, though the program accepts Enter; `COLOR=TURQUOISE`, not the yellow majority |
+| `cardDetail` | `COCRDSL` | `ENTER=Search Cards  F3=Exit`       | two keys                                                                                      |
+| `cardUpdate` | `COCRDUP` | `ENTER=Process F3=Exit`             | plus a second, `ATTRB=(ASKIP,DRK)` field carrying `F5=Save F12=Cancel`                        |
+
+Two of those are worth calling out because they are the cases a uniform bar would
+get wrong. `cardList` accepts Enter but paints no legend for it, so its Enter
+binding carries an empty label -- which `usePfKeys` defines as a keyboard-only
+handler and `PfKeyBar` renders no control for. `cardUpdate`'s second legend field
+is non-display until the program reaches its confirmation state, so that screen
+registers the save key only once edits have been validated and gives the cancel key
+a label only at the same point, even though the key itself is accepted earlier.
 
 ## Prerequisites
 
@@ -58,7 +101,19 @@ cp ui/.env.example ui/.env
 
 Populate `VITE_API_BASE_URL`, `VITE_CORRELATION_ID_HEADER`, and
 `VITE_API_TIMEOUT_MS`. The SPA contains no Cognito client secret and does not
-authenticate directly with the user pool.
+authenticate directly with the user pool: it posts credentials to
+`auth-service`'s published sign-on operation and holds only the tokens that
+operation returns.
+
+Assumptions: **`VITE_API_BASE_URL` configures a local development server only.**
+Vite inlines it at build time, so it cannot carry a deployed environment's
+endpoint -- that endpoint is created by the same infrastructure apply that
+provisions the environment, which runs after the bundle is built. A deployed
+environment is configured instead by a `config.json` document published beside
+the bundle and read at start-up, and the published document takes precedence
+wherever it exists. See `ui/src/api/runtimeConfig.ts`, which records the full
+reasoning, and note that the value must include the `/api/v1` prefix in either
+form because operations are addressed relatively by the client.
 
 ## Develop
 

@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.carddemo.common.codec.CopybookLayout;
 import com.carddemo.common.codec.FixedWidthCodec;
+import com.carddemo.common.validation.DateEditValidator;
 import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigDecimal;
@@ -44,6 +45,26 @@ class ReferenceFixtureContractTest {
 
     /** The declared record length of the date-conversion request payload. */
     private static final int REQUEST_RECLEN = 1000;
+
+    /**
+     * The date the refused-date scenario is named for, February 29 in a year that has no February 29.
+     *
+     * <p>Assumptions: the refusal is a property of the calendar and not of any caller's tolerance, so
+     * this vector reaches the same outcome wherever the rule is invoked. Its scenario README records why
+     * a range vector such as {@code 1582-10-14} was not used instead: that one decodes to the
+     * unsupported-range outcome, and four baseline call sites across two programs forgive precisely that
+     * message number, so the scenario's expected outcome would depend on which caller asked.
+     */
+    private static final String REFUSED_DATE = "2023-02-29";
+
+    /**
+     * The control vector, the same month and day in a year that does have a February 29.
+     *
+     * <p>Assumptions: it differs from {@link #REFUSED_DATE} at exactly one byte, the final digit of the
+     * year, so an assertion that the two reach different severities cannot be satisfied by a rule that
+     * merely rejects the shape {@code NNNN-NN-NN} or that answers one fixed outcome for every input.
+     */
+    private static final String ACCEPTED_NEIGHBOUR_DATE = "2024-02-29";
 
     /**
      * Reads one fixture from the test classpath.
@@ -129,9 +150,18 @@ class ReferenceFixtureContractTest {
     private static Stream<Arguments> populatedFixtures() {
         return Stream.of(
                 Arguments.of("reference_list/happy_path/trantype.txt", REFERENCE_RECLEN, 7),
+
+                // WHY : Assumptions: this entry and the delete-restrict one below name the EXACT
+                //       scenario paths of two category files that this suite previously read only
+                //       through their reference_update/happy_path sibling. A fixture nothing loads by
+                //       its own path can be deleted or corrupted with the whole suite staying green,
+                //       so enrolling the paths is what makes each file's bytes load-bearing.
+                Arguments.of("reference_list/happy_path/trancatg.txt", REFERENCE_RECLEN, 18),
                 Arguments.of("reference_update/happy_path/trantype.txt", REFERENCE_RECLEN, 8),
                 Arguments.of("reference_update/happy_path/trancatg.txt", REFERENCE_RECLEN, 18),
                 Arguments.of("reference_update/delete_restricted_by_category/trantype.txt",
+                        REFERENCE_RECLEN, 2),
+                Arguments.of("reference_update/delete_restricted_by_category/trancatg.txt",
                         REFERENCE_RECLEN, 2),
                 Arguments.of("disclosure_group/happy_path/discgrp.txt", DISCGRP_RECLEN, 1),
                 Arguments.of("disclosure_group/default_fallback/discgrp.txt", DISCGRP_RECLEN, 34),
@@ -139,6 +169,8 @@ class ReferenceFixtureContractTest {
                 Arguments.of("batch_reference_update/invalid_type_soft_reject/trtype-update.txt",
                         BATCH_RECLEN, 2),
                 Arguments.of("date_conversion/happy_path/date-request.txt", REQUEST_RECLEN, 1),
+                Arguments.of("date_conversion/invalid_date_rejected/date-request.txt",
+                        REQUEST_RECLEN, 1),
                 Arguments.of("date_conversion/request_payload_ignored/date-request.txt",
                         REQUEST_RECLEN, 1));
     }
@@ -243,7 +275,16 @@ class ReferenceFixtureContractTest {
         List<byte[]> types = records(
                 bytes("reference_update/delete_restricted_by_category/trantype.txt"),
                 REFERENCE_RECLEN);
-        List<byte[]> categories = records(bytes("reference_update/happy_path/trancatg.txt"),
+
+        // WHY : Refactoring Rationale: the child rows are now read from THIS scenario's own
+        //       trancatg.txt rather than from reference_update/happy_path/trancatg.txt. The scenario
+        //       ships two category rows of its own, and reading the sibling's eighteen instead left
+        //       those two loaded by nothing: they could be emptied or repointed at another type and
+        //       the restrict assertion would still pass on the sibling's rows. Reading the local pair
+        //       also narrows what the case proves to what the scenario actually carries -- exactly
+        //       two children of the referenced type and none of the unreferenced one.
+        List<byte[]> categories = records(
+                bytes("reference_update/delete_restricted_by_category/trancatg.txt"),
                 REFERENCE_RECLEN);
 
         String referenced = decode(types.get(0), "TRANTYPE").get("TRAN-TYPE").toString();
@@ -258,7 +299,104 @@ class ReferenceFixtureContractTest {
         //       to the first code, and only refusable-then-permitted if none refers to the second.
         //       Both halves are asserted against the category file rather than assumed from the
         //       scenario's name, because a name cannot go out of date but a reference can.
-        assertThat(referringTypes).contains(referenced).doesNotContain(unreferenced);
+        assertThat(referringTypes).containsExactly(referenced).doesNotContain(unreferenced);
+
+        // WHY : Assumptions: the referring set is asserted to be EXACTLY the referenced code and
+        //       nothing else, not merely to contain it. A scenario whose category file also referred to
+        //       a third type would satisfy a containment assertion while making the delete of that
+        //       third type refusable too, so the fixture would no longer isolate one restricted delete
+        //       from one permitted one -- which is the whole distinction it exists to draw.
+        // WHY : Assumptions: the two children are asserted individually as well as collectively,
+        //       because the count is what makes the refusal non-vacuous. A single child would still
+        //       refuse the delete, but the pair is what shows the refusal is a property of the
+        //       reference and not of one row -- and a scenario that lost one child would still pass a
+        //       collective assertion while proving strictly less than it claims.
+        assertThat(categories).hasSize(2);
+        assertThat(decode(categories.get(0), "TRANCAT").get("TRAN-CAT-CD")).hasToString("1");
+        assertThat(decode(categories.get(0), "TRANCAT").get("TRAN-CAT-TYPE-DESC"))
+                .isEqualTo("Fraud reversal" + " ".repeat(36));
+        assertThat(decode(categories.get(1), "TRANCAT").get("TRAN-CAT-CD")).hasToString("2");
+        assertThat(decode(categories.get(1), "TRANCAT").get("TRAN-CAT-TYPE-DESC"))
+                .isEqualTo("Non-fraud reversal" + " ".repeat(32));
+
+        // WHY : Trade-offs: these two rows are also present in reference_update/happy_path/trancatg.txt,
+        //       and the scenario README accepts that second copy so that the directory holds both sides
+        //       of the relationship it asserts. Two copies of the same rows are how the two come to
+        //       disagree, so the copies are compared here rather than each being read in isolation:
+        //       the local pair must be byte-identical to the type-06 subset of the eighteen-row file.
+        //       The comparison is on RAW BYTES rather than on decoded fields, because a padding or
+        //       balance-field difference between the copies would survive a field-by-field comparison
+        //       that only looked at the fields this scenario gives a value to.
+        List<byte[]> wholeDomain = records(bytes("reference_update/happy_path/trancatg.txt"),
+                REFERENCE_RECLEN);
+        List<byte[]> referencedSubset = wholeDomain.stream()
+                .filter(r -> referenced.equals(decode(r, "TRANCAT").get("TRAN-TYPE-CD").toString()))
+                .toList();
+        assertThat(referencedSubset).hasSize(2);
+        assertThat(categories.get(0)).isEqualTo(referencedSubset.get(0));
+        assertThat(categories.get(1)).isEqualTo(referencedSubset.get(1));
+    }
+
+    /**
+     * Asserts the list scenario's category file is the whole seeded extract, ordered and referentially
+     * closed over its sibling type file.
+     *
+     * <p>Refactoring Rationale: this fixture was enrolled in no inventory and asserted by nothing when the
+     * review found it, and the scenario's README tabled only its type file while claiming the consumer
+     * loads every file in the directory. A list scenario whose category half is unread cannot demonstrate
+     * that a category list is produced at all, which is the one thing the scenario is named for.</p>
+     *
+     * <p>Assumptions: four properties are asserted together because they are the ones a list operation
+     * depends on. Ascending composite-key order with no duplicate, because the baseline reads the dataset
+     * sequentially and a list screen pages in key order; referential closure over the sibling type file,
+     * because a category naming a type the scenario does not seed would render with no parent; one
+     * decoded row's content, so that a file of the right shape carrying the wrong text cannot pass; and
+     * byte-identity with the update scenario's copy, because the two scenarios are deliberately the same
+     * eighteen-row extract and a divergence between them would mean one had been edited in isolation.</p>
+     *
+     * @throws IOException if a fixture cannot be read
+     */
+    @Test
+    @DisplayName("the list scenario's categories are the ordered, closed eighteen-row extract")
+    void theListScenarioCategoriesAreOrderedAndReferentiallyClosed() throws IOException {
+        List<byte[]> categories = records(bytes("reference_list/happy_path/trancatg.txt"),
+                REFERENCE_RECLEN);
+        List<byte[]> types = records(bytes("reference_list/happy_path/trantype.txt"),
+                REFERENCE_RECLEN);
+
+        assertThat(categories).hasSize(18);
+
+        List<String> keys = categories.stream()
+                .map(record -> decode(record, "TRANCAT").get("TRAN-TYPE-CD").toString()
+                        + decode(record, "TRANCAT").get("TRAN-CAT-CD").toString())
+                .toList();
+        assertThat(keys).doesNotHaveDuplicates().isSorted();
+
+        List<String> declaredTypes = types.stream()
+                .map(record -> decode(record, "TRANTYPE").get("TRAN-TYPE").toString())
+                .toList();
+        assertThat(declaredTypes).containsExactly("01", "02", "03", "04", "05", "06", "07");
+
+        List<String> orphans = categories.stream()
+                .map(record -> decode(record, "TRANCAT").get("TRAN-TYPE-CD").toString())
+                .distinct()
+                .filter(parent -> !declaredTypes.contains(parent))
+                .toList();
+        assertThat(orphans)
+                .as("a category naming a type this scenario does not seed would render with no parent")
+                .isEmpty();
+
+        assertThat(decode(categories.get(0), "TRANCAT").get("TRAN-CAT-CD")).hasToString("1");
+        assertThat(decode(categories.get(0), "TRANCAT").get("TRAN-CAT-TYPE-DESC"))
+                .isEqualTo("Regular Sales Draft" + " ".repeat(31));
+
+        // WHY : Assumptions: the two scenarios are asserted BYTE-IDENTICAL rather than merely equal in
+        //       row count. They are one extract used by two scenarios, and the eighteen rows carry the
+        //       same descriptions and the same all-zero filler; comparing counts alone would let one copy
+        //       be edited -- a description reworded, a filler blanked -- while the other stayed, which is
+        //       exactly the drift a shared extract is supposed to make impossible.
+        assertThat(bytes("reference_list/happy_path/trancatg.txt"))
+                .isEqualTo(bytes("reference_update/happy_path/trancatg.txt"));
     }
 
     /**
@@ -385,27 +523,149 @@ class ReferenceFixtureContractTest {
      * @throws IOException if the fixture cannot be read
      */
     @Test
-    @DisplayName("both date-conversion requests fill the declared function and key fields")
-    void bothDateRequestsFillTheirDeclaredFields() throws IOException {
+    @DisplayName("all three date-conversion requests fill the declared function and key fields")
+    void allThreeDateRequestsFillTheirDeclaredFields() throws IOException {
         byte[] wellFormed = records(bytes("date_conversion/happy_path/date-request.txt"),
                 REQUEST_RECLEN).get(0);
         byte[] ignored = records(
                 bytes("date_conversion/request_payload_ignored/date-request.txt"),
+                REQUEST_RECLEN).get(0);
+        byte[] refusedDate = records(
+                bytes("date_conversion/invalid_date_rejected/date-request.txt"),
                 REQUEST_RECLEN).get(0);
 
         assertThat(field(wellFormed, 0, 4)).isEqualTo("DATE");
         assertThat(field(wellFormed, 4, 11)).isEqualTo("00000000001");
         assertThat(field(ignored, 0, 4)).isEqualTo("DTE ");
         assertThat(field(ignored, 4, 11)).isEqualTo("00000000002");
+        assertThat(field(refusedDate, 0, 4)).isEqualTo("DTE ");
+        assertThat(field(refusedDate, 4, 11)).isEqualTo("00000000002");
 
         // WHY : Assumptions: the trailing 985 characters are blanks and are asserted as such,
         //       because REQUEST-MESSAGE is PIC X(1000) and a short record would be a different
-        //       message. The two payloads differ, and CODATE01 reads neither field -- WS-FUNC and
-        //       WS-KEY occur in that program only at their declarations -- so the pair exists to
-        //       assert that a differing payload changes nothing observable.
+        //       message. CODATE01 reads neither declared field -- WS-FUNC and WS-KEY occur in that
+        //       program only at their declarations -- so a differing payload changes nothing
+        //       observable, which is what the first pair exists to assert.
         assertThat(field(wellFormed, 15, REQUEST_RECLEN - 15)).isBlank().hasSize(985);
         assertThat(field(ignored, 15, REQUEST_RECLEN - 15)).isBlank().hasSize(985);
+        assertThat(field(refusedDate, 15, REQUEST_RECLEN - 15)).isBlank().hasSize(985);
         assertThat(wellFormed).isNotEqualTo(ignored);
+
+        // WHY : Assumptions: the refused-date envelope is BYTE-IDENTICAL to the ignored-payload one,
+        //       and that is asserted rather than treated as an accident. Both scenario READMEs specify
+        //       the same three field values -- the function token DTE with one trailing space and the
+        //       key 00000000002 -- so equality is the documented outcome, and a reader meeting two
+        //       equal files needs to be told which of the two properties distinguishes the scenarios.
+        //       It is not the bytes: this record has NO date field at all, so what separates the two
+        //       scenarios is the date supplied beside the envelope as a validator parameter, which the
+        //       case below asserts. An assertion of inequality here would be false, and silence would
+        //       leave the equality looking like a copy-paste fault.
+        assertThat(refusedDate).isEqualTo(ignored);
+    }
+
+    /**
+     * Asserts that the date the refused-date scenario is named for is refused by the production rule.
+     *
+     * <p>Assumptions: this scenario's outcome is a VALIDATION outcome and not a record-shape outcome,
+     * so the assertion is made at the parameter level. Its own README states the boundary in full: the
+     * envelope beside this assertion carries no date field, {@code CODATE01} examines no field of the
+     * request at all, and the date travels as a ten-character parameter of the date-edit rule rather
+     * than inside the 1000 bytes. A case that looked for the refused date inside the record would find
+     * nothing to look at.
+     *
+     * <p>Assumptions: the rule is reached through the production
+     * {@code com.carddemo.common.validation.DateEditValidator} and nothing about the outcome is
+     * restated here as an expected constant -- the severity and the message number are compared against
+     * that type's own named constants and against the feedback outcome it selects, so a change to the
+     * rule fails this case rather than leaving it agreeing with a copy of the old answer.
+     *
+     * <p>Assumptions: {@link #REFUSED_DATE} is a calendar impossibility, so it is refused wherever the
+     * rule is invoked, and its constant records why a range vector was not used in its place.
+     *
+     * @throws IOException if the scenario's envelope cannot be read
+     */
+    @Test
+    @DisplayName("the date the refused-date scenario is named for is refused by the production rule")
+    void theRefusedDateScenarioDateIsRefusedByTheProductionRule() throws IOException {
+        assertThat(bytes("date_conversion/invalid_date_rejected/date-request.txt"))
+                .hasSize(REQUEST_RECLEN + 1);
+
+        DateEditValidator.LanguageEnvironmentResult outcome = DateEditValidator
+                .evaluateWithLanguageEnvironment(REFUSED_DATE, DateEditValidator.DATE_FORMAT_MASK);
+
+        assertThat(outcome.feedbackCode())
+                .isEqualTo(DateEditValidator.FeedbackCode.BAD_DATE_VALUE);
+        assertThat(outcome.severity()).isEqualTo(DateEditValidator.SEVERITY_ERROR);
+        assertThat(outcome.messageNumber())
+                .isEqualTo(DateEditValidator.FeedbackCode.BAD_DATE_VALUE.messageNumber());
+        assertThat(outcome.verdict())
+                .isEqualTo(DateEditValidator.FeedbackCode.BAD_DATE_VALUE.verdict());
+        assertThat(outcome.date()).isEqualTo(REFUSED_DATE);
+        assertThat(outcome.mask()).isEqualTo(DateEditValidator.DATE_FORMAT_MASK);
+
+        // WHY : Assumptions: the outcome is asserted to differ from an accepted one as well as to equal
+        //       the refusing one, because a rule that answered one fixed outcome for every input would
+        //       satisfy a positive assertion on nothing but the echoed date and mask. The control vector
+        //       differs from the refused date at a single byte, so the two also separate a genuine
+        //       calendar judgement from a check on the shape NNNN-NN-NN alone.
+        assertThat(DateEditValidator
+                        .evaluateWithLanguageEnvironment(ACCEPTED_NEIGHBOUR_DATE,
+                                DateEditValidator.DATE_FORMAT_MASK)
+                        .severity())
+                .isEqualTo(DateEditValidator.SEVERITY_VALID)
+                .isNotEqualTo(outcome.severity());
+    }
+
+    /**
+     * Asserts the date-edit scenario's carrier envelope is present and carries the derived bytes.
+     *
+     * @throws IOException if the fixture cannot be read
+     */
+    @Test
+    @DisplayName("the date-edit scenario's carrier envelope is present and space-filled")
+    void theDateEditScenarioCarrierEnvelopeIsPresentAndSpaceFilled() throws IOException {
+        byte[] carrier = records(
+                bytes("date_conversion/invalid_date_rejected/date-request.txt"),
+                REQUEST_RECLEN).get(0);
+
+        // WHY : Assumptions: this scenario's refusal happens to a DATE passed as a DateEditValidator
+        //       parameter, not to any byte of this envelope, so what is assertable here is only that
+        //       the carrier matches its README's derivation table. That table gives WS-FUNC as 'DTE'
+        //       right-space-padded to four and WS-KEY as 00000000002, and the key deliberately
+        //       differs from the happy_path sibling's 00000000001 so a consumer holding two decoded
+        //       requests can tell them apart from the key alone.
+        assertThat(field(carrier, 0, 4)).isEqualTo("DTE ");
+        assertThat(field(carrier, 4, 11)).isEqualTo("00000000002");
+
+        // WHY : Assumptions: the two fill regimes meet one byte apart inside this record, and that
+        //       boundary is asserted rather than described because it is the one place a reader can
+        //       see both. Byte 14 is the last digit of the '0'-left-padded unsigned key and byte 15
+        //       is the first of the space-filled FILLER, exactly as the README's section 4.1.1
+        //       states.
+        assertThat(field(carrier, 14, 1)).isEqualTo("2");
+        assertThat(field(carrier, 15, 1)).isEqualTo(" ");
+
+        // WHY : Trade-offs: the FILLER is asserted to be 985 SPACES rather than merely 985 bytes.
+        //       CODATE01.cbl line 112 declares VALUE SPACES, whereas the three seed-derived
+        //       reference datasets in the sibling domains '0'-fill their FILLER -- so applying the
+        //       seed regime here would write 985 zeros in place of 985 spaces. That is a different
+        //       thousand bytes of the SAME length, which no width or record-count check can catch,
+        //       and this is the assertion that does.
+        assertThat(field(carrier, 15, REQUEST_RECLEN - 15))
+                .isEqualTo(" ".repeat(985));
+
+        // WHY : Assumptions: this envelope is byte-identical to request_payload_ignored's, and the
+        //       identity is pinned rather than left to coincidence. Both READMEs derive the same
+        //       three field values from the same declaration, so a later author who "differentiated"
+        //       one of them would silently invalidate the other's section 4.1.1 table. The two
+        //       scenarios are distinguished by their SUBJECT -- one pins that CODATE01 reads no
+        //       field, the other carries a date-edit parameter alongside the bytes -- not by their
+        //       payload. Alternatives Considered: giving this scenario a third distinct key, which
+        //       was rejected because its README derives 00000000002 explicitly and the fixture must
+        //       match the document rather than the document the fixture.
+        assertThat(carrier).isEqualTo(records(
+                bytes("date_conversion/request_payload_ignored/date-request.txt"),
+                REQUEST_RECLEN).get(0));
     }
 
     /**
@@ -473,13 +733,16 @@ class ReferenceFixtureContractTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("absent from the test classpath");
 
-        // WHY : Refactoring Rationale: date_conversion/invalid_date_rejected was renamed to
-        //       request_payload_ignored during this remediation, because CODATE01 examines no field
-        //       of the request and so has no invalid-date branch for the old name to exercise. The
-        //       rename is pinned by asserting the NEW name resolves rather than by asserting the old
-        //       one does not, which is the direction that cannot pass or fail for reasons of build
-        //       hygiene.
+        // WHY : Assumptions: both sibling scenarios of the probe resolve, and both are named here rather
+        //       than only one, because the probe above proves only that SOME name fails. A pair of names
+        //       that do resolve, from the same domain and read through the same loader, is what separates
+        //       "the loader raises on an absent name" from "the loader raises on every name". These two
+        //       carry byte-identical records under different scenario names, so they also pin the
+        //       positive direction for the name RATHER than for the payload, which is the property this
+        //       case is about.
         assertThat(bytes("date_conversion/request_payload_ignored/date-request.txt"))
+                .hasSize(REQUEST_RECLEN + 1);
+        assertThat(bytes("date_conversion/invalid_date_rejected/date-request.txt"))
                 .hasSize(REQUEST_RECLEN + 1);
     }
 

@@ -291,6 +291,67 @@ class CursorTokenTest {
     }
 
     /**
+     * Asserts that a composed binding isolates one query, one subject and one query scope.
+     *
+     * <p>The three isolation properties are asserted together because they are the reason the
+     * composer exists: a token sealed for one subject must not open for another, one issued for one
+     * query must not open on a second, and a narrowing scope must not be interchangeable with a
+     * different one. The subject case is the one a constant binding got wrong.
+     *
+     * <p>The method accepts no parameters, returns nothing, and expects
+     * {@link InvalidCursorException} from each cross-binding redemption.
+     */
+    @Test
+    @DisplayName("a composed binding isolates query, subject and scope from one another")
+    void aComposedBindingIsolatesQuerySubjectAndScope() {
+        CursorToken sealer = new CursorToken(KEY, LIFETIME);
+        String mine = CursorToken.binding("transaction-list", "user-a", CursorToken.SCOPE_NONE);
+        String theirs = CursorToken.binding("transaction-list", "user-b", CursorToken.SCOPE_NONE);
+        String otherQuery = CursorToken.binding("card-list", "user-a", CursorToken.SCOPE_NONE);
+        String otherScope = CursorToken.binding("transaction-list", "user-a", "account:00000000001");
+
+        String token = sealer.seal(mine, RAW_CURSOR);
+
+        assertThat(sealer.open(mine, token)).isEqualTo(RAW_CURSOR);
+        assertThatThrownBy(() -> sealer.open(theirs, token))
+                .isInstanceOf(InvalidCursorException.class);
+        assertThatThrownBy(() -> sealer.open(otherQuery, token))
+                .isInstanceOf(InvalidCursorException.class);
+        assertThatThrownBy(() -> sealer.open(otherScope, token))
+                .isInstanceOf(InvalidCursorException.class);
+    }
+
+    /**
+     * Asserts that the composer refuses a binding that would bind a token to nothing, and escapes.
+     *
+     * <p>Assumptions: the length prefix is what stops two different part triples composing one
+     * binding. A subject carrying the length mark and a scope carrying it are the case a delimited
+     * encoding got wrong, so the two triples are asserted unequal rather than merely asserted to
+     * compose.
+     *
+     * <p>The method accepts no parameters, returns nothing, and expects
+     * {@link NullPointerException} and {@link IllegalArgumentException} from the refused
+     * compositions.
+     */
+    @Test
+    @DisplayName("the composer refuses an unbound binding and keeps ambiguous part triples distinct")
+    void theComposerRefusesAnUnboundBindingAndEscapesItsParts() {
+        assertThatThrownBy(() -> CursorToken.binding("q", "  ", CursorToken.SCOPE_NONE))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("subject");
+        assertThatThrownBy(() -> CursorToken.binding("  ", "s", CursorToken.SCOPE_NONE))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("queryName");
+        assertThatThrownBy(() -> CursorToken.binding("q", "s", null))
+                .isInstanceOf(NullPointerException.class);
+
+        assertThat(CursorToken.binding("q", "s:", "x"))
+                .isNotEqualTo(CursorToken.binding("q", "s", ":x"));
+        assertThat(CursorToken.binding("q", "ab", "c"))
+                .isNotEqualTo(CursorToken.binding("q", "a", "bc"));
+    }
+
+    /**
      * Waits for a bounded number of milliseconds so that a one-second token lifetime can elapse.
      *
      * <p>Assumptions: the interruption is restored rather than swallowed or wrapped, because a test

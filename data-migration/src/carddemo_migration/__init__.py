@@ -44,7 +44,7 @@ runtime settings when a command runs rather than when a module is imported -- th
 is what keeps this package importable with nothing configured; and ``credentials``, the
 database bootstrap step that applies each generated service credential to the login role
 that authenticates with it. That last one runs immediately after
-``sql/V0__schemas_and_roles.sql`` creates the eight roles with no password, and it is the
+``sql/V0__schemas_and_roles.sql`` creates the fifteen login roles with no password, and it is the
 delivered mechanism that makes them able to authenticate at all -- so it precedes every
 loader in the batch chain rather than sitting beside them.
 

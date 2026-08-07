@@ -10,159 +10,85 @@ config/checkstyle/suppressions.xml
 Purpose:
   The companion file to config/checkstyle/checkstyle.xml, and the ONLY place in
   this repository where an exemption from the Java documentation gate may be
-  recorded. That gate is what mechanically enforces this project's single
-  user-specified rule, Rule 1 (Explainability), for Java across all nine Maven
-  modules under services/: common-lib, plus the auth, account, card,
-  transaction, reference, batch, authorization and reporting services.
+  recorded. That gate mechanically enforces this project's single
+  user-specified rule, Rule 1 (Explainability), for Java across every Maven
+  module under services/.
 
-  How this file is reached, stated here so it can be understood without opening
-  either sibling:
-    1. config/checkstyle/checkstyle.xml declares a SuppressionFilter whose file
-       is ${config_loc}/suppressions.xml and whose optional flag is false.
-    2. services/pom.xml supplies config_loc as the directory holding the
-       ruleset, and binds maven-checkstyle-plugin to the Maven validate phase
-       with failOnViolation true. It deliberately does NOT set the plugin's own
-       suppressions-location parameter, so this file is loaded through the
-       ruleset's filter and through nothing else.
-  Addressing the file relative to the ruleset is what makes it resolve
-  identically from the services/ aggregator and from each of the nine module
-  directories one level deeper.
-
-  This file MUST exist. It is not a placeholder and it is not optional; see the
-  fail-closed note under Design decisions below for what happens if it is deleted.
+  How this file is reached: checkstyle.xml declares a SuppressionFilter whose
+  file is ${config_loc}/suppressions.xml with its optional flag false, and
+  services/pom.xml supplies config_loc as the directory holding the ruleset and
+  binds maven-checkstyle-plugin to the validate phase with failOnViolation
+  true. The POM deliberately does NOT set the plugin's own
+  suppressions-location parameter, so this file is loaded through the ruleset's
+  filter and through nothing else. Addressing it relative to the ruleset is
+  what makes it resolve identically from the services/ aggregator and from each
+  module directory one level deeper.
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Scope (the whole permitted charter):
-  Generated sources and test fixtures. Nothing else. Two entries are declared
-  below and they are the entire sanctioned surface:
-    1. Sources emitted by a build plugin, under services/*/target/.
-    2. Fixture material under services/*/src/test/resources/fixtures/.
+Scope and how to add an entry:
+  The sanctioned surface is generated sources and test fixture material, and
+  nothing else. An entry must put its justification in an XML comment
+  IMMEDIATELY ABOVE the element, tag it with at least one of Rule 1's four
+  categories in the one accepted spelling ("Alternatives Considered:",
+  "Refactoring Rationale:", "Assumptions:" or "Trade-offs:", as
+  docs/CODE_DOCUMENTATION_STANDARD.md sets out), narrow itself with a checks
+  attribute naming only checks the ruleset configures, and name the broader
+  alternative it rejected together with the concrete consequence of having
+  taken it.
 
-  Four things must NEVER be added here. Each is restated with its reason in the
-  ruled block at the foot of this file, because a prohibition that lives only
-  in a header is a prohibition a future editor edits past:
-    1. Never hand-written production code under services/*/src/main/java/.
-    2. Never a mapper package. A mapper looks generated and is not; the reason
-       is recorded at the foot.
-    3. Never the test tree as a whole. Tests are IN scope for Rule 1, and
-       services/pom.xml sets includeTestSourceDirectory to true precisely so
-       that they are audited.
-    4. Never a catch-all, meaning a files value of .* or an entry carrying
-       neither a files nor a checks attribute.
+  Checks available to name, and only these: JavadocPackage,
+  MissingJavadocType, MissingJavadocMethod, MissingJavadocPackage,
+  JavadocType, JavadocMethod, NonEmptyAtclauseDescription, SummaryJavadoc,
+  AtclauseOrder, CommentsIndentation.
 
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-How to add an entry:
-  Four requirements, all mandatory.
-    1. Put the justification in an XML comment IMMEDIATELY ABOVE the element.
-       Do not reach for a reason attribute: the DTD has none, and the file
-       stops parsing. See the DTD note under Design decisions below.
-    2. Tag that justification with at least one of Rule 1's four categories,
-       written in the ONE accepted spelling, plural and colon-terminated:
-       "Alternatives Considered:", "Refactoring Rationale:", "Assumptions:" or
-       "Trade-offs:". docs/CODE_DOCUMENTATION_STANDARD.md sets that spelling
-       out and enumerates the rejected shapes; a singular, bracketed,
-       heading-style or dash-terminated variant is not accepted here or
-       anywhere else in the repository. The reason is mechanical rather than
-       stylistic: these labels are searched for, so a second accepted
-       spelling is a rationale that reads as documented to a human and as
-       absent to the search.
-    3. Narrow the entry with a checks attribute, naming only checks the ruleset
-       actually configures. The list is directly below.
-    4. Name the broader alternative you rejected AND the concrete consequence
-       of having taken it. A justification that does not say what would have
-       gone wrong is not a justification.
-  Per the contract stated at the foot of checkstyle.xml, each entry answers
-  three questions of its own: why the exemption exists at all, how tightly its
-  files pattern is scoped, and why the checks it names are the right ones to
-  relax rather than a wider family.
-
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Checks available to name, and only these ten:
-  JavadocPackage, MissingJavadocType, MissingJavadocMethod,
-  MissingJavadocPackage, JavadocType, JavadocMethod,
-  NonEmptyAtclauseDescription, SummaryJavadoc, AtclauseOrder,
-  CommentsIndentation.
-
-  Assumptions: that list is the complete set of checks checkstyle.xml enables,
-    and naming anything outside it is worse than useless. A suppression for an
+  Assumptions: that list is the complete set checkstyle.xml enables, and naming
+    anything outside it is worse than useless. A suppression for an
     unconfigured check never fires, so nothing reveals that it is dead, while
     the entry still reads to the next maintainer as evidence that the check is
     active and had to be relaxed. SingleLineJavadoc, JavadocVariable,
-    JavadocStyle and WriteTag are the four most likely mistakes here: each is
-    deliberately absent from the ruleset, with its reason recorded in that
-    file's EXCLUDED MODULES section, so none of them belongs in this one.
-
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-WHY (non-obvious design decisions):
-  - Assumptions: the justification for every entry sits in an adjacent comment
-    because the DTD leaves no alternative. The suppress element is declared
-    EMPTY and its attribute list admits exactly six names: files, checks,
-    message, id, lines and columns. A reason attribute is not among them, so
-    the widely copied blog idiom that writes one onto the element is invalid
-    here, and the failure is not a graceful one: the document stops being
-    valid against the DTD, and
-    because the filter that reads it fails closed, the nine-module reactor
-    stops before a single class is compiled. Worse than the breakage is the
-    near miss, which is an entry that looks documented while the attribute
-    carrying its reason is silently unusable. Upstream Checkstyle keeps the
-    justifications for its own suppressions in adjacent comments for this
-    reason, and so does this file.
-  - Assumptions: every entry narrows by checks and none narrows by message.
-    Checkstyle's own documentation warns that "filtering by message is
-    dependent on runtime locale", and the consequence is specific: a build
-    running under a different locale silently stops matching, so an entry
-    either stops suppressing what it was written for or starts suppressing
-    something adjacent. Check names are stable identifiers and carry no such
-    dependency. If a future entry genuinely cannot be expressed any other way,
-    it must record that locale exposure next to itself.
-  - Trade-offs: each checks value spells out all ten check names in full rather
-    than abbreviating them to a pattern such as Javadoc.* plus the leftovers.
-    The pattern form is shorter and was rejected on two counts. First, a
-    wildcard silently absorbs any check added to the ruleset later, so the
-    exemption would widen on its own, without an edit to this file and without
-    review. Second, matching is performed against the fully qualified check
-    class name, so a wildcard's true reach is not readable from the pattern.
-    The cost accepted is a long attribute value; what is bought is that every
-    alternative in it is literally one of the ten names listed above, which a
-    reviewer can check against the ruleset by eye.
-  - Trade-offs: exactly two entries are declared, and neither is speculative.
+    JavadocStyle and WriteTag are the likeliest mistakes: each is deliberately
+    absent from the ruleset, with its reason recorded in that file's EXCLUDED
+    MODULES section.
+  Assumptions: the justification sits in an adjacent comment because the DTD
+    leaves no alternative. The suppress element is declared EMPTY and its
+    attribute list admits only files, checks, message, id, lines and columns; a
+    reason attribute is not among them, so the widely copied idiom that writes
+    one onto the element makes the document invalid against the DTD and, because
+    the filter fails closed, stops the reactor before a single class is
+    compiled. Worse than the breakage is the near miss: an entry that looks
+    documented while the attribute carrying its reason is silently unusable.
+  Assumptions: every entry narrows by checks and none narrows by message.
+    Checkstyle's own documentation warns that filtering by message is dependent
+    on runtime locale, so a build under a different locale silently stops
+    matching, and an entry then either stops suppressing what it was written
+    for or starts suppressing something adjacent. Check names carry no such
+    dependency.
+  Trade-offs: each checks value spells out all ten names rather than
+    abbreviating them to a pattern such as Javadoc.* plus the leftovers. A
+    wildcard would silently absorb any check added to the ruleset later, so the
+    exemption would widen with no edit to this file and no review, and matching
+    is performed against the fully qualified class name so a wildcard's true
+    reach is not readable from the pattern. The cost is a long attribute value.
+  Trade-offs: exactly two entries are declared and neither is speculative.
     Pre-loading every path the architecture can be predicted to want was
     rejected, because a suppression for a tree that holds no files cannot be
     reviewed: nobody can tell whether it is still needed, whether its pattern
     is as tight as it should be, or whether it has quietly begun matching
-    hand-authored code. tests/audit-allowlist.json sets the precedent from the
-    other direction, shipping its adjudications list empty on the stated
-    ground that each suppression must be an owned decision rather than an
-    opaque cutoff. Both entries below are honest about how much work they do.
-  - Trade-offs: no entry will ever exempt production code, and the reason is
-    worth stating as a cost rather than a principle. The tempting use of this
-    file is to unblock a build by exempting whatever is failing. The
-    consequence of doing that once is that the gate keeps reporting success
-    while no longer enforcing Rule 1 for the code it was built for, which is
-    strictly worse than having no gate, because a green build is now evidence
-    of nothing. Exempting a tree is therefore not available as a remedy; the
-    remedy is to write the missing docstring.
-  - Assumptions: this file failing closed is deliberate and is relied upon from
-    two sides. checkstyle.xml sets optional to false, and services/pom.xml
-    records that the flag "is relied upon and must not be worked around". With
-    optional true and the file absent, Checkstyle's documented behaviour is
-    that the filter accepts all audit events: the build would go green having
-    suppressed nothing and having verified nothing about which suppressions
-    were meant to apply. tests/README.md names that failure mode directly, as
-    "a run that verifies NOTHING must not read as green". The practical
-    consequence for a future maintainer is narrow and important: emptying this
-    file back to a bare suppressions element is correct and supported;
-    deleting the file is not, and breaks every build that reads the ruleset.
-  - Assumptions: the house comment idiom cannot be reproduced literally in XML,
-    so the adaptation here is deliberate rather than careless. XML 1.0 section
-    2.5 forbids two consecutive hyphens anywhere inside a comment. The house
-    files use a hyphen mid-rule and a spaced double hyphen as an em-dash;
-    .github/workflows/tests.yml does both. Neither survives here, so the
-    mid-rules are tildes and the em-dash is a single hyphen, a colon or a
-    semicolon. This is not cosmetic: restoring either one makes the file
-    unparseable, and since the filter fails closed, every build that reads it
-    fails before a single Java file has been audited. The equals rulers need
-    no adaptation and keep the house width of 77.
+    hand-authored code.
+  Assumptions: this file failing closed is deliberate and is relied upon from
+    two sides; checkstyle.xml sets optional to false and services/pom.xml
+    records that the flag must not be worked around. With optional true and the
+    file absent, Checkstyle's documented behaviour is that the filter accepts
+    all audit events, so the build would go green having suppressed nothing and
+    having verified nothing. The practical consequence is narrow and important:
+    emptying this file back to a bare suppressions element is supported;
+    deleting the file is not.
+  Assumptions: the house comment idiom cannot be reproduced literally here,
+    because XML 1.0 section 2.5 forbids two consecutive hyphens anywhere inside
+    a comment. The house files use a hyphen mid-rule and a spaced double hyphen
+    as an em-dash; neither survives, so the mid-rules are tildes and the
+    em-dash is a single hyphen, a colon or a semicolon. Restoring either makes
+    the file unparseable, and the filter fails closed.
 =============================================================================
   -->
 
@@ -170,45 +96,30 @@ WHY (non-obvious design decisions):
 
   <!--
     Generated sources: code emitted by a build plugin, never authored.
-      Assumptions: this depends on Maven's standard layout, in which a plugin
-        writes generated sources beneath target/generated-sources/, and on
-        .gitignore ignoring target/ so that nothing matched here is ever
-        committed. The pattern is scoped to that one directory segment pair
-        rather than to target/ as a whole, so it cannot reach a hand-authored
-        tree even if build output is ever redirected.
       Assumptions: the exemption is legitimate because Rule 1 governs AUTHORED
         code. The rule asks an author to state a purpose, the parameters, the
-        return value and the exceptions; generated code has no author to ask,
-        so there is nothing for the gate to police and nothing a contributor
-        could do to satisfy it. This is the boundary of the rule's
-        applicability, not a relaxation of it, and it mirrors the boundary the
-        rule already draws around the reference-only COBOL baseline, which
-        requires no retrofitted commentary either.
-      Assumptions: it names all ten configured checks because a generated file
-        would trip the presence checks and the completeness checks alike, and
-        CommentsIndentation reports on the placement of whatever comments the
-        generator chose to emit. Naming a narrower family would leave the
-        remaining checks firing on the same unfixable file.
-      Trade-offs: this entry is a GUARD, not currently load-bearing, and saying
-        so is the point. services/pom.xml binds the gate to the validate
-        phase, which runs before generate-sources, so at the moment the audit
-        executes no generator has added its output to the compile source roots
-        and nothing under target/ is in the audit set. The entry becomes
-        load-bearing the moment that stops being true: if the binding moves to
-        a later phase, or if the per-service OpenAPI 3.1 contracts are wired
-        to generate server stubs or client DTOs whose root is registered by
-        then. It is kept for that case rather than removed, because the
-        alternative is discovering the need as a build failure with no record
-        of why the exemption is correct. What is NOT claimed is that it
-        suppresses anything today.
-      Alternatives Considered: the same exclusion can be written as an excludes
-        entry on maven-checkstyle-plugin in services/pom.xml. Rejected because
-        it splits exemption policy across two files: this file would no longer
-        be the complete record of what is exempt, and a reviewer reading it
-        would draw a false conclusion from its shortness. Both siblings reject
-        the mirror image of that split for the same reason, the ruleset
-        declining to let the POM name a suppressions file and the POM
-        declining to name one.
+        return value and the exceptions; generated code has no author to ask, so
+        this is the boundary of the rule's applicability rather than a
+        relaxation of it, and it mirrors the boundary already drawn around the
+        reference-only COBOL baseline. The pattern is scoped to the
+        target/generated-sources/ directory segment pair rather than to target/
+        as a whole, so it cannot reach a hand-authored tree even if build output
+        is ever redirected, and it names all ten configured checks because a
+        generated file would trip the presence and completeness checks alike.
+      Trade-offs: this entry is a GUARD and is not currently load-bearing, which
+        is stated rather than glossed. The gate is bound to the validate phase,
+        which runs before generate-sources, so no generator has added output to
+        the compile source roots when the audit executes. It becomes
+        load-bearing if that binding moves to a later phase, or if the
+        per-service OpenAPI 3.1 contracts are wired to generate stubs or DTOs
+        whose root is registered by then; it is kept for that case rather than
+        removed, because the alternative is discovering the need as a build
+        failure with no record of why the exemption is correct.
+      Alternatives Considered: writing the same exclusion as an excludes entry
+        on maven-checkstyle-plugin in services/pom.xml. Rejected because it
+        splits exemption policy across two files: this file would no longer be
+        the complete record of what is exempt, and a reviewer reading it would
+        draw a false conclusion from its shortness.
   -->
   <suppress files="[\\/]target[\\/]generated-sources[\\/]"
             checks="JavadocPackage|MissingJavadocType|MissingJavadocMethod|MissingJavadocPackage|JavadocType|JavadocMethod|NonEmptyAtclauseDescription|SummaryJavadoc|AtclauseOrder|CommentsIndentation"/>
@@ -218,34 +129,24 @@ WHY (non-obvious design decisions):
       Assumptions: fixtures under src/test/resources/fixtures/ are DATA, not
         behaviour. A fixture record is a fixed-width image of an app/cpy/
         copybook layout, and its meaning lives in that layout, at the declared
-        record length, rather than in a docstring attached to it. Asking for a
-        purpose, parameters and a return value from a 300-byte account image
-        has no answer to give.
-      Assumptions: it names all ten configured checks for the same reason as the
-        entry above, so that no member of the family is left firing on
-        material that cannot answer it.
-      Trade-offs: this entry is DEFENSIVE and may never fire, which is stated
-        rather than glossed. checkstyle.xml sets fileExtensions to java, so
-        the fixed-width fixture files under resources/ are already outside the
-        audit set and need no exemption. What remains is the narrow case the
-        entry actually covers: a .java file generated into, or co-located
-        with, that fixtures directory. It is belt-and-braces for that case. It
-        is not load-bearing for the fixture data itself, and must not be
-        described as though it were.
-      Alternatives Considered: the obvious broader form is a single entry on
-        src/test/. Rejected outright, and this is the boundary that matters
-        most about this entry: it covers src/test/resources/fixtures/ and must
-        never be widened to src/test/java/. Widening it would exempt every
-        controller, service and repository test in all nine modules. Those
-        tests are where the business rules transcribed from the COBOL are
-        actually asserted, which makes their documentation the part a reviewer
-        most needs, and the house convention already requires it in terms that
-        leave no room: "Every new test, fixture builder, helper, mock, and
-        runner routine must carry a docstring stating Purpose, Parameters,
-        Returns, and Exceptions". services/pom.xml sets
-        includeTestSourceDirectory to true so that those tests are audited; an
-        entry on src/test/ would undo that setting from this side while
-        leaving it apparently in force.
+        record length, rather than in a docstring attached to it; asking for a
+        purpose, parameters and a return value from a 300-byte account image has
+        no answer to give. It names all ten configured checks for the same
+        reason as the entry above.
+      Trade-offs: this entry is DEFENSIVE and may never fire. checkstyle.xml
+        sets fileExtensions to java, so the fixed-width fixture files under
+        resources/ are already outside the audit set; what remains is the narrow
+        case of a .java file generated into, or co-located with, that fixtures
+        directory.
+      Alternatives Considered: the broader form, a single entry on src/test/.
+        Rejected outright, and this is the boundary that matters most about this
+        entry: it covers src/test/resources/fixtures/ and must never be widened
+        to src/test/java/. Widening it would exempt every controller, service
+        and repository test in every module, and those tests are where the
+        business rules transcribed from the COBOL are actually asserted.
+        services/pom.xml sets includeTestSourceDirectory to true so that they
+        are audited; an entry on src/test/ would undo that setting from this
+        side while leaving it apparently in force.
   -->
   <suppress files="[\\/]src[\\/]test[\\/]resources[\\/]fixtures[\\/]"
             checks="JavadocPackage|MissingJavadocType|MissingJavadocMethod|MissingJavadocPackage|JavadocType|JavadocMethod|NonEmptyAtclauseDescription|SummaryJavadoc|AtclauseOrder|CommentsIndentation"/>
@@ -257,75 +158,57 @@ NEVER SUPPRESS: what must not be added to this file, and the consequence.
 Alternatives Considered: every item below is a plausible entry that was
   evaluated and rejected. They are written out because the two entries above
   are the readable part of this file and the dangerous part is invisible: an
-  exemption nobody wrote. Each item names what adding it would actually cost.
-  Nothing here is a suppress element, and nothing here should become one.
+  exemption nobody wrote. Nothing here is a suppress element, and nothing here
+  should become one.
 
 1. services/*/src/main/java/ : NEVER, not one entry and not one pattern that
-   could match it. This is the hand-authored production code of all nine
-   modules and it is the entire population the gate exists to police.
-   Exempting any part of it leaves the build reporting success over code that
-   Rule 1 no longer reaches, and the report is then indistinguishable from a
-   genuine pass. This is the reason config/checkstyle exists as a directory of
-   its own rather than as a file tucked under services/.
+   could match it. This is the hand-authored production code the gate exists to
+   police, and exempting any part of it leaves the build reporting success over
+   code Rule 1 no longer reaches, indistinguishable from a genuine pass.
 
 2. A mapper package : NEVER, and this is the trap most likely to be walked
-   into, because the word "mapper" reads as "generated" in most codebases. In
-   this one it is the opposite. The mappers are the anti-corruption layer and
-   they are hand-written deliberately; MapStruct was evaluated and rejected on
-   the recorded ground that copybook-to-DTO mapping "is not mechanical: it
-   drops FILLER, masks the primary account number to its last four digits,
-   suppresses the card verification value entirely, encrypts the national and
-   government-issued identifiers, and renames three misspelled baseline
-   fields. Every one of those needs an inline justification at the mapping
-   site, which a generated mapper cannot hold." Each of those five behaviours
-   is a decision a reader cannot recover from the code, which makes a mapper
-   the HIGHEST value documentation target in the repository, not a candidate
-   for exemption. checkstyle.xml widens type scope all the way to private for
-   this exact population, noting that a mapper "is often package-private
-   precisely because it is internal, and internal is where an undocumented
-   type costs a future reader most." Because Checkstyle's scope property is
-   inclusive downwards, private admits every narrower visibility as well, so a
-   private nested mapper helper is audited on the same terms as the mapper
-   itself.
+   into, because "mapper" reads as "generated" in most codebases. Here it is
+   the opposite: the mappers are the hand-written anti-corruption layer, and
+   MapStruct was rejected on the recorded ground that copybook-to-DTO mapping
+   is not mechanical; it drops FILLER, masks the primary account number to its
+   last four digits, suppresses the card verification value, encrypts the
+   national and government-issued identifiers, and renames three misspelled
+   baseline fields. Each of those is a decision a reader cannot recover from the
+   code, which makes a mapper the highest-value documentation target in the
+   repository. checkstyle.xml widens type scope to private for this exact
+   population, and because Checkstyle's scope property is inclusive downwards, a
+   private nested mapper helper is audited on the same terms as the mapper.
 
 3. A service Application class or a config package : NEVER. These are the
-   "module entry point" and configuration types that Rule 1's presence clause
-   names outright. There is a sibling route to the same exemption and it is
-   closed on purpose: checkstyle.xml declines to set skipAnnotations, even
-   though the upstream documentation's own example for MissingJavadocType sets
-   it to SpringBootApplication and Configuration. Copying that example would
-   exempt every service's entry point and every class under every config
-   package. Do not reopen from this side what that file closed from its own.
+   module entry point and configuration types Rule 1's presence clause names
+   outright. The sibling route to the same exemption is closed on purpose:
+   checkstyle.xml declines to set skipAnnotations even though the upstream
+   example for MissingJavadocType sets it to SpringBootApplication and
+   Configuration, which would exempt every entry point and config package.
 
 4. The test tree as a whole : NEVER. Tests are in scope for Rule 1, the house
-   convention requires a docstring on every test, fixture builder, helper,
-   mock and runner routine, and services/pom.xml turns on test-source auditing
-   so that the requirement is enforced rather than aspirational. Only
-   genuinely mechanical fixture material may be narrowed, which is what the
-   second entry above does and the precise reason it stops at resources/.
+   convention requires a docstring on every test, fixture builder, helper, mock
+   and runner routine, and services/pom.xml turns on test-source auditing.
+   Only genuinely mechanical fixture material may be narrowed, which is what
+   the second entry does and the precise reason it stops at resources/.
 
 5. A catch-all : NEVER. A files value of .*, or an element carrying neither a
    files nor a checks attribute, exempts everything from everything. The DTD
-   permits it, because every attribute is optional, so nothing but review
-   stands in the way. One such element silently disables the whole gate while
-   leaving all eleven modules of the ruleset in place and apparently in force,
-   which is the most expensive possible outcome for the fewest characters.
+   permits it because every attribute is optional, so nothing but review stands
+   in the way, and one such element silently disables the whole gate while
+   leaving the ruleset apparently in force.
 
-6. An in-code bypass : NEVER, and this one cannot be added here at all, which
-   is the point. The ruleset configures no SuppressWarningsFilter, no
+6. An in-code bypass : NEVER, and it cannot be added here at all, which is the
+   point. The ruleset configures no SuppressWarningsFilter, no
    SuppressionCommentFilter and no SuppressWithNearbyCommentFilter, so a
-   suppression cannot be written into a Java source as an annotation or a
-   magic comment. That omission is what gives this file its value: were any of
-   the three configured, the gate could be switched off line by line across
-   any number of files with no single artifact showing that it had been. Every
-   exemption is a durable entry here, and a reviewer can read the complete
-   list in one place. Adding one of those filters to the ruleset would take
-   that property away, so the request belongs nowhere.
+   suppression cannot be written into a Java source as an annotation or a magic
+   comment. That omission is what gives this file its value: every exemption is
+   a durable entry here and a reviewer can read the complete list in one place.
 
-Assumptions: the entries above are ordered oldest first, so append new ones
-  directly beneath the second entry and above this block. Do not delete the
-  enclosing suppressions element when the last entry goes: the file must stay
-  present and parseable, because the filter that reads it fails closed.
+Assumptions: append a new entry directly beneath the second one and above this
+  block. Do not delete the enclosing suppressions element when the last entry
+  goes: the file must stay present and parseable, because the filter that reads
+  it fails closed.
 =============================================================================
   -->
 

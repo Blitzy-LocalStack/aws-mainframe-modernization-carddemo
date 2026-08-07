@@ -1,9 +1,14 @@
 package com.carddemo.card.dto;
 
+import com.carddemo.common.security.CardNumberMasker;
+import com.carddemo.common.security.MaskedCardNumber;
+import com.carddemo.common.security.SealedSelector;
+
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
+import java.util.Objects;
 
 /**
  * Carries the full stored state of one card to a caller that may not see its account number.
@@ -11,15 +16,18 @@ import jakarta.validation.constraints.Size;
  * <h2>The two operations this shape answers, and the one it does not</h2>
  *
  * <p>{@code services/card-service/src/main/resources/openapi/card-api.yaml} returns this shape from
- * two operations. {@code getCard}, the read at {@code GET /api/v1/cards/{cardNumber}}, answers with
- * it; and {@code updateCard}, the {@code PUT} on the same path, answers with it as well once the
- * change has been committed, so a caller making a second change does not have to read the card again
- * to obtain a current concurrency token. Both answers describe the same thing -- one row of
- * {@code card.cards}, reported after whatever the operation did to it -- which is why one shape
- * serves both rather than two shapes describing one row.
+ * THREE operations. {@code getCard}, the read at {@code GET /api/v1/cards/{cardKey}}, answers with
+ * it; {@code updateCard}, the {@code PUT} on the same path, answers with it as well once the change
+ * has been committed, so a caller making a second change does not have to read the card again to
+ * obtain a current concurrency token; and {@code lookupCard}, the {@code POST} on
+ * {@code /api/v1/cards/lookup}, answers with it after resolving a card number supplied in a request
+ * body. All three answers describe the same thing -- one row of {@code card.cards}, reported after
+ * whatever the operation did to it -- which is why one shape serves them rather than three shapes
+ * describing one row.
  *
- * <p>Alternatives Considered: a third operation reads the same row and is deliberately NOT answered
- * by this record. {@code getAdminCardDetail}, at {@code GET /api/v1/admin/cards/{cardNumber}},
+ * <p>Alternatives Considered: a fourth operation reads the same row and is deliberately NOT answered
+ * by this record. {@code getAdminCardDetail}, at {@code GET /api/v1/admin/cards/{cardKey}},
+
  * returns the account number in full, and the alternative was to let this one record serve that read
  * too by carrying an extra optional member that only the administrative path populates. The contract
  * rejects that arrangement and this record follows it: an optional member is an absence a service
@@ -64,18 +72,22 @@ import jakarta.validation.constraints.Size;
  * {@code app/cbl/CBACT02C.cbl}, 178 lines, corroborates the layout independently by including it with
  * {@code COPY CVACT02Y.} at its line 45 and reading the card file its line 29 selects.
  *
- * <p>Assumptions: five of this record's six components are that record's data items less two, and the
- * sixth has no counterpart in it. The two exclusions are the verification value at line 7, whose
+ * <p>Assumptions: five of this record's seven components are that record's data items less two, and the
+ * other two have no counterpart in it. The two exclusions are the verification value at line 7, whose
  * total absence is argued below, and the padding item at line 11, whose drop is recorded below as
- * well. The sixth component, {@code version}, is the target-side concurrency token; it corresponds to
- * a column rather than to a copybook field, and the discipline it expresses is nevertheless the
- * baseline's own, as its own section sets out.
+ * well. Of the two components with no copybook counterpart, {@code version} is the target-side
+ * concurrency token, corresponding to a column rather than to a copybook field, and expressing a
+ * discipline that is nevertheless the baseline's own as its own section sets out; and {@code selector}
+ * is the target-side addressing token, corresponding to nothing stored at all, and existing for the
+ * reason its own section gives.
  *
- * <p>Assumptions: the component order is the record order -- line 5, then 6, then 8, then 9, then 10
- * -- with the two excluded items skipped and the token appended sixth and last. That is also the
- * order the contract lists its properties in, and the order of the columns
- * {@code services/card-service/src/main/resources/db/migration/V1__card.sql} declares for
- * {@code card.cards}, so all three agree and none was reordered to suit the others.
+ * <p>Assumptions: the component order is the addressing token, then the record order -- line 5, then 6,
+ * then 8, then 9, then 10, with the two excluded items skipped -- then the concurrency token last. The
+ * addressing token leads because it is the identity every operation on this shape takes, which is the
+ * position an identity conventionally occupies and the position the sibling list row gives it. That is
+ * also the order the contract lists its properties in, and the five stored members appear in the order
+ * of the columns {@code services/card-service/src/main/resources/db/migration/V1__card.sql} declares
+ * for {@code card.cards}, so all three agree and none was reordered to suit the others.
  *
  * <p>Assumptions: this record carries no monetary amount and no timestamp, and the absence is
  * recorded rather than left silent because silence in a package derived from a financial record reads
@@ -160,34 +172,47 @@ import jakarta.validation.constraints.Size;
  * subject to it anywhere in the domain, because a client that never parses the value as a number
  * cannot re-round it.
  *
- * <h2>The masked rendering, and why it carries no digit pattern</h2>
+ * <h2>The masked rendering, and the shape it is held to</h2>
  *
- * <p>Trade-offs: {@code displayCardNumber} is constrained by width alone. A sixteen-digit pattern of
- * the kind {@code accountId} carries would refuse the very value this member is defined to hold: the
- * rendering is the last four digits behind a masking prefix, so all but four of its characters are
- * not digits, and every response would then fail its own declared constraint. The cost of omitting
- * the pattern is that the digit discipline for the number itself lives entirely elsewhere -- on the
- * path parameter that selects the card, in {@code com.carddemo.card.mapper} where the rendering is
- * produced, and on the administrative shape's own sixteen-digit member -- so nothing on this
- * component would catch a mapper that published raw storage here. That is accepted because the
- * contract declares the same single bound and CD-16 makes the contract authoritative; a stricter
- * constraint here would make this record refuse bodies the published contract calls valid.
+ * <p>Refactoring Rationale: {@code displayCardNumber} declares the masked SHAPE, where it was
+ * constrained by width alone. The reasoning for the width alone was that a sixteen-digit pattern of the
+ * kind {@code accountId} carries would refuse the very value this member is defined to hold, which is
+ * true -- and it left out the third option, a pattern that requires the MASK. The consequence was
+ * specific rather than theoretical: a maximum of sixteen characters is satisfied exactly by a full
+ * sixteen-digit primary account number, so the one value this component must never carry was the one its
+ * constraint admitted, and since the masking is applied by {@code com.carddemo.card.mapper} a path that
+ * skipped the call published raw storage with nothing on this record to refuse it.
  *
- * <p>Alternatives Considered: a pattern describing the masked form itself, admitting a run of mask
- * characters followed by four digits. Rejected because it would copy two constants of
- * {@code com.carddemo.common.security.CardNumberMasker} -- the mask character and the number of
- * trailing positions left visible -- into a wire contract that does not own them, so a change to the
- * shared masker would leave every response failing validation against a DTO that had silently become
- * a second, stale definition of the masking rule.
+ * <p>Refactoring Rationale: the earlier revision also recorded a REJECTED alternative that was in
+ * substance this fix -- a pattern admitting a run of mask characters followed by four digits -- on the
+ * ground that it would copy two constants of {@code com.carddemo.common.security.CardNumberMasker} into
+ * a wire contract that does not own them, so a change to the shared masker would leave every response
+ * failing validation against a stale second definition. That objection was correct about copying and is
+ * answered rather than overruled: the expression is not copied here but read from
+ * {@code com.carddemo.common.security.MaskedCardNumber}, which sits beside the masker in the module that
+ * owns both and derives the expression from the masker's own constants. There is one definition, in the
+ * place that owns it, and this contract references it.
+ *
+ * <p>Refactoring Rationale: a compact constructor refuses an unmasked value as WELL, because the
+ * constraint annotation alone does not close the boundary. Bean validation is evaluated by the framework
+ * on a body it is asked to validate and is NOT evaluated on a response it serialises, so a mapper
+ * publishing raw storage here would produce a response that violates its own declared constraint and is
+ * sent anyway. Every instance this service serialises was constructed, so a check in the constructor is
+ * the only one that cannot be bypassed -- and it is expressed by calling the shared guard rather than by
+ * matching the expression a second time, so the refusal message is the shared one and names the offending
+ * position without echoing the value.
+ *
+ * <p>Assumptions: the published contract was tightened in the same change, so the two still agree. Its
+ * masked members declare the identical pattern and an exact length, which is what keeps this record from
+ * refusing a body the contract calls valid -- the condition the earlier reasoning was protecting.
+
  *
  * <p>Alternatives Considered: masking, encipherment and suppression inside this record, either by
- * normalising a value in a compact constructor or by rendering it behind an accessor. Rejected, and
- * the package charter states the rule for every shape here: those three happen in
- * {@code com.carddemo.card.mapper} and nowhere else. Spreading the decision across the records that
- * carry the number would mean auditing every one of them and satisfying oneself that no path had been
- * missed, where concentrating it leaves one class to inspect. Because this record transforms nothing,
- * an unmasked value can reach a response only by passing through that mapper, which is what makes the
- * mapper the single auditable place where the disclosure is decided.
+ * normalising a value in the constructor or by rendering it behind an accessor. Those remain rejected,
+ * and the distinction from the check just described is the point: the constructor REFUSES a value it
+ * should never have been handed and TRANSFORMS nothing. Masking here would move a decision the package
+ * charter assigns to {@code com.carddemo.card.mapper}, and it would silently repair a mapper that
+ * published raw storage, removing the only signal that it had done so.
  *
  * <h2>The expiry date, and the three independent proofs of its layout</h2>
  *
@@ -330,16 +355,36 @@ import jakarta.validation.constraints.Size;
  * direction from the outbound asterisk that marks a blank field on a refusal, which belongs to the
  * shared error model. Neither appears in this record.
  *
- * <p>Alternatives Considered: overriding {@code toString()} to withhold the embossed name from
- * diagnostics, as a sibling response record in another bounded context does for the personal
- * components it carries. Rejected here because the package charter admits no transformation of any
- * kind in these records and assigns suppression to the mapper alone, and a rendering that substituted
- * a placeholder would be suppression performed in a record. The cost is accepted knowingly: an
- * incidental stringification of an instance -- in a log line, an assertion message or an exception
- * detail -- prints the embossed name in full, while the account number prints already masked because
- * that is the only form this shape holds. What keeps that cost bounded is that the values reaching
- * these components have passed the mapper, so the shape carries no value the mapper decided to
- * withhold.
+ * <p>Refactoring Rationale: {@code toString()} IS overridden to withhold the embossed name and the
+ * expiry date and to mask the account identifier, and an earlier revision of this paragraph recorded the
+ * opposite decision. It rejected the override on the ground that the package charter admits no
+ * transformation in these records and assigns suppression to the mapper alone, and it accepted the
+ * consequence knowingly -- that an incidental stringification, in a log line, an assertion message or an
+ * exception detail, prints the cardholder's name and the full eleven-digit account identifier. That
+ * reasoning conflated two different things. The charter's fifth rule governs the DATA PATH: it refuses a
+ * value normalised in a constructor and a value rendered behind an accessor, because either would move a
+ * disclosure decision out of the one class that audits it. A string form is on neither path -- it produces
+ * no component value and reaches no wire, and every accessor still returns exactly what the mapper
+ * supplied -- so the mapper remains the single place that decides what a response discloses. The accepted
+ * cost was also mis-sized: the values reaching these components HAVE passed the mapper, but what the
+ * mapper decided was what a RESPONSE may carry, and it never had any view on what a log line may carry.
+ * A record's generated rendering prints EVERY component, so the cost was unbounded rather than accepted.
+ * The sibling records in {@code com.carddemo.auth.dto} reached the same conclusion for the same reason,
+ * and this record now matches them.
+ *
+ * <p>Assumptions: the selector and the masked card rendering print in FULL, because neither discloses
+ * anything -- one is opaque without the deployment key and the other is already masked -- and printing the
+ * selector is what keeps the rendering useful, since it is the value that correlates the line with a
+ * request. The account number prints MASKED rather than withheld, matching {@link CardSummary}: it is an
+ * identifier rather than a secret, and masking leaves enough to correlate two lines about one account
+ * while disclosing no complete locator. The embossed name and the expiry date are replaced by a fixed
+ * marker rather than by a truncation, because a truncated name is still a name and a partial date still
+ * narrows a cardholder.
+ *
+ * <p>Trade-offs: the accepted cost is that a diagnostic no longer shows a value a developer may have
+ * wanted, so a test asserting on a rendering has to read the accessor instead. That is a smaller cost
+ * than the alternative, which was that every such rendering disclosed the cardholder.
+
  *
  * <h2>What the test channel has to assert</h2>
  *
@@ -351,12 +396,16 @@ import jakarta.validation.constraints.Size;
  * order and admissible value stated here is instead verifiable by reading the cited file at the cited
  * line, which is why the citations are exact.
  *
- * <p>Assumptions: six assertions are required of whatever tests this record. That it declares exactly
- * these six components in exactly this order, matching the properties the contract lists and the
- * columns the owning migration declares. That it exposes no accessor able to return the account number
- * in full and none for the verification value, which are the two assertions that would fail first if
- * either exclusion documented above were ever undone. That a masked rendering of sixteen characters is
- * accepted while a seventeenth character is refused. That an eleven-digit account identifier is
+ * <p>Assumptions: nine assertions are required of whatever tests this record. That it declares exactly
+ * these seven components in exactly this order, matching the properties the contract lists and, for the
+ * five stored ones, the columns the owning migration declares. That it exposes no accessor able to
+ * return the card number in full and none for the verification value, which are the two assertions that
+ * would fail first if either exclusion documented above were ever undone. That a full-width masked
+ * rendering is accepted while a raw sixteen-digit number is REFUSED AT CONSTRUCTION, which is the
+ * assertion that holds the disclosure boundary. That the refusal does not quote the value it refused.
+ * That the diagnostic rendering carries neither the embossed name nor the unmasked account number.
+ * That a selector of the sealed length and alphabet is accepted while a raw number is refused. That an
+ * eleven-digit account identifier is
  * accepted while ten digits, twelve digits and eleven characters including a non-digit are each
  * refused, which pins the bound at the copybook width rather than one position either side of it.
  * That the status admits {@code 'Y'} and {@code 'N'} and refuses everything else, meaning a null, an
@@ -383,12 +432,15 @@ import jakarta.validation.constraints.Size;
  * sets at its line 43, where a docstring and a labelled rationale together are what a change needs to
  * pass review.
  *
- * <p>Assumptions: this record declares no method of its own, and the omission is deliberate rather
- * than incidental. A compact constructor validating its arguments was the obvious addition and is
- * unnecessary here: the constraints on the components are evaluated by the framework on the boundary
- * this shape crosses, the charter assigns imperative checking to the service layer, and a constructor
- * that threw would make this type unusable from a test that deliberately builds an invalid instance to
- * assert that validation reports it.
+ * <p>Assumptions: this record declares exactly two methods, and the boundary between what they do and
+ * what they deliberately do not is worth stating. The compact constructor checks ONE invariant, that the
+ * card-number rendering is masked, and checks nothing else: every other constraint on every other
+ * component is evaluated by the framework on the boundary this shape crosses, the charter assigns
+ * imperative checking to the service layer, and a constructor that validated the whole shape would make
+ * this type unusable from a test that deliberately builds an otherwise-invalid instance to assert that
+ * validation reports it. The one invariant is checked there because it is the only one whose violation
+ * would be a DISCLOSURE rather than a refused request, and because a response is never validated. The
+ * second method is the diagnostic rendering, argued in its own paragraph above.
  *
  * <p>Assumptions: where this record and
  * {@code services/card-service/src/main/resources/openapi/card-api.yaml} could be read as disagreeing
@@ -401,12 +453,24 @@ import jakarta.validation.constraints.Size;
  * rendering is carried by a member named {@code displayCardNumber}, not by a member named for the card
  * number, and this record therefore declares no member that could hold that number in full.
  *
+ * @param key the opaque, deployment-keyed selector this card is addressed by, exactly
+ *     {@value #SELECTOR_LENGTH} URL-safe characters in the form {@link SealedSelector} mints. Required
+ *     on every response, and carried here as well as on a list row because a caller that reached this
+ *     card through {@code lookupCard} never saw a list and would otherwise hold no value with which to
+ *     issue the update. It carries no card number, cannot be constructed by a client, and is STABLE for
+ *     one card so a route built from it is bookmarkable: the card number was removed from every path and
+ *     query in this contract because the load balancer writes the request line into a durable
+ *     access-log object before any application code can redact it
+
  * @param displayCardNumber the card this record describes, rendered for a person as its last four
- *     digits behind a masking prefix and never as a selector -- it identifies no row and is accepted
- *     as an input nowhere. At most 16 characters, the width of {@code CARD-NUM PIC X(16)} at
+ *     digits behind a masking prefix and never as an address -- it identifies no row and is accepted
+ *     as an input nowhere. Exactly 16 characters, the width of {@code CARD-NUM PIC X(16)} at
  *     {@code app/cpy/CVACT02Y.cpy} line 5, because the shared masker replaces the leading positions
  *     rather than removing them and the rendering is therefore as wide as the value it hides. Required
- *     on every response, and carrying no digit pattern for the reason recorded above
+ *     on every response, and held to exactly twelve mask characters followed by four digits by the
+ *     shape {@code com.carddemo.common.security.MaskedCardNumber} declares, so a raw number cannot
+ *     satisfy it
+
  * @param accountId the account this card belongs to, as exactly eleven digit characters and never as
  *     a JSON number, from {@code CARD-ACCT-ID PIC 9(11)} at {@code app/cpy/CVACT02Y.cpy} line 6 and
  *     stored as {@code account_id}. Required, and never masked, which is why it is the one identifier
@@ -441,7 +505,18 @@ import jakarta.validation.constraints.Size;
  *     read here or be refused with 409; a caller never chooses it and never increments it
  */
 public record CardDetail(
-        @NotNull @Size(max = DISPLAY_CARD_NUMBER_WIDTH) String displayCardNumber,
+        // WHY : Assumptions: the bound is an EXACT length and the URL-safe base64 alphabet, which is
+        //       what SealedSelector emits for a sixteen-character value. A looser bound would let a raw
+        //       card number satisfy this member, because a run of digits IS valid base64 -- the length
+        //       is the only thing separating the two. The alphabet is read from SealedSelector rather
+        //       than written out here, so the constraint cannot drift from the sealer that mints it.
+        @NotNull @Size(min = SELECTOR_LENGTH, max = SELECTOR_LENGTH)
+        @Pattern(regexp = SealedSelector.SEALED_SHAPE) String key,
+        // WHY : Assumptions: no width bound accompanies the pattern. MaskedCardNumber.DOMAIN fixes
+        //       twelve mask characters followed by four digits, so it already admits exactly sixteen
+        //       characters and a @Size would restate what the pattern decides.
+        @NotNull @Pattern(regexp = MaskedCardNumber.DOMAIN) String displayCardNumber,
+
         @NotNull @Pattern(regexp = ACCOUNT_ID_DOMAIN) String accountId,
         @NotNull @Size(max = EMBOSSED_NAME_WIDTH) @Pattern(regexp = EMBOSSED_NAME_DOMAIN)
         String embossedName,
@@ -450,20 +525,21 @@ public record CardDetail(
         @NotNull @Min(INITIAL_VERSION) Integer version) {
 
     /**
-     * The number of characters the masked rendering of a card number occupies.
+     * The number of characters a sealed card selector occupies.
      *
-     * <p>Assumptions: 16 is read from {@code CARD-NUM PIC X(16)} at {@code app/cpy/CVACT02Y.cpy} line
-     * 5, and the same width reaches the rendering unchanged because
-     * {@code com.carddemo.common.security.CardNumberMasker} substitutes a mask character for the
-     * leading positions rather than removing them. The stored column is a 16-position character type
-     * and the published contract declares the same maximum, so three artifacts agree on this figure.
+     * <p>Assumptions: 59 is what {@link SealedSelector#sealedLengthFor(int)} returns for the
+     * sixteen-character card number, being a twelve-byte synthetic vector, sixteen bytes of ciphertext
+     * and a sixteen-byte authentication tag rendered in unpadded URL-safe base64. It is written here as
+     * a literal because a constraint annotation requires a compile-time constant, and
+     * {@code SealedSelectorTest} asserts that method against this same figure so the literal cannot
+     * drift from the arithmetic.
      *
-     * <p>Alternatives Considered: writing 16 straight into the constraint annotation. Rejected
-     * because a bare number inside an annotation is the one place a reader cannot tell which copybook
-     * line it was read from, and this record carries two distinct widths; a named constant leaves
-     * exactly one line to check against line 5.
+     * <p>Assumptions: the bound is stated as an exact length rather than a maximum, and that is
+     * load-bearing. A run of digits is itself valid URL-safe base64, so the alphabet alone would admit a
+     * raw sixteen-digit card number in this member; the length is the only thing that separates a
+     * selector from the value it stands for.
      */
-    private static final int DISPLAY_CARD_NUMBER_WIDTH = 16;
+    private static final int SELECTOR_LENGTH = 59;
 
     /**
      * The number of characters the baseline declares for the embossed name.
@@ -553,4 +629,96 @@ public record CardDetail(
      * the table immediately after migration.
      */
     private static final int INITIAL_VERSION = 0;
+
+    /**
+     * The placeholder that stands in for a component this record refuses to render.
+     *
+     * <p>Assumptions: the literal matches the one {@code com.carddemo.card.dto.CardUpdateRequest} and the
+     * response records in {@code com.carddemo.auth.dto} use, so a log store holding lines from several
+     * migrated shapes shows one placeholder vocabulary rather than one per package. The constant is named
+     * for the class of data it hides rather than for the literal, because a reader of this file needs to
+     * know which components are withheld and a reader of a log line needs only to know that some were.</p>
+     *
+     * <p>Alternatives Considered: the {@code <withheld>} marker the authorization payloads and
+     * {@code CsvAuthCodec} use. Rejected here for coherence rather than on merit: those are message-wire
+     * shapes in another bounded context, and the two card response records and the three auth ones already
+     * share this literal, so adopting a second marker inside this package would leave one package printing
+     * two vocabularies.</p>
+     */
+    private static final String REDACTED_PERSONAL = "REDACTED";
+
+    /**
+     * Confirms the selector is sealed and the card-number rendering is masked before any instance exists.
+     *
+     * <p>Refactoring Rationale: the checks live here rather than in the mapper so that no detail can
+     * exist carrying a raw key or an unmasked number, whichever path constructed it. They call
+     * {@link SealedSelector#hasSealedShape(String)} and {@link MaskedCardNumber#require(String, String)}
+     * rather than restating either shape, which is the same pair {@link CardSummary} and
+     * {@code com.carddemo.authorization.dto.PendingAuthRowView} apply, so one definition of a sealed
+     * selector and one of a masked rendering serve every response type.</p>
+     *
+     * <p>Assumptions: neither refusal quotes the rejected value. The value most likely to be passed here
+     * by mistake is a raw card number, so echoing it would put the number this contract removed from
+     * every request line into an exception message and from there into a log.</p>
+     *
+     * @throws NullPointerException if {@code key} or {@code displayCardNumber} is {@code null}
+     * @throws IllegalArgumentException if {@code key} is not a sealed selector, or if
+     *     {@code displayCardNumber} is not a full-width masked rendering
+     */
+    public CardDetail {
+        Objects.requireNonNull(key, "key is required");
+        if (!SealedSelector.hasSealedShape(key)) {
+            throw new IllegalArgumentException(
+                    "key must be a sealed selector token, so that a card selector cannot be forged"
+                            + " and a raw card number cannot be presented as one");
+        }
+        MaskedCardNumber.require("displayCardNumber", displayCardNumber);
+    }
+
+
+    /**
+     * Renders this shape for diagnostics with the cardholder's name and expiry date withheld.
+     *
+     * <p>Refactoring Rationale: the reasoning for overriding at all, and for why the package charter does
+     * not forbid it, is recorded on the type above; this is the mechanism. An incidental stringification
+     * used to print the embossed name as stored and the account identifier in full, which is a personal
+     * name joined to an account locator in one line -- and a log store is the destination neither the
+     * mapper's masking nor the shared advice's path masking reaches.</p>
+     *
+     * <p>Trade-offs: which components print in full is the substance of this method. {@code key} prints
+     * because it is opaque without the deployment key and is the value that correlates this line with a
+     * request. {@code displayCardNumber} prints because it arrives ALREADY MASKED -- the constructor above
+     * admits no other form into this shape. {@code activeStatus} prints because it is a two-valued flag
+     * carrying no personal content, and {@code version} prints because a concurrency conflict cannot be
+     * traced without it. {@code accountId} prints masked, matching {@link CardSummary}.
+     * {@code expirationDate} is withheld alongside the embossed name: on its own it identifies nobody,
+     * but printed beside a partial card number it completes two of the three components of a card
+     * credential, and it has no diagnostic use here that the correlating selector does not already
+     * serve.</p>
+     *
+     * <p>Assumptions: only the string form is narrowed. Component equality and hashing are untouched, the
+     * accessors return exactly what the mapper supplied, and the serialised body is unchanged -- the
+     * framework writes a response from the accessors and never from this method, so no published property
+     * loses a value. The exposure being closed is incidental stringification, not the deliberate act of
+     * reading a component the contract publishes.</p>
+     *
+     * @return a single-line description of this record naming every component in contract order, in which
+     *     the account identifier is masked and the embossed name and the expiry date are each represented
+     *     by a placeholder and never rendered
+     */
+    @Override
+    public String toString() {
+        // Assumptions: the generated form's shape is reproduced deliberately, component order included,
+        //   so that a reader who knows what a record prints is not led to think some other type produced
+        //   this line. Only the withheld and masked values depart from it.
+        return "CardDetail[key=" + key
+                + ", displayCardNumber=" + displayCardNumber
+                + ", accountId=" + CardNumberMasker.mask(accountId)
+                + ", embossedName=" + REDACTED_PERSONAL
+                + ", expirationDate=" + REDACTED_PERSONAL
+                + ", activeStatus=" + activeStatus
+                + ", version=" + version
+                + "]";
+
+    }
 }

@@ -159,7 +159,7 @@ output "service_credential_secrets" {
   #       contract for no gain.
   # WHY : Assumptions: built with a `for` expression over the `for_each`
   #       resource, so the inventory is read out of what was actually created.
-  #       The eight role names are NOT restated here: they are fixed by the
+  #       The fifteen role names are NOT restated here: they are fixed by the
   #       bootstrap SQL, arrive as `var.service_credential_names` and are checked
   #       there against a closed list, so a literal list in this file would be a
   #       fourth copy of an inventory that already has as many as it should. It
@@ -201,6 +201,10 @@ output "service_credential_secrets" {
   #       the language is no ordering guarantee at all.
   depends_on = [aws_secretsmanager_secret_version.service]
 }
+# -----------------------------------------------------------------------------
+# The shared workload credential
+# -----------------------------------------------------------------------------
+
 # =============================================================================
 # The version identifier is deliberately NOT published, and the reason is
 # stronger than "no caller needs it".

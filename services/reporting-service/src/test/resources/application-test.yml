@@ -349,16 +349,25 @@ carddemo:
 #
 #   3. No carddemo.reporting.step-functions or carddemo.reporting.s3 stub.
 #      Assumptions: the base declares a state-machine ARN and an output bucket as
-#      fallback-free placeholders, and BOTH are safe to leave unresolved here
-#      because nothing reads them yet - no service class exists in this module - and
-#      configuration-property binding does not raise on an unresolvable placeholder.
+#      fallback-free placeholders, and BOTH are left unresolved here.
 #      Alternatives Considered: stubbing them anyway, for symmetry with the two
 #      security values above. Rejected because an ARN and a bucket name are network
 #      locations rather than selectors: a fabricated ARN in a test resource is the
 #      shape of value a future test could accidentally send a real StartExecution
-#      call to, whereas an unresolved placeholder cannot be mistaken for one. When a
-#      service class lands, the test that exercises it supplies its own value
-#      through dynamic properties or a mocked client.
+#      call to, whereas an unresolved placeholder cannot be mistaken for one. The
+#      rule this omission states is therefore that the test which exercises a
+#      service reading either value supplies its own, through dynamic properties or
+#      a mocked client.
+#      Refactoring Rationale: this entry formerly rested on a second ground as
+#      well - that nothing read the two keys because no service class existed in
+#      this module - and that ground is spent. service/ReportExecutionService.java
+#      and config/StepFunctionsConfig.java now read the state-machine ARN and the
+#      call timeout, and service/StatementService.java reads the output bucket and
+#      the two key prefixes. The omission stands on the first ground alone, which
+#      was always the load-bearing one; the tests that exercise those classes
+#      supply their values as this entry prescribes, and
+#      repository/ReportingQueryBootstrapIT.java avoids needing either by naming
+#      only the two packages it requires rather than scanning the module root.
 #
 #   4. No spring.sql.init.mode override.
 #      Assumptions: the base already pins it to never, precisely because this module

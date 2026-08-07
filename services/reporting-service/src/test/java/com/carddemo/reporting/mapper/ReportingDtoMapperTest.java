@@ -17,7 +17,9 @@ import java.io.IOException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Parameter;
+import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.RecordComponent;
+import java.lang.reflect.Type;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.net.URISyntaxException;
@@ -26,6 +28,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Enumeration;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -1082,13 +1085,13 @@ final class ReportingDtoMapperTest {
         //       it. Admitting a closed set -- rather than listing the types to reject -- keeps the
         //       check closed, so a type nobody thought of fails by default.
         for (RecordComponent component : componentsOf(discovered)) {
-            assertThat(admitsOnTheWire(component.getType()))
+            assertThat(admitsOnTheWire(component.getGenericType()))
                     .as(
                             component.getDeclaringRecord().getSimpleName()
                                     + "."
                                     + component.getName()
                                     + " declares "
-                                    + component.getType().getName()
+                                    + component.getGenericType().getTypeName()
                                     + ", which the payload wire format does not admit")
                     .isTrue();
         }
@@ -1097,7 +1100,7 @@ final class ReportingDtoMapperTest {
     /**
      * Decides whether a payload component type is one the reporting wire format admits.
      *
-     * <p>Four kinds are admitted, and the set is deliberately closed so that a type nobody
+     * <p>Seven kinds are admitted, and the set is deliberately closed so that a type nobody
      * anticipated fails by default rather than passing unexamined:</p>
      *
      * <ul>
@@ -1113,6 +1116,19 @@ final class ReportingDtoMapperTest {
      *   <li>{@code int} or {@code long} -- an integral count. {@code StatementResponse
      *       .transactionCount} is the case in point: it counts statement lines and is not a monetary
      *       quantity, so it is not in the money path that transformation rule T3 governs.</li>
+     *   <li>{@code boolean} -- a two-valued discriminator, which Jackson writes as a JSON literal.
+     *       {@code ReportSubmissionOutcome.submitted} is the case in point: it says whether a report
+     *       run was accepted, and the argument for admitting it is the argument for admitting an
+     *       enum. It has no scale and cannot carry a quantity at all.</li>
+     *   <li>A {@link List} whose ELEMENT type is itself admitted, recursively. Two payload records
+     *       return more than one population -- {@code TransactionDetailReport} returns detail lines
+     *       and subtotal bands, and {@code StatementDocument} returns a heading and its transaction
+     *       lines -- so a container is unavoidable. The container itself carries no value, so the
+     *       exactness question belongs to its element type and is asked of it directly.</li>
+     *   <li>A {@code record} declared in this same payload package, whose OWN components are all
+     *       admitted, recursively. {@code StatementDocument.statement} is the case in point: it
+     *       composes {@code StatementResponse} rather than restating its nine members, which is what
+     *       keeps one description of a statement heading rather than two.</li>
      * </ul>
      *
      * <p>Assumptions: every decimal and floating-point type is refused, which is the hazard this
@@ -1121,19 +1137,71 @@ final class ReportingDtoMapperTest {
      * held four purely textual-and-monetary records; it now rejects a closed enum discriminator and an
      * integral count, neither of which can express a fractional quantity, so it would have forced two
      * well-grounded payload designs to be rewritten to satisfy a check aimed at a different problem.
-     * Trade-offs: admitting {@code int} and {@code long} means an integral count reaches the wire as a
-     * bare JSON number. That is accepted because a count has no scale to lose -- the exactness rule
+     * Trade-offs: admitting {@code int}, {@code long} and {@code boolean} means each reaches the wire
+     * as a bare JSON literal. That is accepted because none has a scale to lose -- the exactness rule
      * protects money, and money is refused here unless it is declared as {@link Money}.</p>
      *
-     * @param type the declared type of a payload record component; must not be {@code null}
+     * <p>Refactoring Rationale: the container and nested-record arms are RECURSIVE rather than
+     * blanket admissions, which makes this guard stronger than the flat version it replaced rather
+     * than more permissive. Admitting any {@code List} would have let a
+     * {@code List<java.math.BigDecimal>} through unexamined, and admitting any record in the package
+     * would have let a nested record carrying one through. Descending instead means the money rule
+     * now reaches every component of every composed payload, at any depth, where before it reached
+     * only the top level of each record.</p>
+     *
+     * <p>Assumptions: the descent terminates because the payload records compose acyclically -- a
+     * heading is composed into a document and nothing is composed into a heading -- and a visited set
+     * is carried anyway, so a cycle introduced later reports a refusal rather than exhausting the
+     * stack. A refusal names the type, which points at the cycle; a stack overflow would not.</p>
+     *
+     * @param type the declared type of a payload record component, generic information included; must
+     *     not be {@code null}
      * @return {@code true} when the wire format admits the type, {@code false} otherwise
      */
-    private static boolean admitsOnTheWire(Class<?> type) {
-        return type == String.class
-                || type == Money.class
-                || type.isEnum()
-                || type == int.class
-                || type == long.class;
+    private static boolean admitsOnTheWire(Type type) {
+        return admitsOnTheWire(type, new HashSet<>());
+    }
+
+    /**
+     * Decides admissibility while remembering which records the descent has already entered.
+     *
+     * @param type the declared type to judge; must not be {@code null}
+     * @param entered the payload records this descent has already entered, so a cycle is refused
+     *     rather than followed
+     * @return {@code true} when the wire format admits the type, {@code false} otherwise
+     */
+    private static boolean admitsOnTheWire(Type type, Set<Class<?>> entered) {
+        if (type instanceof ParameterizedType parameterized) {
+            return parameterized.getRawType() == List.class
+                    && admitsOnTheWire(parameterized.getActualTypeArguments()[0], entered);
+        }
+        if (!(type instanceof Class<?> raw)) {
+            // WHY : Assumptions: a type variable or a wildcard is refused rather than descended into,
+            //       because neither names a concrete component type and a payload record in this
+            //       package declares none. Refusing keeps the set closed: a generic payload
+            //       introduced later fails here and has to be judged deliberately.
+            return false;
+        }
+        if (raw == String.class
+                || raw == Money.class
+                || raw.isEnum()
+                || raw == int.class
+                || raw == long.class
+                || raw == boolean.class) {
+            return true;
+        }
+        if (!raw.isRecord() || !DTO_RESOURCE_PATH.replace('/', '.').equals(raw.getPackageName())) {
+            return false;
+        }
+        if (!entered.add(raw)) {
+            return false;
+        }
+        for (RecordComponent nested : raw.getRecordComponents()) {
+            if (!admitsOnTheWire(nested.getGenericType(), entered)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -1408,17 +1476,14 @@ final class ReportingDtoMapperTest {
     @Test
     @DisplayName("the general monetary contract is scale two half-up and no amount is re-scaled")
     void theGeneralMonetaryContractIsScaleTwoHalfUp() {
-        // WHY : Assumptions: the general contract is the one this context uses. Where a reduction to
-        //       cents happens anywhere on this path it is scale two, rounding half away from zero, and
-        //       a three-place input reduces upward rather than raising. The separate baseline accrual
-        //       mode exists because the reference interest paragraph carries no ROUNDED phrase and so
-        //       truncates toward zero; that mode belongs to the accrual path in another service and is
-        //       asserted here only to be shown different from the one in use, so the two cannot be
-        //       conflated by a reader arriving from that service.
+        // Assumptions: one contract governs every reduction to cents on this path -- scale two,
+        //   rounding half away from zero -- so a three-place input reduces upward rather than
+        //   raising. The mode is asserted here rather than trusted because this class carries amounts
+        //   another service computed, and a second mode anywhere in the money path would let two
+        //   services report the same amount a cent apart.
         assertThat(Money.SCALE).isEqualTo(2);
         assertThat(Money.GENERAL_ROUNDING).isEqualTo(RoundingMode.HALF_UP);
         assertThat(Money.of(new BigDecimal("1.005"))).isEqualTo(Money.of("1.01"));
-        assertThat(Money.BASELINE_INTEREST_ROUNDING).isNotEqualTo(Money.GENERAL_ROUNDING);
 
         // WHY : Assumptions: this class performs no arithmetic, so the order-of-operations rule that
         //       forms a product at full precision before dividing has nothing to reorder here -- but it

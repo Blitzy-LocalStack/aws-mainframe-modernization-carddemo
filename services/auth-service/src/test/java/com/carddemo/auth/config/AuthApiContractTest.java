@@ -5,10 +5,13 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 
 import com.carddemo.common.security.JwtRoleConverter;
 import com.carddemo.common.web.CorrelationIdFilter;
+import jakarta.validation.constraints.NotBlank;
 import java.io.InputStream;
+import java.lang.reflect.RecordComponent;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.DisplayName;
@@ -147,6 +150,122 @@ class AuthApiContractTest {
     }
 
     /**
+     * Reduces a declared parameter list to the {@code (name, in)} pairs the specification identifies
+     * parameters by, following any reference into the components section.
+     *
+     * <p>Assumptions: a reference is followed rather than compared as a string, because two parameters
+     * are the same parameter when their name and location agree -- not when their references agree. A
+     * document declaring one header inline and the same header by reference would carry it twice while
+     * the two spellings differed, so comparing spellings would report no duplicate at all.</p>
+     *
+     * @param declared the value of a {@code parameters} key, which may be {@code null} when none are
+     *     declared
+     * @return one {@code name|in} entry per declared parameter, in document order and WITH repeats
+     *     preserved, since the repeats are what this reduction exists to expose; never {@code null}
+     * @throws IllegalStateException if an entry is neither a mapping nor resolvable, or if a reference
+     *     names a component the document does not declare, either of which makes the contract
+     *     unreadable rather than merely wrong
+     */
+    private List<String> parameterIdentities(Object declared) {
+        if (declared == null) {
+            return List.of();
+        }
+        if (!(declared instanceof List<?> entries)) {
+            throw new IllegalStateException("a \"parameters\" key must hold a sequence");
+        }
+        List<String> identities = new ArrayList<>();
+        for (Object entry : entries) {
+            if (!(entry instanceof Map<?, ?> raw)) {
+                throw new IllegalStateException("every declared parameter must be a mapping");
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> parameter = (Map<String, Object>) raw;
+            Object reference = parameter.get("$ref");
+            if (reference instanceof String pointer) {
+                String component = pointer.substring(pointer.lastIndexOf('/') + 1);
+                Map<String, Object> parameters = mapping(mapping(contract, "components"), "parameters");
+                if (!parameters.containsKey(component)) {
+                    throw new IllegalStateException(
+                            "a parameter reference names an undeclared component: " + pointer);
+                }
+                parameter = mapping(parameters, component);
+            }
+            identities.add(parameter.get("name") + "|" + parameter.get("in"));
+        }
+        return identities;
+    }
+
+    /**
+     * Asserts no operation carries one {@code (name, in)} parameter pair twice, whether within its own
+     * list or by restating one it already inherits from its path item.
+     *
+     * <p>Refactoring Rationale: this gate exists because two operations in this document did exactly
+     * that -- {@code listUsers} and {@code deleteUser} each declared the correlation header twice in
+     * their own parameter list. The specification states that a parameter list MUST NOT contain
+     * duplicates, so those documents were invalid, and the consequence was not theoretical: a
+     * generator reading the list emits the header parameter twice, and a validating gateway can refuse
+     * a request satisfying one copy of a required parameter but not the other. Neither repeat was
+     * visible to a reader, because each sat at the far end of a long justification comment.
+     *
+     * <p>Assumptions: an inherited pair restated by an operation is treated as a duplicate here even
+     * though the specification permits an operation to OVERRIDE an inherited parameter. The
+     * distinction that matters is whether the restatement CHANGES anything: an override that differs
+     * is a deliberate narrowing, whereas the identical declaration twice over leaves a reader unable
+     * to tell which copy is authoritative and is the shape this document had. This gate therefore
+     * refuses the restatement outright, and an operation that genuinely needs to narrow an inherited
+     * parameter must say so by declaring the parameter only at the operation level -- which is the
+     * convention every path item in this document already follows.
+     *
+     * <p>Trade-offs: the walk is declared in this module rather than shared with the sibling services
+     * that publish their own contracts. The shared kernel's test artifact is deliberately restricted
+     * to its architecture package -- each service POM records that restriction where it declares the
+     * artifact -- so there is no test type this module and its siblings both see. The accepted cost is
+     * that the sibling contract carrying the same defect gates it with its own copy of this walk; what
+     * is bought is that neither module's build depends on widening a boundary that exists to keep the
+     * kernel's test surface closed.
+     */
+    @Test
+    @DisplayName("no operation declares one parameter identity twice, inherited or otherwise")
+    void noOperationDeclaresOneParameterIdentityTwice() {
+        Map<String, Object> paths = mapping(contract, "paths");
+
+        assertThat(paths).as("the contract must publish at least one path").isNotEmpty();
+
+        for (Map.Entry<String, Object> pathEntry : paths.entrySet()) {
+            Map<String, Object> pathItem = mapping(paths, pathEntry.getKey());
+            List<String> inherited = parameterIdentities(pathItem.get("parameters"));
+
+            assertThat(inherited)
+                    .as("path item %s must not declare one parameter identity twice",
+                            pathEntry.getKey())
+                    .doesNotHaveDuplicates();
+
+            for (String method : HTTP_METHODS) {
+                if (!pathItem.containsKey(method)) {
+                    continue;
+                }
+                List<String> own =
+                        parameterIdentities(mapping(pathItem, method).get("parameters"));
+
+                assertThat(own)
+                        .as("%s %s must not declare one parameter identity twice",
+                                method.toUpperCase(java.util.Locale.ROOT), pathEntry.getKey())
+                        .doesNotHaveDuplicates();
+                // WHY : Assumptions: the inherited set is tested for emptiness first because the
+                //       assertion below refuses an empty expectation outright rather than passing
+                //       vacuously -- a path item declaring no parameters of its own would otherwise
+                //       fail this case for a reason that has nothing to do with duplication.
+                if (!inherited.isEmpty()) {
+                    assertThat(own)
+                            .as("%s %s must not restate a parameter it already inherits",
+                                    method.toUpperCase(java.util.Locale.ROOT), pathEntry.getKey())
+                            .doesNotContainAnyElementsOf(inherited);
+                }
+            }
+        }
+    }
+
+    /**
      * Asserts that the authority model publishes the open marker and the two group names the shared
      * converter recognises, and that every operation declares one of them.
      */
@@ -196,7 +315,7 @@ class AuthApiContractTest {
             if (enforced == null) {
                 mismatches.add(name + ": contract requires " + declared
                         + ", chain has no rule for " + path + " so it falls through to the catch-all,"
-                        + " which admits any authenticated caller");
+                        + " which denies every caller");
             } else if (!declared.equals(enforced)) {
                 mismatches.add(name + ": contract says " + declared + ", chain enforces " + enforced);
             }
@@ -321,6 +440,164 @@ class AuthApiContractTest {
                     .as("the rule is presence of a non-whitespace character, not absence of whitespace")
                     .isTrue();
         }
+    }
+
+    /**
+     * Asserts that every request component this module annotates {@code @NotBlank} publishes a
+     * machine-readable non-whitespace constraint under the same name in the same schema.
+     *
+     * <p>Refactoring Rationale: the review found the create body disagreeing with its record in exactly
+     * the way the sign-on body had already been corrected for, which is what makes a hand-listed check
+     * the wrong instrument. The test above names two properties of one schema; a third schema was added
+     * with the same defect and no assertion noticed. This case therefore derives its expectation from the
+     * ANNOTATIONS rather than from a list, so a component annotated {@code @NotBlank} in a future record,
+     * or a component whose annotation is added later, is covered without this file being edited.</p>
+     *
+     * <p>Assumptions: a record component satisfies the contract in either of two ways, and both are
+     * accepted because both are machine-readable. It may declare a non-whitespace {@code pattern}, or it
+     * may declare an {@code enum} none of whose members is blank -- the latter is a strictly narrower
+     * statement of the same rule, and requiring a pattern beside it would demand that a document restate
+     * a domain constraint it already expresses more precisely.</p>
+     *
+     * <p>Assumptions: the record class name is the schema name. That correspondence is what the published
+     * document already uses -- {@code SignOnRequest} and {@code CreateUserRequest} are named identically
+     * on both sides -- so the mapping is read from the name rather than declared in a table that could
+     * drift from it.</p>
+     *
+     * @throws ReflectiveOperationException never in practice; declared because the component types are
+     *     resolved reflectively and a renamed record would surface here rather than as a silent skip
+     */
+    @Test
+    @DisplayName("every @NotBlank request component publishes a non-whitespace constraint")
+    void everyNotBlankComponentPublishesANonWhitespaceConstraint() throws ReflectiveOperationException {
+        Map<String, Object> schemas = mapping(mapping(contract, "components"), "schemas");
+        int asserted = 0;
+
+        for (String recordName : List.of("SignOnRequest", "CreateUserRequest")) {
+            Class<?> record = Class.forName("com.carddemo.auth.dto." + recordName);
+            Map<String, Object> properties = mapping(mapping(schemas, recordName), "properties");
+
+            for (RecordComponent component : record.getRecordComponents()) {
+                if (!isNotBlankAnnotated(record, component)) {
+                    continue;
+                }
+                asserted++;
+                Map<String, Object> declared = mapping(properties, component.getName());
+                assertThat(declaresNonWhitespaceRule(declared))
+                        .as("%s.%s is annotated @NotBlank, so the published %s schema must refuse a"
+                                + " whitespace-only value by pattern or by enum rather than by prose"
+                                + " alone", recordName, component.getName(), recordName)
+                        .isTrue();
+            }
+        }
+
+        // WHY : Assumptions: the count is asserted because a reflective loop that matched nothing would
+        //       otherwise pass. Six is the two sign-on components plus the four of the create body, and
+        //       a change to either record moves this number rather than silently emptying the loop.
+        assertThat(asserted)
+                .as("the reflective loop must actually have found the annotated components")
+                .isEqualTo(6);
+    }
+
+    /**
+     * Asserts that no request property claims non-blankness in prose without also enforcing it.
+     *
+     * <p>Refactoring Rationale: this is the same defect stated from the document's own side, and it
+     * catches the case the reflective test above cannot. The update body publishes two name properties
+     * whose descriptions assert the value must not be blank, and the record implementing that body is not
+     * yet authored -- so no annotation exists to derive an expectation from, and the contradiction sits
+     * entirely inside the document. Asserting the prose against the constraints closes it now rather than
+     * at whatever later moment the record lands.</p>
+     *
+     * <p>Assumptions: the phrase searched for is the one this document actually uses, and it is searched
+     * for case-insensitively because the sentence opens some descriptions and continues others. A
+     * property that carries the claim and the constraint together is the passing case; a property that
+     * carries only the claim is the defect.</p>
+     */
+    @Test
+    @DisplayName("no request property asserts non-blankness in prose without enforcing it")
+    void nonBlanknessClaimedInProseIsAlwaysEnforced() {
+        Map<String, Object> schemas = mapping(mapping(contract, "components"), "schemas");
+        List<String> unenforced = new ArrayList<>();
+
+        for (String schemaName : schemas.keySet()) {
+            Map<String, Object> schema = mapping(schemas, schemaName);
+            if (!(schema.get("properties") instanceof Map)) {
+                continue;
+            }
+            Map<String, Object> properties = mapping(schema, "properties");
+            for (String propertyName : properties.keySet()) {
+                Map<String, Object> declared = mapping(properties, propertyName);
+                String description = String.valueOf(declared.getOrDefault("description", ""));
+                boolean claimsNonBlank = description.toLowerCase(Locale.ROOT).contains("not be blank");
+                if (claimsNonBlank && !declaresNonWhitespaceRule(declared)) {
+                    unenforced.add(schemaName + "." + propertyName);
+                }
+            }
+        }
+
+        assertThat(unenforced)
+                .as("each of these properties tells a reader it must not be blank while admitting a value"
+                        + " of spaces, which is the disagreement F03 was raised against")
+                .isEmpty();
+    }
+
+    /**
+     * Reports whether a record component carries the not-blank constraint on any of its three carriers.
+     *
+     * <p>Assumptions: the component itself is NOT one of them, and that is the whole reason this helper
+     * exists rather than a direct call. {@code @NotBlank} declares its targets as method, field,
+     * constructor, parameter, annotation type and type use, and {@code ElementType.RECORD_COMPONENT} is
+     * not among them, so the compiler propagates the annotation to the accessor, the backing field and the
+     * canonical constructor parameter but leaves the record component itself bare. Reading
+     * {@code RecordComponent.getAnnotation} therefore returns null for every component of every record in
+     * this module -- which is exactly what the count assertion in the caller was written to catch, and did.
+     * </p>
+     *
+     * <p>Trade-offs: both the accessor and the field are consulted rather than only the accessor. One
+     * would be sufficient for the current compiler behaviour, and consulting both costs a reflective
+     * lookup that never runs more than a handful of times; what it buys is that the helper does not depend
+     * on which permitted carrier a future compiler chooses to propagate to.</p>
+     *
+     * @param record the record class declaring the component; must not be {@code null}
+     * @param component the component to test; must not be {@code null}
+     * @return {@code true} when the accessor or the backing field carries {@code @NotBlank}
+     * @throws ReflectiveOperationException if the backing field cannot be resolved, which would mean the
+     *     class is not the record this test believes it to be
+     */
+    private static boolean isNotBlankAnnotated(Class<?> record, RecordComponent component)
+            throws ReflectiveOperationException {
+
+        if (component.getAccessor().getAnnotation(NotBlank.class) != null) {
+            return true;
+        }
+        return record.getDeclaredField(component.getName()).getAnnotation(NotBlank.class) != null;
+    }
+
+    /**
+     * Reports whether a declared property refuses a whitespace-only value by a machine-readable rule.
+     *
+     * <p>Assumptions: an enum satisfies the rule when every member carries a non-whitespace character,
+     * which is checked rather than assumed -- an enum admitting a single space would be a domain
+     * constraint that permits exactly the value under discussion.</p>
+     *
+     * @param declared the property's declared schema; must not be {@code null}
+     * @return {@code true} when a pattern refuses a whitespace-only value, or an enum admits only
+     *     non-blank members; {@code false} when neither holds
+     */
+    private static boolean declaresNonWhitespaceRule(Map<String, Object> declared) {
+        Object declaredPattern = declared.get("pattern");
+        if (declaredPattern != null) {
+            Pattern pattern = Pattern.compile(String.valueOf(declaredPattern));
+            if (!pattern.matcher("   ").find() && !pattern.matcher("\t\n ").find()) {
+                return true;
+            }
+        }
+        Object declaredEnum = declared.get("enum");
+        if (declaredEnum instanceof List<?> members && !members.isEmpty()) {
+            return members.stream().allMatch(member -> !String.valueOf(member).isBlank());
+        }
+        return false;
     }
 
     // WHY : Assumptions: the challenge is asserted to exist because its ABSENCE was the defect, not a

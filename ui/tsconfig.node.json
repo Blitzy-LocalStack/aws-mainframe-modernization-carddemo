@@ -119,21 +119,37 @@
     "moduleDetection": "force"
   },
 
-  // WHY : Assumptions: the two files are named literally rather than matched by
+  // WHY : Assumptions: the three files are named literally rather than matched by
   // a glob such as `*.ts`. This project is the one place in the ui tree that
   // hands out Node types, so its membership has to stay a deliberate list:
   // under a glob the next root-level .ts file anyone adds would join it
   // silently and inherit `process` and `Buffer` without that ever being
   // chosen. Widening it should require editing this line. No `exclude`
-  // accompanies it -- a two-entry list is already closed, and a second bound
+  // accompanies it -- a three-entry list is already closed, and a second bound
   // would only raise the question of which one wins.
-  // WHY : Trade-offs: both named members exist and `tsc -p` checks both, so the
-  // accepted cost of a literal list is only that a third Node configuration does
-  // not join automatically; adding one requires editing this line. That is also
-  // the benefit: a glob cannot silently grant Node globals to a new root-level
-  // TypeScript file. The rejected references-only layout would have avoided the
-  // editing cost only by being silently inert, which is precisely the failure
-  // mode this project is shaped to prevent: a project that checks nothing still
-  // exits 0.
-  "include": ["vite.config.ts", "vitest.config.ts"]
+  // WHY : Refactoring Rationale: the list carried two entries and now carries
+  // three. `documentationGate.test.ts` is the negative-probe suite for the JSDoc
+  // gate in `eslint.config.js`; it writes deliberately non-conforming sources to
+  // disk, lints them through the ESLint Node API and removes them, so it needs
+  // `node:fs`, `node:path` and `node:url`. It belongs HERE and not under `src`
+  // because `tsconfig.json` sets `"types": []` on purpose -- ambient types are
+  // declared per project, so admitting Node's declarations to the project that
+  // covers `src` would hand `process` and `Buffer` to all 21 screens. A
+  // file-local `/// <reference types="node" />` was considered and rejected for
+  // the same reason: a triple-slash reference joins the whole PROGRAM, so the
+  // screens would acquire the globals regardless and the narrowing would be
+  // appearance only.
+  // WHY : Trade-offs: all three named members exist and `tsc -p` checks all
+  // three, so the accepted cost of a literal list is only that a fourth Node
+  // configuration does not join automatically; adding one requires editing this
+  // line. That is also the benefit: a glob cannot silently grant Node globals to
+  // a new root-level TypeScript file. The rejected references-only layout would
+  // have avoided the editing cost only by being silently inert, which is
+  // precisely the failure mode this project is shaped to prevent: a project that
+  // checks nothing still exits 0.
+  // WHY : Trade-offs: a TEST is now a member of the build-tooling project, which
+  // reads oddly beside the screen tests under `src`. It is the honest grouping --
+  // what that suite exercises is the lint configuration rather than the
+  // application -- and the alternative was the ambient-type leak above.
+  "include": ["vite.config.ts", "vitest.config.ts", "documentationGate.test.ts"]
 }

@@ -3,13 +3,13 @@
 # -----------------------------------------------------------------------------
 # Purpose:
 #   The hand-authored OpenAPI 3.1 contract of record for the card bounded
-#   context. It settles, for the five synchronous operations this service
+#   context. It settles, for the four synchronous operations this service
 #   exposes, the paths, the operation identifiers, the parameter and property
 #   names, the response shapes and the error vocabulary. Every other tree that
 #   touches this context is written against this document rather than against a
 #   reading of the baseline. Its consumers are the browser client at
 #   ui/src/api/cards.ts, which declares CardSummary, CardDetail and the
-#   seven-member page envelope from the schemas below; the assertions at
+#   four-member page envelope from the schemas below; the assertions at
 #   services/card-service/src/test/java/com/carddemo/card/config/CardApiContractTest.java,
 #   which hold this document and SecurityConfig to each other; and this module's
 #   own controllers, request and response shapes and mapper, which implement the
@@ -35,19 +35,27 @@
 #   Requests carry four kinds of input, and every one of them is described
 #   at the point it is declared rather than only here.
 #
-#   - A path parameter: the sixteen-digit card number identifying one card,
-#     declared once at components/parameters/CardNumberPath and referenced by the
-#     three operations addressing a single card. It is the primary key of
-#     card.cards, and it is a value a user supplies rather than one any response
-#     hands out; a masked rendering is refused there.
-#   - Query parameters: the two optional list filters, accountId and cardNumber,
-#     which are the two filter fields of the baseline list screen, and the two
-#     paging inputs, cursor and direction. All four are declared under
-#     components/parameters.
+#   - A path parameter: the OPAQUE SELECTOR identifying one card, declared once
+#     at components/parameters/CardKeyPath and referenced by the three
+#     operations addressing a single card. It is minted by this service and
+#     carried on every response, and it is emphatically NOT the card number: the
+#     parameter's own rationale records that a request line is written verbatim
+#     into the load balancer's access log before any application code can redact
+#     it, which is why no primary account number appears in a path or a query
+#     string anywhere in this document.
+#   - Query parameters: ONE optional list filter, accountId -- the first of the
+#     baseline list screen's two filter fields -- and the two paging inputs,
+#     cursor and direction. The screen's second filter field, the card number, is
+#     served by the lookup operation's request body instead. All three query
+#     parameters are declared under components/parameters.
 #   - A request header: X-Correlation-Id, optional on every operation, declared
 #     once at components/parameters/CorrelationIdHeader.
-#   - One request body: CardUpdateRequest, carried by the update operation. The
-#     three read operations carry no body.
+#   - Two request bodies: CardUpdateRequest, carried by the update operation, and
+#     CardLookupRequest, carried by the lookup operation. The three read
+#     operations carry no body. Refactoring Rationale: the lookup body exists for
+#     a transport reason and not a semantic one -- it reads and changes nothing --
+#     because a body is the only part of a request that neither access log
+#     records.
 #
 #   The number of rows a full page carries is NOT among them. It is settled
 #   server-side at seven by carddemo.card.list.page-size (application.yml),
@@ -145,18 +153,47 @@
 #      400 responses at run time. The paging difference is resolved in THIS
 #      document, because on it the client was right: one cursor parameter cannot
 #      name the wrong response member, so it is now the only paging position
-#      here. The selector difference is resolved the other way, and deliberately:
-#      the path carries the sixteen-digit card number, which is the primary key
-#      and the one value a user actually holds, and the exposure a path segment
-#      creates is answered by redaction rather than by indirection --
-#      common-lib's CardNumberMasker renders a number embedded in a path or a
-#      query down to its last four digits before any operational record is
-#      written. Indirection cost more than it saved: it made the primary key
-#      unpublishable, which forced a second read operation and a POST whose only
-#      purpose was to accept in a body the number the URL could not carry. The
-#      rest is resolved in the client, which gains the administrative operation's
-#      absence, the two list filters and the four page members it was missing.
-#   8. Assumptions: the authority each operation requires is a machine-readable
+#      here.
+#   8. Refactoring Rationale: the selector difference is ALSO resolved in this
+#      document, in the client's favour, REVERSING the decision the revision
+#      described in item 7 recorded. That decision put the sixteen-digit card
+#      number in the path of all three single-card operations and in a query
+#      parameter on the list, and answered the exposure by arguing that
+#      "the exposure a path segment creates is answered by redaction rather than
+#      by indirection -- common-lib's CardNumberMasker renders a number embedded
+#      in a path or a query down to its last four digits before any operational
+#      record is written". That argument fails on WHO writes the record. The
+#      masker runs inside the service and can only redact what the service
+#      itself emits. The durable copies of a request target are written by
+#      components the service does not author and cannot filter: the load
+#      balancer's own access log, configured in infra/modules/alb/main.tf, which
+#      records the full target of every request before the request reaches any
+#      application code, and the browser's history, which records it before the
+#      request is sent at all. So the number was persisted in two places no
+#      application-side redaction reaches, which is the exposure CWE-532
+#      describes, and it was persisted on every ordinary read and update rather
+#      than only on the one operation whose authority governs disclosure.
+#      Alternatives Considered: sealing the number into an authenticated token
+#      with common-lib's CursorToken, the primitive already used for paging.
+#      Declined as circular. That class states of itself that it provides
+#      "confidentiality by encoding rather than by encryption", that "base64url
+#      is reversible by anyone", and that what makes it sound is that "the route
+#      contract forbids a card number in a path" -- the very property being
+#      established here. A reversible token in a path puts a recoverable number
+#      into the same access log.
+#      Trade-offs: the cost the earlier decision named is real but was
+#      mismeasured. It said indirection "made the primary key unpublishable,
+#      which forced a second read operation and a POST whose only purpose was to
+#      accept in a body the number the URL could not carry". There is indeed a
+#      POST, at /api/v1/cards/lookup, and it exists for exactly that reason. But
+#      it is not a second read forced by indirection -- it is the migrated form
+#      of a path the baseline already had, direct entry into the unprotected
+#      card-number field of COCRDSLC (app/cbl/COCRDSLC.cbl:507-511), which the
+#      earlier decision had collapsed into the list filter. And the primary key
+#      is not unpublishable: it is published, in full, in the response body of
+#      the administrative read, which is where authority already governs it.
+#      What changed is only that it stopped travelling in request targets.
+#   9. Assumptions: the authority each operation requires is a machine-readable
 #      field on the operation, x-required-authority, and not prose. The
 #      rationale for the field and for rejecting the security-scheme scope
 #      alternative is recorded above x-authority-model below.
@@ -186,7 +223,7 @@ info:
     context of the migrated CardDemo credit-card management application.
   description: >-
     The card bounded context owns one table, card.cards, and exposes it through
-    five synchronous operations that carry across three online baseline
+    four synchronous operations that carry across three online baseline
     programs: the card list app/cbl/COCRDLIC.cbl, the card detail
     app/cbl/COCRDSLC.cbl and the card update app/cbl/COCRDUPC.cbl. Those three
     ran as CICS transactions CCLI, CCDL and CCUP respectively
@@ -230,7 +267,7 @@ servers:
       unchanged, so no host, port or environment name is recorded here.
 
 # WHY : Assumptions: authorization is asserted at the document level and
-#       inherited by all five operations, rather than repeated per operation
+#       inherited by all four operations, rather than repeated per operation
 #       with the risk that one is forgotten. There is no unauthenticated
 #       operation in this context and none may be added: a bearer requirement
 #       omitted from a single operation is invisible in review, whereas a
@@ -333,27 +370,32 @@ paths:
         baseline states the same thing unconditionally at
         app/cbl/COCRDLIC.cbl:1287.
       x-required-authority: carddemo-user
-      # WHY : Refactoring Rationale: BOTH filter fields of the baseline screen are
-      #       query parameters of this operation -- the account number at
-      #       app/cpy-bms/COCRDLI.CPY:66 and the card number at :72 -- so the two
-      #       inputs a terminal user typed are the two inputs a caller supplies. An
-      #       intermediate revision of this document moved the card-number filter
-      #       into the body of a separate operation to keep a primary account
-      #       number out of the request line. The concern was real and it is met
-      #       without a second operation: common-lib's CardNumberMasker redacts a
+      # WHY : Refactoring Rationale: ONLY ONE of the baseline screen's two filter
+      #       fields is a query parameter of this operation -- the account number at
+      #       app/cpy-bms/COCRDLI.CPY:66. The card-number field at :72 is served by
+      #       the lookup operation below, which takes it in a request body. A
+      #       previous revision of this document carried both as query parameters
+      #       and defended that by saying common-lib's CardNumberMasker redacts a
       #       card number embedded in a request path or query before it reaches an
-      #       operational record, and GlobalExceptionHandler already applies it on
-      #       every error it writes. Splitting one screen's two filters across two
-      #       operations, one of them a POST, was the cost of not using it.
-      # WHY : Assumptions: the card-number filter is OPTIONAL and the account
-      #       filter is optional too, so a request carrying neither is the whole
-      #       collection one page at a time. app/cbl/COCRDUPC.cbl:193-194 words the
-      #       constraint as "Card number if supplied must be a 16 digit number",
-      #       which states the optionality and the width in one sentence.
+      #       operational record. The masker does exist and does that for THIS
+      #       service's log lines and error bodies, but the record that matters here
+      #       is the load balancer's access log: it is written by the load balancer
+      #       itself, from the request line, before any application code runs, and
+      #       access logging is mandatory in this deployment. No downstream masking
+      #       can redact a log that is already written, so every listing narrowed by
+      #       card number left one durable copy of a primary account number in an
+      #       object store. Splitting one screen's two filters across two
+      #       operations, one of them a POST with a body, is the price of not doing
+      #       that -- and the second operation earns its place independently,
+      #       because narrowing by a unique primary key answers with one row and a
+      #       caller asking for one row wants the card rather than a page wrapper
+      #       around it.
+      # WHY : Assumptions: the account filter is OPTIONAL, so a request carrying no
+      #       criteria at all is the whole collection one page at a time, which is
+      #       the screen's initial state.
       parameters:
         - $ref: '#/components/parameters/CorrelationIdHeader'
         - $ref: '#/components/parameters/AccountIdFilter'
-        - $ref: '#/components/parameters/CardNumberFilter'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/PagingDirection'
       responses:
@@ -379,15 +421,115 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
-  /api/v1/cards/{cardNumber}:
+  # WHY : Refactoring Rationale: THIS OPERATION EXISTS BECAUSE A CARD NUMBER MAY
+  #       NOT APPEAR IN A REQUEST LINE. It is the entry point for the one value a
+  #       user actually holds -- the sixteen digits typed into CARDSIDI PIC X(16) at
+  #       app/cpy-bms/COCRDLI.CPY:72 on the baseline list screen -- and it carries
+  #       that value in a request BODY. A body is not part of the request line, so
+  #       neither the load balancer's access log nor the gateway's records it; a path
+  #       segment and a query string are both recorded verbatim, which is the finding
+  #       that removed the number from each of them.
+  # WHY : Alternatives Considered: answering with the SELECTOR alone and requiring a
+  #       second request to read the card. Rejected as one extra round trip for no
+  #       gain: the caller that supplied the number is authorised to read the card it
+  #       names, so withholding the state it asked for would only mean issuing the
+  #       detail request itself a moment later. The response is CardDetail, exactly
+  #       as the read operation returns, and it carries the selector as its key
+  #       member, so a caller that looked a card up can then update it without
+  #       looking it up again.
+  # WHY : Assumptions: this is a POST and is deliberately not idempotent-by-verb even
+  #       though it changes nothing. GET was evaluated and cannot be used: a GET body
+  #       has no defined semantics for caches and intermediaries and several will drop
+  #       it, which would leave the number no place to travel except the request line
+  #       -- the exact thing being avoided. SEARCH is a registered method with the
+  #       right semantics and is rejected as unroutable here, because the edge route
+  #       keys and the load-balancer rules would both need to admit a method that
+  #       neither the browser client nor the gateway's ANY key covers.
+  # WHY : Trade-offs: the path is a literal segment BENEATH the card collection, so
+  #       /api/v1/cards/lookup and /api/v1/cards/{cardKey} overlap. The overlap is
+  #       safe in both hops and in the handler, and each resolution is a documented
+  #       rule rather than an accident: an HTTP API route with a literal segment is
+  #       selected ahead of one with a path variable, Spring MVC likewise prefers an
+  #       exact pattern to a templated one, and a selector cannot spell the literal
+  #       in any case because a sealed selector begins with the version marker "v1."
+  #       and is at least fifty characters. The alternative was a second top-level
+  #       segment such as /api/v1/card-lookup, which needs a new route key at the
+  #       gateway and a new rule at the load balancer; the overlap costs neither.
+  /api/v1/cards/lookup:
+
+    post:
+      operationId: lookupCard
+      tags:
+        - cards
+      summary: Read one card by the number a user typed, supplied in the body
+      description: >-
+        Accepts a sixteen-digit primary account number in the request body and
+        answers with that card, including the opaque selector every other
+        single-card operation addresses it by. This is how a caller reaches a card
+        from user input: the number never appears in the request line, so no
+        access-log record retains it.
+
+
+        The number is supplied in the body for that reason alone and for no
+        semantic one -- this operation reads and changes nothing. A number of the
+        wrong width, or one carrying a non-digit, is refused with 400 and the
+        baseline's own wording 'Card number if supplied must be a 16 digit number'
+        from app/cbl/COCRDUPC.cbl:193-194. A well-formed number that names no card
+        is 404, which is a different answer from a malformed one and is reported
+        differently.
+      x-required-authority: carddemo-user
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      requestBody:
+        required: true
+        description: >-
+          The card number to resolve. The body carries this one member and
+          nothing else, so a caller cannot smuggle a second selector past the
+          shape check.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CardLookupRequest'
+      responses:
+        '200':
+          description: >-
+            The card the supplied number names, with its primary account number
+            masked, its current version token and the opaque selector the read
+            and update operations address it by.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CardDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/cards/{cardKey}:
 
     description: >-
-      One card, addressed by its own primary account number. It carries the two
-      operations a cardholder-facing caller may perform on a single card,
-      reading it and changing its three editable attributes, and deliberately no
-      delete: the baseline's card screens offer none, and card.cards is
-      referenced by the transaction and authorization contexts, so removing a
-      row would strand history that is still read.
+      One card, addressed by the opaque selector this service minted for it. It
+      carries the two operations a cardholder-facing caller may perform on a
+      single card, reading it and changing its three editable attributes, and
+      deliberately no delete: the baseline's card screens offer none, and
+      card.cards is referenced by the transaction and authorization contexts, so
+      removing a row would strand history that is still read.
+
+
+      The selector, and not the card number, is what stands in this path. The
+      parameter's own rationale records why the number was removed from it and
+      what a caller does instead; the short answer is that the load balancer
+      writes the request line into a durable access-log object before any
+      application code can redact it.
 
     get:
       operationId: getCard
@@ -406,7 +548,7 @@ paths:
         the CardDetail schema.
       x-required-authority: carddemo-user
       parameters:
-        - $ref: '#/components/parameters/CardNumberPath'
+        - $ref: '#/components/parameters/CardKeyPath'
         - $ref: '#/components/parameters/CorrelationIdHeader'
       responses:
         '200':
@@ -458,7 +600,7 @@ paths:
         refusal and each is reported separately; see the 409 response.
       x-required-authority: carddemo-user
       parameters:
-        - $ref: '#/components/parameters/CardNumberPath'
+        - $ref: '#/components/parameters/CardKeyPath'
         - $ref: '#/components/parameters/CorrelationIdHeader'
       requestBody:
         required: true
@@ -550,7 +692,7 @@ paths:
   #       asserted, and the duplication the earlier revision avoided is avoided
   #       still because AdminCardDetail composes CardDetail rather than restating
   #       it.
-  /api/v1/admin/cards/{cardNumber}:
+  /api/v1/admin/cards/{cardKey}:
 
     get:
       operationId: getAdminCardDetail
@@ -559,7 +701,7 @@ paths:
       summary: Read one card with the full primary account number
       description: >-
         Returns the same card state as the non-administrative read operation at
-        /api/v1/cards/{cardNumber}, with one difference: the optional cardNumber
+        /api/v1/cards/{cardKey}, with one difference: the optional cardNumber
         member is present and carries the primary account number in full. The
         masked displayCardNumber member is present here too and is unchanged, so a
         client holding one type renders either response. The caller must hold
@@ -573,7 +715,7 @@ paths:
         be rendered of the account number and nothing else.
       x-required-authority: carddemo-admin
       parameters:
-        - $ref: '#/components/parameters/CardNumberPath'
+        - $ref: '#/components/parameters/CardKeyPath'
         - $ref: '#/components/parameters/CorrelationIdHeader'
       responses:
         '200':
@@ -634,56 +776,90 @@ components:
         operation requires yields 403.
 
   parameters:
-    # WHY : Assumptions: the path segment IS the sixteen-digit card number, which
-    #       is the primary key of card.cards -- CARD-NUM PIC X(16) at
-    #       app/cpy/CVACT02Y.cpy:5, the KSDS key the baseline browses on -- and it
-    #       is the value a user supplies rather than one this service issues. The
-    #       baseline's own card-detail and card-update screens are reached by a
-    #       user typing that number into the filter field CARDSIDI PIC X(16) at
-    #       app/cpy-bms/COCRDLI.CPY:72, so the number a caller places here is the
-    #       number a terminal user typed and not a value read out of a response.
-    # WHY : Refactoring Rationale: an intermediate revision of this document
-    #       replaced this parameter with an opaque 22-character token, on the
-    #       ground that a path segment is written into gateway and load-balancer
-    #       access logs, into browser history and referrer headers, and into the
-    #       path member of this document's own error body. That exposure is real
-    #       and it is answered by redaction rather than by indirection:
-    #       common-lib's CardNumberMasker renders a card number embedded anywhere
-    #       in a request path down to its last four digits, and the shared error
-    #       advice applies it to every path it records, so this document's error
-    #       body cannot carry a full number even though the request line did. The
-    #       indirection cost more than it saved -- it made the primary key
-    #       unpublishable, which forced a second read operation and a POST whose
-    #       only purpose was to accept in a body the number the URL could not
-    #       carry, and it left a client unable to construct a card route from the
-    #       one value a user actually holds.
-    # WHY : Trade-offs: exactly sixteen digits, matched by an anchored pattern
-    #       rather than left free-form. A masked rendering taken from a response
-    #       is consequently refused with 400 by the shape check alone, before any
-    #       handler runs, which is the failure a client is most likely to produce
-    #       -- the masked form does not identify a row. The cost is that the
-    #       request line carries the number in the clear to this service, which is
-    #       why the redaction above is a requirement of the logging path and not an
-    #       optional courtesy.
-    CardNumberPath:
-      name: cardNumber
+    # WHY : Refactoring Rationale: THE PATH SEGMENT IS AN OPAQUE SEALED SELECTOR
+    #       AND NOT THE CARD NUMBER, and this parameter was the card number until a
+    #       review found the reasoning that put it there to be wrong on a matter of
+    #       fact. That reasoning ran: a path segment is written into load-balancer
+    #       and gateway access logs, but common-lib's CardNumberMasker narrows a
+    #       card number embedded in a path and the shared error advice applies it to
+    #       every path it records, so the exposure is answered by redaction. The
+    #       first half is true and the second does not reach the exposure it claims
+    #       to. The load balancer writes its own access-log record, from inside the
+    #       service that terminates the connection; the request line it persists is
+    #       captured before any application code runs and cannot be filtered,
+    #       redacted or omitted by the workload behind it. Access logging is
+    #       mandatory in this deployment -- infra/modules/alb/main.tf enables it
+    #       with no input able to turn it off -- so under the previous spelling every
+    #       single-card request wrote one durable copy of a primary account number
+    #       into an S3 object. Masking downstream of a log that is already written
+    #       cannot unwrite it. What CardNumberMasker actually bounds is this
+    #       document's own error body and this service's own log lines, which is
+    #       worth having and is retained as defence in depth, and is not the same
+    #       hazard.
+    # WHY : Assumptions: the selector is minted by this service and carries no card
+    #       number, so the value in the request line is a token that identifies a
+    #       row to this service and nothing to a reader of a log. It is sealed by
+    #       com.carddemo.common.security.SealedSelector, which encrypts the card's
+    #       own key under the deployment key with authenticated encryption and a
+    #       purpose label, so a selector cannot be forged from a card number and
+    #       cannot be opened by any party without that key.
+    # WHY : Alternatives Considered: sealing it with com.carddemo.common.web.CursorToken,
+    #       the primitive the paging cursor uses, which would have made one type serve
+    #       both. Rejected on a property the two do not share: a cursor is a position in
+    #       a result set and is deliberately SHORT-LIVED, carrying a lifetime and a
+    #       binding to the caller and query scope it was issued for, while a row selector
+    #       addresses a row that does not move and appears in a route a user may bookmark.
+    #       Sealing a selector with an expiring primitive would make a card URL stop
+    #       resolving after an interval for no reason arising from the card. SealedSelector
+    #       is deterministic for one value, so the same card yields the same selector and
+    #       the route is stable.
+    # WHY : Trade-offs: a caller can no longer construct a card route from a number
+    #       a user typed, and the cost lands in two places rather than being
+    #       absorbed silently. A client obtains a selector either from a list row or
+    #       from the lookup operation, which accepts the typed number in a REQUEST
+    #       BODY -- a body is not part of the request line and is not recorded by
+    #       either access log. And the selector is derived from the deployment key, so
+    #       ROTATING that key changes every selector and a URL bookmarked across a
+    #       rotation stops resolving; a value that is not a sealed selector, or that
+    #       cannot be opened, is refused with 400. Both costs were named as reasons for
+    #       withdrawing this shape once before. They are accepted now because the
+    #       alternative is a permanent record of cardholder data in an object store,
+    #       which is not a cost that can be traded against an interaction.
+    # WHY : Alternatives Considered: keeping the number in the path and disabling
+    #       ALB access logging so nothing records it. Rejected outright -- the
+    #       access log is the only admission record this architecture has, the
+    #       baseline having none at all, and removing an audit capability to make
+    #       room for cardholder data in a URL inverts the trade. Alternatives
+    #       Considered: keeping the number in the path and filtering the log after
+    #       delivery. Rejected because the object is written before any filter could
+    #       run, so the window in which the value exists in the clear is not closed
+    #       by the filter, only narrowed.
+    # WHY : Assumptions: this change is a user-visible behavioural divergence from the
+    #       reference system and is registered as D-CARD-SELECTOR in
+    #       docs/architecture/cobol-to-service-traceability.md. The baseline reaches a
+    #       card by the number an operator typed into CARDSIDI PIC X(16) at
+    #       app/cpy-bms/COCRDLI.CPY:72, and that entry also narrowed the displayed
+    #       list; here the number resolves to one card through the lookup operation and
+    #       every path carries a selector instead. The register records what is
+    #       preserved, what is given up and where each half is verified.
+    CardKeyPath:
+      name: cardKey
       in: path
       required: true
       description: >-
-        The card to act on, as exactly sixteen digit characters. It is the
-        primary key of card.cards, CARD-NUM PIC X(16) at
-        app/cpy/CVACT02Y.cpy:5. A masked rendering such as the
-        displayCardNumber member of a list row is NOT accepted here, because the
-        masked form identifies no row; supply the number a user entered. A value
-        of the wrong width, or one carrying a non-digit, is refused with 400 and
-        the baseline's own wording 'Card number if supplied must be a 16 digit
-        number' from app/cbl/COCRDUPC.cbl:193-194.
+        The card to act on, as the opaque selector this service minted for it.
+        Copy it from the key member of a list row, or from the key member of a
+        detail response, and echo it exactly; it is not a card number, cannot be
+        constructed by a client and must not be parsed or compared. To reach a
+        card from a number a user typed, call the lookup operation, which takes
+        the number in a request body and answers with the card and its selector.
+        It is stable for one card, so a route built from it is bookmarkable for as
+        long as the deployment key is unchanged. A value that is not a sealed
+        selector, or that cannot be opened, is refused with 400.
       schema:
-        type: string
-        minLength: 16
-        maxLength: 16
-        pattern: '^[0-9]{16}$'
-      example: '4111111111111111'
+        $ref: '#/components/schemas/CardSelector'
+      example: 'fake-selector-example-not-a-real-sealed-value-0000000000000'
+
 
     AccountIdFilter:
       name: accountId
@@ -763,40 +939,20 @@ components:
     #       column is needed and paging by it is total and exact; adding the
     #       account identifier as a second sort column would reorder the set
     #       and produce plausible pages in the wrong sequence.
-    # WHY : Assumptions: this filter is the second of the list screen's two, and
-    #       it is a query parameter for the same reason the path parameter is a
-    #       card number: the value is one a user types, and the redaction that
-    #       protects the path protects the query string with it. An intermediate
-    #       revision of this document moved it into the body of a separate POST
-    #       operation; the rationale on the list operation records why that was
-    #       withdrawn.
-    # WHY : Trade-offs: narrowing by card number can match at most one row,
-    #       because the card number is the unique primary key, so this filter
-    #       answers with a page carrying one item rather than with a card. The cost
-    #       is a page wrapper around a single row; what it buys is that the filter
-    #       stays a filter and composes with the account filter and the cursors,
-    #       exactly as the baseline screen composed its two filter fields, instead
-    #       of becoming a third way to read a card with its own disclosure
-    #       boundary.
-    CardNumberFilter:
-      name: cardNumber
-      in: query
-      required: false
-      description: >-
-        Narrows the list to one card. Sixteen digit characters exactly when
-        supplied; omit it to list without this narrowing. This carries across the
-        CARDSIDI PIC X(16) filter field of the list screen at
-        app/cpy-bms/COCRDLI.CPY:72, and the baseline states both its optionality
-        and its width in one sentence, 'Card number if supplied must be a 16
-        digit number' at app/cbl/COCRDUPC.cbl:193-194. A masked rendering is not
-        a valid value, because the masked form identifies no row.
-      schema:
-        type: string
-        minLength: 16
-        maxLength: 16
-        pattern: '^[0-9]{16}$'
-      example: '4111111111111111'
-
+    # WHY : Refactoring Rationale: THERE IS NO CARD-NUMBER QUERY PARAMETER, and one
+    #       stood here until a review established that a query string is retained by
+    #       the load-balancer access log on exactly the same terms as a path. A
+    #       previous revision of this block argued that "the redaction that protects
+    #       the path protects the query string with it"; both halves of that
+    #       sentence are now known to be false, because the redaction protects
+    #       neither -- it bounds this service's own log lines and error bodies, and
+    #       the access-log record is written by the load balancer before any
+    #       application code sees the request. The second filter of the baseline
+    #       list screen is therefore served by the lookup operation, which takes the
+    #       typed number in a REQUEST BODY and answers with the card itself, rather
+    #       than by a filter that would have placed it in the request line. The
+    #       rationale on the list operation records the same decision from the
+    #       operation's side.
     Cursor:
       name: cursor
       in: query
@@ -1228,6 +1384,99 @@ components:
 
   schemas:
 
+    # WHY : Refactoring Rationale: the selector declares a shape of its OWN and is a
+    #       separate schema from CursorToken, and an earlier revision of this file had
+    #       it reuse the cursor's shape on the ground that one sealing primitive minting
+    #       both leaves one place a forgery is refused. The premise was withdrawn rather
+    #       than the conclusion: the two are now sealed by DIFFERENT primitives, because
+    #       a cursor stands for a POSITION in an ordered set and is deliberately
+    #       short-lived, bound to the query, the direction and the caller it was issued
+    #       for, whereas a selector stands for a ROW that does not move and is echoed
+    #       back in a path a user may bookmark. Sealing a selector with an expiring
+    #       primitive would make a card URL stop resolving after an interval arising from
+    #       nothing about the card. com.carddemo.common.security.SealedSelector seals
+    #       this one; com.carddemo.common.web.CursorToken still seals the cursor below.
+    # WHY : Assumptions: the three constants here are read from
+    #       services/common-lib/src/main/java/com/carddemo/common/security/SealedSelector.java
+    #       and not chosen here -- the accepted alphabet at SEALED_SHAPE and the length
+    #       from sealedLengthFor(16), which SealedSelectorTest asserts against the same
+    #       figure so neither this contract nor the record constraint can drift from the
+    #       arithmetic. The expression is repeated rather than composed, because JSON
+    #       Schema offers no way to reference another schema's pattern alone; it is one
+    #       anchored expression, and CardApiContractTest asserts it identical to the
+    #       constant the Java uses.
+    # WHY : Assumptions: the bound is an EXACT length rather than a maximum, and the
+    #       length is what does the work. 59 characters is what SealedSelector emits
+    #       for a sixteen-character value -- a twelve-byte vector, sixteen bytes of
+    #       ciphertext and a sixteen-byte tag in unpadded URL-safe base64 -- and a run
+    #       of sixteen digits is itself valid base64, so a maximum-length bound would
+    #       admit a raw card number in the one position this contract removed it from.
+    #       The exact length refuses it before any handler runs.
+    # WHY : Trade-offs: rotating the deployment key changes every selector, because the
+    #       value is derived rather than stored. A client therefore treats one as valid
+    #       for as long as the key is unchanged rather than storing it indefinitely, and
+    #       recovers from a refusal by reading the list or the lookup again. The
+    #       alternative -- a stored surrogate key column -- was rejected because it adds
+    #       a column, an index and a write path to every card row for a value the
+    #       deployment key already determines.
+    CardSelector:
+      type: string
+      minLength: 59
+      maxLength: 59
+      pattern: '^[A-Za-z0-9_-]{59}$'
+      description: >-
+        An opaque row selector minted by this service, standing for one card
+        without disclosing its number. It is a deployment-keyed sealing of the
+        card's own key under authenticated encryption, so it addresses exactly one
+        row, cannot be forged from a card number and discloses nothing to any party
+        without that key. It is STABLE for one card, so a route built from it is
+        bookmarkable. Echo it back exactly as received and never parse, construct or
+        compare it: no part of it is a card number, an account identifier or a row
+        ordinal. A value that is not a sealed selector, or that cannot be opened, is
+        refused with 400, and a caller recovers by looking the card up again.
+
+    # WHY : Assumptions: the body carries ONE member and additionalProperties is
+    #       false, so a caller cannot add a selector, an account identifier or a
+    #       version alongside the number and have any of them read. This operation
+    #       resolves a number and does nothing else, and a body that admitted more
+    #       would invite a client to treat it as a general search.
+    # WHY : Trade-offs: the example is sixteen zeros rather than a realistic
+    #       specimen, for the same reason the administrative full-number member
+    #       carries that placeholder: a full-length digit run in a card-number
+    #       field is indistinguishable to a secret scanner, and to a reader
+    #       skimming a diff, from real cardholder data.
+    CardLookupRequest:
+      type: object
+      description: >-
+        The one input of POST /api/v1/cards/lookup: a primary account number a
+        user has typed, to be resolved to the selector every single-card
+        operation addresses that card by. It is carried in a request BODY and not
+        in a query parameter because the access-log configuration in
+        infra/modules/alb/main.tf retains the target of every request and no part
+        of any body, so a number submitted here is not written to a log the way
+        one in a query string would be. The same decision, for the same reason,
+        governs the request body of POST /api/v1/card-xrefs/lookup in
+        services/account-service/src/main/resources/openapi/account-api.yaml.
+        This is the only place in this document a caller supplies a full primary
+        account number.
+      required:
+        - cardNumber
+      additionalProperties: false
+      properties:
+        cardNumber:
+          type: string
+          minLength: 16
+          maxLength: 16
+          pattern: '^[0-9]{16}$'
+          description: >-
+            The primary account number to resolve, exactly sixteen digit
+            characters, carried across CARD-NUM PIC X(16) at
+            app/cpy/CVACT02Y.cpy:5. A masked rendering taken from a response is
+            refused, because the masked form identifies no row. The constraint is
+            the one the baseline states in 'Card number if supplied must be a 16
+            digit number' at app/cbl/COCRDUPC.cbl:193-194.
+          example: '0000000000000000'
+
     # WHY : Refactoring Rationale: the accepted shape IS pinned, by the same
     #       pattern the shared kernel compiles. An earlier revision of this file
     #       deliberately withheld it, arguing that publishing the layout would
@@ -1377,54 +1626,90 @@ components:
         displayed per row, whose twenty-eight-character layout is declared at
         app/cbl/COCRDLIC.cbl:258-260 as an eleven-character account number, a
         sixteen-character card number and a one-character status - with the card
-        number rendered masked. It carries NO member by which a client can address
-        this row's card in a subsequent request, for the reason recorded on its
-        properties below. The twenty-eighth character is the status and not a
-        row-selection marker.
+        number rendered masked - plus one member the baseline row had no
+        counterpart for, the opaque selector by which a client addresses this
+        row's card in a subsequent request. The twenty-eighth character is the
+        status and not a row-selection marker.
 
 
         The selection and separator fields the list screen carried alongside
         each row - CRDSEL1I through CRDSEL7I and CRDSTP2I through CRDSTP7I in
         app/cpy-bms/COCRDLI.CPY, where there is deliberately no CRDSTP1I - are
-        absent here. They existed so a terminal operator could mark a row and
-        submit the whole screen; a client instead calls the detail or update
-        operation for the card it wants, so they have no counterpart.
+        absent here, but the workflow they served is not. They existed so a
+        terminal operator could mark one row and submit the whole screen, after
+        which the program moved that row's own card number out of its working
+        storage and transferred control. A client instead reads the marked row's
+        key member and calls the detail or update operation with it, which is
+        the same arrangement with the marking done client-side: in both, the
+        card number that selects the record is one the server put there, never
+        one the user re-typed.
       required:
+        - key
         - displayCardNumber
         - accountId
         - activeStatus
       additionalProperties: false
       properties:
-        # WHY : Refactoring Rationale: a row carries the MASKED rendering and no
-        #       value that could address the card, and an intermediate revision of
-        #       this document added an opaque selector member for that purpose. The
-        #       member is withdrawn with the opaque path parameter it fed: the
-        #       operations are addressed by card number, and a card number is a value
-        #       a user supplies rather than one a list response hands out. Publishing
-        #       an addressable value per row would put back exactly what masking the
-        #       rendering exists to prevent -- a list response from which a full
-        #       account number, or a token standing in for one, can be lifted for
-        #       every row at once.
-        # WHY : Trade-offs: a client therefore cannot build a detail link from a row
-        #       alone, and reaches a card by the number a user entered. That is the
-        #       baseline's own workflow -- its detail and update screens are entered
-        #       by typing the number into CARDSIDI PIC X(16) at
-        #       app/cpy-bms/COCRDLI.CPY:72, and its row-selection fields are absent
-        #       here for the reason stated above. The cost is one interaction a
-        #       row-click would have saved; what it buys is that a list response
-        #       carries nothing that addresses anything.
+        # WHY : Refactoring Rationale: THE ROW CARRIES AN ADDRESSABLE SELECTOR, and
+        #       a previous revision of this document withdrew one on the ground that
+        #       "publishing an addressable value per row would put back exactly what
+        #       masking the rendering exists to prevent -- a list response from which
+        #       a full account number, or a token standing in for one, can be lifted
+        #       for every row at once". That objection is answered rather than
+        #       overruled, in two parts. A selector is not a token standing in for a
+        #       card number in any recoverable sense: it carries no number and it is
+        #       the card's key ENCRYPTED under the deployment key with authenticated
+        #       encryption, so it is not reversible by any party holding only the
+        #       response -- what a caller can lift from a page is a set of values that
+        #       address exactly the rows that caller was already shown.
+        #       And the alternative was not "no addressable value": it was a card
+        #       number in the request line, which the load balancer writes verbatim
+        #       into a durable access-log object before any application code runs.
+        #       Between an addressable-but-numberless selector in a response body and
+        #       a primary account number in an S3 object, the response body is not
+        #       the greater exposure.
+        # WHY : Trade-offs: a client can now build a detail link from a row alone,
+        #       which is what the baseline's own row-selection fields did -- CRDSEL1I
+        #       through CRDSEL7I marked a row and the screen was submitted -- so the
+        #       interaction is closer to the reference system than the withdrawn
+        #       shape was, not further from it. What it costs is that a link built
+        #       this way stops resolving if the deployment key is ROTATED, where a link
+        #       built from a card number would have resolved forever. The selector is
+        #       otherwise stable for one card, so the link survives every restart,
+        #       deployment and session in between. That cost is accepted and is recorded
+        #       on the path parameter as well, because it is the one behaviour a user
+        #       notices.
+        key:
+          $ref: '#/components/schemas/CardSelector'
+        # WHY : Refactoring Rationale: the masked SHAPE is declared, where a maximum
+        #       width alone stood here. A maxLength of 16 is satisfied EXACTLY by a
+        #       full sixteen-digit primary account number, so the one value this
+        #       member must never carry was the one its schema admitted -- and the
+        #       masking is applied by a mapper, so a path that skipped the call
+        #       published a card number that nothing in the contract refused. The
+        #       pattern requires twelve mask characters followed by four digits, which
+        #       is the same rule com.carddemo.common.security.MaskedCardNumber states
+        #       for every masked response type in the system.
+        # WHY : Assumptions: minLength is stated as well as maxLength, so the length is
+        #       EXACT. The pattern already fixes it, and both are declared because a
+        #       generator that reads only the length facets still produces the right
+        #       bound and because a shorter value cannot be told apart from a
+        #       truncated card number.
         displayCardNumber:
           type: string
+          minLength: 16
           maxLength: 16
+          pattern: '^\*{12}[0-9]{4}$'
           description: >-
             Identifies this card TO A PERSON, rendered as its last four digits
-            behind a masking prefix. Never the full number on this schema,
+            behind a masking prefix of exactly twelve mask characters. Never the
+            full number on this schema,
             whatever authority the caller holds, because a list is the widest
             exposure in the context and the last four digits are what the row is
-            for. It is a rendering and not a selector: it identifies no row and
-            is not accepted as an input anywhere in this document. To obtain the
-            full number a caller reads the single card through the
-            administrative operation.
+            for. It is a rendering and not an address: it identifies no row, is
+            not accepted as an input anywhere in this document, and the selector
+            beside it is what addresses the card. To obtain the full number a
+            caller reads the single card through the administrative operation.
           example: '************0011'
         accountId:
           type: string
@@ -1517,8 +1802,10 @@ components:
         strings rather than in their stored types; and the card_num column is
         rendered by two members rather than one, a masked displayCardNumber
         carried on every response and an optional full cardNumber carried only
-        by the administrative read. Every member here corresponds to a column;
-        none is derived.
+        by the administrative read. One further member corresponds to no column
+        at all: key, the opaque selector every single-card operation addresses
+        this card by, which is minted per response and not stored. Every other
+        member here corresponds to a column and none is derived.
 
 
         The single target-side rename is carried through: the record field
@@ -1533,6 +1820,7 @@ components:
         AdminCardDetail is this core plus the one property that carries a full
         account number.
       required:
+        - key
         - displayCardNumber
         - accountId
         - embossedName
@@ -1541,6 +1829,24 @@ components:
         - version
       properties:
 
+        # WHY : Assumptions: the detail carries the selector as well as the list
+        #       row does, and the reason is the update operation. A caller that read
+        #       a card, edited it and submitted the change addresses the same card
+        #       twice, and without the selector on the response it would have to hold
+        #       the one it used for the read -- which works for a client that
+        #       navigated from a list, and fails for one that reached the card through
+        #       the lookup operation, since a lookup takes a number and never sees a
+        #       selector otherwise. Carrying it here makes every route to a card end
+        #       with the value the next request needs.
+        # WHY : Assumptions: the selector on an update RESPONSE is freshly minted and
+        #       is not the one the request was addressed by. It stands for the same
+        #       row, so echoing either back reaches the same card; the reason it is
+        #       re-minted rather than copied is that a mapper composes it from the row
+        #       it is rendering and holds no request state, which is also what keeps
+        #       the sealing key out of the handler.
+        key:
+          $ref: '#/components/schemas/CardSelector'
+
         # WHY : Refactoring Rationale: this member is masked on EVERY operation,
         #       and an earlier revision of this document made one member mean two
         #       things - masked on two operations and unmasked on a third,
@@ -1548,15 +1854,32 @@ components:
         #       could not tell from a stored response which it was holding. The
         #       masked rendering now has its own name and one meaning everywhere,
         #       and the full number has its own name on its own schema.
+        # WHY : Refactoring Rationale: the masked SHAPE is declared, where a maximum
+        #       width alone stood here. A maxLength of 16 is satisfied EXACTLY by a
+        #       full sixteen-digit primary account number, so the one value this
+        #       member must never carry was the one its schema admitted -- and the
+        #       masking is applied by a mapper, so a path that skipped the call
+        #       published a card number that nothing in the contract refused. The
+        #       pattern requires twelve mask characters followed by four digits, which
+        #       is the same rule com.carddemo.common.security.MaskedCardNumber states
+        #       for every masked response type in the system.
+        # WHY : Assumptions: minLength is stated as well as maxLength, so the length is
+        #       EXACT. The pattern already fixes it, and both are declared because a
+        #       generator that reads only the length facets still produces the right
+        #       bound and because a shorter value cannot be told apart from a
+        #       truncated card number.
         displayCardNumber:
           type: string
+          minLength: 16
           maxLength: 16
+          pattern: '^\*{12}[0-9]{4}$'
           description: >-
             Identifies this card TO A PERSON, rendered as the last four digits
-            behind a masking prefix, on every operation without exception.
+            behind a masking prefix of exactly twelve mask characters, on every
+            operation without exception.
             Carried across CARD-NUM PIC X(16) at app/cpy/CVACT02Y.cpy:5 and
-            derived from card_num, the primary key. It is a rendering and not a
-            selector: it identifies no row and is accepted as an input nowhere.
+            derived from card_num, the primary key. It is a rendering and not an
+            address: it identifies no row and is accepted as an input nowhere.
           example: '************0011'
 
         # WHY : Refactoring Rationale: the shared core carries the masked
@@ -1764,10 +2087,14 @@ components:
           description: >-
             The full primary account number, exactly sixteen digit characters,
             carried across CARD-NUM PIC X(16) at app/cpy/CVACT02Y.cpy:5 and
-            stored as card_num. It appears on this schema only, is returned by
-            the administrative read only, and is accepted as an input nowhere in
-            this document - the selector on every path is the card number itself,
-            redacted on the logging path by common-lib's CardNumberMasker.
+            stored as card_num. It appears on this schema only and is returned
+            by the administrative read only. It is accepted as an input in
+            exactly one place, the request BODY of POST /api/v1/cards/lookup,
+            and in no request target anywhere in this document: every path names
+            a card by the opaque selector its key member carries instead. That
+            asymmetry is the whole disclosure boundary of this contract - a
+            number travels in bodies, which no access log retains, and never in
+            a target, which every access log retains.
           # WHY : Assumptions: the example below is SYNTHETIC and cannot be a real
           #       card, and the three properties that make that true are stated
           #       here rather than assumed, because this is the one member of this
@@ -1980,15 +2307,30 @@ components:
             statement about whether more rows exist. When it is true, lastKey is
             present.
 
+    # WHY : Refactoring Rationale: a CardSelectorLookupRequest and a
+    #       CardSelectorLookupResponse pair once stood here, for an operation that
+    #       exchanged a typed card number for a selector alone. They are withdrawn
+    #       because lookupCard answers the same request with the whole CardDetail,
+    #       which is what the baseline's own turn does -- app/cbl/COCRDSLC.cbl shows
+    #       the detail screen once a number is entered, not a bare handle -- so a
+    #       selector-only answer would have cost the caller a second round trip to
+    #       display what it already had. The number still travels in a request BODY,
+    #       which was the property that pair existed to secure, and CardLookupRequest
+    #       carries it.
+
     CardUpdateRequest:
       type: object
       description: >-
-        A change to the three editable attributes of one card, together with the
-        concurrency token last read for it. The card being changed is named in
-        the request path and is not repeated here; neither the card number nor
-        the account identifier is editable, and the baseline agrees by omitting
-        both from the six fields its change comparison tests at
-        app/cbl/COCRDUPC.cbl:1503-1508.
+        A change to the editable attributes of one card - its embossed name, its
+        active status and the month and year of its expiry - together with the
+        concurrency token last read for it. The card being changed is addressed by
+        the selector in the request path and is not repeated here; neither the card
+        number nor the account identifier is editable, and the baseline agrees by
+        omitting both from the six fields its change comparison tests at
+        app/cbl/COCRDUPC.cbl:1503-1508. The DAY of the expiry is not editable
+        either and no member carries it: the stored date keeps the day it already
+        held, which is the invariant the baseline maintains by rendering its day
+        field non-display.
 
 
         No verification value and no snapshot, prior-value or before-image
@@ -2000,7 +2342,8 @@ components:
       required:
         - embossedName
         - activeStatus
-        - expirationDate
+        - expirationMonth
+        - expirationYear
         - version
       additionalProperties: false
       properties:
@@ -2012,15 +2355,41 @@ components:
         #       'Card name can only contain alphabets and spaces' refusal at
         #       app/cbl/COCRDUPC.cbl:183-184 becomes a condition the caller can
         #       anticipate rather than only discover.
+        # WHY : Refactoring Rationale: this pattern REQUIRES A LETTER and an
+        #       earlier revision of it did not. It read '^[A-Za-z ]+$', which
+        #       admits a value of fifty spaces, while CardUpdateRequest carries
+        #       @NotBlank ALONGSIDE the same character-set pattern and refuses
+        #       one. A blank-padded screen field is the ordinary shape of an
+        #       unfilled 3270 input, so the value this schema admitted and the
+        #       service refused was not an exotic case but the commonest one: it
+        #       is exactly what app/cbl/COCRDUPC.cbl:811-813 tests for when it
+        #       refuses low values, spaces or zeros alike.
+        # WHY : Assumptions: the two Java constraints are expressed here as ONE
+        #       pattern because a property carries one. '^ *[A-Za-z][A-Za-z ]*$'
+        #       is the conjunction of them: the leading run admits the blank
+        #       padding the reference field carries, the single letter is the
+        #       not-blank rule, and the trailing run keeps the character set. It
+        #       therefore accepts and refuses exactly what the record does, which
+        #       is asserted by acceptance over a value corpus rather than by
+        #       comparing the two expressions as text.
+        # WHY : Alternatives Considered: an allOf of two patterns, one per Java
+        #       constraint, which would let each expression stay identical to the
+        #       annotation it mirrors. Rejected because allOf on a scalar is
+        #       handled inconsistently by code generators, and a constraint a
+        #       generated client silently drops is worse than one expressed
+        #       differently. Also considered a lookahead, '^(?=.*[A-Za-z])[A-Za-z ]+$';
+        #       rejected for the same reason, a plain expression being the more
+        #       portable of two equivalents.
         embossedName:
           type: string
           minLength: 1
           maxLength: 50
-          pattern: '^[A-Za-z ]+$'
+          pattern: '^ *[A-Za-z][A-Za-z ]*$'
           description: >-
             The replacement name to emboss, alphabetic characters and spaces
-            only, up to fifty characters. Carried across the CRDNAMEI PIC X(50)
-            input field at app/cpy-bms/COCRDUP.CPY:72. An empty or absent value
+            only and carrying at least one letter, up to fifty characters.
+            Carried across the CRDNAMEI PIC X(50) input field at
+            app/cpy-bms/COCRDUP.CPY:72. An empty, absent or all-whitespace value
             yields 'Card name not provided' from app/cbl/COCRDUPC.cbl:181-182;
             a value carrying anything outside the permitted set yields 'Card
             name can only contain alphabets and spaces' from :183-184. The
@@ -2039,19 +2408,52 @@ components:
             absent value, yields 'Card Active Status must be Y or N' from
             app/cbl/COCRDUPC.cbl:195-196.
           example: 'Y'
-        expirationDate:
+        # WHY : Refactoring Rationale: the month and the year are two members and
+        #       there is NO day member, where an earlier revision of this document
+        #       carried one whole ISO date. The baseline permits only the month and
+        #       the year to be edited: its day input EXPDAYI is rendered non-display
+        #       unconditionally at app/cbl/COCRDUPC.cbl:1285, is redisplayed from the
+        #       pre-edit snapshot rather than from an entered value at :1123, has no
+        #       validation paragraph at all, and has no field on the detail screen.
+        #       A single date member therefore published an editable day the
+        #       baseline never offered, and the invariant that would have had to be
+        #       enforced -- that the submitted day equal the stored one -- means the
+        #       submitted day carries no information. Removing the member removes the
+        #       need to enforce anything about it.
+        # WHY : Trade-offs: this request no longer has the same shape as the response,
+        #       which carries the whole stored date, so a caller cannot round-trip a
+        #       detail response straight back as an update. That asymmetry matches the
+        #       screens, where COCRDSL.CPY declares EXPMONI at :84 and EXPYEARI at :90
+        #       and no day field while the stored record holds a whole date. The
+        #       response reports what is stored; the request carries what is editable.
+        #       The divergence is registered as D-CARD-EXPIRY-MONTH-YEAR in
+        #       docs/architecture/cobol-to-service-traceability.md.
+        expirationMonth:
           type: string
-          format: date
+          minLength: 2
+          maxLength: 2
+          pattern: '^(0[1-9]|1[0-2])$'
           description: >-
-            The replacement expiry date as an ISO calendar date. This single
-            field carries the three separate screen inputs EXPMONI PIC X(2),
-            EXPYEARI PIC X(4) and EXPDAYI PIC X(2) at
-            app/cpy-bms/COCRDUP.CPY:84, :90 and :96, which the baseline itself
-            joins into exactly this form at app/cbl/COCRDUPC.cbl:1467-1474. A
-            month outside one to twelve yields 'Card expiry month must be
-            between 1 and 12' from :197-198; an unacceptable year yields
-            'Invalid card expiry year' from :199-200.
-          example: '2026-12-31'
+            The replacement expiry month, two digits with its leading zero
+            present. Carried across the EXPMONI PIC X(2) input field at
+            app/cpy-bms/COCRDUP.CPY:84 and bounded by 88 VALID-MONTH VALUES 1
+            THRU 12 at app/cbl/COCRDUPC.cbl:95, applied at :898. A value outside
+            the range yields 'Card expiry month must be between 1 and 12' from
+            :197-198.
+          example: '12'
+        expirationYear:
+          type: string
+          minLength: 4
+          maxLength: 4
+          pattern: '^(19[5-9][0-9]|20[0-9]{2})$'
+          description: >-
+            The replacement expiry year, four digits between 1950 and 2099.
+            Carried across the EXPYEARI PIC X(4) input field at
+            app/cpy-bms/COCRDUP.CPY:90 and bounded by 88 VALID-YEAR VALUES 1950
+            THRU 2099 at app/cbl/COCRDUPC.cbl:99, applied at :934. A value
+            outside the window yields 'Invalid card expiry year' from :199-200.
+          example: '2026'
+
         version:
           type: integer
           format: int32
@@ -2206,24 +2608,32 @@ components:
             is an idea this migration inherited rather than introduced: the
             baseline's structured error record already carries a
             twenty-character event key.
-        # WHY : Assumptions: a card path DOES carry a card number, so this member
-        #       is the one place a full account number could escape into a stored
-        #       record, and it does not: the shared advice applies common-lib's
-        #       CardNumberMasker to every path before placing it here, which renders
-        #       any embedded sixteen-digit run down to its last four digits. The
-        #       example therefore shows a MASKED path segment, which is what a
-        #       client receives, rather than the number it sent.
+        # WHY : Assumptions: no path published by this document carries a card
+        #       number -- every one names a card by its opaque selector -- so this
+        #       member is not expected to hold one. The shared advice nonetheless
+        #       applies common-lib's CardNumberMasker to every path before placing
+        #       it here, rendering any embedded sixteen-digit run down to its last
+        #       four digits.
+        # WHY : Trade-offs: keeping that masking when the route contract already
+        #       forbids the input is defence in depth and is deliberate. This
+        #       member records the path a request ACTUALLY used, including a
+        #       mistaken one, so a caller that put a card number where a selector
+        #       belongs -- which the shape check refuses with 400 -- would
+        #       otherwise have its number copied into a stored diagnostic by the
+        #       very response telling it the value was wrong. The masking costs
+        #       one pass over a short string and removes that case entirely, so it
+        #       is not withdrawn on the strength of the contract alone.
         path:
           type: string
           description: >-
             The request path that failed, so that a client reporting a problem
             does not have to reconstruct which call produced it. The empty
-            string when no path is available. No FULL card number appears here even
-            though a card path carries one: the shared advice masks any digit run
-            long enough to be an account number before placing a path in this
-            member, so a
-            mistaken route cannot leak one through the diagnostic field.
-          example: /api/v1/cards/************1111
+            string when no path is available. No FULL card number appears here.
+            No path this document publishes carries one, and the shared advice
+            additionally masks any digit run long enough to be an account number
+            before placing a path in this member, so neither a published route
+            nor a mistaken one can leak a number through the diagnostic field.
+          example: /api/v1/cards/9f2c1b7a-4e58-42d1-9c3e-6a70b5d81e04
         timestamp:
           type: string
           description: >-

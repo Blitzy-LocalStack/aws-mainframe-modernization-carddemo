@@ -163,10 +163,26 @@ and is required *per card*, whereas the inquiry exchange has no ordering
 requirement at all.
 
 **Per-card ordering.** Producers derive `MessageGroupId` through
-`CsvAuthCodec.AuthRequest.orderGroup`, using the purpose-scoped HMAC held by
-`OpaqueIdentifier` with the key supplied via `CARDDEMO_MASK_HMAC_KEY`. Equal
-cards therefore produce one stable group, while the primary account number
-itself never appears in SQS metadata, queue telemetry or send traces.
+`CsvAuthCodec.AuthRequest.orderGroup` — and, on the reply leg,
+`CsvAuthCodec.AuthReply.orderGroup`, which returns the same token for the same
+card — using the purpose-scoped HMAC held by `OpaqueIdentifier` with the key
+supplied via `CARDDEMO_MESSAGING_HMAC_KEY`. Equal cards therefore produce one
+stable group, while the primary account number itself never appears in SQS
+metadata, queue telemetry or send traces.
+
+Refactoring Rationale: this paragraph named `CARDDEMO_MASK_HMAC_KEY`, and the
+name was wrong in a way that mattered rather than cosmetically. That variable is
+the extract-transform-load redaction key, and `infra/modules/ecs-service` admits
+it for the `data-migration` workload only — so the derivation described here
+could not happen on any producer, and the reply path fell back to publishing the
+card number itself as its group identity. The two keys are deliberately separate:
+this one is generated per environment by each root, injected to
+`authorization-service` alone, and shared with every producer on this queue
+because the group identity has to be equal for equal cards *across* producers —
+that equality is the ordering guarantee. Sharing a single value with the
+migration workload would let a job that reads cardholder extracts compute
+production queue group identities, and would make rotating either purpose require
+stopping both.
 Assumptions: a per-card group is implementable at all because the card number is
 an explicit field of the baseline's comma-separated request — the field order is
 listed from `app/app-authorization-ims-db2-mq/README.md:285` onward, with
@@ -255,12 +271,18 @@ indefinitely.
 that bounded guarantee and its operator controls without claiming exact order
 across the quarantine boundary.
 
-**Amazon MQ for IBM MQ was considered and rejected.** Alternatives Considered:
-it was the closest alternative and deserves its hearing — it speaks the MQ wire
-protocol itself, carries the same message-descriptor concepts, and offers a
-native per-message expiry that the chosen option lacks. The deciding factor was
-that it would keep a broker to size, patch and fail over for a workload that
-needs none. [ADR-004](../../../docs/adr/ADR-004-messaging.md) owns that
+**Two broker options were considered and rejected.** Alternatives Considered:
+**a self-managed IBM MQ queue manager on AWS** — the closest alternative on
+capability, because it speaks the MQ wire protocol itself, carries the same
+message-descriptor concepts and honours `MQMD-EXPIRY` natively — and **Amazon MQ
+for ActiveMQ or RabbitMQ**, the managed broker, which needs the same payload
+translation this module's consumers need but does offer a per-message expiry
+primitive that the chosen option lacks. Assumptions: those are two separate
+options because Amazon MQ has no IBM MQ engine — its `engineType` admits
+`ACTIVEMQ` and `RABBITMQ` only — so protocol fidelity and a managed broker cannot
+be had together. The deciding factor against both was that each keeps a broker to
+size, patch and fail over, and an idle cost floor, for a workload that needs no
+broker capability. [ADR-004](../../../docs/adr/ADR-004-messaging.md) owns that
 comparison in full and it is not restated here.
 
 ## Two messaging disciplines, not one
@@ -527,9 +549,10 @@ an oversight.
   primary queues, as tabulated
   [above](#seven-baseline-literals-six-primary-queues). Two of the seven are
   reply-queue names absorbed by the `replyToQueueUrl` attribute.
-- **No broker resource.** Decision D4 rejected Amazon MQ for IBM MQ, so there is
-  no broker, no broker subnet group and no broker credential anywhere in this
-  design.
+- **No broker resource.** Decision D4 rejected both broker options — a
+  self-managed IBM MQ queue manager and an Amazon MQ ActiveMQ or RabbitMQ broker —
+  so there is no broker, no broker subnet group and no broker credential anywhere
+  in this design.
 - **No Kafka and no Kinesis.** Alternatives Considered: streaming platforms are
   out of scope because the requirement these queues serve is request/reply,
   which SQS satisfies directly; a partitioned log would add retention and

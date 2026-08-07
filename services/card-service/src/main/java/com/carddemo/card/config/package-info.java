@@ -2,27 +2,6 @@
  * Spring configuration for the card bounded context, covering stateless request
  * security, published API metadata, and datasource wiring.
  *
- * <h2>Target contract, not a directory listing</h2>
- *
- * <p>Assumptions: every inventory, file name, class name and count in this charter states the
- * package's <b>target contract</b> as the migration plan assigns it. It is a specification of what
- * this package owns and of what it may never hold, so it is read against the plan rather than against
- * a listing of the directory beside it.</p>
- *
- * <p>Alternatives Considered: deriving the inventory from the directory instead of from the plan.
- * Rejected, because a charter that describes whatever happens to be present cannot say what may
- * <em>not</em> be added, and that is the half of a package contract a reader cannot reconstruct from
- * the files. Stating the closed set costs a charter that has to be revised when the contract itself
- * changes, and buys a boundary a reviewer can enforce against a proposed addition.</p>
- *
- * <p>Every class in this package binds one external concern to the service while
- * the application context is being built. None of them carries a business rule.
- * The validation chains, the keyset paging behaviour and the field masking rules
- * encoded from the baseline card programs live in the service, mapper and
- * repository packages of this context instead, so a reader looking for why a card
- * update is refused, or why a primary account number arrives truncated on a
- * response, will not find the answer here.</p>
- *
  * <h2>The three configuration classes</h2>
  *
  * <p>Target contract: this package is to hold exactly three classes, each with a
@@ -155,14 +134,36 @@
  *
  * <h2>Labelling of the rationale above</h2>
  *
- * <p>Assumptions: three of the four canonical labels this project's explainability
- * rule names appear above, in the plural and unparenthesised form the tree
- * uses, and {@code Refactoring Rationale:} is deliberately absent rather than
- * overlooked. That label is reserved for genuinely replaced code, and this
- * package replaces nothing: the COBOL baseline it is transcribed from is never
- * edited, and no earlier Java configuration existed here to supersede. Where a
- * choice made here differs from the baseline, {@code Alternatives Considered:} is
- * therefore the accurate label and is the one used. The written convention is
+ * <p>Assumptions: all four of the canonical labels this project's explainability
+ * rule names appear above, in the plural and unparenthesised form the tree uses,
+ * and {@code Refactoring Rationale:} is used twice, both times on something this
+ * package genuinely superseded rather than merely differs from. The first is on the
+ * shared auto-configuration entry in the registration list, where the earlier design
+ * had {@code CardApplication} import two of those components explicitly and this
+ * charter described that arrangement: Java configuration that existed in this
+ * package was replaced by the shared module's own registration resource. The second
+ * is the paragraph immediately below, which supersedes a statement this section
+ * itself used to make. Assumptions: a charter is part of what this package
+ * delivers, so a claim in it that has been replaced is within the label's reach on
+ * the same reasoning as replaced Java -- and recording the replacement under the
+ * label is what lets a reviewer's literal search find it, which is the whole
+ * purpose the label serves.
+ *
+ * <p>Refactoring Rationale: this section previously asserted the opposite -- that
+ * only three labels appeared and that {@code Refactoring Rationale:} was
+ * "deliberately absent rather than overlooked" because "no earlier Java
+ * configuration existed here to supersede". The label was in the same file,
+ * forty lines above the sentence denying it, and both halves of the denial were
+ * false. That combination is the one worth correcting rather than tolerating: a
+ * reviewer sweeping this tree for label discipline reads a claim of absence,
+ * finds a present instance, and cannot tell which of the two the author intended
+ * -- so the instance reads as the violation when in fact the claim was.
+ *
+ * <p>Assumptions: the label's precondition remains unmet for a choice that merely
+ * DIFFERS from the COBOL baseline, and no such choice is labelled this way. The
+ * baseline is never edited, so transcribing it replaces nothing; where a decision
+ * here departs from it, {@code Alternatives Considered:} is the accurate label and
+ * is the one used. The written convention is
  * {@code docs/CODE_DOCUMENTATION_STANDARD.md}, and the Checkstyle Javadoc gate
  * bound to the Maven {@code validate} phase in {@code services/pom.xml} checks
  * that this documentation is present but cannot check that its labels are

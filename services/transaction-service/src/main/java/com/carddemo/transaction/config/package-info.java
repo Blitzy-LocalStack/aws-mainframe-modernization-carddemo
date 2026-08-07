@@ -100,9 +100,10 @@
  *       visible to this module's application context. Assumptions: the
  *       committed contract is a published interface with a real consumer rather
  *       than developer convenience, because the browser client at
- *       {@code ui/src/api/transactions.ts} is to be written against that file,
- *       so the metadata declared here and the committed document are expected
- *       to agree rather than drift. Assumptions: the money module belongs
+ *       {@code ui/src/api/transactions.ts} is written against that file, so the
+ *       metadata declared here and the committed document are expected to agree
+ *       rather than drift, and {@code ui/src/api/contracts.test.ts} fails the SPA
+ *       build when they do not. Assumptions: the money module belongs
  *       beside that metadata because both concern how this service represents
  *       itself on the wire -- one describes the shape of a payload and the
  *       other fixes how a monetary amount is written into it -- so a change to

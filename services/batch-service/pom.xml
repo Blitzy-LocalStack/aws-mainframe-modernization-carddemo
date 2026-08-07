@@ -73,7 +73,7 @@
     docs/CODE_DOCUMENTATION_STANDARD.md is the written convention for this
     repository. XML has no docstring construct, so this header block is the
     module-entry-point equivalent, and every non-obvious declaration below
-    carries a WHY comment naming at least one of Alternatives Considered,
+    carries an adjacent rationale under one of Alternatives Considered,
     Refactoring Rationale, Assumptions or Trade-offs.
 
   REFERENCE-ONLY BASELINE
@@ -86,7 +86,7 @@
 
   <modelVersion>4.0.0</modelVersion>
 
-  <!-- WHY : Assumptions: the parent is resolved from the reactor through
+  <!-- Assumptions: the parent is resolved from the reactor through
              relativePath rather than from a repository, because this module is
              never built or released independently of the aggregator. groupId
              and version are deliberately NOT restated below: Maven inherits
@@ -101,7 +101,7 @@
 
   <artifactId>batch-service</artifactId>
 
-  <!-- WHY : Assumptions: the sibling Dockerfile copies a single self-contained
+  <!-- Assumptions: the sibling Dockerfile copies a single self-contained
              jar into the runtime image, so the packaging type is stated
              explicitly instead of relying on the Maven default. -->
   <packaging>jar</packaging>
@@ -121,7 +121,7 @@
          SHARED KERNEL
          ==================================================================== -->
 
-    <!-- WHY : Alternatives Considered: depending on transaction-service and
+    <!-- Alternatives Considered: depending on transaction-service and
                account-service in order to reuse their Transaction and Account
                JPA entities was evaluated and rejected on two grounds. First,
                the layering rules enforce that no service imports another
@@ -134,7 +134,7 @@
                the ledger and account tables it writes, and the agreement with
                the owning contexts is at the physical schema level, expressed
                as database grants, never through shared code.
-         WHY : Assumptions: tests/README.md:273 documents that GnuCOBOL must be
+         Assumptions: tests/README.md:273 documents that GnuCOBOL must be
                given the EBCDIC sign convention because the ASCII default
                silently corrupts negative balances. The zoned decimal codec
                that encodes that overpunch rule lives in common-lib and is
@@ -149,7 +149,7 @@
          APPLICATION FRAMEWORK
          ==================================================================== -->
 
-    <!-- WHY : Refactoring Rationale: the baseline has NO checkpoint contract
+    <!-- Refactoring Rationale: the baseline has NO checkpoint contract
                to preserve. The only RESTART= anywhere in the tree is commented
                out at app/jcl/DEFGDGD.jcl:2, and there is no CHKPT= in any of
                the 38 JCL members. A failed step therefore had to be resubmitted
@@ -164,7 +164,7 @@
       <artifactId>spring-boot-starter-batch</artifactId>
     </dependency>
 
-    <!-- WHY : Alternatives Considered: a plain JDBC template or an SQL mapping
+    <!-- Alternatives Considered: a plain JDBC template or an SQL mapping
                framework was evaluated, since a batch workload leans on
                set-based statements that an object mapper adds nothing to. JPA
                wins on the record-at-a-time paths, which are the ones
@@ -179,7 +179,7 @@
       <artifactId>spring-boot-starter-data-jpa</artifactId>
     </dependency>
 
-    <!-- WHY : Assumptions: the posting reject reasons transcribed from
+    <!-- Assumptions: the posting reject reasons transcribed from
                app/cbl/CBTRN02C.cbl are short-circuit field checks whose exact
                message text is part of the observable contract. Expressing the
                structural half of those checks as declarative constraints keeps
@@ -190,7 +190,7 @@
       <artifactId>spring-boot-starter-validation</artifactId>
     </dependency>
 
-    <!-- WHY : Assumptions: the actuator exists only to provide the health target
+    <!-- Assumptions: the actuator exists only to provide the health target
                required by services/batch-service/Dockerfile. No business
                controller, administrative trigger or API contract is introduced,
                and application.yml exposes only the health endpoint. -->
@@ -199,7 +199,7 @@
       <artifactId>spring-boot-starter-actuator</artifactId>
     </dependency>
 
-    <!-- WHY : Trade-offs: an embedded servlet container is carried solely while
+    <!-- Trade-offs: an embedded servlet container is carried solely while
                the argument-driven job is running so the actuator can answer the
                image health probe. A marker-file or process-only shell probe was
                evaluated and rejected because it cannot report an unreachable
@@ -207,7 +207,7 @@
                is a listener in an otherwise one-shot process; BatchApplication
                closes the context and calls System.exit with the job status, so
                that listener cannot keep a completed task alive.
-         WHY : Assumptions: the listener this starter brings is bound to the
+         Assumptions: the listener this starter brings is bound to the
                LOOPBACK address, not to every interface. The bind is declared at
                the server.address key of
                services/batch-service/src/main/resources/application.yml, which
@@ -229,7 +229,7 @@
          DESIGN DECISION: THIS MODULE DECLARES NO SECURITY STARTER
          ==================================================================== -->
 
-    <!-- WHY : Alternatives Considered: security and resource-server starters
+    <!-- Alternatives Considered: security and resource-server starters
                were evaluated for the health listener and rejected. The module
                publishes no business or administrative route, application.yml
                exposes health only with details disabled, and the edge publishes
@@ -242,7 +242,7 @@
          PERSISTENCE
          ==================================================================== -->
 
-    <!-- WHY : Trade-offs: scoped to runtime rather than compile so that no
+    <!-- Trade-offs: scoped to runtime rather than compile so that no
                compilation unit in this module can bind to a driver-specific
                type. Every table this module touches is reached through JPA or
                through set-based SQL, both of which stay portable; the driver is
@@ -253,13 +253,13 @@
       <scope>runtime</scope>
     </dependency>
 
-    <!-- WHY : Assumptions: migrations shipped by this module create and evolve
+    <!-- Assumptions: migrations shipped by this module create and evolve
                ONLY the batch schema. The ledger, account and reference schemas
                are created and evolved exclusively by the contexts that own
                them; this module reaches them through grants, so pointing a
                migration location at any of them would make two modules
                authoritative for one table.
-         WHY : Refactoring Rationale: the migration engine is declared HERE as a
+         Refactoring Rationale: the migration engine is declared HERE as a
                direct dependency rather than absorbed as a transitive of a Boot
                starter. A starter previously stood in this position, which left
                the engine this module configures through its own spring.flyway.*
@@ -274,7 +274,7 @@
       <artifactId>flyway-core</artifactId>
     </dependency>
 
-    <!-- WHY : Assumptions: flyway-core above is the engine, and this coordinate
+    <!-- Assumptions: flyway-core above is the engine, and this coordinate
                is what makes Spring Boot DRIVE it. Spring Boot 4 split its
                autoconfiguration into one module per technology, so
                FlywayAutoConfiguration no longer ships inside
@@ -284,7 +284,7 @@
                spring.flyway.* keys bind to nothing and batch.batch_run, the
                durable step ledger the whole redrive contract rests on, is never
                created, so the first nightly run fails on a missing relation.
-         WHY : Alternatives Considered: spring-boot-starter-flyway carries this
+         Alternatives Considered: spring-boot-starter-flyway carries this
                same autoconfiguration module and was evaluated first. It is
                rejected because it additionally aggregates spring-boot-starter,
                spring-boot-starter-jdbc and spring-boot-jdbc, every one of which
@@ -299,7 +299,7 @@
       <artifactId>spring-boot-flyway</artifactId>
     </dependency>
 
-    <!-- WHY : Assumptions: from Flyway 10 onward, per-database support was
+    <!-- Assumptions: from Flyway 10 onward, per-database support was
                moved OUT of flyway-core into a separate module per database, and
                the Boot starter above pulls no database module of its own. The
                build therefore compiles, packages and passes every test without
@@ -318,19 +318,29 @@
          AWS INTEGRATION
          ==================================================================== -->
 
-    <!-- WHY : Alternatives Considered: the legacy
+    <!-- Alternatives Considered: the legacy
                org.springframework.cloud:spring-cloud-aws-* coordinate was
                evaluated and rejected because it is no longer the maintained
                line; io.awspring.cloud is the group that receives releases
                tracking current Spring Boot versions. Choosing the legacy
                coordinate would pin this module to an unmaintained
                autoconfiguration set while looking, at a glance, correct. -->
+    <!-- WHY : Refactoring Rationale: the sentence above said this line tracks
+               "current Spring Boot versions", which overstates it. The pinned
+               4.1.0 release is built against Boot 4.0.7 while this reactor
+               forces 4.1.0; the evidence, the alternatives and the trade-off
+               are recorded once on the spring-cloud-aws.version property in
+               services/pom.xml, and the startup and emulator-backed tests that
+               hold the combination to account live in account-service. This
+               module inherits the version from that property and takes on the
+               same accepted risk, so it is named here rather than left for a
+               reader to infer from a version number. -->
     <dependency>
       <groupId>io.awspring.cloud</groupId>
       <artifactId>spring-cloud-aws-starter-sqs</artifactId>
     </dependency>
 
-    <!-- WHY : Assumptions: the infrastructure layer publishes every runtime
+    <!-- Assumptions: the infrastructure layer publishes every runtime
                location (database endpoint, dataset bucket, queue destinations,
                encryption key identifiers) as parameters, and this module reads
                them from there. That is the mechanism by which no endpoint and
@@ -341,7 +351,7 @@
       <artifactId>spring-cloud-aws-starter-parameter-store</artifactId>
     </dependency>
 
-    <!-- WHY : Refactoring Rationale: the baseline addressed dataset
+    <!-- Refactoring Rationale: the baseline addressed dataset
                generations through relative generation numbers, for example the
                (0) and (+1) references at app/jcl/COMBTRAN.jcl:24, :26, :37 and
                :44, and retained five generations per base. Generation-data-group
@@ -360,12 +370,12 @@
          OBSERVABILITY
          ==================================================================== -->
 
-    <!-- WHY : Trade-offs: runtime scope only, because no code in this module
+    <!-- Trade-offs: runtime scope only, because no code in this module
                may reference a registry implementation directly. Instrumentation
                is expressed against the vendor-neutral facade that arrives with
                the actuator, so swapping the backend stays a dependency change
                rather than a code change.
-         WHY : Refactoring Rationale: the baseline's only operational telemetry
+         Refactoring Rationale: the baseline's only operational telemetry
                was the job log written to the SYSOUT and SYSPRINT data
                definitions of each JCL step, which could be read after the fact
                but never queried or alerted on while a step was running. -->
@@ -379,7 +389,7 @@
          TEST SCOPE
          ==================================================================== -->
 
-    <!-- WHY : Assumptions: the aggregate is declared instead of pinning each
+    <!-- Assumptions: the aggregate is declared instead of pinning each
                test library individually, so the test stack is version-aligned
                with the runtime by construction and cannot drift away from it
                when the parent moves the framework version. It also supplies the
@@ -391,7 +401,7 @@
       <scope>test</scope>
     </dependency>
 
-    <!-- WHY : Assumptions: the jobs are argument-driven, so a test must be able
+    <!-- Assumptions: the jobs are argument-driven, so a test must be able
                to launch one with an explicit business date and assert on the
                resulting exit status. app/jcl/INTCALC.jcl:22 injects
                PARM='2022071800' for exactly the same reason, and a test that
@@ -403,7 +413,7 @@
       <scope>test</scope>
     </dependency>
 
-    <!-- WHY : Trade-offs: a real database container starts far more slowly than
+    <!-- Trade-offs: a real database container starts far more slowly than
                an in-memory engine, and that cost is accepted deliberately. The
                integration tests must prove that the three-write posting unit of
                work at app/cbl/CBTRN02C.cbl:440-442 both COMMITS and ROLLS BACK
@@ -413,7 +423,7 @@
                an in-memory substitute reproduces faithfully; a test that passed
                against a substitute would prove nothing about the property that
                actually matters here.
-         WHY : Assumptions: the parent imports the Testcontainers bill of
+         Assumptions: the parent imports the Testcontainers bill of
                materials at 2.0.5, the exact version the dependency inventory
                pins after verifying it against the publishing registry. Every
                module artifact was renamed in the 2.x line to carry the
@@ -423,7 +433,7 @@
                managed only by the 1.x bill of materials. Declaring them beside a
                2.0.5 import therefore leaves the version unmanaged and fails
                resolution outright rather than merely warning.
-         WHY : Trade-offs: the pinned bill-of-materials version and the older
+         Trade-offs: the pinned bill-of-materials version and the older
                artifactId spelling cannot both be honoured, and the version pin
                wins because it is the value that was verified against the
                registry and is shared by every module in the reactor. The
@@ -445,7 +455,7 @@
       <scope>test</scope>
     </dependency>
 
-    <!-- WHY : Refactoring Rationale: the two prohibitions this module depends on
+    <!-- Refactoring Rationale: the two prohibitions this module depends on
                most, that the money path never uses a binary floating-point type
                and that no service imports another service's domain package,
                were previously expressible only as review conventions, and a
@@ -462,7 +472,7 @@
       <scope>test</scope>
     </dependency>
 
-    <!-- WHY : Refactoring Rationale: the engine above was declared alone and the
+    <!-- Refactoring Rationale: the engine above was declared alone and the
                comment above it said the rule set was inherited. Maven resolution
                passes a module's MAIN classes to its consumers and never its test
                classes, so no rule was ever evaluated against com.carddemo.batch
@@ -471,7 +481,7 @@
                here. common-lib now publishes the class as a test artifact and the
                architecture-rules Surefire execution in services/pom.xml scans it
                into this module's test run, against this module's own classes.
-         WHY : Assumptions: ownership is unchanged, the rules remaining authored
+         Assumptions: ownership is unchanged, the rules remaining authored
                once at
                services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java.
                Version and scope come from the aggregator's managed set, and test
@@ -487,52 +497,33 @@
          DELIBERATELY ABSENT DEPENDENCIES
 
          Recorded because each is a choice a reader could reasonably expect to
-         find made the other way. Rule 1 treats an undocumented non-obvious
-         choice as a review failure, and choosing NOT to add a library is such
-         a choice.
-         ====================================================================
+         find made the other way, and Rule 1 treats an undocumented non-obvious
+         choice as a review failure.
 
-         No annotation-driven boilerplate generator (lombok).
-           Alternatives Considered: evaluated and rejected because generated
-           accessors carry no Javadoc, so annotating a type to synthesise its
-           members would make this module structurally incapable of passing the
-           inherited Checkstyle documentation gate. Java records with explicit
-           constructors give the same brevity while leaving every member
-           documentable.
+         No boilerplate generator (lombok).
+           Alternatives Considered: rejected because generated accessors carry
+           no Javadoc, so this module would be structurally incapable of passing
+           the inherited Checkstyle documentation gate. Records with explicit
+           constructors give the same brevity while staying documentable.
 
          No generated bean mapper (mapstruct).
-           Alternatives Considered: evaluated and rejected because the record
-           to data-transfer mapping in this repository is not mechanical. It
-           drops FILLER padding, masks the primary account number to its last
-           four digits, suppresses the card verification value entirely,
-           encrypts identifiers, and gives a target name to three fields the
-           baseline spells differently - the baseline spellings stay exactly as
-           app/** declares them and app/** is untouched, with the naming
-           divergence registered in
-           docs/architecture/data-model-and-schema-mapping.md. Each of those
-           needs a justification at the mapping site, and a generated mapper has
-           nowhere to put one.
+           Alternatives Considered: rejected because copybook-to-DTO mapping is
+           not mechanical: it drops FILLER, masks the primary account number,
+           encrypts identifiers and renames three misspelled baseline fields,
+           and each of those needs an inline justification a generated mapper
+           cannot hold.
 
          No external resilience library (resilience4j, spring-retry) and no
          circuit breaker.
-           Alternatives Considered: retry moved into the Spring Framework core
-           that arrives with the parent, which supplies method-level retry, a
-           concurrency limiter and a programmatic retry policy. The published
-           resilience4j Spring Boot integration targets the previous Boot major
-           version, and spring-retry is superseded by the in-framework support,
-           so adding either would layer a second retry mechanism over the one
-           already present. Durable retry for this module comes from per-state
-           retry in the invoking state machine and from queue redelivery into a
-           dead-letter queue, which survive a task dying outright; an in-process
-           retry cannot. A circuit breaker is omitted because this module makes
-           no synchronous call to another service that could be broken open.
+           Alternatives Considered: rejected because retry moved into the Spring
+           Framework core, which the parent already brings, and because the
+           durable retry tier for this module is the orchestrator's per-state
+           retry rather than an in-process one.
 
          No in-memory cache or streaming platform (redis, kafka, kinesis).
-           Alternatives Considered: out of scope by design. The baseline has no
-           cache tier, so adding one would introduce a coherence question that
-           functional parity does not ask; and the messaging requirement here is
-           request/reply, which the queue service already satisfies without a
-           broker or a shard to operate.
+           Alternatives Considered: rejected as out of scope by design. The
+           baseline has no cache tier and its messaging requirement is
+           request/reply, which the queue service satisfies.
 
          No distributed-transaction coordinator (XA data source, or any
          two-phase-commit, saga or compensating-reversal framework).
@@ -546,24 +537,11 @@
            failure. Keeping one local transaction over scoped cross-schema
            grants preserves atomicity and needs no coordinator at all.
 
-         No API documentation starter.
-           Alternatives Considered: exposing an administrative endpoint to
-           trigger a job over HTTP was evaluated and rejected. The only
-           invocation path in the target architecture is a synchronous run-task
-           call from a state machine state, which passes job selection and the
-           business date as container command arguments. An HTTP trigger would
-           add a second invocation path and, with it, a second authorization
-           surface to design, test and defend, for no operational gain. There is
-           consequently no controller, no published contract and no
-           OpenApiConfig class shipped under src, and infra/modules/api-gateway
-           -http creates no route for this module and refuses one by validation;
-           the module README states the same, so they cannot disagree.
-
-           Assumptions: no security starter and no SecurityConfig class are
-           shipped. The only HTTP surface is the actuator health route, its
-           details are disabled, and the container probe supplies no credential.
-           Job selection remains exclusively in the command arguments consumed
-           by BatchApplication, so the listener cannot trigger or alter a job.
+         No API documentation starter and no security starter.
+           Assumptions: this module publishes no business route, so there is no
+           contract for one to serve and no filter chain for the other to
+           configure. Its only listener answers the actuator health probe on the
+           loopback address.
          ==================================================================== -->
 
   </dependencies>
@@ -571,7 +549,7 @@
   <build>
     <plugins>
 
-      <!-- WHY : Assumptions: the Spring Boot parent only MANAGES this plugin, it
+      <!-- Assumptions: the Spring Boot parent only MANAGES this plugin, it
                  does not activate it, and the reactor parent at services/pom.xml
                  activates checkstyle, enforcer and failsafe but deliberately not
                  this one, because common-lib is a library that must stay a
@@ -581,7 +559,7 @@
                  Main-Class and no BOOT-INF layout, and the container image's
                  `java -jar` entry point fails with "no main manifest attribute"
                  at run time, from a build that reported success.
-           WHY : Assumptions: this module is a deployable even though it serves no
+           Assumptions: this module is a deployable even though it serves no
                  HTTP surface. Step Functions starts it through ecs:runTask.sync
                  and the image launches one self-contained archive, so the
                  packaging requirement is identical to the seven online services;
@@ -593,13 +571,13 @@
         <artifactId>spring-boot-maven-plugin</artifactId>
       </plugin>
 
-      <!-- WHY : Assumptions: the inherited pluginManagement supplies the
+      <!-- Assumptions: the inherited pluginManagement supplies the
                  bindings but a module must still opt in for the plugin to run
                  at all, and the default include pattern already matches the
                  IT-suffixed class names used by this module's repository tests,
                  so no include override is needed. Unit tests are matched by the
                  default test runner's own patterns and need no declaration.
-           WHY : Trade-offs: no failure tolerance of any kind is configured
+           Trade-offs: no failure tolerance of any kind is configured
                  here, and that is a deliberate separation rather than an
                  omission. The mainframe condition-code rubric, under which a
                  return code of 4 is a warn tier that still lets the chain

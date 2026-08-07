@@ -121,12 +121,13 @@ below.
    denominated in **milliseconds** — so `5000` also means 5 seconds. A reader who
    carries either literal across without its unit is wrong by a factor of ten in
    one direction or a hundred in the other.
-2. **A field-width sum is not a wire length, and the request receiver overrides
-   one copybook width.** The request copybook declarations sum to **153**, but
-   the observed ordinal-nine receiver is `PIC X(13)`, so the target codec emits
-   **152** data characters plus seventeen commas: **169** characters. The reply
-   declarations sum to **57**; the target codec emits the zero-suppressed amount
-   plus six commas: **63** characters. The baseline passes a length of 64 because
+2. **A field-width sum is not a wire length, and one consumer's receiving item
+   is not a width.** The request copybook declarations sum to **153**, so the
+   payload is **153** data characters plus seventeen commas: **170** characters.
+   The observed ordinal-nine receiver is `PIC X(13)`, which is that consumer's
+   working storage and not a property of the wire. The reply declarations sum to
+   **57**; the target codec emits the zero-suppressed amount plus six commas:
+   **63** characters. The baseline passes a length of 64 because
    its `STRING` pointer advances one position beyond the built payload. These
    figures are given, separately labelled, in
    [Width sums are not wire lengths](#width-sums-are-not-wire-lengths).
@@ -168,13 +169,20 @@ convention already established for the test suite at
   purpose is byte-level fidelity.
 - Refactoring Rationale: the baseline contains one structural flaw in its
   messaging that the target contract deliberately corrects — its request get is
-  outside recovery, and its reply is sent before the decision is committed. That is
-  recorded here as an **open implementation obligation** rather than passed over,
-  because otherwise the specified transactional outbox appears gratuitous. The
-  repository does not yet contain that outbox or its consumer/publisher, so this
-  document does not claim the gap is closed. **No COBOL is changed**; the baseline
-  remains exactly as it is, and the future divergence must be registered in the
-  contracted `docs/architecture/cobol-to-service-traceability.md`.
+  outside recovery, and its reply is sent before the decision is committed, so a
+  reply can be emitted for a decision that never commits. That correction is
+  **authored**, not merely specified: `AuthorizationRequestListener` consumes the
+  request under a per-message transaction and lets a failure propagate, so the
+  message is deleted only on success and redelivered otherwise; `AuthReplyOutbox` is
+  the reply-intent row committed with the decision; `OutboxPublisher` sends it
+  afterwards; and `auth_reply_outbox` is created by `V1__authorization.sql`. An
+  earlier revision of this bullet said the repository did not yet contain the outbox
+  or its consumer and publisher, which has ceased to be true; a specification note
+  that understates what is landed sends a reader looking for absent code and past
+  the code that is there. **No COBOL is changed**; the baseline remains exactly as it
+  is, and the divergence is registered in the contracted
+  `docs/architecture/cobol-to-service-traceability.md`.
+
 - Trade-offs: this document reproduces the **complete positional field list** for
   both payloads rather than pointing at the copybooks, and it accepts the resulting
   duplication. The reason is specific rather than editorial: the copybooks begin at
@@ -264,7 +272,7 @@ constants:
 | `CARDDEMO.RESPONSE.QUEUE` | [`app-vsam-mq/README.md`](../../app/app-vsam-mq/README.md) L54, defined to CICS at L72 | The two inquiry programs each open a **statically named** reply queue instead: `'CARD.DEMO.REPLY.ACCT'` at `COACCT01.cbl` L198 and `'CARD.DEMO.REPLY.DATE'` at `CODATE01.cbl` L147 |
 | `CARD.DEMO.ERROR` | `COACCT01.cbl` L294 and `CODATE01.cbl` L243 | A program literal in both inquiry programs |
 
-> **Assumptions: neither authorization endpoint is a compiled-in baseline queue
+> Assumptions: **neither authorization endpoint is a compiled-in baseline queue
 > name, but inbound routing data is not authority.** The request queue reaches
 > `COPAUA0C` in the trigger message — `EXEC CICS RETRIEVE INTO(MQTM)` at L233–L236,
 > then `MOVE MQTM-QNAME TO WS-REQUEST-QNAME` at L238 — and the reply queue reaches
@@ -277,7 +285,7 @@ constants:
 > fixed reply queues by literal (L198 and L147), and the target account/date
 > consumers likewise send only to the configured shared inquiry-reply queue.
 
-> **Refactoring Rationale: the shared inquiry request queue is split at the
+> Refactoring Rationale: **the shared inquiry request queue is split at the
 > ownership boundary.** Both inquiry programs are
 > triggered from the same request/reply pair described in
 > [`app-vsam-mq/README.md`](../../app/app-vsam-mq/README.md) L53–L54, but they
@@ -292,8 +300,12 @@ constants:
 > either consumer receives them. Each has its own DLQ; the reply and error queues
 > remain shared.
 
-- Alternatives Considered: **managed queues rather than a managed IBM MQ broker.**
-  A managed broker running IBM MQ would have preserved the wire protocol verbatim
+- Alternatives Considered: **managed queues rather than an IBM MQ broker run on
+  EC2.** Assumptions: IBM MQ is not an Amazon MQ engine — Amazon MQ offers
+  ActiveMQ and RabbitMQ only — so the broker alternative was always a
+  self-managed one, as
+  [ADR-004](../adr/ADR-004-messaging.md#option-2--self-managed-ibm-mq-on-ec2--the-close-call-runner-up-rejected)
+  records. A broker running IBM MQ would have preserved the wire protocol verbatim
   and required no codec at all, which is a real advantage and the reason it was
   evaluated first. It was rejected on two specific grounds. First, the two
   properties that the baseline actually depends on are both reproducible without a
@@ -342,7 +354,8 @@ From [`CCPAURQY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CCPAURQY.cpy),
 data at L19–L36. The `PICTURE` column is the declared width; the position column is
 the field's ordinal on the wire, which is the only thing that identifies it.
 Ordinal nine is the documented exception: the copybook declares fourteen
-characters, but the consuming program receives only thirteen.
+characters and the wire carries fourteen, but the one consuming program in the
+repository receives them into a thirteen-character item of its own.
 
 | # | Field | `PICTURE` | Width | Notes |
 |---|---|---|---|---|
@@ -354,7 +367,7 @@ characters, but the consuming program receives only thirteen.
 | 6 | `PA-RQ-MESSAGE-TYPE` | `X(06)` | 6 | |
 | 7 | `PA-RQ-MESSAGE-SOURCE` | `X(06)` | 6 | |
 | 8 | `PA-RQ-PROCESSING-CODE` | `9(06)` | 6 | Unsigned numeric display |
-| 9 | `PA-RQ-TRANSACTION-AMT` | `+9(10).99` | 14 declared / **13 received** | Target emission follows `WS-TRANSACTION-AMT-AN PIC X(13)`, not the wider declaration; see [Money on the wire](#money-on-the-wire-is-edited-display-text-not-packed) |
+| 9 | `PA-RQ-TRANSACTION-AMT` | `+9(10).99` | **14** declared and emitted / 13 received by `COPAUA0C` | Target emission follows the declaration; the narrower receiver is registered as a reference-side divergence — see [Money on the wire](#money-on-the-wire-is-edited-display-text-not-packed) |
 | 10 | `PA-RQ-MERCHANT-CATAGORY-CODE` | `X(04)` | 4 | Misspelled in the baseline; corrected on every target-side surface — the persisted column, the Java component and the additive JSON envelope schema — per `data-model-and-schema-mapping.md`. The correction changes no byte of this wire, which carries no field name at all: what this row fixes is ordinal 10 |
 | 11 | `PA-RQ-ACQR-COUNTRY-CODE` | `X(03)` | 3 | |
 | 12 | `PA-RQ-POS-ENTRY-MODE` | `9(02)` | 2 | Unsigned numeric display |
@@ -404,58 +417,58 @@ levels are given separately and each is labelled.
 
 | Quantity | Request | Reply | What it is |
 |---|---|---|---|
-| Sum of copybook-declared field widths | **153** | **57** | Declaration arithmetic only; request ordinal nine is wider here than its actual receiver |
-| Declaration arithmetic *plus* delimiters — **do not adopt** | **170** | **63** | 153 + 17 commas. Recorded only so the figure is recognisable; see the note below |
-| Target codec emitted-width sum | **152** | **57** | Seventeen request widths plus the observed 13-character amount; six reply widths with the emitted mask |
-| Target codec canonical wire length | **169** | **63** | Request: 152 + 17 interior commas. Reply: 57 + 6 commas, including the trailing comma |
+| Sum of copybook-declared field widths | **153** | **57** | Declaration arithmetic only, no delimiters |
+| Target codec emitted-width sum | **153** | **57** | Eighteen request widths as declared; six reply widths with the emitted mask |
+| Target codec canonical wire length | **170** | **63** | Request: 153 + 17 interior commas. Reply: 57 + 6 commas, including the trailing comma |
+| What one reference consumer receives — **not a wire length** | **169** | n/a | `COPAUA0C` reads ordinal nine into a 13-character item, so it keeps 169 of the 170 it is sent; accepted on decode, never emitted |
 | What the baseline producer emits | **not observable** | **63 built, 64 passed to MQPUT1** | No request producer exists; the reply pointer contributes one trailing pad byte to the passed length |
 
-> **Reconciled — the request wire length is 169, and 170 is the figure to reject.**
+> **Reconciled — the request wire length is 170, and 169 is one consumer's intake.**
 > The two differ by exactly one byte of the money field, so the choice is a data
 > decision rather than a counting preference and is settled here in writing rather
-> than left to be rediscovered. Reaching 170 requires emitting ordinal nine at the
+> than left to be rediscovered. 170 is reached by emitting ordinal nine at the
 > fourteen characters
 > [`CCPAURQY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CCPAURQY.cpy) L27
-> declares for `PIC +9(10).99`. The only consumer in the repository cannot hold
-> fourteen: L63 of
+> declares for `PIC +9(10).99`, and a copybook field's picture is normative for this
+> wire. The only consumer in the repository cannot hold fourteen: L63 of
 > [`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl)
 > declares the receiving field `WS-TRANSACTION-AMT-AN PIC X(13)`, the `UNSTRING`
 > hands ordinal nine into that field at L364, and L376–L377 then evaluate
 > `FUNCTION NUMVAL` over it. An alphanumeric move into a shorter field drops the
-> **last** character, which for this token is the second cents digit — so a
-> 14-character token is received as the amount **divided by ten**, with nothing
-> raised anywhere. `CsvAuthCodec.REQUEST_WIRE_LENGTH` is therefore 169 and its
-> `REQUEST_MONEY_WIDTH` is 13. **A scope statement, ticket or review comment that
-> says 170 should be corrected against this section; the codec should not be
-> "corrected" to match it.** The measurable consequence is bounded and loud rather
-> than silent: the emittable *negative* amount domain narrows to
-> `-999999999.99 … -0.01`, because a negative value spends one of the thirteen
-> positions on its sign, and a more negative value is **refused by name** rather
-> than truncated. Every positive amount `0.00 … 9999999999.99` round-trips exactly.
+> **last** character, which for this token is the second cents digit — so *that
+> consumer* acts on the amount **divided by ten**, with nothing raised anywhere.
+> That is a defect in its working storage, not in the payload, and narrowing the
+> emission to 13 would make every other consumer wrong in order to protect it while
+> leaving it truncating whatever it is sent. `CsvAuthCodec.REQUEST_WIRE_LENGTH` is
+> therefore 170 and its `REQUEST_MONEY_WIDTH` is 14. The measurable consequence is
+> that the whole declared domain round-trips exactly, positive and negative alike,
+> because the sign occupies its own position rather than borrowing a digit's.
 
-> **Tolerant on input, strict on output — and the two committed fixtures say so.**
+> **Tolerant on input, strict on output — and the committed fixtures say so.**
 > The paragraph above settles the **emitted** length; it does not make a
-> 14-character inbound token unacceptable, and the distinction is worth stating
-> because a reader can otherwise take "170 is the figure to reject" as a rule about
-> what may arrive. `CsvAuthCodec.parseMoney` accepts the wider grammar and parses
-> **every** character of it, so a producer built from
-> [`CCPAURQY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CCPAURQY.cpy) L27
-> alone is understood rather than misread; the codec never *emits* fourteen, so the
-> reference receiver is never handed a token it would truncate; and a token that has
-> already been truncated to thirteen characters is **refused by name**, because the
-> parser requires exactly two fraction digits where `FUNCTION NUMVAL` would have
-> accepted one. That asymmetry is registered as **D-AUTH-AMOUNT-TOLERANT-READ** in
+> 13-character inbound token unacceptable, and the distinction is worth stating
+> because a reader can otherwise take the emitted width as a rule about what may
+> arrive. `CsvAuthCodec.parseMoney` accepts the narrower grammar as well, so a
+> producer built against that consumer's intermediate is understood rather than
+> dead-lettered; the codec always *emits* fourteen, so nothing it produces
+> contradicts the layout this repository publishes; and a token narrower still —
+> one that lost a cents digit rather than its sign position — is **refused by
+> name**, because the parser requires exactly two fraction digits where
+> `FUNCTION NUMVAL` would have accepted one. That asymmetry is registered as
+> **D-AUTH-AMOUNT-TOLERANT-READ** in
 > [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md) §7.4.
 >
-> Two fixtures under
-> `services/authorization-service/src/test/resources/fixtures/` make each half
-> executable, and neither is named as canonical:
-> `auth-request-amount-variants.csv` holds three **169**-byte payloads spanning the
-> negative, maximum and zero amount boundaries, and
-> `auth-request-copybook-wire170-decode-only.csv` holds one **170**-byte payload whose
-> amount is at the copybook's declared width. `AuthRequestWireFixtureTest` asserts
-> the lengths, the decoded values, the refusal of the truncated form, and that
-> re-emitting the wider payload produces the canonical 169.
+> Fixtures under `services/authorization-service/src/test/resources/fixtures/`
+> make each half executable, and their names say which is which:
+> `auth-request-canonical-wire170.csv` and `auth-request-encode-oracle-170.bin`
+> hold the canonical **170**-character payload — the second with no terminator at
+> all, so it is byte-comparable against encoder output;
+> `auth-request-amount-variants.csv` holds three 170-byte payloads spanning the
+> negative, maximum and zero amount boundaries; and
+> `auth-request-receiver-wire169-decode-only.csv` holds one **169**-byte payload at
+> the reference receiver's narrower width. `AuthRequestWireFixtureTest` asserts the
+> lengths, the decoded values, the refusal of the truncated form, and that
+> re-emitting the narrower payload produces the canonical 170.
 
 > **Measured — the emitted reply is longer than the interior-delimiter arithmetic
 > predicts, because the `STRING` appends a comma after the last field too.** The
@@ -474,14 +487,14 @@ levels are given separately and each is labelled.
 > requires exactly 62 bytes with no trailing delimiter would reject every genuine
 > reply the baseline produces.
 
-> **Assumptions: the target codec parses tolerantly, emits the observed request
-> intake width and emits the reply buffer the baseline actually builds.** The
-> request encoder writes a 13-character amount, giving 152 data characters and a
-> 169-character payload; positive values use ten zero-padded integer digits and
-> two cents without a sign, while a negative value spends one of those thirteen
-> positions on `-`. This is an explicit assumption about the absent producer,
-> chosen because emitting the copybook's fourteenth sign position would be
-> truncated by the only real consumer. The reply encoder writes the
+> Assumptions: **the target codec parses tolerantly, emits the declared request
+> width and emits the reply buffer the baseline actually builds.** The request
+> encoder writes a 14-character amount, giving 153 data characters and a
+> 170-character payload; the leading position always carries a forced sign, `+` or
+> `-`, followed by ten zero-padded integer digits, the point and two cents. This is
+> an explicit assumption about the absent producer, chosen because the copybook is
+> the only published statement of what that producer would emit. The reply encoder
+> writes the
 > fourteen-character `PIC -zzzzzzzzz9.99` rendering and a trailing comma, giving
 > 63 characters. The decoder also tolerates the baseline's 64th pad byte. Golden
 > vectors pin positive, negative, zero and non-zero-cent values so a symmetric but
@@ -498,7 +511,7 @@ Proven on both directions of the conversation, so there is no inference involved
 | `01 W01-GET-BUFFER PIC X(500).` | `COPAUA0C.cbl` L103 | The inbound buffer is a 500-byte character area, so the payload is character data throughout |
 | `MOVE MQFMT-STRING TO MQMD-FORMAT` | `COPAUA0C.cbl` L397 (inbound) and L751 (outbound) | Both directions are declared string format to the queue manager |
 
-> **Assumptions: the payload is character data, and no field may contain the
+> Assumptions: **the payload is character data, and no field may contain the
 > delimiter.** Because the format is positional and the delimiter is a bare comma
 > with no quoting or escaping mechanism anywhere in the parse, any comma appearing
 > inside a value — most plausibly in the 22-character merchant name at ordinal 14 or
@@ -521,7 +534,7 @@ So the same value has three representations in the baseline: signed decimal
 **text** in transit, packed decimal at rest in the segment, and a fixed-scale
 decimal column at rest in the table.
 
-> **Assumptions: the baseline already transports money as signed decimal text, so
+> Assumptions: **the baseline already transports money as signed decimal text, so
 > carrying money as a JSON string preserves the baseline's contract rather than
 > inventing a convention.** This is the single most useful thing to know about the
 > money path, because the target's rule — money is a JSON string, never a JSON
@@ -539,7 +552,7 @@ decimal column at rest in the table.
 > [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md) and is not
 > restated here.
 
-> **Assumptions: the reply's amount is emitted through a different edit mask than
+> Assumptions: **the reply's amount is emitted through a different edit mask than
 > the one the copybook declares, and both are fourteen characters wide.** The
 > `STRING` at
 > [`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl) L727
@@ -556,7 +569,7 @@ decimal column at rest in the table.
 
 ### The copybooks carry no `01` level, with one exception
 
-> **Assumptions: four of the five copybooks begin at level `05` and have no group
+> Assumptions: **four of the five copybooks begin at level `05` and have no group
 > item, so a codec written against one must be told what record it belongs to.**
 > [`CCPAURQY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CCPAURQY.cpy),
 > [`CCPAURLY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CCPAURLY.cpy),
@@ -686,7 +699,7 @@ there is no ambiguity to resolve:
 | L747–L748 | spaces into the reply's own reply-to queue and queue-manager fields | The reply is **terminal** — it invites no answer |
 | L758 | the put is `MQPUT1`, not `MQPUT` | Open, put and close in one operation per message, with the destination supplied in the call |
 
-> **Assumptions: correlation is echoed, but a reply URL is routing data rather
+> Assumptions: **correlation is echoed, but a reply URL is routing data rather
 > than authority.** The target consumer must copy the inbound `correlationId`
 > verbatim because the requester is waiting on that opaque value. It may use the
 > inbound `replyToQueueUrl` only after exact-match validation against its
@@ -700,8 +713,23 @@ there is no ambiguity to resolve:
 > The two inquiry programs remain the contrast: they pre-open fixed reply queues
 > by literal (`COACCT01.cbl` L198 and L261, `CODATE01.cbl` L147 and L210), and
 > the target account/reference consumers send only to the configured shared
-> inquiry-reply queue. Application validation is still a **target requirement**;
-> no listener is authored yet.
+> inquiry-reply queue.
+>
+> Refactoring Rationale: this paragraph previously ended "Application validation is
+> still a **target requirement**; no listener is authored yet." Both listeners are
+> now authored --
+> `services/account-service/src/main/java/com/carddemo/account/service/InquiryMessageListener.java`
+> and
+> `services/reference-service/src/main/java/com/carddemo/reference/service/DateInquiryMessageListener.java`
+> -- and each publishes **only** to the queue named by its own configuration. Neither
+> reads a destination from the message: both were written against the baseline's own
+> behaviour, which saves the request's reply-to queue (`COACCT01.cbl` L341) and then
+> does not use it, putting instead to the handle opened from the statically assigned
+> reply-queue name. Honouring a message-supplied destination would have been both
+> unfaithful and a queue-injection vector, since a request could then direct an
+> account's balance to a queue of the sender's choosing;
+> `InquiryMessageListenerTest.theReplyIgnoresAMessageSuppliedDestination` asserts it
+> does not.
 
 The IAM boundary is already authored independently of that future validation.
 `infra/modules/sqs/outputs.tf` publishes `service_queue_permissions` as three
@@ -718,11 +746,31 @@ closed sets:
 statement grants only `sqs:SendMessage`; its consume statement grants receive,
 delete, visibility and queue-metadata actions only on the supplied receive ARNs.
 There is no wildcard SQS resource and no ARN is assembled from
-`replyToQueueUrl`. The environment roots that must pass
-`service_queue_permissions` into each service are not yet authored, so the module
-boundary is implemented but not yet composed into a deployable stack.
+`replyToQueueUrl`. Both environment roots compose that boundary: each reads
+`module.sqs.service_queue_permissions` into a per-workload map and passes its
+`receive` and `send` members into the service module's `sqs_receive_queue_arns` and
+`sqs_send_queue_arns`, so the grant surface is composed and not merely offered. The
+correction that got it there, and why composing it became necessary rather than tidy,
+is recorded immediately below.
 
-> **Assumptions: the FIFO deduplication identifier is a separate concern from
+Refactoring Rationale: this section previously closed by stating that the
+environment roots which must pass `service_queue_permissions` into each service
+were "not yet authored, so the module boundary is implemented but not yet composed
+into a deployable stack." Both roots now compose it, through
+`local.sqs_permissions_by_workload`, which reads the three entries of that output
+directly rather than assembling ARNs. The composition became necessary rather than
+merely tidy the moment the two inquiry consumers were authored: both of them
+**send**, so without the grants each would poll its request queue successfully and
+then fail every reply with an access-denied error — a failure that presents as an
+unanswered requester rather than as a permissions problem, and which no plan-time
+check would have surfaced.
+
+A workload absent from that map receives the empty set and therefore no SQS
+statement at all. That is deliberate: `batch` and `data-migration` put no message
+on any of these queues, so the three workloads that do are named explicitly and
+adding a fourth is a visible edit rather than an inherited grant.
+
+> Assumptions: **the FIFO deduplication identifier is a separate concern from
 > correlation, and the two must not be conflated.** The correlation identifier is
 > transport metadata whose only job is to match an answer to a question; it is
 > opaque, it is chosen by the requester, and the consumer never interprets it. The
@@ -755,7 +803,7 @@ plainly rather than papered over.
 | Get wait interval | `COPAUA0C.cbl` L242, applied at L393 | `5000` | **milliseconds** | 5 seconds |
 | Reply persistence | `COPAUA0C.cbl` L749 | `MQPER-NOT-PERSISTENT` | — | The reply is not written to durable storage |
 
-> **Assumptions: two different time units express the same five seconds in one
+> Assumptions: **two different time units express the same five seconds in one
 > program, and any implementation that reads either literal without its unit will
 > be wrong.** MQ denominates message expiry in tenths of a second, so the `50` at
 > `COPAUA0C.cbl` L750 is **5.0 seconds** — not fifty seconds and not fifty
@@ -802,6 +850,16 @@ message the way the descriptor's expiry field does.
   "the system correctly declined a stale message" from "the system lost a message",
   and the cost is one log line per expired message. The record lands in the structured logging described in
   `docs/architecture/observability.md`.
+- Trade-offs: **an attribute that will not parse is not the same as an absent one, and the three
+  consumers answer it differently on purpose.** An absent attribute means the producer states no
+  expiry and its request is answered; an attribute that is present but unreadable is refused by
+  `AuthorizationRequestListener` and treated as absent by `InquiryMessageListener` and
+  `DateInquiryMessageListener`. The asymmetry is the point: the authorization flow commits a decision
+  and moves an account's counters, so accepting an unreadable attribute would let a producer defeat
+  the control by corrupting it, whereas the two inquiry flows answer read-only questions where
+  honouring a stale request costs a wasted reply and refusing a merely oddly-formatted one costs a
+  real answer. In every case only the attribute's LENGTH is logged, never its value: it came off the
+  wire and did not parse, so nothing bounds what it contains.
 
 ---
 
@@ -868,7 +926,7 @@ work and the reply have succeeded. Both paths keep a dead-letter queue at
 Two further get options appear in **all three** programs and must be carried
 across:
 
-> **Assumptions: `MQGMO-CONVERT` moves the character-conversion responsibility from
+> Assumptions: **`MQGMO-CONVERT` moves the character-conversion responsibility from
 > the transport to the producer.** All three consumers request queue-manager
 > codepage conversion on the get —
 > [`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl) L390,
@@ -884,7 +942,7 @@ across:
 > deliver a message whose merchant name and city fields contain replacement
 > characters while every numeric field still parses.
 
-> **Assumptions: `MQGMO-FAIL-IF-QUIESCING` maps to graceful listener shutdown on
+> Assumptions: **`MQGMO-FAIL-IF-QUIESCING` maps to graceful listener shutdown on
 > `SIGTERM`.** All three consumers set it — `COPAUA0C.cbl` L391, `COACCT01.cbl`
 > L348, `CODATE01.cbl` L297 — so a get in progress fails cleanly when the queue
 > manager is shutting down instead of hanging or being severed mid-operation. The
@@ -898,7 +956,7 @@ across:
 
 ---
 
-## The baseline has two loss windows; the target outbox is prospective
+## The baseline has two loss windows; the target outbox that closes them is authored
 
 - Refactoring Rationale: **the baseline sequence is decide → send reply → write
   database state → commit, not commit → send.** The call order appears directly in
@@ -915,27 +973,51 @@ across:
      was never committed.
 
 The target contract is a **transactional outbox plus delete-on-success**. The
-authorization handler is to commit the decision and reply-intent row in one local
-database transaction, then delete the SQS request. A separately retryable publisher
-is to send unpublished rows and mark them published after success. This changes the
+authorization handler commits the decision and reply-intent row in one local
+database transaction, then deletes the SQS request. A separately retryable publisher
+sends unpublished rows and marks them published after success. This changes the
 observable failure semantics deliberately: a pre-commit crash causes request
 redelivery rather than loss, and a post-commit send failure leaves durable reply
 intent for retry rather than an untraceable split between queue and database state.
-The target row shape is specified in
+The row shape is specified in
 [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md).
 
-**Delivery status:** this is a target contract only. At this checkpoint there is no
-`auth_reply_outbox` migration, table, repository, writer, publisher or authorization
-request consumer in the repository. The authored artifacts are the SQS topology,
-its exact-ARN IAM permission sets and `CsvAuthCodec`; they do not by themselves
-close either baseline window. The future implementation must register this
-intentional divergence in the contracted
-`docs/architecture/cobol-to-service-traceability.md`. No COBOL is changed, and the
-reference-only status of [`app/`](../../app) remains absolute.
+**Delivery status: the contract above is authored, and it has not been run.** Each
+part of it can be opened:
 
-- Trade-offs: the prospective outbox adds one database write and a publisher, and
-  it changes reply delivery from the baseline's lossy sequence to at-least-once
-  publication. A requester may therefore receive a duplicate reply after a send
+| Part of the contract | Where it is authored |
+|---|---|
+| The `auth_reply_outbox` table, its primary key and its two partial unpublished-row indexes | `services/authorization-service/src/main/resources/db/migration/V1__authorization.sql` **L948**, **L1120**, **L1142** and **L1166** |
+| The reply-intent row itself | `authorization/domain/AuthReplyOutbox.java` |
+| Its persistence, including the group-head and group-follower claim queries | `authorization/repository/OutboxRepository.java` |
+| The request consumer and its per-message transaction boundary | `authorization/service/AuthorizationRequestListener.java` |
+| The separately retryable sender, with its retention sweep | `authorization/service/OutboxPublisher.java` |
+| The wire encoding both ends use | `common-lib` `codec/CsvAuthCodec.java` |
+| The queues, their DLQs and the exact-ARN grants | `infra/modules/sqs`, composed per service in `infra/envs/{dev,prod}/main.tf` |
+
+Refactoring Rationale: an earlier revision of this section stated that none of the
+above existed and that the outbox was "a target contract only". That was true when it
+was written and is no longer, and the correction matters more than a tense usually
+would: a delivery-status block is the one place a reader consults before deciding
+whether to write the code themselves, so a stale "nothing is authored" invites a
+second, divergent implementation of a contract that already has one. Assumptions: the
+line citations in the first row are re-measured rather than carried forward. They had
+drifted by roughly a hundred lines as the migration grew, and a citation that lands in
+the middle of a different column's comment block is worse than none, because a reader
+who checks it concludes the artifact is absent. **What has still
+not happened is a run** — no application message has been sent through these queues,
+so nothing here is a report of observed behaviour. The intentional divergence from the
+baseline's lossy sequence is registered in the contracted
+
+`docs/architecture/cobol-to-service-traceability.md`. No COBOL is changed, and the
+reference-only status of [`app/`](../../app) remains absolute. What remains
+unexercised is stated in [the boundaries section](#caveats-boundaries-and-out-of-scope):
+no application message has been sent through these queues.
+
+- Trade-offs: the outbox adds one database write and a publisher, and it changes
+  reply delivery from the baseline's send-then-commit sequence — in which a reply can
+  be emitted for a decision that never commits — to at-least-once publication of a
+  committed decision. A requester may therefore receive a duplicate reply after a send
   succeeds but before the publisher records success. That is accepted because the
   reply carries the transaction identifier at ordinal 2, allowing idempotent
   duplicate suppression, whereas neither a consumed request nor an uncommitted
@@ -993,16 +1075,17 @@ the fraud write's own boundary is not, its controller not yet existing.
 
 **Exposing distributed transactions is explicitly out of scope**, and the target
 contract does not reintroduce a two-phase protocol. The one place a second
-participant would otherwise appear — publishing the reply — is to be isolated by
-the prospective outbox described above so the reply queue never becomes a database
-transaction participant. No outbox implementation is authored at this checkpoint.
-The target schema inventory is specified in
+participant would otherwise appear — publishing the reply — is isolated by the
+outbox described above, so the reply queue never becomes a database transaction
+participant. That isolation is authored rather than pending: `AuthReplyOutbox` is
+written inside the decision's transaction and `OutboxPublisher` sends outside it,
+which is the whole of the mechanism. The schema inventory is specified in
 [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md); ownership
 is recorded in [`service-catalog.md`](service-catalog.md).
 
 ---
 
-## Batch discipline corrects the observed 501-message off-by-one
+## Batch discipline diverges from the observed 501-message bound
 
 The authorization consumer declares a 500-message limit, but its control flow
 processes **501** messages when that many are continuously available. The counter
@@ -1016,20 +1099,22 @@ flag. The declaration and the observed behaviour must not be conflated.
 | **500 declared; 501 observed** — `05 WS-REQSTS-PROCESS-LIMIT PIC S9(4) COMP VALUE 500.` | declaration at L40; increment at L332; `> WS-REQSTS-PROCESS-LIMIT` test at L339; loop-end flag at L340 | **Enforced — exactly 500** handled requests per processing window, the bound being checked before the next receive. `AuthorizationRequestListener.DEFAULT_REQUEST_PROCESS_LIMIT`, overridable by `carddemo.messaging.request-process-limit` |
 | A five-second get-with-wait | `MOVE 5000 TO WS-WAIT-INTERVAL` at L242, applied to the get at L393 | A five-second receive wait — `carddemo.messaging.poll-timeout-seconds`, default 5 |
 
-- Refactoring Rationale: **the target preserves the declared business limit, not
-  the baseline's off-by-one implementation.** Enforcing exactly 500 is an
-  intentional divergence because the name and literal both state 500, while the
-  501st message follows only from the order of increment and comparison. Preserving
-  501 would turn an implementation defect into a new contract. The five-second wait
-  remains unchanged to isolate that correction from transport tuning. Both values
+- Refactoring Rationale: **the target preserves the declared business limit rather
+  than the observed count.** Enforcing exactly 500 is an intentional divergence,
+  recorded as one: the name and the literal both state 500, while the 501st message
+  follows from the order of increment and comparison. Preserving 501 would promote an
+  incidental consequence of statement order into a contract the source never
+  declares, which is the reason the declared figure is the one carried across. The
+  five-second wait remains unchanged to isolate this divergence from transport
+  tuning. Both values
   are configurable so later performance work can change them with measured
   evidence rather than by editing code.
 
 - Refactoring Rationale: this row now describes code rather than an intention. An
   earlier revision of this section stated the enforcement in the future tense while
-  no bounded run existed anywhere, so the document committed to a correction the
-  service did not make — the consumer counted nothing and handled an unbounded number
-  of requests. `AuthorizationRequestListener` now counts every request it takes off
+  no bounded run existed anywhere, so the document committed to a divergence the
+  service did not yet implement — the consumer counted nothing and handled an
+  unbounded number of requests. `AuthorizationRequestListener` now counts every request it takes off
   the queue and closes its window on exactly the configured quota.
 
 - Assumptions: **closing the window means closing intake, not refusing a message.**
@@ -1110,19 +1195,25 @@ sentence above can be read as a claim to the contrary:
 **Boundaries, stated honestly.**
 
 * The twelve SQS resources are authored as infrastructure-as-code and the module has
-  been statically validated. The **authorization** consumer is authored —
-  `AuthorizationRequestListener` with its bounded processing window, `AuthReplyOutbox`
-  and `OutboxPublisher` — while the **account** and **reference** inquiry consumers are
-  not. **No application message has been sent through these queues.** Every figure in
-  this document is either quoted from a cited baseline line or arithmetic over declared
-  widths; none is an observation of a running messaging flow, and no throughput, latency
-  or ordering behaviour has been measured.
+  been statically validated, and **all three consumers are now authored**: the
+  authorization consumer as `AuthorizationRequestListener` with its bounded processing
+  window, `AuthReplyOutbox` and `OutboxPublisher`; the account inquiry consumer as
+  `InquiryMessageListener`; and the reference date consumer as
+  `DateInquiryMessageListener` with `DateConversionMessageListener`, each behind its
+  own `SqsConfig`. **No application message has been sent through these queues.** Every
+  figure in this document is either quoted from a cited baseline line or arithmetic over
+  declared widths; none is an observation of a running messaging flow, and no
+  throughput, latency or ordering behaviour has been measured.
 
-  - Refactoring Rationale: an earlier revision of this bullet said all three consumers
-    were unauthored, which was true when it was written and is no longer. A boundaries
-    section that overstates what is missing is as misleading as one that understates it:
-    a reader would conclude the outbox and the request window described above were
-    aspirational, and would not look for the code that implements them.
+  - Refactoring Rationale: this bullet has now been corrected twice in the same
+    direction — first from "all three consumers are unauthored" to "one of three", and
+    now to all three — and the pattern is worth naming rather than just fixing. A
+    boundaries section is written once and then read many times as though it were still
+    current, so each correction it needs is a correction a reader has already been
+    misled by. Overstating what is missing is as misleading as understating it: a reader
+    would conclude the outbox, the request window and both inquiry flows described above
+    were aspirational, and would not look for the code that implements them. What is
+    genuinely still outstanding is narrower and unchanged: nothing has been **run**.
 * The **external point-of-sale authorizer that produces authorization requests is
   not supplied by the baseline.** Only a test stub exists, and building a real
   producer is not in scope. The practical consequence is asymmetric confidence: the
@@ -1137,13 +1228,22 @@ sentence above can be read as a claim to the contrary:
   to operate exactly as they do today. The migration adds a path, it does not remove
   one, and nothing in this document retires, replaces or deprecates the existing
   messaging arrangement.
-* The three known baseline defects are **not** subjects of this document and are
-  not fixed in place. They must be registered in the contracted
-  `docs/architecture/cobol-to-service-traceability.md`. The two
+* The three known baseline defects that AAP §0.2.2 names are **not** subjects of
+  this document and are not fixed in place; they are registered in the contracted
+  `docs/architecture/cobol-to-service-traceability.md`. Distinct from those, the two
   intentional messaging divergences specified here — replacing the authorization
   loss windows with delete-on-success plus an outbox, and enforcing exactly 500
-  messages rather than the observed 501 — must be registered there when their
-  application code is authored. Neither is implemented at this checkpoint.
+  messages rather than the observed 501 — are **both implemented and both
+  registered**: the first by `AuthorizationRequestListener` with `AuthReplyOutbox`
+  and `OutboxPublisher`, the second by that same listener's
+  `DEFAULT_REQUEST_PROCESS_LIMIT` of 500 and the window boundary that closes on the
+  five-hundredth handled request. Refactoring Rationale: this bullet previously
+  reported neither as implemented, which contradicted the delivery statement in the
+  outbox section and the boundaries bullet above it, leaving a reader no way to tell
+  which of the three statements to trust. A divergence is only meaningful once the
+  target behaviour exists, so describing implemented behaviour as pending understated
+  the very contract this document specifies.
+
 * Every citation above is a **read**. Nothing under [`app/`](../../app),
   [`tests/`](../../tests) or `scripts/` is modified by this document or by the work
   it specifies.

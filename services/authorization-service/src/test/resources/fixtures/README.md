@@ -24,41 +24,32 @@ fixtures describe declares none.
 The authorization request is a comma-delimited payload of **eighteen** fields. Its money field has
 **two** observable widths, and both are represented here because they are not interchangeable.
 
-| Source | Money width | Payload width | Emitted by |
+| Source | Money width | Payload width | Role |
 |---|---|---|---|
-| `app/app-authorization-ims-db2-mq/cpy/CCPAURQY.cpy` line 27, `PIC +9(10).99` | 14 | 170 | nothing in this repository |
-| `app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl` line 63, `WS-TRANSACTION-AMT-AN PIC X(13)` | 13 | 169 | `CsvAuthCodec.encodeRequest` |
+| `app/app-authorization-ims-db2-mq/cpy/CCPAURQY.cpy` line 27, `PIC +9(10).99` | 14 | 170 | the published contract, emitted by `CsvAuthCodec.encodeRequest` |
+| `app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl` line 63, `WS-TRANSACTION-AMT-AN PIC X(13)` | 13 | 169 | the reference consumer's own intermediate, accepted on decode only |
 
-Assumptions: the **effective** contract is thirteen and sixty-nine, not the copybook's fourteen
-and seventy. The reference consumer's `UNSTRING` at `COPAUA0C.cbl` line 354 reads the ordinal-nine
-token straight into a thirteen-character receiver, and an `UNSTRING` receiver follows alphanumeric
-move rules: a fourteen-character token is left-justified into thirteen positions and the
-fourteenth character is **discarded**. An emitted `+0000000250.00` therefore arrives as
-`+0000000250.0`, and `FUNCTION NUMVAL` returns 250.0 rather than 250.00. The failure is silent,
-arithmetically plausible and wrong by a factor of ten in the cents.
+Assumptions: the contract is the copybook's fourteen and one hundred seventy, because a copybook
+field's picture is normative for this wire. The reference consumer's `UNSTRING` at
+`COPAUA0C.cbl` line 354 copies the ordinal-nine token into a thirteen-character receiver before
+`FUNCTION NUMVAL` converts it, so it keeps thirteen of the fourteen characters it is sent -- a
+property of one consumer's working storage rather than of the payload, registered as a
+reference-side divergence in `docs/architecture/cobol-to-service-traceability.md`.
 
-Trade-offs: `CsvAuthCodec` emits thirteen and accepts both. Emitting fourteen would have matched
-the copybook's arithmetic and broken the only consumer that exists; refusing fourteen on decode
-would have rejected a payload the reference consumer accepts. The asymmetry is deliberate, and it
-is why the wider vector below is named `decode-only`.
+Trade-offs: `CsvAuthCodec` emits fourteen and accepts both widths. Refusing the narrower form on
+decode would reject a payload a producer built against that intermediate would send, which is why
+the narrower vector below is named `decode-only`.
 
 | File | Bytes | Records | Contract |
 |---|---|---|---|
-| `auth-request-canonical-wire169.csv` | 170 | 1 | The **canonical** request wire: 169 characters, eighteen fields, a 13-character money token `0000000250.00`. This is byte-for-byte what `CsvAuthCodec.encodeRequest` emits for that amount, so it is the encode oracle. |
-| `auth-request-copybook-wire170-decode-only.csv` | 171 | 1 | The copybook-arithmetic form: 170 characters with the 14-character token `+0000000250.00`. `decodeRequest` accepts it and yields the same 250.00; `encodeRequest` never emits it. It differs from the canonical vector in the money token and in the transaction identifier -- the identifier because every committed row is deliberately distinguishable by it -- so the pair is an A/B on the money width across the other seventeen positions. |
-| `auth-request-amount-variants.csv` | 510 | 3 | Three money boundaries at the canonical 13-character width: the negative form `-000000250.00` (sign plus nine integer digits), the widest positive `9999999999.99` (ten integer digits, no sign position), and zero `0000000000.00`. |
-| `auth-request-encode-oracle-170.bin` | 170 | 1 | The row above it with **no terminator at all** -- the same 170 characters as `auth-request-copybook-wire170-decode-only.csv` minus that file's single LF, so `wc -l` reports 0 and the wire length and the file length coincide. It is the only request fixture read through `bytesOf` rather than `linesOf`, because a `\n`-splitting reader cannot express the ABSENCE of a terminator, and absence is this file's whole contract: a byte comparison against it needs no trimming and therefore cannot pass for output carrying a trailing comma, a trailing pad or one byte too many. Byte 169 is the digit `0`, which is what makes the reply wire's trailing comma an assertable asymmetry rather than an assumption. |
+| `auth-request-canonical-wire170.csv` | 171 | 1 | The **canonical** request wire: 170 characters, eighteen fields, the 14-character money token `+0000000250.00`. This is byte-for-byte what `CsvAuthCodec.encodeRequest` emits for that amount, so it is the encode oracle. |
+| `auth-request-receiver-wire169-decode-only.csv` | 170 | 1 | The reference receiver's narrower form: 169 characters with the 13-character token `0000000250.00`. `decodeRequest` accepts it and yields the same 250.00; `encodeRequest` re-emits it at the declared width. It differs from the canonical vector in the money token and in the transaction identifier -- the identifier because every committed row is deliberately distinguishable by it -- so the pair is an A/B on the money width across the other seventeen positions. |
+| `auth-request-amount-variants.csv` | 513 | 3 | Three money boundaries at the canonical 14-character width: the negative form `-0000000250.00`, the widest positive `+9999999999.99` and zero `+0000000000.00`. |
+| `auth-request-encode-oracle-170.bin` | 170 | 1 | The canonical row with **no terminator at all** -- the same 170 characters as `auth-request-canonical-wire170.csv` minus that file's single LF, so `wc -l` reports 0 and the wire length and the file length coincide. It is the only request fixture read through `bytesOf` rather than `linesOf`, because a `\n`-splitting reader cannot express the ABSENCE of a terminator, and absence is this file's whole contract: a byte comparison against it needs no trimming and therefore cannot pass for output carrying a trailing comma, a trailing pad or one byte too many. |
 
-Assumptions: despite its name, this `.bin` is **not** what `CsvAuthCodec.encodeRequestBytes` emits --
-that is `auth-request-canonical-wire169.csv`, and `REQUEST_WIRE_LENGTH` is 169 for the truncation
-reason given above. It is the byte-level oracle for the **copybook-declared** 170-character form, and
-`AuthorizationFixtureContractTest` asserts that boundary in both directions: these bytes decode
-exactly, and re-encoding them yields 169 bytes that are not equal to them. Reading the name as the
-stronger claim is the one mistake this pairing exists to prevent.
-
-Assumptions: the negative form spends its sign on an integer digit position and the non-negative
-form does not, which is why both appear. A vector carrying only non-negative amounts would pass
-against an implementation that emitted fourteen characters for a negative one.
+Assumptions: the negative form is the only vector whose forced sign position carries a minus, which
+is why it appears. A vector carrying only non-negative amounts would pass against an implementation
+that took the sign out of an integer position.
 
 ---
 
@@ -155,8 +146,11 @@ consumer test asserts, so the two must move together.
 Assumptions: sections 1 to 3 describe eighteen of the thirty resources in this directory. The eleven
 below arrived with the detail-segment work and are recorded here so the inventory in
 `AuthorizationFixtureContractTest` has a documented counterpart for every name it lists — that class
-states it is the consumer for all thirty, and a name it enumerates with nothing written about it
-would make that claim true only in the letter.
+enrols all thirty as a closed set, and a name it enumerates with nothing written about it
+would leave the enrolment true only in the letter. Assumptions: enrolment and assertion are separate
+claims, and the `What asserts it` column above is where the difference is recorded per file: enrolment
+establishes that a resource resolves and is non-empty, while the assertion named in each row is what
+holds that resource to a contract.
 
 Assumptions: every record count below is measured by dividing the file's byte length by the
 registered record length, 200 for `PAUTDTL`, rather than by reading a header. The `pautdtl1-` prefix
@@ -165,7 +159,8 @@ and the digit marks the later group.
 
 | File | Bytes | Records | What asserts it |
 |---|---|---|---|
-| `auth-reply-approved-wire63.csv` | 64 | 1 | Inventory only. The 63-character approved reply wire plus the one LF section 3.3 of the master fixture README mandates, carrying the six reply fields and the trailing comma the reference `STRING` emits after the last of them. |
+| `auth-reply-approved-wire63.csv` | 64 | 1 | Inventory, wire width, field-by-field decode and re-encode, and the reply ENCODE ORACLE, asserted by three consumers. `replyWireFixtureIsTheReplyEncodeOracle` walks the six declared field widths, asserts the delimiter after each one including the sixth, compares every decoded member against the span it was read from, and requires `CsvAuthCodec.encodeReply` to reproduce the payload byte for byte. `approvedReplyFixtureDecodesFieldByField` asserts the 63-character width, the six separators, each decoded field and the scale-two amount. `theApprovedReplyFixtureDecodesAndReEmitsIdentically` adds the value-level half: it asserts all six field values and the eight blanks that right-justify the edited money, re-emits through both `encodeReply` and `encodeReplyBytes` and requires byte identity from each, and pins the trailing comma by requiring the six-field split to yield a seventh empty token. The file is the 63-character approved reply wire plus the one LF section 3.3 of the master fixture README mandates, carrying the six reply fields and the trailing comma the reference `STRING` emits after the last of them. Refactoring Rationale: this row read "Inventory only" while field order and the delimiter are the whole of the reply contract, so the one property that could not be recovered from anything else in this directory was the one with no oracle. |
+
 | `pautdtl1-canonical.bin` | 200 | 1 | Inventory, geometry and round trip. |
 | `pautdtl1-amount-ten-integer-digits.bin` | 200 | 1 | Inventory, geometry, round trip, and the maximum-amount assertions in the contract test: both money spans hold the widest value `PIC S9(10)V99 COMP-3` admits. |
 | `pautdtl1-auth-fraud-domain.bin` | 600 | 3 | Inventory, geometry and round trip — one image per admitted fraud-field state. |
@@ -175,8 +170,12 @@ and the digit marks the later group.
 | `pautdtl1-order-same-day-times.bin` | 600 | 3 | `PendingAuthDetailOrderingFixtureTest`. Three same-day images whose file order is deliberately not chronological. |
 | `pautdtl1-time-leading-nines.bin` | 200 | 1 | `PendingAuthDetailComplementKeyFixtureTest`, plus geometry and round trip. All eight key bytes fall outside the ASCII digit range, which is the property the round trip is there to defend. |
 | `unload-gsam-detail-200.bin` | 800 | 4 | `PendingAuthDetailOrderingFixtureTest`, plus geometry and round trip. The GSAM unload form, whose records are the segment length exactly. |
-| `unload-prefixed-detail-206.bin` | 824 | 4 | Inventory only. The prefixed unload form: 206 bytes per record, being the 200-byte segment behind a six-byte record prefix. Trade-offs: it is not enrolled in the generic geometry check, because that check divides by the registered 200 and 824 is a whole number of 206-byte records rather than of 200-byte ones. A 206-byte layout is not registered, and inventing one to satisfy a check would assert a geometry no reader of this directory uses. |
+| `unload-prefixed-detail-206.bin` | 824 | 4 | Inventory, prefixed geometry, per-record decode and round trip, asserted by `AuthorizationFixtureContractTest.thePrefixedUnloadFixtureCarriesFourPackedPrefixedSegments` and `prefixedUnloadFixtureRecordsDecodeAndRoundTrip`. The prefixed unload form: 206 bytes per record, being the 200-byte segment behind a six-byte record prefix. Trade-offs: it is still not enrolled in the *generic* geometry check, because that check divides by the registered 200 and 824 is a whole number of 206-byte records rather than of 200-byte ones; a 206-byte layout is not registered, and inventing one to satisfy a generic check would assert a geometry no reader of this directory uses. Its dedicated cases supply the coverage instead without registering that layout: they derive the prefix width as the difference between the 206-byte stride and the registered 200, check it equals the packed width of the eleven-digit root key, decode each prefix to an account identifier, and apply the ordinary `PAUTDTL` layout to the segment behind it for a byte-identical round trip. The four prefixes are asserted as the measured sequence 10000000001, 10000000002, 10000000001, 10000000002 -- two parents ALTERNATING, not grouped as in the 200-byte GSAM sibling -- and the four segments are asserted distinct. |
 
-Assumptions: "inventory only" is stated plainly rather than left to be discovered, because it names
-the weakest coverage a fixture here has — presence and non-emptiness — and a reader deciding where to
-add an assertion should be able to find those rows without reading the test.
+Assumptions: no row in this inventory now reads "inventory only", which would name the weakest coverage
+a fixture here could have -- presence and non-emptiness -- and which contradicted this file's own
+opening guarantee that a byte in this directory cannot change while the suite stays green. The two rows
+that once carried the label, `auth-reply-approved-wire63.csv` and `unload-prefixed-detail-206.bin`, are
+both asserted semantically as of the same change that recorded this paragraph, so the guarantee and the
+inventory now agree. The phrase is described here rather than dropped so that a reader adding a fixture
+knows what the weakest acceptable coverage would have been, and knows not to settle for it.

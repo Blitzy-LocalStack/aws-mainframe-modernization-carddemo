@@ -120,8 +120,16 @@ output "user_pool_id" {
   value       = aws_cognito_user_pool.this.id
 }
 
+# WHY : Refactoring Rationale: the description below named AdminSetUserPassword
+#       among the actions this ARN scopes. The calling root's auth task-role
+#       statement grants AdminCreateUser, AdminAddUserToGroup and AdminDeleteUser
+#       and deliberately does NOT grant AdminSetUserPassword, because
+#       services/auth-service creates no credential -- that is the whole point of
+#       moving the plaintext password at app/cpy/CSUSR01Y.cpy L21 out of the
+#       record. Naming an action no statement carries described a privilege this
+#       output does not scope, so the list was corrected to the three that exist.
 output "user_pool_arn" {
-  description = "ARN of the user pool, for the IAM policy documents the calling root builds. It is what scopes the auth service's task-role statements for AdminCreateUser, AdminSetUserPassword and AdminAddUserToGroup to this one pool. Without it those statements can only name a wildcard resource, which is the opposite of the least-privilege posture the migration commits to."
+  description = "ARN of the user pool, for the IAM policy documents the calling root builds. It is what scopes the auth service's task-role statements for AdminCreateUser, AdminAddUserToGroup and AdminDeleteUser to this one pool. Without it those statements can only name a wildcard resource, which is the opposite of the least-privilege posture the migration commits to."
   value       = aws_cognito_user_pool.this.arn
 }
 

@@ -263,6 +263,88 @@ class ReportingTaskRunnerTest {
     }
 
     /**
+     * A failed run's diagnostic carries the class chain and the origin frame and never a message.
+     *
+     * <p>Refactoring Rationale: the failure tier of this class used to hand the throwable itself to the
+     * journal, which renders the whole stack trace including every message in the cause chain. This
+     * module assembles customer names, street addresses and transaction descriptions, so a message
+     * composed while one of those was in hand became a line in a retained log stream that every holder of
+     * log access can read. The two renderers replacing it are asserted here to be message-free, because
+     * that property is the whole point of them and nothing in the build would notice if a later edit put
+     * {@code getMessage()} back.</p>
+     */
+    @Test
+    @DisplayName("a failure diagnostic names the class chain and the origin frame, never the message")
+    void aFailureDiagnosticCarriesNoMessage() {
+        String secret = "CARDHOLDER JOHN Q PUBLIC OF 410 TERRY AVE N";
+        IllegalStateException cause = new IllegalStateException(secret);
+        RuntimeException wrapper = new RuntimeException("wrapping " + secret, cause);
+
+        assertThat(ReportingTaskRunner.causeChainOf(wrapper))
+                .isEqualTo(RuntimeException.class.getName() + "<-"
+                        + IllegalStateException.class.getName())
+                .doesNotContain(secret)
+                .doesNotContain("JOHN")
+                .doesNotContain("TERRY");
+
+        // Assumptions: the origin frame comes from the DEEPEST cause, so it names this method rather than
+        //   whatever caught and re-threw. Both throwables were constructed here, so both traces begin in
+        //   this method and the assertion is on the class and method rather than on a line number, which
+        //   any edit above would move.
+        assertThat(ReportingTaskRunner.originFrameOf(wrapper))
+                .startsWith(ReportingTaskRunnerTest.class.getName()
+                        + ".aFailureDiagnosticCarriesNoMessage:")
+                .doesNotContain(secret);
+    }
+
+    /**
+     * A cyclic cause chain is bounded rather than followed forever, and an absent trace is named.
+     *
+     * <p>Assumptions: a self-referential chain is constructed deliberately, because a framework wrapper
+     * that initialises its own cause is the realistic source of one and a diagnostic that loops turns a
+     * reportable failure into a task the orchestrator waits on until its ceiling elapses.</p>
+     */
+    @Test
+    @DisplayName("a cyclic cause chain is bounded and a throwable with no trace names the absence")
+    void aCyclicChainIsBoundedAndAnAbsentTraceIsNamed() {
+        RuntimeException selfCaused = new SelfCausedFailure();
+
+        String chain = ReportingTaskRunner.causeChainOf(selfCaused);
+        assertThat(chain.split("<-", -1).length)
+                .isLessThanOrEqualTo(ReportingTaskRunner.CAUSE_CHAIN_LIMIT);
+        assertThat(ReportingTaskRunner.originFrameOf(selfCaused)).isNotBlank();
+
+        Throwable traceless = new IllegalStateException("withheld");
+        traceless.setStackTrace(new StackTraceElement[0]);
+        assertThat(ReportingTaskRunner.originFrameOf(traceless))
+                .isEqualTo(ReportingTaskRunner.ORIGIN_FRAME_UNAVAILABLE);
+    }
+
+    /**
+     * A throwable whose cause is itself, used to prove the cause walk terminates.
+     *
+     * <p>Assumptions: the cycle is built by overriding the accessor rather than by calling
+     * {@code initCause}, because the platform refuses to set a throwable as its own cause. A framework
+     * wrapper that computes its cause can still return itself, which is the condition being guarded
+     * against.</p>
+     */
+    private static final class SelfCausedFailure extends RuntimeException {
+
+        /** Declared because the platform type is serialisable and a fixed value keeps that stable. */
+        private static final long serialVersionUID = 1L;
+
+        /**
+         * Answers this instance as its own cause.
+         *
+         * @return this instance, which is the cycle the walk must not follow
+         */
+        @Override
+        public synchronized Throwable getCause() {
+            return this;
+        }
+    }
+
+    /**
      * Reads the Terraform module that builds the dispatched commands.
      *
      * @return the whole file as text; never {@code null}

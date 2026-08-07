@@ -284,4 +284,63 @@ class AuthorizationApiContractTest {
                 .as("the 403 description must name the code the shared denied handler renders")
                 .contains(GlobalExceptionHandler.CODE_FORBIDDEN);
     }
+
+    /**
+     * The 400 names every per-field key this module's own code can emit, and no key it cannot.
+     *
+     * <p>Refactoring Rationale: this assertion exists because the published set was wrong in a way no
+     * compiler could catch. It named {@code fraudAction} for the fraud body's action member, and no such
+     * property exists -- the request schema declares {@code action}, and that is the name the shared advice
+     * reports, since it keys a rejected body member by its record component. A client written against that
+     * list had a control to mark for a refusal it can never receive, and none for the refusal it can.</p>
+     *
+     * <p>Assumptions: the set is small because the fraud body declares ONE member. An earlier revision of
+     * that body repeated the row's three key components, and the published set named them; they are gone
+     * from both, and the second half of this test is what holds them gone -- a member reinstated on the
+     * body without being published here fails the loop, and a key published here that no member produces
+     * fails the closing assertion.</p>
+     *
+     * <p>Assumptions: the body-member half of the set is read from the request SCHEMA rather than restated,
+     * so a member renamed in the document cannot leave this list stale. The parameter half is read from the
+     * document's own parameter components for the same reason. Only the literal {@code request} is written
+     * out, because it is the shared advice's own fallback and belongs to no declared member.</p>
+     */
+    @Test
+    @DisplayName("the 400 names every per-field key the module can emit and no key it cannot")
+    void badRequestNamesEveryEmittablePerFieldKey() {
+        String published = String.valueOf(response("BadRequest").get("description"));
+
+        Map<String, Object> requestMembers =
+                mapping(schema("FraudMarkRequest"), "properties");
+        for (String member : requestMembers.keySet()) {
+            assertThat(published)
+                    .as("the 400 must name fraud-request member %s, which a domain violation keys", member)
+                    .contains(member);
+        }
+
+        for (String parameter : List.of("AccountIdScope", "Cursor", "PagingDirection",
+                "AuthorizationKeyPath")) {
+            String name = String.valueOf(parameter(parameter).get("name"));
+            assertThat(published)
+                    .as("the 400 must name parameter %s, which a constraint on it keys", name)
+                    .contains(name);
+        }
+
+        assertThat(published)
+                .as("the shared advice's own fallback key must be named as well")
+                .contains("request");
+        assertThat(published)
+                .as("a key no member of this module produces must not be published as one")
+                .doesNotContain("fraudAction");
+    }
+
+    /**
+     * Returns one named parameter from the document's component set.
+     *
+     * @param name the parameter component name
+     * @return the parameter mapping, never {@code null}
+     */
+    private static Map<String, Object> parameter(String name) {
+        return mapping(mapping(mapping(CONTRACT, "components"), "parameters"), name);
+    }
 }

@@ -822,11 +822,11 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "logs" {
       #       still encrypted at rest.
       #       Trade-offs: the two buckets this module owns are consequently
       #       encrypted under different mechanisms, which reads as an oversight
-      #       and is not one. The note on var.s3_kms_key_arn in
-      #       infra/modules/cloudfront-spa/variables.tf describes that key as
-      #       covering this bucket too; that description does not survive
-      #       contact with the delivery constraint, and the constraint wins,
-      #       because a log bucket that cannot be written to protects nothing.
+      #       and is not one. The boundary is stated identically in the three
+      #       other places a reader could reach it from -- the log_bucket_arn
+      #       output's own description, this module's README, and
+      #       docs/architecture/observability.md -- so no one of them can claim
+      #       a customer-managed key here while this resource declares AES256.
       #       If this is ever "harmonised" up to `aws:kms`, logging stops --
       #       which is exactly the gate this bucket exists to satisfy.
       #       Assumptions: the constraint applies to the S3 DESTINATION of the
@@ -1052,17 +1052,24 @@ resource "aws_cloudwatch_log_delivery" "cloudfront_access" {
   delivery_destination_arn = aws_cloudwatch_log_delivery_destination.cloudfront_access.arn
   field_delimiter          = "\t"
 
-  # WHY : Refactoring Rationale: `cs-uri-stem` is NOT delivered, and an earlier revision of
-  #       this list did deliver it on the ground that the only identifier-bearing browser
-  #       route carried a server-issued opaque token. That is no longer the case:
-  #       ui/src/routes/cards.ts addresses a card by its sixteen-digit number, so the routes
-  #       /cards/:cardNumber and /cards/:cardNumber/edit place a card number in a browser
-  #       path. Client-side navigation never reaches this distribution, but a refresh, a
-  #       bookmark or a pasted link requests that path so the SPA fallback can answer it, and
-  #       the field would then write the number into a durable log object. This module's own
-  #       earlier note stated the condition and the remedy -- if a route ever placed a real
-  #       identifier in a path, the field had to be removed -- and removing it is honouring
-  #       that condition rather than revisiting it.
+  # WHY : Refactoring Rationale: `cs-uri-stem` is NOT delivered, and the reasoning has now
+  #       moved twice. It was omitted originally because a browser path can hold an
+  #       identifier; it was briefly kept on the ground that the only identifier-bearing
+  #       route carried a server-issued opaque token; it was then removed again when
+  #       ui/src/routes/cards.ts began addressing a card by its sixteen-digit number. That
+  #       module addresses a card by an opaque SELECTOR once more -- /cards/:cardKey and
+  #       /cards/:cardKey/edit -- so no browser path holds a card number today, and the field
+  #       stays withdrawn anyway. Assumptions: this is defence in depth and not a duplicate
+  #       control. The route contract and this field list are owned by different trees and
+  #       change independently, and it is precisely the sequence above that shows how easily
+  #       one moves without the other; a field that cannot be redacted after delivery is worth
+  #       keeping out on the strength of that history rather than on the current route shape. An edge
+  #       log is composed before any application code runs and can never be redacted afterwards, so
+  #       the field's safety would otherwise rest entirely on the SPA's route contract continuing to
+  #       hold -- and this module cannot see that contract, let alone assert it.
+  #       Trade-offs: the cost is the one named below, an operator losing the requested path.
+  #       It is accepted for the same reason it was accepted the first time.
+
   # WHY : Trade-offs: an operator loses the requested path from the edge record, which is the
   #       field that distinguishes one SPA fallback from another. What remains still
   #       diagnoses the failures this delivery exists for: the status code says whether the
@@ -1076,9 +1083,9 @@ resource "aws_cloudwatch_log_delivery" "cloudfront_access" {
   #       field allowlist and not a rewrite -- so redaction would have to happen after the
   #       object was written, which is after the disclosure.
   #
-  # Query strings, cookies, referrers and the URI stem are all deliberately absent, so the
-  # durable audit record can diagnose routing and transport failures without retaining any
-  # cardholder metadata.
+  # Query strings, cookies and referrers remain deliberately absent. The URI stem is delivered;
+  # the query string is not, and that asymmetry is the point -- a stem holds only route
+  # segments this SPA controls, while a query string holds whatever a caller appended.
   record_fields = [
     "date",
     "time",
@@ -1183,11 +1190,13 @@ resource "aws_cloudfront_origin_access_control" "spa" {
 #       allowlist, whereas the v2 delivery above omits the query string, cookie
 #       and referrer fields entirely.
 #       Assumptions: the v2 delivery keeps NO path field at all, which is what
-#       keeps cardholder data out of it. The SPA's identifier-bearing routes are
-#       `/cards/:cardNumber` and `/cards/:cardNumber/edit` -- the contract stated
-#       in ui/src/routes/cards.ts -- so a path here can hold a card number, and
-#       the rationale on the delivery's record_fields records why the field was
-#       withdrawn rather than redacted.
+#       keeps cardholder data out of it whatever the SPA's routes come to carry.
+#       Those routes are `/cards/:cardKey` and `/cards/:cardKey/edit` -- the
+#       contract stated in ui/src/routes/cards.ts -- and a selector is not a card
+#       number, so a path here holds no cardholder data today. The field stays
+#       withdrawn regardless, for the reason recorded on the delivery's
+#       record_fields: the route contract and this field list live in different
+#       trees and have already moved independently of each other.
 #       Alternatives Considered: disabling logging altogether, which an earlier
 #       revision did. Rejected because it removes the edge's transport and
 #       routing history for an exposure that the field list and the opaque route
@@ -1368,7 +1377,7 @@ resource "aws_cloudfront_distribution" "spa" {
   #
   #   Assumptions: ui/src/router.tsx owns all twenty-one screen routes ON THE
   #   CLIENT -- /signon, /menu, /admin, /account/view, /account/update, /cards,
-  #   /cards/:cardNumber, /cards/:cardNumber/edit, /transactions, /transactions/:id,
+  #   /cards/:cardKey, /cards/:cardKey/edit, /transactions, /transactions/:id,
   #   /transactions/new, /billpay, /reports, /users, /users/new,
   #   /users/:id/edit, /users/:id/delete, /authorizations, /authorizations/:key,
   #   /reference/transaction-types and /reference/transaction-types/:cd. The

@@ -193,18 +193,47 @@
  *
  * <h2>What this package contains, and which way the arrow points</h2>
  *
- * <p>Four compilation units live in this directory and there will be no fifth:
+ * <p>Seven compilation units live in this directory:
  *
  * <ul>
  *   <li>{@code JwtRoleConverter} -- reading the
  *       {@code cognito:groups} claim and yielding the granted authorities.</li>
  *   <li>{@code CognitoAccessTokenValidator} -- asserting the three token checks
  *       the issuer alone does not make: token use, client identity and scope.</li>
- *   <li>{@code OpaqueIdentifier} -- the reversible surrogate that keeps a primary
- *       account number out of a URL and out of a log line.</li>
- *   <li>this charter, the fourth compilation unit, which carries no declaration
- *       beyond the package statement itself.</li>
+ *   <li>{@code OpaqueIdentifier} -- the keyed surrogate that keeps a primary
+ *       account number out of a queue attribute and out of a log line.</li>
+ *   <li>{@code CardNumberMasker} -- PRODUCING the masked rendering of a card
+ *       number, or of any text that may contain one.</li>
+ *   <li>{@code MaskedCardNumber} -- stating what an ACCEPTABLE masked rendering
+ *       is, so a response contract can refuse a value that is not one.</li>
+ *   <li>{@code InternalServiceToken} -- the credential one workload presents to
+ *       another, for the calls this platform makes on its own behalf rather than
+ *       on a signed-on user's. It MINTS and does not verify: the token is a signed
+ *       JWT carrying an issuer, a subject, an audience, a scope and an expiry, so
+ *       the verifying side is the framework's own resource-server decoder rather
+ *       than code in this repository. What this class contributes beyond minting is
+ *       the CONSTANTS both halves read, so a minter and a verifier cannot disagree
+ *       about an audience or a scope name. It holds no key and names no key source;
+ *       the caller supplies one, so either half could be re-backed by a managed key
+ *       service without this class changing.</li>
+ *   <li>this charter, which carries no declaration beyond the package statement
+ *       itself.</li>
  * </ul>
+ *
+ * <p>Refactoring Rationale: this list previously named three production classes and declared that there
+ * would be no fifth compilation unit. Both were measurably wrong at the time they were read:
+ * {@code CardNumberMasker} was already present and unlisted, so the directory already held five files
+ * while the charter forbade a fifth. The list is now a measurement of the directory. Assumptions: the
+ * closed-set language is dropped rather than restated with a larger number, because what actually
+ * governs admission here is the prohibition below on any controller, service, repository, domain,
+ * transfer-object, mapper or configuration type -- a rule about KIND, which a reader can apply -- and not
+ * a file count, which only tells a reader that something is missing without saying what.</p>
+ *
+ * <p>Assumptions: the last two entries are a PAIR and are separate types deliberately. One produces a
+ * masked rendering and the other decides whether a value is one, and the second existed nowhere before:
+ * three response contracts each carried their own weaker approximation of it, two of which admitted a
+ * full sixteen-digit primary account number. A production rule with no acceptance rule is the shape in
+ * which a masking obligation quietly stops holding.</p>
  *
  * <p>Trade-offs: no configuration class belongs here, and the omission is
  * deliberate. Each of the eight service modules owns its own filter chain and
@@ -238,34 +267,39 @@
  * security record, so a reader may quite reasonably reach for that module's
  * type or its filter chain. Either reach would invert the arrow.
  *
- * <h2>The count canon</h2>
+ * <h2>What this package contributes, and why no kernel-wide total is restated here</h2>
  *
- * <p>The shared kernel's target inventory is 21 production classes and 9 package charter files,
- * for 30 compilation units in total. This package contributes 3 of those
- * production classes and 1 of those charters, which is 4 files in this
- * directory and no more. The arithmetic is recorded so that a later reader can
- * tell a class that is missing from one that was never planned:
+ * <p>This directory holds six production classes and this charter. That is a measurement of the
+ * directory, and the six are the six listed above.</p>
  *
- * <pre>
- * root 1 + money 2 + codec 5 + error 3 + web 3 + security 3 + observability 1 + time 1 + validation 2 = 21
- * </pre>
+ * <p>Refactoring Rationale: that sentence read "five ... and the five" until the machine-identity
+ * credential landed, and it is corrected here rather than left to drift for the reason the paragraph
+ * below gives about the withdrawn kernel-wide canon: a figure this charter CAN verify is worth keeping
+ * accurate, because it describes the one directory this file can see. The figure survived a second
+ * change without moving: a bespoke workload-assertion credential occupied that entry first and was
+ * withdrawn in favour of the signed token above, so one file replaced one file. Two mechanisms for one
+ * hop is one too many, and the surviving one delegates its verification to audited framework code
+ * instead of re-implementing expiry and message-authentication checking here.</p>
  *
- * <p>Cross-check by compilation unit, counting one charter per package plus
- * that package's production classes: 2 + 3 + 6 + 4 + 4 + 4 + 2 + 2 + 3 = 30,
- * the root contributing its charter and the one auto-configuration class. And 21 production classes plus 9
- * charters is 30. All three paths agree, and this file is one of the nine
- * charters.
+ * <p>Refactoring Rationale: a kernel-wide "count canon" stood here -- a total of 21 production classes
+ * with a per-package breakdown re-deriving it -- and it is removed rather than corrected in place,
+ * because every one of its figures for this package and several for others had stopped matching the
+ * tree: this package held four production classes where the breakdown said three, and the kernel held
+ * 27 where the total said 21. Assumptions: a total that a charter cannot verify is worse than no total,
+ * and this charter cannot verify one. It can see its own directory, so it states that; it cannot see
+ * the other eight packages, so restating their arithmetic made this file assert as fact a figure that
+ * drifted the moment any of them gained a class. Alternatives Considered: recomputing the whole canon
+ * here from a fresh count. Rejected because it would reproduce the same failure one measurement later
+ * -- the next class added to any package falsifies this file again -- and because the same figures are
+ * restated in three sibling charters, so a single corrected copy would make the tree inconsistent
+ * instead of merely stale. Those three are recorded as a known inaccuracy rather than edited from
+ * here, this charter having no standing to describe another package's contents.</p>
  *
- * <p>Assumptions: this package's inventory depends on that repository-wide
- * allocation staying at three production classes and one charter here, within an
- * authoritative kernel total of <strong>21 production classes and 30
- * compilation units, 9 of them charters</strong>. The precision matters locally
- * rather than academically: an inflated total is exactly what would make a
- * second class in this directory look authorised, and the second class a reader
- * is most likely to reach for is the configuration class the paragraph above
- * explains away. The total is therefore always stated beside a breakdown that
- * re-derives it, so that a figure which does not reproduce all three sums above
- * is rejected on sight rather than adopted.
+ * <p>Assumptions: what governs admission to this directory is the prohibition above on any controller,
+ * service, repository, domain, transfer-object, mapper or configuration type, together with the
+ * inward-only dependency arrow that the architecture test enforces. Those are rules a reader can apply
+ * to a proposed class. A file count is not: it can only say that the directory differs from a number,
+ * without saying which class was wrong to be there.</p>
  *
  * <h2>The documentation contract this file is held to</h2>
  *

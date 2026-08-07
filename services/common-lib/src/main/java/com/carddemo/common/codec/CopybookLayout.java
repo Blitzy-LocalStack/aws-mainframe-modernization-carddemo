@@ -219,6 +219,25 @@ import java.util.Map;
  * {@code CUST-SSN} at {@code app/cpy/CVCUS01Y.cpy} line 17 and {@code CUST-GOVT-ISSUED-ID} at line 18
  * of the same file.</p>
  *
+ * <p>Assumptions: the two IMS authorization segments are classified by a different MECHANISM and the
+ * distinction is deliberate. Every record above marks its sensitive fields at their own declaration
+ * sites, which is a DENYLIST -- a new field is disclosable until somebody marks it. The two
+ * authorization segments instead declare their fields plainly and then run them through
+ * {@link #closeAuthorizationDisclosure(List)}, which withholds everything
+ * {@link #AUTHORIZATION_DISCLOSABLE_FIELDS} does not name, so a new field there is withheld until
+ * somebody names it. Sixteen fields across the two segments are consequently withheld -- fifteen of
+ * them beyond the primary account number this paragraph's list already covers -- and they are not
+ * enumerated here, because enumerating them would be a second statement of a set that has one
+ * authoritative statement.</p>
+ *
+ * <p>Trade-offs: two mechanisms in one class is a cost, and it is paid for one reason. The
+ * authorization segments are the only records whose content is ALSO decoded by a second class in this
+ * package, {@link CsvAuthCodec}, over the request and reply payloads; a denylist let the two disagree,
+ * and they did. The remaining records have exactly one decoder each, so their per-site marking has
+ * nothing to disagree with. Converting every record to an allowlist was considered and rejected as a
+ * far larger change to records the review did not fault, and one that would move fifteen records'
+ * classifications away from the declaration sites where they read most clearly.</p>
+ *
  * <h2>Alternatives Considered: a flat field list rather than a group tree</h2>
  *
  * <p>Several of these copybooks nest their leading fields inside a group item, and that group is
@@ -1825,6 +1844,118 @@ public final class CopybookLayout {
             TRAN_LAYOUT.withFieldFlags("INTTRAN", "TRAN-ORIG-TS", true, false);
 
     /**
+     * Every authorization-segment field whose bytes MAY be rendered into a diagnostic.
+     *
+     * <p>Refactoring Rationale: the two authorization segments below used to classify almost nothing.
+     * {@code PAUTDTL} marked exactly one field sensitive, the primary account number, and
+     * {@code PAUTSUM0} marked none at all -- so a malformed byte anywhere in either segment could put
+     * the credit limit, the cash limit, both balances, the approved and declined amounts, the card
+     * expiry date, the transaction and approved amounts, the merchant identity and the transaction
+     * identifier into an exception message in full. That was wrong on its own terms rather than merely
+     * conservative, because the SAME record content is classified far more widely elsewhere in this very
+     * package: {@link CsvAuthCodec}'s own sensitive set covers the card number, the card expiry date,
+     * the transaction amount, the approved amount, the merchant identity, name, city and postal code and
+     * the transaction identifier over the authorization wire. One record cannot be two sensitivities --
+     * a segment decoded here and a message decoded there carry the same fields -- so a decode failure
+     * here would emit precisely what that codec refuses to emit at all.</p>
+     *
+     * <p>Assumptions: this set names every authorization field that may be rendered, and it is the SAME
+     * set as {@code _AUTHORIZATION_DISCLOSABLE_FIELDS} in
+     * {@code data-migration/src/carddemo_migration/copybook/layouts.py}, name for name. That is not a
+     * coincidence to be maintained by hand: the parity is asserted by a test that reads that file, so a
+     * name added on either side without the other fails the Java build. The line the set draws is that
+     * a date, a time, a code from a small closed domain, a count rather than a money value, the account
+     * key the published contracts render in full, and the trailing pad may be disclosed; cardholder
+     * identity, merchant identity beyond a two-character state, and every amount may not.</p>
+     *
+     * <p>Trade-offs: it is expressed as an ALLOWLIST so the default direction is CLOSED. A denylist
+     * reads shorter, and that is exactly its defect -- a field added to either segment later would be
+     * disclosable until somebody remembered to mark it, whereas here it is withheld until somebody
+     * deliberately names it. The failure mode of forgetting becomes silence rather than disclosure. The
+     * cost is that a genuinely harmless new field produces an unhelpfully bare diagnostic until it is
+     * named, which is the cheaper of the two mistakes to discover.</p>
+     *
+     * <p>Alternatives Considered: adopting the wire set of {@link CsvAuthCodec} directly and marking
+     * only those nine base names. Rejected because that set was derived from the request and reply
+     * payloads, which carry no customer identifier and none of the summary segment's four balances and
+     * limits, so it classifies nothing at all for {@code PAUTSUM0} -- it has no opinion to copy. The
+     * allowlist covers both segments from one statement and reaches the same verdict as the wire set on
+     * every field the two have in common.</p>
+     *
+     * <p>Assumptions: the policy is a target-only addition. A copybook declares widths and usages and
+     * has no notion of a field whose content may not be logged, so the divergence is registered as
+     * {@code D-AUTH-DIAGNOSTIC-DISCLOSURE} in
+     * {@code docs/architecture/cobol-to-service-traceability.md} rather than presented as parity.</p>
+     */
+    static final java.util.Set<String> AUTHORIZATION_DISCLOSABLE_FIELDS = java.util.Set.of(
+            // Summary segment: the account key, the two status fields, the two counters.
+            "PA-ACCT-ID",
+            "PA-AUTH-STATUS",
+            "PA-ACCOUNT-STATUS",
+            "PA-APPROVED-AUTH-CNT",
+            "PA-DECLINED-AUTH-CNT",
+            // Detail segment: the four date and time fields, the closed-domain codes, the two
+            // remaining narrow codes and the merchant state.
+            "PA-AUTH-DATE-9C",
+            "PA-AUTH-TIME-9C",
+            "PA-AUTH-ORIG-DATE",
+            "PA-AUTH-ORIG-TIME",
+            "PA-AUTH-TYPE",
+            "PA-MESSAGE-TYPE",
+            "PA-MESSAGE-SOURCE",
+            "PA-AUTH-ID-CODE",
+            "PA-AUTH-RESP-CODE",
+            "PA-AUTH-RESP-REASON",
+            "PA-PROCESSING-CODE",
+            "PA-MERCHANT-CATAGORY-CODE",
+            "PA-ACQR-COUNTRY-CODE",
+            "PA-POS-ENTRY-MODE",
+            "PA-MERCHANT-STATE",
+            "PA-MATCH-STATUS",
+            "PA-AUTH-FRAUD",
+            "PA-FRAUD-RPT-DATE",
+            // Both segments close with a trailing pad, which carries no value at all.
+            "FILLER");
+
+    /**
+     * Marks every authorization field sensitive unless {@link #AUTHORIZATION_DISCLOSABLE_FIELDS} names
+     * it.
+     *
+     * <p>Assumptions: only the sensitivity flag is ever changed, and the geometry is carried through
+     * untouched by {@link FieldSpec#withFlags(boolean, boolean)}, so applying this cannot move a field,
+     * resize one or alter a storage regime. That is what lets it run between the field declarations and
+     * {@link RecordSpec#validateGeometry()}, leaving the hundred-byte and two-hundred-byte sums to be
+     * checked exactly as before.</p>
+     *
+     * <p>Trade-offs: the timestamp-normalisation flag is read off each field and written straight back
+     * rather than being defaulted to false, because neither authorization segment declares a wall-clock
+     * stamp today and a helper that quietly cleared the flag would be wrong the moment one did. Reading
+     * and restoring costs nothing and removes that trap.</p>
+     *
+     * <p>Alternatives Considered: reaching for {@link #sensitiveText(String, int, int)} at each
+     * declaration site instead, which is how every other record in this class classifies its fields.
+     * Rejected for these two records alone, and only because the policy is fail-closed: with an
+     * allowlist the correct marking of a NEW field is "sensitive", so a declaration site that has to
+     * remember to reach for the sensitive factory has the safe outcome as the one requiring an action.
+     * Deciding it in one place inverts that. The three storage regimes are a second reason -- these
+     * segments hold packed, binary and display fields that need withholding, and only two of the
+     * factories have sensitive variants.</p>
+     *
+     * @param fields the segment's field descriptors exactly as transcribed from its copybook; never
+     *     {@code null}
+     * @return a list of the same fields in the same order and with the same geometry, each marked
+     *     sensitive unless the allowlist names it; never {@code null}
+     */
+    private static List<FieldSpec> closeAuthorizationDisclosure(List<FieldSpec> fields) {
+        List<FieldSpec> closed = new ArrayList<>(fields.size());
+        for (FieldSpec field : fields) {
+            closed.add(field.withFlags(field.normalizeTs(),
+                    !AUTHORIZATION_DISCLOSABLE_FIELDS.contains(field.name())));
+        }
+        return List.copyOf(closed);
+    }
+
+    /**
      * The authorization summary segment, the parent of the authorization database.
      *
      * <p>Assumptions: 100 bytes with a six-byte key at offset zero, and both numbers have two
@@ -1849,8 +1980,20 @@ public final class CopybookLayout {
      * transcription of the same copybook, and a record present in only one of them has no second
      * reading to disagree with it -- which is the whole mechanism by which an offset error in a
      * packed-decimal money field gets caught rather than posted.</p>
+     *
+     * <p>Refactoring Rationale: the field list is wrapped in
+     * {@link #closeAuthorizationDisclosure(List)} rather than declaring each field's sensitivity at its
+     * own site, and this segment used to declare NONE of it -- so a decode diagnostic could render the
+     * customer identifier, both credit limits, both balances and the two authorization amounts in full.
+     * Seven of its thirteen fields are withheld now: {@code PA-CUST-ID}, {@code PA-CREDIT-LIMIT},
+     * {@code PA-CASH-LIMIT}, {@code PA-CREDIT-BALANCE}, {@code PA-CASH-BALANCE},
+     * {@code PA-APPROVED-AUTH-AMT} and {@code PA-DECLINED-AUTH-AMT}. The remaining six -- the packed
+     * account key, the two status fields, the two counters and the pad -- are the ones an operator
+     * reading a malformed extract actually needs, and none of them is an amount or a cardholder
+     * attribute.</p>
      */
-    private static final RecordSpec PAUTSUM0_LAYOUT = new RecordSpec("PAUTSUM0", 100, 6, 0, List.of(
+    private static final RecordSpec PAUTSUM0_LAYOUT = new RecordSpec("PAUTSUM0", 100, 6, 0,
+            closeAuthorizationDisclosure(List.of(
             packed("PA-ACCT-ID", 0, 11, 0, true),  // CIPAUSMY L19 PIC S9(11) COMP-3, 6 bytes
             uint("PA-CUST-ID", 6, 9),  // CIPAUSMY L20 PIC 9(09) display
             text("PA-AUTH-STATUS", 15, 1),  // CIPAUSMY L21 PIC X(01)
@@ -1863,7 +2006,7 @@ public final class CopybookLayout {
             binary("PA-DECLINED-AUTH-CNT", 52, 4, 0, true),  // CIPAUSMY L28 PIC S9(04) COMP, 2 bytes
             packed("PA-APPROVED-AUTH-AMT", 54, 9, 2, true),  // CIPAUSMY L29 PIC S9(09)V99 COMP-3
             packed("PA-DECLINED-AUTH-AMT", 60, 9, 2, true),  // CIPAUSMY L30 PIC S9(09)V99 COMP-3
-            text("FILLER", 66, 34))).validateGeometry();  // CIPAUSMY L31 PIC X(34) trailing pad
+            text("FILLER", 66, 34)))).validateGeometry();  // CIPAUSMY L31 PIC X(34) trailing pad
 
     /**
      * The authorization detail segment, the child of the authorization database.
@@ -1893,17 +2036,34 @@ public final class CopybookLayout {
      * {@code merchant_category_code} belongs to the mapping layer and is recorded in
      * {@code docs/architecture/data-model-and-schema-mapping.md}.</p>
      *
-     * <p>Assumptions: only the primary account number at line 24 is marked sensitive. The segment
-     * carries no card verification value at all, and the merchant name, city, state and postal code
-     * are acquirer-supplied merchant identity rather than cardholder identity, so marking them would
-     * redact the very fields a fraud reviewer reads to recognise a merchant.</p>
+     * <p>Refactoring Rationale: this paragraph used to read "only the primary account number at line
+     * 24 is marked sensitive", and gave as its reason that "the merchant name, city, state and postal
+     * code are acquirer-supplied merchant identity rather than cardholder identity, so marking them
+     * would redact the very fields a fraud reviewer reads to recognise a merchant". Both halves were
+     * wrong for this purpose. The reason conflates two channels: a fraud reviewer reads a RESPONSE
+     * BODY, which this flag does not touch, whereas the flag governs only what a decode FAILURE may
+     * quote -- and a reviewer never reads one of those. And the classification disagreed with
+     * {@link CsvAuthCodec}, which withholds the merchant identifier, name, city and postal code over
+     * the wire, so the same four values were withheld from one diagnostic and rendered in another. Nine
+     * fields are withheld now, by {@link #closeAuthorizationDisclosure(List)} rather than at their own
+     * declaration sites: {@code PA-CARD-NUM}, {@code PA-CARD-EXPIRY-DATE}, {@code PA-TRANSACTION-AMT},
+     * {@code PA-APPROVED-AMT}, {@code PA-MERCHANT-ID}, {@code PA-MERCHANT-NAME},
+     * {@code PA-MERCHANT-CITY}, {@code PA-MERCHANT-ZIP} and {@code PA-TRANSACTION-ID} -- exactly the
+     * nine base names that codec's wire set covers.</p>
+     *
+     * <p>Assumptions: {@code PA-MERCHANT-STATE} remains disclosable where the other four merchant
+     * fields do not, and the distinction is the one the wire set already draws. A two-character state
+     * is a closed domain of roughly sixty values and narrows to no party; a name, a street-level city,
+     * a nine-character postal code or a fifteen-character merchant identifier each narrow to one. The
+     * segment carries no card verification value at all, so there is none to classify.</p>
      */
-    private static final RecordSpec PAUTDTL_LAYOUT = new RecordSpec("PAUTDTL", 200, 8, 0, List.of(
+    private static final RecordSpec PAUTDTL_LAYOUT = new RecordSpec("PAUTDTL", 200, 8, 0,
+            closeAuthorizationDisclosure(List.of(
             packed("PA-AUTH-DATE-9C", 0, 5, 0, true),  // CIPAUDTY L20 PIC S9(05) COMP-3, 3 bytes
             packed("PA-AUTH-TIME-9C", 3, 9, 0, true),  // CIPAUDTY L21 PIC S9(09) COMP-3, 5 bytes
             text("PA-AUTH-ORIG-DATE", 8, 6),  // CIPAUDTY L22 PIC X(06)
             text("PA-AUTH-ORIG-TIME", 14, 6),  // CIPAUDTY L23 PIC X(06)
-            sensitiveText("PA-CARD-NUM", 20, 16),  // CIPAUDTY L24 PIC X(16)
+            text("PA-CARD-NUM", 20, 16),  // CIPAUDTY L24 PIC X(16), withheld by the allowlist
             text("PA-AUTH-TYPE", 36, 4),  // CIPAUDTY L25 PIC X(04)
             text("PA-CARD-EXPIRY-DATE", 40, 4),  // CIPAUDTY L26 PIC X(04)
             text("PA-MESSAGE-TYPE", 44, 6),  // CIPAUDTY L27 PIC X(06)
@@ -1926,7 +2086,7 @@ public final class CopybookLayout {
             text("PA-MATCH-STATUS", 173, 1),  // CIPAUDTY L45 PIC X(01), 88s L46-L49
             text("PA-AUTH-FRAUD", 174, 1),  // CIPAUDTY L50 PIC X(01), 88s L51-L52
             text("PA-FRAUD-RPT-DATE", 175, 8),  // CIPAUDTY L53 PIC X(08)
-            text("FILLER", 183, 17))).validateGeometry();  // CIPAUDTY L54 PIC X(17) trailing pad
+            text("FILLER", 183, 17)))).validateGeometry();  // CIPAUDTY L54 PIC X(17) trailing pad
 
     /**
      * The registry of every layout this class declares, keyed by logical record name.

@@ -161,6 +161,17 @@ public final class ExportRecordMapper {
      */
     private static final String FIELD_CARD_CVV = "EXP-CARD-CVV-CD";
 
+    /**
+     * The declared byte width of the card verification span.
+     *
+     * <p>Assumptions: derived rather than written down, so the carrier's width check and the
+     * descriptor can never disagree. {@code EXP-CARD-CVV-CD} is declared {@code PIC S9(03) COMP} at
+     * {@code app/cpy/CVEXPORT.cpy:96}, which the shared kernel's width rule renders as a two-byte
+     * halfword; computing it from that rule means a change to either the picture or the rule moves
+     * both the span and the check together.</p>
+     */
+    private static final int CARD_CVV_WIDTH = CopybookLayout.binaryWidth(3, 0);
+
     /** The declared length of the whole export record, from {@code app/cpy/CVEXPORT.cpy:5}. */
     private static final int RECORD_LENGTH = 500;
 
@@ -587,6 +598,90 @@ public final class ExportRecordMapper {
          */
         private OpaqueSensitiveValue(byte[] rawBytes) {
             this.bytes = rawBytes == null ? null : rawBytes.clone();
+        }
+
+        /**
+         * The exact byte width this carrier admits, which is the declared halfword span.
+         *
+         * <p>Refactoring Rationale: the width is PUBLISHED on the carrier rather than left as the
+         * enclosing mapper's private field it is derived from. A caller offering bytes to this carrier
+         * has to know the width it must offer, and a test asserting the refusal has to name the number
+         * the message states; with the width private, both had to restate the literal 2, and a literal
+         * restated in three places is a literal that will eventually disagree with the layout it came
+         * from. It is the same value the enclosing record layout declares, so there is still exactly one
+         * source.</p>
+         */
+        public static final int VALUE_WIDTH = CARD_CVV_WIDTH;
+
+        /**
+         * The carrier denoting that no verification value is present.
+         *
+         * <p>Refactoring Rationale: this accessor exists because the absent carrier was previously
+         * reachable only from inside this file, which made {@link ExportRecord#ofCard} unusable by
+         * any outside caller: that factory REQUIRES a carrier, and neither a present one nor an
+         * absent one could be obtained. A card-view record could therefore be decoded from an image
+         * but never assembled from a projection, so the migrated equivalent of the card export step
+         * had no way to build the record it must write. Naming the absent state explicitly is also
+         * what keeps it distinct from {@code null}, which the factory refuses.</p>
+         *
+         * @return the shared absent carrier, never {@code null} and never holding bytes
+         */
+        public static OpaqueSensitiveValue absent() {
+            // WHY : Assumptions: one shared instance is returned rather than a fresh one per call,
+            //       which is safe because the type is immutable -- the constructor copies on the way
+            //       in and copyBytes copies on the way out, so no caller can reach the state of
+            //       another. The absent carrier additionally holds no bytes at all, so there is
+            //       nothing for sharing to expose.
+            return ABSENT;
+        }
+
+        /**
+         * Wraps a verification value read from a card record, defensively and opaquely.
+         *
+         * <p>Refactoring Rationale: this is the narrow public entry point {@link ExportRecord#ofCard}
+         * needs, and it was previously absent -- the only constructor was private, so an outside
+         * caller holding the two bytes had no way to hand them over. The factory is deliberately
+         * NARROW rather than a general byte wrapper: it accepts exactly the declared width of the
+         * verification span and nothing else, so a caller cannot use this carrier as a route for
+         * arbitrary sensitive data whose disclosure rules have not been reasoned about here.</p>
+         *
+         * <p>Assumptions: the width is validated rather than trusted, and the reason is that the
+         * carrier's whole purpose is to reach an encode. A carrier holding some other number of bytes
+         * would fail later, inside a span copy, as a length failure naming an offset rather than as a
+         * refusal naming the field -- and if it happened to be shorter it would leave part of the
+         * target span holding whatever was already there.</p>
+         *
+         * <p>Alternatives Considered: accepting a {@code BigDecimal} or a {@code short} and encoding
+         * it here, which would match the way every other numeric field of this record is supplied.
+         * Rejected because it would create a numeric variable somewhere in this module whose content
+         * is a verification value, which is exactly what this type exists to prevent -- the class
+         * charter above states that the value is deliberately never decoded to a number. Bytes in and
+         * bytes out keeps the cleartext confined to the span it was read from.</p>
+         *
+         * @param rawBytes the bytes of the verification span, which must be exactly
+         *     {@value #CARD_CVV_WIDTH} long; they are copied on the way in, so the caller may zero its
+         *     own array afterwards without emptying the carrier
+         * @return a carrier holding a private copy of those bytes, never {@code null}
+         * @throws ExportRecordException if {@code rawBytes} is {@code null} or is not exactly
+         *     {@value #CARD_CVV_WIDTH} bytes long
+         */
+        public static OpaqueSensitiveValue of(byte[] rawBytes) {
+            if (rawBytes == null) {
+                throw new ExportRecordException("record " + RECORD_NAME + " field " + FIELD_CARD_CVV
+                        + " must be exactly " + VALUE_WIDTH
+                        + " bytes; use absent() to denote that no value is present");
+            }
+            if (rawBytes.length != CARD_CVV_WIDTH) {
+                // WHY : Assumptions: the refusal reports the SUPPLIED LENGTH and never the supplied
+                //       bytes, on the same rule the redaction marker below follows -- a message that
+                //       echoed the content would disclose through an exception the very value the
+                //       type exists to keep out of every diagnostic.
+                throw new ExportRecordException("record " + RECORD_NAME + " field " + FIELD_CARD_CVV
+                        + " must be exactly " + VALUE_WIDTH
+                        + " bytes, the width of the declared halfword span, but the carrier was"
+                        + " offered " + rawBytes.length);
+            }
+            return new OpaqueSensitiveValue(rawBytes);
         }
 
         /**
@@ -1140,13 +1235,24 @@ public final class ExportRecordMapper {
     /**
      * Encodes a decoded record while restoring from the source image the spans a re-render cannot.
      *
+     * <p>Refactoring Rationale: the image is now checked for BELONGING as well as for length, and the
+     * verification value is no longer taken from it at all. Those two changes address one weakness:
+     * the image is an ordinary parameter, so nothing established that the bytes restored from it were
+     * the bytes this record was read from, and the most sensitive of those bytes -- the card
+     * verification value -- was copied straight across. See {@link #requireMatchingImage(ExportRecord,
+     * byte[])} for what is checked and {@link #restoreVerificationValue(ExportRecord,
+     * CopybookLayout.RecordSpec, byte[])} for where the value comes from instead.</p>
+     *
      * @param decoded the record to encode, carrying the one projection its view selects
      * @param sourceImage the 500-byte image {@code decoded} was read from, used only as the source of
-     *     the sign carriers, the trailing pad, the unchanged timestamps and the verification value
+     *     the sign carriers, the trailing pad and the unchanged timestamps; it must carry the same
+     *     discriminator and sequence number as {@code decoded}, and it is NOT the source of the
+     *     verification value
      * @return exactly 500 bytes, identical to {@code sourceImage} wherever the decoded projection
      *     still holds the value that image carried
-     * @throws ExportRecordException if {@code decoded} is {@code null}, or if
-     *     {@code sourceImage} is {@code null} or not 500 bytes
+     * @throws ExportRecordException if {@code decoded} is {@code null}, if {@code sourceImage} is
+     *     {@code null} or not 500 bytes, or if the image's discriminator or sequence number differs
+     *     from the decoded record's
      * @throws FixedWidthCodec.FieldCodecException if a projection value does not fit the span its
      *     descriptor declares
      * @throws IllegalArgumentException if a projection is missing a value its view requires
@@ -1154,6 +1260,11 @@ public final class ExportRecordMapper {
     public static byte[] toRecord(ExportRecord decoded, byte[] sourceImage) {
         requireDecoded(decoded);
         requireImage(sourceImage);
+        // WHY : Assumptions: the belonging check runs BEFORE the encode rather than after it, so a
+        //       mismatched image is refused without the record ever being rendered. Ordering it the
+        //       other way would leave a fully encoded 500-byte array in hand at the moment of refusal,
+        //       which is the kind of value that gets logged.
+        requireMatchingImage(decoded, sourceImage);
         byte[] image = toRecord(decoded);
         byte[] sourcePayload = payloadOf(sourceImage);
         CopybookLayout.RecordSpec view = viewLayout(decoded.prefix().recordType());
@@ -1555,7 +1666,7 @@ public final class ExportRecordMapper {
                 restoreUnchangedTimestamp(sourcePayload, target, view, "EXP-TRAN-PROC-TS",
                         decoded.transaction().getProcTs());
             }
-            case CARD -> copySpan(sourcePayload, target, view.field(FIELD_CARD_CVV));
+            case CARD -> restoreVerificationValue(decoded, view, target);
             // WHY : Assumptions: the three remaining views need nothing beyond the sign carriers and
             //       the pad, which the caller has already restored. They are named rather than left
             //       to a default arm so that a sixth view could not acquire this behaviour by
@@ -1577,6 +1688,121 @@ public final class ExportRecordMapper {
      */
     private static void copySpan(byte[] source, byte[] target, CopybookLayout.FieldSpec field) {
         System.arraycopy(source, field.start(), target, field.start(), field.length());
+    }
+
+    /**
+     * Writes the card verification value into the encoded payload from the record's OWN carrier.
+     *
+     * <p>Refactoring Rationale: <b>the value comes from {@code decoded} and no longer from the
+     * caller's source image.</b> An earlier revision copied this span straight out of the supplied
+     * image, which made the encode disclose whatever verification value that image happened to hold
+     * regardless of which card the decoded record described. Because the image is a plain parameter,
+     * a caller could pass card A's record together with card B's image -- by mixing up two records
+     * mid-loop, by reusing a buffer, or deliberately -- and the export written for card A would then
+     * carry card B's verification value, in cleartext, into a dataset generation that is retained for
+     * five versions. Reading the value from the record's own carrier removes the possibility
+     * structurally rather than warning against it: there is no longer any parameter through which one
+     * card's secret can reach another card's record.</p>
+     *
+     * <p>Assumptions: the absent carrier leaves the span exactly as the plain encode wrote it, which
+     * is the encoded zero the card field map supplies. That is the correct outcome and not a silent
+     * omission: a record assembled without a verification value has none to write, and substituting
+     * the source image's bytes for it -- which the earlier form did -- would have INVENTED a secret
+     * the projection did not carry.</p>
+     *
+     * <p>Trade-offs: a caller that decoded a card record, discarded the carrier, and then asked for a
+     * source-image encode no longer reproduces that image byte for byte across these two bytes. That
+     * is accepted, and it is the right trade: the carrier is returned by every decode, so the only way
+     * to lose it is to drop it deliberately, whereas the previous behaviour silently repaired that
+     * loss from an image whose provenance nothing checked. The general identity check the caller now
+     * performs on the image narrows the exposure further, but it cannot close it, because two records
+     * of one card and one generation legitimately share a discriminator and a sequence number.</p>
+     *
+     * @param decoded the record being encoded, whose opaque carrier is the only source of the value
+     * @param view the card view descriptor, which names the offset and width of the span
+     * @param target the freshly encoded 460-byte payload, modified in place
+     * @throws ExportRecordException if the carrier holds bytes of some width other than the span's,
+     *     which would leave part of the span holding whatever the encode had already put there
+     */
+    private static void restoreVerificationValue(ExportRecord decoded,
+            CopybookLayout.RecordSpec view, byte[] target) {
+        OpaqueSensitiveValue carrier = decoded.cardVerificationValue();
+        if (carrier == null || !carrier.isPresent()) {
+            return;
+        }
+
+        CopybookLayout.FieldSpec field = view.field(FIELD_CARD_CVV);
+        byte[] value = carrier.copyBytes();
+        if (value.length != field.length()) {
+            // WHY : Assumptions: the refusal names the widths and never the bytes, on the same rule
+            //       the carrier's own factory and redaction marker follow. A message echoing the
+            //       content would disclose through an exception the value this whole path exists to
+            //       keep out of every diagnostic.
+            throw new ExportRecordException("record " + RECORD_NAME + " field "
+                    + field.describe() + " is declared " + field.length()
+                    + " bytes but the carried value is " + value.length);
+        }
+        System.arraycopy(value, 0, target, field.start(), field.length());
+    }
+
+    /**
+     * Refuses a source image that does not belong to the record being encoded.
+     *
+     * <p>Refactoring Rationale: an earlier revision accepted any 500-byte array as the source image
+     * and checked only its LENGTH, so every span restored from it -- the sign carriers, the trailing
+     * pad, the timestamps -- was taken from bytes nothing had established were the bytes this record
+     * was read from. A caller that mixed up two records mid-loop therefore produced a well-formed
+     * export record assembled from two different sources, which no length check could detect and which
+     * a downstream reader has no way to notice. Checking the two prefix fields that identify a record
+     * turns that class of mistake into a refusal at the boundary that made it.</p>
+     *
+     * <p>Assumptions: the two fields checked are the DISCRIMINATOR and the SEQUENCE NUMBER, and they
+     * are the right two because they are the only prefix members that identify a record rather than
+     * describe it. The discriminator decides how the whole 460-byte payload is read, so an image
+     * carrying a different one is not merely a different record but a differently SHAPED one, and every
+     * span offset restored from it would be wrong. The sequence number is the record's retrieval key --
+     * {@code app/cpy/CVEXPORT.cpy} declares it as the field the divergence note above discusses -- so
+     * two images agreeing on it are the same record of the same generation.</p>
+     *
+     * <p>Alternatives Considered: comparing the whole 40-byte prefix, including the timestamp, the
+     * branch and the region. Rejected because the timestamp is a value a caller may legitimately have
+     * changed before re-encoding -- that is exactly what the conditional timestamp restoration below
+     * exists to accommodate -- so requiring it to match would refuse the very case the restoration is
+     * designed for. Alternatives Considered: comparing the payload's own key field instead. Rejected
+     * because the payload is read through a view chosen BY the discriminator, so it cannot be decoded
+     * safely until the discriminator has already been agreed.</p>
+     *
+     * <p>Trade-offs: this is a soundness check and NOT proof of provenance. Two distinct records of one
+     * card within one generation would share both checked values, so a determined mix-up between them
+     * still passes. It is retained because the realistic failure -- a loop that pairs record N with
+     * image N minus one, or a view mismatch -- is caught, and because the sensitive span no longer
+     * comes from this image at all.</p>
+     *
+     * @param decoded the record being encoded, whose prefix is the authority for the two values
+     * @param sourceImage the 500-byte image the caller offered as the record's source
+     * @throws ExportRecordException if the image's discriminator or sequence number differs from the
+     *     decoded record's, which means the image does not belong to this record
+     */
+    private static void requireMatchingImage(ExportRecord decoded, byte[] sourceImage) {
+        Prefix prefix = decoded.prefix();
+
+        RecordType imageType = recordTypeOf(sourceImage);
+        if (imageType != prefix.recordType()) {
+            throw new ExportRecordException("record " + RECORD_NAME
+                    + " was decoded as view " + prefix.recordType()
+                    + " but the source image offered for it carries view " + imageType
+                    + ", so the image does not belong to this record and every span restored from it"
+                    + " would be read at the wrong offset");
+        }
+
+        long imageSequence = decodePrefix(sourceImage).sequenceNumber();
+        if (imageSequence != prefix.sequenceNumber()) {
+            throw new ExportRecordException("record " + RECORD_NAME + " field "
+                    + EXPORT_RECORD.field(FIELD_SEQUENCE_NUM).describe()
+                    + " is " + prefix.sequenceNumber() + " on the decoded record but "
+                    + imageSequence + " on the source image offered for it, so the image does not"
+                    + " belong to this record");
+        }
     }
 
     /**

@@ -858,4 +858,3 @@ class PendingAuthDetailOrderingFixtureTest {
                 .hasSize(IMAGES);
     }
 }
-

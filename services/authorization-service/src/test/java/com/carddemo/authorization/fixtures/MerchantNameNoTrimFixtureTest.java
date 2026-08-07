@@ -562,8 +562,14 @@ class MerchantNameNoTrimFixtureTest {
      * Builds the detail entity the loader would persist from this image.
      *
      * <p>Assumptions: the account identifier is supplied rather than decoded, because the segment does
-     * not contain one, and the match status is the constructor's own pending default, which is the
-     * value this image carries at offset 173.</p>
+     * not contain one. Every other member, the match status included, comes from the image.</p>
+     *
+     * <p>Refactoring Rationale: the match status is now DECODED from offset 173 and passed in, where an
+     * earlier revision relied on the constructor defaulting it to pending. Both spellings produce
+     * {@code 'P'} for this particular image, so the change is invisible in the assertions -- but the
+     * earlier form asserted nothing about the loader, because it would have produced {@code 'P'} for an
+     * image carrying a declined status too. Reading the byte the fixture actually holds is what makes
+     * this a test of the load path rather than of a default.</p>
      *
      * @return the entity populated from the decoded fixture
      */
@@ -586,7 +592,12 @@ class MerchantNameNoTrimFixtureTest {
                 text("PA-MERCHANT-CATAGORY-CODE"), text("PA-ACQR-COUNTRY-CODE"),
                 ((Long) fields.get("PA-POS-ENTRY-MODE")).shortValue(), text("PA-MERCHANT-ID"),
                 text("PA-MERCHANT-NAME"), text("PA-MERCHANT-CITY"), text("PA-MERCHANT-STATE"),
-                text("PA-MERCHANT-ZIP"), text("PA-TRANSACTION-ID"));
+                text("PA-MERCHANT-ZIP"), text("PA-TRANSACTION-ID"),
+                // WHY : Assumptions: the fixture's own stored match status is used rather than a
+                //       literal, so this construction asserts that the committed binary carries a
+                //       status the insert path can actually originate. A literal would make the
+                //       assertion about this test instead of about the fixture.
+                text("PA-MATCH-STATUS"));
     }
 
     /**

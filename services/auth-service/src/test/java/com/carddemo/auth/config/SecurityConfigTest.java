@@ -9,11 +9,16 @@ import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.security.authorization.AuthorizationResult;
+import org.springframework.security.core.Authentication;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
+import org.springframework.security.web.access.intercept.RequestAuthorizationContext;
 import org.springframework.util.AntPathMatcher;
 import org.yaml.snakeyaml.Yaml;
 
@@ -42,7 +47,14 @@ class SecurityConfigTest {
      * <p>Assumptions: this is the assertion that makes the gate complete rather than merely present. The
      * collection path and its subtree need two patterns, because neither wildcard form matches both, and an
      * author who wrote only the subtree pattern would leave the list and create operations on the bare
-     * collection governed by the catch-all -- reachable by any authenticated user.</p>
+     * collection matched by no rule at all.</p>
+     *
+     * <p>Refactoring Rationale: this rationale said such an omission left those operations "reachable by
+     * any authenticated user", which was true of the catch-all it was written against and is not true of
+     * the present one. The chain now ends in {@code denyAll()}, so the omission fails CLOSED and both
+     * operations would answer 403 to an administrator. The assertion is unchanged and is worth more
+     * under the new rule, not less: it is now the test that keeps a published operation REACHABLE, and
+     * {@link #everyPublishedPathIsGrantedByARuleAboveTheCatchAll()} states that obligation directly.</p>
      */
     @Test
     @DisplayName("every protected contract operation is covered by an administrator gate")
@@ -98,8 +110,14 @@ class SecurityConfigTest {
      *
      * <p>Assumptions: the service receives the full path including {@code /api/v1}, because no service sets
      * a servlet context path and the load balancer forwards without rewriting. A prefix-less pattern would
-     * match no reachable request, so the guarded routes would fall through to the authenticated-only rule --
-     * a silent fail-open that reads as correct.</p>
+     * match no reachable request, so the routes it was written to guard would reach the catch-all
+     * instead.</p>
+     *
+     * <p>Refactoring Rationale: this rationale called that outcome "a silent fail-open that reads as
+     * correct", which described the {@code authenticated()} catch-all it was written against. Against the
+     * present {@code denyAll()} the same defect is a fail-closed outage rather than a silent grant. The
+     * assertion stands either way, because a pattern that matches no request is wrong under both rules --
+     * only the symptom moves, from an unguarded route to an unreachable one.</p>
      */
     @Test
     @DisplayName("the gates require the published /api/v1 prefix and reject the prefix-less form")
@@ -125,6 +143,166 @@ class SecurityConfigTest {
         assertThat(MATCHER.match(SecurityConfig.HEALTH_PATH, "/actuator/env"))
                 .as("opening the whole actuator namespace would publish configuration without a credential")
                 .isFalse();
+    }
+
+    /**
+     * Confirms the chain matches the whole management namespace, not only the endpoints the base
+     * exposure list names.
+     *
+     * <p>Assumptions: the list is read from the configuration rather than restated here, and its LAST
+     * entry is asserted to be the namespace. The defect this guards is precise: the namespace constant
+     * existed for several revisions while no rule matched it, so a management endpoint a profile
+     * published inherited the catch-all instead of the operator rule. A test naming only the three
+     * specific endpoints would have passed throughout.</p>
+     */
+    @Test
+    @DisplayName("the operator rule the chain installs covers the whole management namespace")
+    void theOperatorRuleCoversTheWholeManagementNamespace() {
+        assertThat(SecurityConfig.operatorPaths())
+                .as("the chain is built from this list, so a missing entry is a missing rule")
+                .containsExactly(
+                        SecurityConfig.BUILD_IDENTITY_PATH,
+                        SecurityConfig.METRICS_PATH,
+                        SecurityConfig.METRIC_SCRAPE_PATH,
+                        SecurityConfig.MANAGEMENT_PATH);
+        assertThat(SecurityConfig.operatorPaths())
+                .last()
+                .as("the namespace is the backstop, so it must be present and must be last")
+                .isEqualTo(SecurityConfig.MANAGEMENT_PATH);
+        assertThat(SecurityConfig.operatorPaths())
+                .allSatisfy(path -> assertThat(path)
+                        .as("an operator rule that reached outside /actuator would take a business route"
+                                + " away from every ordinary user")
+                        .startsWith("/actuator"));
+    }
+
+    /**
+     * Confirms every management endpoint the development profile publishes is decided by the health rule
+     * or by an operator rule, and never by the catch-all.
+     *
+     * <p>Assumptions: the exposure list is READ from {@code application-dev.yml} rather than restated,
+     * because that file is where the surface grows. It publishes {@code env}, {@code configprops} and
+     * {@code flyway} beyond the base four, and each of those reaches a real handler -- the active
+     * profiles and the ordered property-source list, every property name the task received, and the
+     * migration history of the {@code auth} schema.</p>
+     *
+     * <p>Assumptions: the second assertion is what stops this test being vacuous. It requires at least
+     * one exposed endpoint to be covered ONLY by the namespace entry, which proves the namespace rule is
+     * load-bearing rather than decorative: without it those ids would be authorized by the catch-all.</p>
+     */
+    @Test
+    @DisplayName("every endpoint the dev profile publishes is covered by the health or operator rules")
+    void everyExposedManagementEndpointIsCoveredByAHealthOrOperatorRule() {
+        List<String> exposed = exposedEndpointIds();
+        assertThat(exposed)
+                .as("the profile must still publish the diagnostic ids this assertion exists for")
+                .contains("health", "env", "configprops", "flyway");
+
+        List<String> uncovered = new ArrayList<>();
+        List<String> namespaceOnly = new ArrayList<>();
+        for (String id : exposed) {
+            String path = "/actuator/" + id;
+            if (MATCHER.match(SecurityConfig.HEALTH_PATH, path) || matchesANamedOperatorPath(path)) {
+                continue;
+            }
+            if (MATCHER.match(SecurityConfig.MANAGEMENT_PATH, path)) {
+                namespaceOnly.add(id);
+            } else {
+                uncovered.add(id);
+            }
+        }
+
+        assertThat(uncovered)
+                .as("an exposed endpoint no rule above the catch-all matches is authorized by the"
+                        + " catch-all, which is the defect this rule set was corrected to remove")
+                .isEmpty();
+        assertThat(namespaceOnly)
+                .as("at least one exposed endpoint must depend on the namespace entry, or this"
+                        + " assertion would pass with that entry deleted")
+                .isNotEmpty();
+    }
+
+    /**
+     * Confirms the decision the operator rule installs admits the task-local addresses and refuses every
+     * other, with no principal at all.
+     *
+     * <p>Assumptions: the decision object is obtained from {@link SecurityConfig#loopbackOnly()} rather
+     * than rebuilt here, so the assertion is about the rule the chain enforces. The authentication
+     * supplied is {@code null}, and that is deliberate rather than lazy: the collector sidecar presents
+     * no credential, so a rule that consulted a principal would refuse the only consumer these endpoints
+     * have. Granting a tokenless request from loopback is the behaviour being asserted.</p>
+     *
+     * <p>Assumptions: a private-subnet address is included among the refusals, not just a public one.
+     * The tasks share a VPC with every other service, so the address that must be refused in practice is
+     * a peer inside that network rather than something arriving from the internet.</p>
+     */
+    @Test
+    @DisplayName("the operator decision admits only the task-local addresses, with no token")
+    void theOperatorDecisionAdmitsOnlyTheTaskLocalAddresses() {
+        assertThat(grantedFrom("127.0.0.1"))
+                .as("the container HEALTHCHECK and the collector both read the port over IPv4 loopback")
+                .isTrue();
+        assertThat(grantedFrom("::1"))
+                .as("a stack presenting the IPv6 loopback must not silently lose its metrics")
+                .isTrue();
+        assertThat(grantedFrom("10.0.4.17"))
+                .as("a peer inside the VPC must not read this service's deployment internals")
+                .isFalse();
+        assertThat(grantedFrom("203.0.113.7"))
+                .as("nothing off the box may read them either")
+                .isFalse();
+    }
+
+    /**
+     * Confirms the management namespace reaches neither a business route nor an open path.
+     *
+     * <p>Assumptions: a namespace pattern that swept a business path in would not fail open, it would
+     * fail CLOSED -- the route would be refused for every caller off the box, an outage rather than a
+     * disclosure -- so it needs an assertion of its own, since every security assertion here would still
+     * pass.</p>
+     */
+    @Test
+    @DisplayName("the management namespace reaches no business route and no open path")
+    void theManagementNamespaceReachesNoBusinessRouteOrOpenPath() {
+        for (String openPath : SecurityConfig.unauthenticatedPaths()) {
+            assertThat(MATCHER.match(SecurityConfig.MANAGEMENT_PATH, openPath))
+                    .as("%s must stay reachable without a token from anywhere", openPath)
+                    .isFalse();
+        }
+        assertThat(MATCHER.match(
+                        SecurityConfig.MANAGEMENT_PATH, SecurityConfig.USER_COLLECTION_PATH_PATTERN))
+                .isFalse();
+        assertThat(MATCHER.match(
+                        SecurityConfig.MANAGEMENT_PATH, "/api/v1/auth/users/" + SAMPLE_USER_ID))
+                .isFalse();
+    }
+
+    /**
+     * Confirms every path the contract publishes is granted by a rule above the denying catch-all.
+     *
+     * <p>Assumptions: this is the obligation the catch-all change created. While the catch-all required
+     * only authentication, a published path nobody had written a rule for was still reachable -- too
+     * widely, but reachable. Now it is refused, so completeness of the rule set is a functional
+     * requirement and not only a security one, and it is asserted against the published contract rather
+     * than against a list restated here.</p>
+     */
+    @Test
+    @DisplayName("every published path is granted by a rule above the denying catch-all")
+    void everyPublishedPathIsGrantedByARuleAboveTheCatchAll() {
+        List<String> ungranted = new ArrayList<>();
+        for (String template : contractPaths().keySet()) {
+            String path = template.replace("{userId}", SAMPLE_USER_ID);
+            boolean granted = SecurityConfig.unauthenticatedPaths().contains(path)
+                    || SecurityConfig.requiredAuthorityFor(path) != null;
+            if (!granted) {
+                ungranted.add(template);
+            }
+        }
+
+        assertThat(ungranted)
+                .as("a published path matched by no rule now answers 403 to every caller, so this is"
+                        + " the assertion that keeps the contract servable")
+                .isEmpty();
     }
 
     /**
@@ -266,6 +444,74 @@ class SecurityConfigTest {
             }
         }
         throw new IllegalStateException("auth-api.yaml declares no operation named " + operationId);
+    }
+
+    /**
+     * Reports whether one concrete path is matched by an operator rule other than the namespace entry.
+     *
+     * @param path the concrete request path to test; must not be {@code null}
+     * @return {@code true} when one of the specifically named operator paths matches it
+     */
+    private boolean matchesANamedOperatorPath(String path) {
+        for (String operatorPath : SecurityConfig.operatorPaths()) {
+            if (!SecurityConfig.MANAGEMENT_PATH.equals(operatorPath)
+                    && MATCHER.match(operatorPath, path)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Applies the installed operator decision to a request arriving from one address.
+     *
+     * @param remoteAddress the address the request appears to come from; must not be {@code null}
+     * @return {@code true} when the installed manager grants access from that address
+     */
+    private boolean grantedFrom(String remoteAddress) {
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/actuator/env");
+        request.setRemoteAddr(remoteAddress);
+        Supplier<Authentication> noPrincipal = () -> null;
+
+        AuthorizationResult result = SecurityConfig.loopbackOnly()
+                .authorize(noPrincipal, new RequestAuthorizationContext(request));
+        return result != null && result.isGranted();
+    }
+
+    /**
+     * Reads the management endpoint ids the development profile publishes.
+     *
+     * <p>Assumptions: the value binds as a set and a profile REPLACES the inherited collection rather
+     * than merging into it, so this one list is the complete exposure of that profile and no base file
+     * has to be read alongside it.</p>
+     *
+     * @return the exposed endpoint ids, never {@code null} and never empty
+     * @throws IllegalStateException if the profile document cannot be read or publishes no exposure
+     *     list, either of which would make this assertion silently vacuous
+     */
+    @SuppressWarnings("unchecked")
+    private List<String> exposedEndpointIds() {
+        try (InputStream profile =
+                SecurityConfigTest.class.getResourceAsStream("/application-dev.yml")) {
+            if (profile == null) {
+                throw new IllegalStateException("application-dev.yml is not on the test class path");
+            }
+            Map<String, Object> document = new Yaml().load(profile);
+            Object include = ((Map<String, Object>) ((Map<String, Object>) ((Map<String, Object>)
+                    ((Map<String, Object>) document.get("management")).get("endpoints")).get("web"))
+                            .get("exposure")).get("include");
+            if (include == null) {
+                throw new IllegalStateException(
+                        "application-dev.yml publishes no management exposure list");
+            }
+            List<String> ids = new ArrayList<>();
+            for (String id : String.valueOf(include).split(",")) {
+                ids.add(id.trim());
+            }
+            return ids;
+        } catch (java.io.IOException problem) {
+            throw new IllegalStateException("application-dev.yml could not be read", problem);
+        }
     }
 
     /**

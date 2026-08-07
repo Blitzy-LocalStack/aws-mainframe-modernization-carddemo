@@ -3,6 +3,7 @@ package com.carddemo.batch.domain;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -12,13 +13,19 @@ import org.junit.jupiter.params.provider.ValueSource;
 /**
  * Pins what the batch-service entity renderings may and may not carry into a log line.
  *
- * <p>Two entities are covered, for two different reasons. {@link CardXref} is covered because a
+ * <p>Four entities are covered, for four related reasons. {@link CardXref} is covered because a
  * cross-reference row's whole content <em>is</em> the linkage between a card number, a customer and an
  * account, so a rendering that carried all three would reproduce the cross-reference file itself in
  * plain text somewhere no migration control governs. {@link Transaction} is covered because its
  * rendering already withheld the card number on the stated ground that a batch emits one line per
  * record across a whole daily feed -- reasoning that applies unchanged to the transaction amount and
- * had not been applied to it.
+ * had not been applied to it. {@link Account} and {@link TransactionCategoryBalance} are covered
+ * because each rendered a protected value while arguing in its own Javadoc that it did not: one that
+ * nothing in the account record needs masking, the other that "a running balance is not itself
+ * protected". The sensitive-data logging contract in {@code docs/architecture/observability.md} names
+ * account identifiers explicitly and covers persistence-bound values as a class, so both arguments
+ * were wrong and both renderings disclosed. A confident rationale is exactly what stops a reader
+ * re-examining a rendering, which is why these two are pinned by test rather than by comment.
  *
  * <p>Assumptions: the assertions name the values that must be <em>absent</em> rather than checking the
  * shape of what is present. That direction is deliberate: a rendering can only regress by gaining a
@@ -62,6 +69,23 @@ class DiagnosticRenderingTest {
      * This constant closes that gap.
      */
     private static final String FORBIDDEN_PREFIX = "485945261287";
+
+    /**
+     * A synthetic eleven-digit account identifier, at the declared width of {@code ACCT-ID PIC 9(11)}.
+     *
+     * <p>Alternatives Considered: reusing the account identifier from the seed row that
+     * {@link #SEED_CARD_NUMBER} belongs to, which is {@code 7}. Rejected on measurement rather than
+     * on principle: a one-digit value makes every absence assertion in this class near-vacuous,
+     * because the digit 7 already occurs inside the permitted card-number suffix and inside several
+     * amounts, so {@code doesNotContain} would fail against a compliant rendering and would have to be
+     * weakened to compensate. A distinctive eleven-digit value cannot collide with any other token a
+     * rendering emits, which is what makes the absence assertions mean what they say.
+     *
+     * <p>Assumptions: the digits are authored rather than extracted, so they identify no real account
+     * and correspond to no seed row. Nothing in this class depends on the value existing anywhere
+     * else -- these cases assert on a rendering, not on a lookup.
+     */
+    private static final Long SYNTHETIC_ACCOUNT_ID = 21_820_493_291L;
 
     /**
      * Confirms a cross-reference rendering carries the card-number suffix and nothing else.
@@ -146,5 +170,75 @@ class DiagnosticRenderingTest {
         assertThat(rendered).doesNotContain(PERMITTED_SUFFIX);
         assertThat(rendered).doesNotContain("1504.77");
         assertThat(rendered).doesNotContain("1,504.77");
+    }
+
+    /**
+     * Confirms an account rendering carries neither the account identifier nor any monetary value.
+     *
+     * <p>Assumptions: the balance and the credit limit are asserted absent as well as the identifier,
+     * because the logging contract covers persistence-bound values as a class and both are the
+     * persisted content of the account master. Asserting the identifier alone would pass against a
+     * rendering that withheld the key and published the money.
+     *
+     * <p>Assumptions: each monetary value is asserted absent in both its plain and its
+     * thousands-grouped spelling, for the same reason the transaction case above does it -- a future
+     * rendering that formatted a figure for readability would still disclose it, and an assertion
+     * against one spelling would pass.
+     */
+    @Test
+    void accountRendersNeitherTheIdentifierNorAnyMonetaryValue() {
+        Account account = new Account(
+                SYNTHETIC_ACCOUNT_ID,
+                "Y",
+                new BigDecimal("1504.77"),
+                new BigDecimal("25000.00"),
+                new BigDecimal("5000.00"),
+                LocalDate.of(2020, 1, 1),
+                LocalDate.of(2026, 1, 1),
+                LocalDate.of(2024, 1, 1),
+                new BigDecimal("100.00"),
+                new BigDecimal("200.00"),
+                "98101",
+                "ZEROAPR");
+
+        String rendered = account.toString();
+
+        assertThat(rendered).contains("activeStatus=Y");
+        assertThat(rendered).contains("groupId=ZEROAPR");
+        assertThat(rendered).doesNotContain(SYNTHETIC_ACCOUNT_ID.toString());
+        assertThat(rendered).doesNotContain("1504.77");
+        assertThat(rendered).doesNotContain("1,504.77");
+        assertThat(rendered).doesNotContain("25000.00");
+        assertThat(rendered).doesNotContain("25,000.00");
+    }
+
+    /**
+     * Confirms a category-balance rendering carries neither the account identifier nor the balance.
+     *
+     * <p>Assumptions: both the enclosing rendering and the embedded key's own rendering are asserted,
+     * and that is the point of the case rather than thoroughness for its own sake. The enclosing
+     * rendering formerly delegated the key to the embedded type, so narrowing only one of the two
+     * would have left the identifier reachable through the other.
+     */
+    @Test
+    void categoryBalanceRendersNeitherTheAccountIdentifierNorTheBalance() {
+        TransactionCategoryBalance.TransactionCategoryBalanceId id =
+                new TransactionCategoryBalance.TransactionCategoryBalanceId(
+                        SYNTHETIC_ACCOUNT_ID, "01", "0001");
+        TransactionCategoryBalance balance =
+                new TransactionCategoryBalance(id, new BigDecimal("1504.77"));
+
+        String renderedBalance = balance.toString();
+        String renderedKey = id.toString();
+
+        assertThat(renderedBalance).contains("typeCd='01'");
+        assertThat(renderedBalance).contains("categoryCd='0001'");
+        assertThat(renderedBalance).doesNotContain(SYNTHETIC_ACCOUNT_ID.toString());
+        assertThat(renderedBalance).doesNotContain("1504.77");
+        assertThat(renderedBalance).doesNotContain("1,504.77");
+
+        assertThat(renderedKey).contains("typeCd='01'");
+        assertThat(renderedKey).contains("categoryCd='0001'");
+        assertThat(renderedKey).doesNotContain(SYNTHETIC_ACCOUNT_ID.toString());
     }
 }

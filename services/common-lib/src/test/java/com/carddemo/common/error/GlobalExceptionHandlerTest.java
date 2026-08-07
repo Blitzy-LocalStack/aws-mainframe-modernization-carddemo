@@ -6,6 +6,7 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import com.carddemo.common.observability.ThrowableDigest;
 import com.carddemo.common.web.CorrelationIdFilter;
 import java.time.Clock;
 import java.time.Instant;
@@ -28,11 +29,25 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
  * Verifies that the shared advice never lets a primary account number out of the process, through
  * either of the two destinations it writes a request path to.
  *
- * <p>Assumptions: the path used throughout is the resolved form of the published card route,
- * {@code /api/v1/cards/{cardNumber}}, whose parameter is declared {@code pattern '^[0-9]{16}$'} and
- * described as supplied in full and unmasked. Using the real route rather than a short placeholder is
- * what makes these assertions about the exposure that actually exists, and the number itself is a
- * synthetic test value that identifies no account.</p>
+ * <p>Refactoring Rationale: the path used throughout is a MISTAKEN card path -- the shape of
+ * {@code /api/v1/cards/{cardKey}} with a sixteen-digit number where the selector belongs. It was
+ * previously described as "the resolved form of the published card route", which it no longer is: that
+ * route's parameter now admits only a canonical selector and refuses a card number outright, and
+ * {@code CardApiContractTest.noOperationAcceptsACardNumberInARequestTarget} asserts that no published
+ * operation accepts one in a path or a query at all.</p>
+ *
+ * <p>Assumptions: the cases are KEPT with that path rather than retired with the route, because this
+ * advice is the last line for a number that reaches a path anyway -- a caller submitting one where a
+ * selector belongs is refused with 400, and this is what stops the refusal from copying the number
+ * into a stored diagnostic on its way out. Asserting against a path no route accepts is therefore the
+ * point rather than a staleness: it is the case the masking exists for now that the contract handles
+ * the rest. The number itself is a synthetic test value that identifies no account.</p>
+ * <p>Assumptions: the card routes no longer carry a number at all -- a single card is addressed by an
+ * opaque sealed selector and the list's {@code cardNumber} query filter was withdrawn with it,
+ * registered together as {@code D-CARD-SELECTOR} in the divergence register -- so the exposure these
+ * assertions guard is narrower than it was. It is deliberately still guarded: this advice serves every
+ * context, a caller may be typed against a route no contract publishes any more, and a redaction that
+ * only held while every contract happened to avoid the value would be no redaction at all.</p>
  *
  * <p>Assumptions: two destinations are asserted separately because they fail separately. The emitted
  * problem shape is read from the returned entity; the operational record is read from a list appender
@@ -540,6 +555,165 @@ class GlobalExceptionHandlerTest {
     }
 
     /**
+     * Confirms the catch-all attaches no throwable to the event it logs, so neither the failure's own
+     * message nor any stack frame reaches log storage.
+     *
+     * <p>Assumptions: the assertion is made on the captured event's throwable slot rather than on the
+     * rendered line, because that slot is what a pattern layout expands into the message and the trace.
+     * A line-only assertion would pass against a call site that still passed the throwable, since the
+     * expansion happens in the appender rather than at the call site.</p>
+     *
+     * <p>Assumptions: the message given to the failure is the shape of the exposure this closes -- the
+     * statement mapper's over-width diagnostic quoted the whole assembled record, so a customer name and
+     * a street address reached the one destination the path masking in this class does not cover. The
+     * value here is synthetic and identifies nobody.</p>
+     */
+    @Test
+    @DisplayName("an unexpected failure logs no throwable, so no message text and no stack frame")
+    void unexpectedFailureLogsNoThrowableContent() {
+        String sensitive = "Doe                      John          1 Main Street";
+
+        this.handler.onUnexpectedFailure(new IllegalStateException(sensitive), requestFor(CARD_PATH));
+
+        assertThat(this.captured.list).hasSize(1);
+        assertThat(this.captured.list.get(0).getThrowableProxy()).isNull();
+        assertThat(this.captured.list.get(0).getFormattedMessage())
+                .doesNotContain(sensitive)
+                .contains("exception=java.lang.IllegalStateException")
+                // WHY : Refactoring Rationale: the reduced rendering is asserted through the digest
+                //       field rather than through a "causes=" field this advice no longer emits. Both
+                //       existed for a while: one revision rendered a class-name-only cause chain and
+                //       another rendered the type chain WITH each link's originating frames, and the
+                //       second supersedes the first because it carries strictly more diagnostic value
+                //       under the same guarantee -- a frame is code position, never migrated data. What
+                //       had to be preserved is the property this case is about, that no message text
+                //       and no throwable object reaches the record, and both are still asserted above.
+                .contains("failure=java.lang.IllegalStateException")
+                .doesNotContain(ThrowableDigest.CAUSE_SEPARATOR);
+    }
+
+    /**
+     * Confirms the cause chain field carries fully-qualified type names only, in outermost-first order,
+     * and none of the messages those causes carry.
+     *
+     * <p>Assumptions: both nested failures are given messages that would leak if the chain rendered
+     * anything but a type, so a regression that appended a message would fail here rather than passing
+     * on the strength of the type names alone.</p>
+     */
+    @Test
+    @DisplayName("the cause chain names types only, outermost first, and no message")
+    void unexpectedFailureCauseChainNamesTypesOnly() {
+        String innerText = "SSN 123456789";
+        String outerText = "balance 000000012345";
+        Exception failure = new IllegalStateException(outerText,
+                new java.io.UncheckedIOException(innerText, new java.io.IOException(innerText)));
+
+        this.handler.onUnexpectedFailure(failure, requestFor(CARD_PATH));
+
+        assertThat(this.captured.list).hasSize(1);
+        // WHY : Assumptions: the three type names are asserted individually and in order through the
+        //       separator count rather than as one concatenated literal, because each link now carries
+        //       its originating frames between the type names and a single literal could no longer
+        //       express the sequence. What the case fixes is unchanged: every type in the chain is
+        //       named, outermost first, and neither message reaches the record.
+        String logged = this.captured.list.get(0).getFormattedMessage();
+        assertThat(logged)
+                .contains("java.lang.IllegalStateException")
+                .contains("java.io.UncheckedIOException")
+                .contains("java.io.IOException")
+                .doesNotContain(innerText)
+                .doesNotContain(outerText);
+        assertThat(logged.indexOf("java.io.UncheckedIOException"))
+                .isLessThan(logged.indexOf("java.io.IOException"));
+        assertThat(logged.split(ThrowableDigest.CAUSE_SEPARATOR, -1)).hasSize(3);
+    }
+
+    /**
+     * Confirms a failure whose cause names itself terminates the walk instead of looping.
+     *
+     * <p>Assumptions: the standard cause accessor returns the throwable itself for a throwable
+     * constructed that way rather than {@code null}, so an unguarded walk would not terminate. The
+     * construction is done by overriding the accessor because the platform's own cause initialiser
+     * refuses self-causation outright, which means this state can only arise from a provider type that
+     * overrides the accessor -- exactly the case the guard exists for.</p>
+     */
+    @Test
+    @DisplayName("a self-causing failure renders the word for absence rather than looping")
+    void selfCausingFailureTerminatesTheWalk() {
+        this.handler.onUnexpectedFailure(new SelfCausingFailure(), requestFor(CARD_PATH));
+
+        assertThat(this.captured.list).hasSize(1);
+        // WHY : Assumptions: termination is asserted as the ABSENCE of a second link rather than as a
+        //       word for absence, because the digest renders the failure's own type and frames whether
+        //       or not it has a cause. A walk that failed to terminate would render this one type eight
+        //       times and then the truncation marker, so a rendering with no cause separator at all is
+        //       the exact evidence that the self-cause was recognised and dropped.
+        assertThat(this.captured.list.get(0).getFormattedMessage())
+                .contains("failure=" + SelfCausingFailure.class.getName())
+                .doesNotContain(ThrowableDigest.CAUSE_SEPARATOR);
+    }
+
+    /**
+     * Confirms a chain longer than the bound is truncated at the bound rather than rendered whole.
+     *
+     * <p>Assumptions: the bound is asserted by counting the separators rather than by naming the
+     * constant, because the constant is private to the advice. Twenty causes are nested so the rendered
+     * chain is provably shorter than the chain supplied, which is the property that matters -- a chain a
+     * provider built cyclically must not be able to make a log line unbounded.</p>
+     */
+    @Test
+    @DisplayName("a cause chain longer than the walk bound is truncated")
+    void aDeepCauseChainIsBounded() {
+        Throwable cause = new IllegalArgumentException("depth 0");
+        for (int depth = 1; depth < 20; depth++) {
+            cause = new IllegalStateException("depth " + depth, cause);
+        }
+
+        this.handler.onUnexpectedFailure(new IllegalStateException("outermost", cause),
+                requestFor(CARD_PATH));
+
+        assertThat(this.captured.list).hasSize(1);
+        String logged = this.captured.list.get(0).getFormattedMessage();
+        assertThat(logged).endsWith(ThrowableDigest.TRUNCATION_MARKER);
+        // WHY : Assumptions: the count is compared against the published bound rather than against a
+        //       literal, so the case follows the bound if it is ever retuned instead of failing for a
+        //       reason that has nothing to do with what it fixes. The truncation marker itself contains
+        //       the separator, which is why the expected count is the bound rather than the bound plus
+        //       one: the trailing marker contributes the last split.
+        assertThat(logged.split(ThrowableDigest.CAUSE_SEPARATOR, -1))
+                .hasSize(ThrowableDigest.MAX_CAUSE_DEPTH + 1);
+        assertThat(logged).doesNotContain("depth ");
+    }
+
+    /**
+     * A failure whose cause accessor returns the failure itself, which the platform initialiser forbids.
+     *
+     * <p>Assumptions: this exists only so the guard against self-causation is exercised against a real
+     * throwable rather than against a mock, and it is declared private so nothing outside this test can
+     * take it for a general-purpose type.</p>
+     */
+    private static final class SelfCausingFailure extends RuntimeException {
+
+        /** Serialisation identity, declared because the parent is serialisable. */
+        private static final long serialVersionUID = 1L;
+
+        /** Creates the failure with a fixed message that carries no migrated data. */
+        SelfCausingFailure() {
+            super("self-causing");
+        }
+
+        /**
+         * Returns this failure as its own cause.
+         *
+         * @return {@code this}, never {@code null}
+         */
+        @Override
+        public synchronized Throwable getCause() {
+            return this;
+        }
+    }
+
+    /**
      * Confirms every status this advice emits is a real HTTP status inside the published code range.
      *
      * <p>Assumptions: this is where the status half of the shape's construction contract is decided,
@@ -673,5 +847,83 @@ class GlobalExceptionHandlerTest {
      */
     private java.util.List<String> loggedMessages() {
         return this.captured.list.stream().map(ILoggingEvent::getFormattedMessage).toList();
+    }
+
+    /**
+     * Confirms the 500 site attaches no throwable to its event, so nothing downstream can render one.
+     *
+     * <p>Assumptions: the throwable proxy is asserted absent rather than the message being asserted
+     * clean, because the two are different guarantees and only this one is structural. A logging event
+     * that carries a throwable is rendered by whatever pattern the deployment happens to configure, and
+     * every default pattern prints the exception message and every cause's message. Since this
+     * repository ships NO appender configuration at all -- there is no {@code logback.xml},
+     * {@code logback-spring.xml} or {@code log4j2.xml} anywhere in it, deliberately, because three
+     * environment profiles record that adding one would take over the appender chain wholesale -- an
+     * attached throwable is rendered in full by the framework default. Asserting the proxy is null
+     * proves the disclosure is impossible rather than merely absent from this build's output.</p>
+     */
+    @Test
+    @DisplayName("an unexpected failure attaches no throwable to its logging event")
+    void unexpectedFailureAttachesNoThrowableToItsEvent() {
+        this.handler.onUnexpectedFailure(
+                new IllegalStateException("card " + CARD_NUMBER + " could not be posted"),
+                requestFor("/api/v1/accounts/00000000011"));
+
+        assertThat(this.captured.list).isNotEmpty();
+        assertThat(this.captured.list)
+                .allSatisfy(event -> assertThat(event.getThrowableProxy())
+                        .describedAs("no logging event from the 500 site may carry a throwable, because"
+                                + " the framework default renders its message and every cause's message")
+                        .isNull());
+    }
+
+    /**
+     * Confirms no message text from any link of a caught cause chain reaches the log line.
+     *
+     * <p>Assumptions: three links carry three different sentinels, so an implementation that dropped
+     * only the outermost message -- the most plausible partial fix -- fails on the second sentinel
+     * rather than passing. The sentinels are shaped like the values that actually matter: an unmasked
+     * account number, a national identifier and a fixed-width record image, which are respectively what
+     * a driver, a validator and a codec quote when they fail.</p>
+     */
+    @Test
+    @DisplayName("no message from any link of the caught cause chain reaches the log line")
+    void noCaughtMessageReachesTheLogLine() {
+        String nationalIdentifier = "123-45-6789";
+        String recordImage = "DOE       JOHN      0000012345";
+        Exception deepest = new NumberFormatException("cannot parse '" + recordImage + "'");
+        Exception middle = new IllegalArgumentException(
+                "customer " + nationalIdentifier + " rejected", deepest);
+        Exception outermost = new IllegalStateException(
+                "posting " + CARD_NUMBER + " failed", middle);
+
+        this.handler.onUnexpectedFailure(outermost, requestFor("/api/v1/accounts/00000000011"));
+
+        assertThat(loggedMessages()).isNotEmpty();
+        assertThat(loggedMessages()).allSatisfy(line -> assertThat(line)
+                .doesNotContain(CARD_NUMBER)
+                .doesNotContain(nationalIdentifier)
+                .doesNotContain(recordImage));
+    }
+
+    /**
+     * Confirms the reduction still names the failing types, so the log line stays diagnostic.
+     *
+     * <p>Assumptions: this is the counterweight to the two omission tests above. A site that logged
+     * neither the messages nor anything else about the failure would satisfy both of them while being
+     * useless, so the three type names of the chain are asserted present -- which is exactly the
+     * information an operator uses to decide where to look.</p>
+     */
+    @Test
+    @DisplayName("the reduced representation still names every type in the caught chain")
+    void theReducedRepresentationStillNamesEveryType() {
+        Exception cause = new NumberFormatException("no sentinel");
+        Exception outermost = new IllegalStateException("no sentinel", cause);
+
+        this.handler.onUnexpectedFailure(outermost, requestFor("/api/v1/accounts/00000000011"));
+
+        assertThat(loggedMessages()).anySatisfy(line -> assertThat(line)
+                .contains(IllegalStateException.class.getName())
+                .contains(NumberFormatException.class.getName()));
     }
 }

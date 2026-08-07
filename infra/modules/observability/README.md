@@ -41,7 +41,10 @@ those signals are brought together:
 
 - `step-functions-batch` takes this module's topic ARN as the target its nightly
   chain's `Catch` path publishes a failure to;
-- `eventbridge-scheduler` can route a dead-letter notification to the same topic;
+- `eventbridge-scheduler` does **not** use this topic as its dead-letter target: it
+  routes undeliverable schedule invocations to the SQS **error queue**, because its
+  `dead_letter_arn` input validates the value against an SQS queue ARN and rejects
+  anything else, and both environment roots pass `module.sqs.error_queue_arn`;
 - `ecs-service` owns each service's log group, and the meters those services
   export through Micrometer surface on this module's dashboard;
 - `network`, `api-gateway-http`, `alb`, `sqs`, `aurora-postgresql` and
@@ -282,7 +285,7 @@ definitions and the programs are untouched and remain runnable.
 
 ## 5. Alarms: condition, question, action
 
-`main.tf` authors **eleven** `aws_cloudwatch_metric_alarm` resources. Each row
+`main.tf` authors **thirteen** `aws_cloudwatch_metric_alarm` resources. Each row
 below states the condition, the question the condition answers and the action it
 enables. Every alarm publishes both its `ALARM` and its `OK` transition to this
 module's topic.
@@ -304,6 +307,8 @@ no service-level objectives and this module invents none — see
 | 9 | `batch_failure` | `ExecutionsFailed`, `ExecutionsTimedOut` or `ExecutionThrottled` on the nightly chain, one alarm per metric | Did the chain fail, or refuse to start at all | Redrive from the failed state |
 | 10 | `aurora_cpu` | Cluster processor utilisation | Is the workload pressed against its configured capacity | Compare capacity and connection counts before changing sizing |
 | 11 | `aurora_capacity` | Serverless capacity against `aurora_max_capacity` | Is the cluster at the ceiling the environment root itself configured | Review the workload before raising the maximum |
+| 12 | `aurora_connections` | Cluster connection count against the total every configured pool could open at full autoscale | Is the cluster running out of **connections** before it runs out of **capacity** | Reduce a service's pool size or bound its maximum task count — both compute-side configuration |
+| 13 | `cloudfront_5xx` | Server-error **rate** at the distribution | Is the static delivery path failing, as distinct from the API path row 4 watches | Compare the origin bucket's access log before redeploying the built assets |
 
 Four points about that table are decisions rather than mechanics.
 
@@ -345,13 +350,29 @@ Four points about that table are decisions rather than mechanics.
 
 Two conditions worth watching have **no alarm resource**, and their absence is a
 decision. A state entering its `Catch` path is not itself a CloudWatch metric, so
-alarming on it requires a metric filter or an explicitly published metric;
-connection-pool exhaustion needs an application meter that reaches a namespace
-before it can be alarmed on. Both are recorded in
+alarming on it requires a metric filter or an explicitly published metric; pool
+**acquisition** failure inside a task needs an application meter that reaches a
+namespace before it can be alarmed on. Both are recorded in
 [`docs/architecture/observability.md`](../../../docs/architecture/observability.md)
 rather than silently omitted. `ExecutionsAborted` is also deliberately not
 watched: an abort is ordinarily somebody's deliberate act, so alarming on it
 would notify whoever just performed the stop.
+
+Refactoring Rationale: **that second omission used to be stated more broadly than
+it holds, and row 12 is the difference.** "Connection-pool exhaustion" names two
+distinct saturations that publish to two different places, and only one of them is
+out of reach. Pool *acquisition* failure is a HikariCP meter, reported per pool name
+by each service's Micrometer registry, and remains unalarmable here. The *cluster's*
+connection count is an ordinary `AWS/RDS` metric on the `DBClusterIdentifier`
+dimension — one this module was already graphing on its dashboard — so the
+application-meter argument never applied to it, and it was covering a gap rather
+than explaining one. Row 12 alarms it, with a threshold derived rather than chosen:
+the environment root multiplies each service's configured pool size by that
+workload's maximum task count and sums the products, which is the relationship
+`ADR-003` states as tasks times pool size rather than tasks plus pool size. Row 12
+can breach while rows 10 and 11 both stay `OK`, which is precisely the risk
+`ADR-003` names — a wide scale-out exhausting connections before it exhausts
+capacity.
 
 ### 5.1 The batch outcome model is graded, and warn is green
 
@@ -517,8 +538,10 @@ a variable, an output, a version constraint or a resource — the command is in
 | [aws_cloudwatch_log_group.managed](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_log_group) | resource |
 | [aws_cloudwatch_metric_alarm.api_5xx](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_metric_alarm) | resource |
 | [aws_cloudwatch_metric_alarm.aurora_capacity](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_metric_alarm) | resource |
+| [aws_cloudwatch_metric_alarm.aurora_connections](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_metric_alarm) | resource |
 | [aws_cloudwatch_metric_alarm.aurora_cpu](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_metric_alarm) | resource |
 | [aws_cloudwatch_metric_alarm.batch_failure](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_metric_alarm) | resource |
+| [aws_cloudwatch_metric_alarm.cloudfront_5xx](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_metric_alarm) | resource |
 | [aws_cloudwatch_metric_alarm.dead_letter_depth](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_metric_alarm) | resource |
 | [aws_cloudwatch_metric_alarm.reply_queue_age](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_metric_alarm) | resource |
 | [aws_cloudwatch_metric_alarm.rotation_failure](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_metric_alarm) | resource |
@@ -563,8 +586,10 @@ a variable, an output, a version constraint or a resource — the command is in
 | <a name="input_alarm_evaluation_periods"></a> [alarm\_evaluation\_periods](#input\_alarm\_evaluation\_periods) | Consecutive breaching periods required before an alarm changes state. Anything above one is what distinguishes a sustained problem from a single unlucky period, at the cost of delaying the notification by that many periods. | `number` | `2` | no |
 | <a name="input_alarm_period_seconds"></a> [alarm\_period\_seconds](#input\_alarm\_period\_seconds) | Length of one evaluation period, in seconds. The alarm's complete detection window is this value multiplied by the evaluation period count, so the two inputs are read together. | `number` | `300` | no |
 | <a name="input_batch_failure_threshold"></a> [batch\_failure\_threshold](#input\_batch\_failure\_threshold) | Failed nightly-chain executions within one evaluation period that raise the batch alarm. This is the metric that replaces reading a job log for a non-zero condition code, and it counts executions the state machine itself reported as failed. | `number` | `1` | no |
-| <a name="input_cloudfront_distribution_id"></a> [cloudfront\_distribution\_id](#input\_cloudfront\_distribution\_id) | Optional CloudFront distribution identifier shown on the dashboard. Null omits the widget; no CloudFront alarm is created because global distribution metrics require a different provider region. | `string` | `null` | no |
+| <a name="input_cloudfront_5xx_error_rate_threshold_percent"></a> [cloudfront\_5xx\_error\_rate\_threshold\_percent](#input\_cloudfront\_5xx\_error\_rate\_threshold\_percent) | Percentage of viewer requests answered with a server error that raises the distribution alarm. A rate rather than a count, because a static single-page application's request volume differs by orders of magnitude between working hours and overnight, and a count meaningful at one volume is noise or silence at the other. Ignored when cloudfront\_distribution\_id is null or when the provider region is not us-east-1, because CloudFront publishes distribution metrics to us-east-1 alone. | `number` | `5` | no |
+| <a name="input_cloudfront_distribution_id"></a> [cloudfront\_distribution\_id](#input\_cloudfront\_distribution\_id) | Optional CloudFront distribution identifier shown on the dashboard and alarmed for server-error rate. Null omits both the widget and the alarm. The alarm is additionally conditional on the provider region being us-east-1, because CloudFront publishes distribution metrics to us-east-1 alone; an earlier revision of this description said global metrics require a different provider region, which turned that conditional constraint into a blanket impossibility and omitted a signal both environment roots can in fact create, since both set aws\_region to us-east-1. | `string` | `null` | no |
 | <a name="input_dashboard_service_names"></a> [dashboard\_service\_names](#input\_dashboard\_service\_names) | Service names the dashboard renders a row of widgets for, in the order given. The order is preserved because it is the order an operator reads the dashboard in, and a request travels through these services in roughly that sequence. | `list(string)` | <pre>[<br/>  "auth-service",<br/>  "account-service",<br/>  "card-service",<br/>  "transaction-service",<br/>  "reference-service",<br/>  "batch-service",<br/>  "authorization-service",<br/>  "reporting-service"<br/>]</pre> | no |
+| <a name="input_database_connection_threshold"></a> [database\_connection\_threshold](#input\_database\_connection\_threshold) | Cluster connection count that raises the connection-saturation alarm, or null to create no such alarm. This is a DERIVED value, not a tuned one: ADR-003 states the relationship as tasks times pool size rather than tasks plus pool size, so a caller computes the product of its service task count and its per-task connection-pool size and passes that. Null is the correct value only for a composition that runs no pooled service, because otherwise cluster connections can be exhausted by scale-out while processor utilisation and serverless capacity both stay well inside their own alarms. | `number` | `null` | no |
 | <a name="input_database_cpu_threshold_percent"></a> [database\_cpu\_threshold\_percent](#input\_database\_cpu\_threshold\_percent) | Cluster processor utilisation, as a percentage, that raises the database alarm. On a serverless cluster this is a scaling signal as much as a saturation one: sustained high utilisation means the workload is pressed against its configured maximum capacity. | `number` | `80` | no |
 | <a name="input_dead_letter_depth_threshold"></a> [dead\_letter\_depth\_threshold](#input\_dead\_letter\_depth\_threshold) | Visible messages in any dead-letter queue that raise the messaging alarm. A dead-letter queue is empty in normal operation, so this is the one threshold whose default is the smallest value that can be breached. | `number` | `1` | no |
 | <a name="input_log_group_names"></a> [log\_group\_names](#input\_log\_group\_names) | Map of logical producer key to the exact CloudWatch log-group name this module creates for producers that do not own a group resource. Empty means no additional group is created; full names are required because Lambda and other managed producers write only to their service-defined paths. | `map(string)` | `{}` | no |
@@ -643,7 +668,7 @@ surface nobody needs.
 
 | Output | Consumer, and why that form |
 |---|---|
-| `notification_topic_arn` | `step-functions-batch` as its `notification_topic_arn` input, where it becomes the target the nightly chain's `Catch` path publishes to; `eventbridge-scheduler` as a dead-letter target; and the `alarm_actions` target of any alarm authored outside this module |
+| `notification_topic_arn` | `step-functions-batch` as its `notification_topic_arn` input, where it becomes the target the nightly chain's `Catch` path publishes to; and the `alarm_actions` target of any alarm authored outside this module. **Not** the scheduler's dead-letter target — that input takes an SQS queue ARN and both roots supply the error queue |
 | `notification_topic_name` | A dashboard widget or an alarm on the topic's **own** delivery failures — CloudWatch dimensions `AWS/SNS` on `TopicName`, which no ARN satisfies. This is the one signal that reports a failure *in* the alerting path, which nothing publishing *through* that path can report |
 | `managed_log_group_names` | A task definition's `awslogs-group` option, a log-query `SOURCE` clause, and the `LogGroupName` metric dimension — each of which takes a name and rejects an ARN |
 | `managed_log_group_arns` | An IAM policy `Resource` element, so a producer's role is scoped to its own group instead of to every group in the account. Published without the all-streams suffix so a caller appends it unconditionally; keys match `managed_log_group_names` exactly, so one key set indexes both |
@@ -710,6 +735,28 @@ oversight.
   requirement is request/reply with a correlated response, which queues satisfy
   directly; a log-structured stream would need a separate reply mechanism built
   on top of it.
+- **No key-authorization alarm, despite `kms_key_arn` being required.** A reader
+  who sees an encryption key threaded into an observability module reasonably looks
+  for an alarm on key-access failure, so its absence is recorded rather than left to
+  inference. Assumptions: **KMS authorization failure is not a CloudWatch metric.**
+  An `AccessDenied` on a `Decrypt` or `GenerateDataKey` call is a CloudTrail
+  management **event**, and the `AWS/KMS` namespace publishes no error or
+  denied-request series to alarm on, so there is no metric here to compare against a
+  threshold. Alternatives Considered: a metric filter over a CloudTrail log group,
+  counting denied KMS events and alarming on the resulting custom metric. Rejected
+  as unauthorable **in this module as composed**: it needs a trail delivering
+  management events to a CloudWatch log group, and no such trail exists in this stack
+  — the only log-group name this module is given from outside is the VPC flow-log
+  group. Authoring the filter against a group that nothing writes would produce an
+  alarm permanently in `INSUFFICIENT_DATA`, which reads identically to a control that
+  is passing, and that is the same failure mode both environment roots already avoid
+  by leaving `rotation_lambda_function_names` empty rather than naming a function
+  that does not exist. Trade-offs: the consequence is accepted and narrow. A key
+  misconfiguration does not go unnoticed — it surfaces immediately as the failure it
+  causes, which the authored alarms do cover: a task that cannot decrypt its
+  credential fails its health check and raises rows 1 and 2, and a producer that
+  cannot write to an encrypted log group fails at `CreateLogGroup`, which is why
+  `kms_key_arn` is required and not nullable in the first place.
 - **No multi-region observability.** Single region, three availability zones.
   Alternatives Considered: cross-region dashboards and alarm replication.
   Rejected because the deployment topology is single-region, so a cross-region
@@ -1005,4 +1052,3 @@ or requires them at run time.
 - [`docs/CODE_DOCUMENTATION_STANDARD.md`](../../../docs/CODE_DOCUMENTATION_STANDARD.md)
   — the polyglot documentation convention this document is written to, including
   the HCL analogue and the `# WHAT:` / `# WHY :` idiom
-

@@ -83,8 +83,24 @@ datasets" double-counts two of them and loses two others. Two of the eight are
 The third alternate index is not in the CSD at all, because no online program
 reads it: `AWS.M2.CARDDEMO.TRANSACT.VSAM.AIX` is defined at
 [`app/jcl/TRANIDX.jcl`](../../app/jcl/TRANIDX.jcl) **L25**, given a path at
-**L43–L44** and populated by `BLDINDEX` at **L52**. It is a batch path, keyed on
-card number and processing date.
+**L43–L44** and populated by `BLDINDEX` at **L52**. It is a batch path keyed on a
+**single 26-byte field at offset 304 — the processing timestamp — and on nothing
+else**: `KEYS(26 304)` at **L27** declares one key of length 26 starting at that
+offset, `NONUNIQUEKEY` on the next line admits repeats of it, and the job's own
+header at **L20** reads `CREATE ALTERNATE INDEX ON PROCESSED TIMESTAMP`.
+
+Assumptions: **card-number ordering over transactions is a different mechanism in a
+different job, and conflating the two would misattribute one index to the other.**
+`KEYS(26 304)` is one key of 26 bytes, not two keys; a two-part key would need two
+length-and-offset pairs. Card ordering comes from the report job's DFSORT control at
+[`app/jcl/TRANREPT.jcl`](../../app/jcl/TRANREPT.jcl) **L41** and **L46**, which
+declares `TRAN-CARD-NUM,263,16,ZD` and sorts on it ascending — a sort over a
+sequential backup, not an index over the master. That job's `INCLUDE` at **L47–L48**
+then filters on the `TRAN-PROC-DT,305,10,CH` symbol declared at **L42**, which is the
+leading date of the very timestamp this alternate index is keyed on, read as ten
+characters instead of twenty-six — DFSORT's one-based 305 and `IDCAMS`'s zero-based
+304 name the same byte. The two mechanisms therefore have one column between them,
+not two.
 
 Assumptions: **an alternate index is an access path that programs read, not
 decoration on a dataset.** Two of the three are surfaced to CICS as first-class
@@ -425,7 +441,18 @@ Every browse and lookup path that exists today still exists, on the same columns
 |---|---|---|
 | `CARDAIX` — cards by account | [`app/jcl/CARDFILE.jcl`](../../app/jcl/CARDFILE.jcl) **L83**, path **L101–L102**, `BLDINDEX` **L110**; surfaced to CICS at CSD **L13** | `idx_cards_account_id` |
 | `CXACAIX` — cross-reference by account | [`app/jcl/XREFFILE.jcl`](../../app/jcl/XREFFILE.jcl) **L72**, path **L91–L92**, `BLDINDEX` **L100**; surfaced to CICS at CSD **L63** | `idx_card_xref_account_id` |
-| `TRANSACT.VSAM.AIX` — transactions by card and processing date | [`app/jcl/TRANIDX.jcl`](../../app/jcl/TRANIDX.jcl) **L25**, path **L43–L44**, `BLDINDEX` **L52** | `idx_transactions_card_num`, `idx_transactions_proc_ts` |
+| `TRANSACT.VSAM.AIX` — transactions by processing timestamp, `KEYS(26 304)` and `NONUNIQUEKEY` | [`app/jcl/TRANIDX.jcl`](../../app/jcl/TRANIDX.jcl) **L25**, key **L27**, path **L43–L44**, `BLDINDEX` **L52** | `idx_transactions_proc_ts` |
+| Transactions ordered by card number — a DFSORT sort, not an alternate index | [`app/jcl/TRANREPT.jcl`](../../app/jcl/TRANREPT.jcl) symbol **L41**, `SORT FIELDS` **L46** | `idx_transactions_card_num` |
+
+Assumptions: **the fourth row is deliberately not an alternate index, and it is
+listed so that the fourth target index has a stated origin.** Three alternate indexes
+yield three secondary indexes; `idx_transactions_card_num` exists because the report
+job sorts on card number and the online card-scoped list reads by it, not because a
+`DEFINE ALTERNATEINDEX` names that column. Leaving it out of this table would have
+made it look unmotivated; folding it into the `TRANSACT.VSAM.AIX` row — as an earlier
+revision of this record did — misattributed it to a key that
+[Context](#the-count-of-eight-is-a-count-of-access-paths-not-of-datasets) shows is a
+single 26-byte timestamp.
 
 Refactoring Rationale: what changes is not the access path but who maintains it.
 `BLDINDEX` is a batch step that rebuilds an index from the base cluster, so the
@@ -585,8 +612,8 @@ is paid by whoever issues the first request after an idle period, which in a
 development environment is a person waiting on a screen. The resolution is to
 accept it exactly where it is cheap and to refuse it where it is not — the
 development environment holds a floor of zero and pays the delay in exchange for
-no idle charge, and the production environment holds a floor above zero so no
-request ever pays it. The concrete values are in
+no idle **capacity-unit** charge, and the production environment holds a floor
+above zero so no request ever pays it. The concrete values are in
 [Cost Implications](#cost-implications).
 
 Refactoring Rationale: this replaces per-dataset manual capacity planning
@@ -720,13 +747,27 @@ uncertainty this decision actually carries.
 
 ## Trade-offs and Risks
 
-### Accepted trade-off — a resume delay in exchange for no idle charge in `dev`
+### Accepted trade-off — a resume delay in exchange for no idle capacity-unit charge in `dev`
 
 Stated in full under [Capacity Semantics](#capacity-semantics) and priced under
 [Cost Implications](#cost-implications). The short form: the development
 environment holds a capacity floor of zero, so the first request after an idle
 period waits on the order of fifteen seconds. It is accepted there and refused in
 production, where the floor is held above zero.
+
+Refactoring Rationale: this heading and the sentence under
+[Capacity Semantics](#capacity-semantics) previously said the trade bought "no idle
+charge", unqualified. That overstated it. What a zero capacity floor removes is the
+**capacity-unit** charge — the per-second compute meter — and it removes nothing
+else. **Storage, automated-backup storage and I/O continue to be billed while
+capacity is paused**, because the data has not gone anywhere: a paused cluster still
+holds every byte of the eight schemas, still retains its backups for the window this
+record's per-environment table sets, and still bills any read or write that arrives
+and wakes it. The unqualified phrasing therefore described a floor of zero where the
+real floor is small but non-zero, which is exactly the kind of cost claim a reader
+would carry into a budget. The narrowing is stated rather than the sentence deleted,
+because the trade itself is real and worth recording — a development environment that
+is idle overnight genuinely stops paying for compute.
 
 ### Accepted trade-off — one cluster hosting eight schemas
 
@@ -818,16 +859,42 @@ answer, because answering it without measurement would be inventing a figure.
 
 ## Consequences
 
-### Eight schemas, one per bounded context, and one of them owns nothing
+### Eight schemas, one per bounded context, and one of them is read-only to its service
 
 The relational store is created as eight schemas by
 [`data-migration/sql/V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql):
 `auth`, `account`, `card`, `ledger`, `reference`, `batch`, `authorization` and
-`reporting`. Seven own tables. The eighth is deliberately different, and the
-difference is worth stating precisely because a looser description of it would
-overstate what the reporting service can reach.
+`reporting`. Seven are owned by the service that reads and writes them. The eighth is
+deliberately different, and the difference has to be stated at three levels, because
+any one of them alone is misleading.
 
-**The reporting service owns no tables.** It reads through read-only cross-schema
+**One, the reporting service owns no tables.** **Two, the `reporting` schema
+nevertheless holds exactly one table**, `reporting.card_grouping_key`, created by
+[`data-migration/sql/V1__reporting_views.sql`](../../data-migration/sql/V1__reporting_views.sql).
+**Three, the reporting service cannot read that table** — it is owned by the separate
+`carddemo_reporting_owner` role, and `SELECT` is revoked from the service's own login
+role. The table is a single row holding the salt that the statement views cross-join to
+compute a card fingerprint, so a service able to read it could invert the fingerprint by
+exhausting sixteen digits; withholding it from the reader is the whole point of its
+existing. The ownership authority for all eight schemas is
+[`docs/architecture/data-model-and-schema-mapping.md`](../architecture/data-model-and-schema-mapping.md),
+and this record follows it rather than restating it independently.
+
+Refactoring Rationale: this passage previously asserted flatly that the reporting
+service owns no tables and left the reader to conclude the schema was empty, and the
+section heading said the schema "owns nothing". The first statement is true and the
+implication is false — the schema holds that one table — so a reader reconciling this
+record against the delivered DDL would find a table the decision appeared to forbid and
+would have no way to tell whether the table or the decision was the error. Two
+alternatives were weighed. Deleting the table to make the original wording true was
+rejected outright: the fingerprint's non-invertibility depends on the salt being
+unreadable by the reader, so removing it would trade a documentation inconsistency for
+a disclosure. Leaving the wording and treating the table as an exception was rejected
+because an unstated exception is how the next reader arrives at the same confusion. The
+three-level statement is what makes the arrangement checkable: each level is
+independently verifiable against the DDL and the grants.
+
+It reads through read-only cross-schema
 views, and the arrangement is stronger than a read-only grant: the `reporting`
 schema is owned by a **separate** owner role rather than by the reporting
 service's own login role, so the service role can create, replace and drop
@@ -866,13 +933,37 @@ generation families. The batch steps that write and read these prefixes belong t
 [ADR-005](ADR-005-batch-orchestration.md) and
 [`docs/architecture/batch-orchestration.md`](../architecture/batch-orchestration.md).
 
-### Three secondary indexes replacing three alternate indexes
+### Three secondary indexes replacing three alternate indexes, plus one added lookup
 
-`idx_cards_account_id`, `idx_card_xref_account_id`, and
-`idx_transactions_card_num` with `idx_transactions_proc_ts`, on the columns
-tabulated in [Rationale](#rationale) §4. The `BLDINDEX` rebuild step has no target
-equivalent and is retired, because the engine maintains an index in the same
-transaction that writes the row.
+The three replacements stand one-to-one against the three baseline alternate indexes,
+on the columns tabulated in [Rationale](#rationale) §4:
+
+| Baseline alternate index | Target secondary index | Relation |
+| --- | --- | --- |
+| `CARDAIX` | `idx_cards_account_id` | `card.cards` |
+| `CXACAIX` | `idx_card_xref_account_id` | `account.card_xref` |
+| `TRANSACT.VSAM.AIX` | `idx_transactions_proc_ts` | `ledger.transactions` |
+
+`idx_transactions_card_num` is a **fourth** index and is **not** one of those
+replacements. It has a different origin, set out in the fourth row of the
+[Rationale](#rationale) §4 table: the report job's card-number sort, declared as a
+symbol at [`app/jcl/TRANREPT.jcl`](../../app/jcl/TRANREPT.jcl) **L41** and sorted on at
+**L46**, together with the card-scoped reads the statement and transaction-list paths
+perform. The baseline satisfies all of those by sorting rather than by a
+`DEFINE ALTERNATEINDEX`.
+
+The `BLDINDEX` rebuild step has no target equivalent and is retired, because the engine
+maintains an index in the same transaction that writes the row.
+
+Refactoring Rationale: the heading counted three while the sentence beneath it named
+four, listing the added card-number index among the replacements and joining it to
+`idx_transactions_proc_ts` with a "with" that read as though the two together replaced
+one alternate index. The count was right and the list was wrong: there are exactly three
+alternate indexes in the baseline and the fourth target index answers to none of them.
+Separating them is not cosmetic — a reader auditing alternate-index coverage would
+otherwise look for a fourth baseline alternate index that does not exist, or conclude
+that one replacement was missing.
+
 
 ### Encryption at rest, in transit, and automated backups
 
@@ -968,7 +1059,8 @@ criticism of them.
 [`app/jcl/REPTFILE.jcl`](../../app/jcl/REPTFILE.jcl) L25–L28 ·
 [`app/jcl/CARDFILE.jcl`](../../app/jcl/CARDFILE.jcl) L83, L101–L102, L110 ·
 [`app/jcl/XREFFILE.jcl`](../../app/jcl/XREFFILE.jcl) L72, L91–L92, L100 ·
-[`app/jcl/TRANIDX.jcl`](../../app/jcl/TRANIDX.jcl) L25, L43–L44, L52 ·
+[`app/jcl/TRANIDX.jcl`](../../app/jcl/TRANIDX.jcl) L20, L25, L27, L43–L44, L52 ·
+[`app/jcl/TRANREPT.jcl`](../../app/jcl/TRANREPT.jcl) L41, L42, L46, L47–L48 ·
 [`app/jcl/ACCTFILE.jcl`](../../app/jcl/ACCTFILE.jcl) L36–L38 ·
 [`app/jcl/DUSRSECJ.jcl`](../../app/jcl/DUSRSECJ.jcl) L64–L69 ·
 [`app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy) L19, L22, L23–L26, L29–L30 ·

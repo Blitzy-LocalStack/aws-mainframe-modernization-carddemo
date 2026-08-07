@@ -154,11 +154,19 @@ import java.util.List;
  * {@code app/cpy-bms/COUSR01.CPY} line 90, {@code app/cpy-bms/COUSR02.CPY} line 90 and
  * {@code app/cpy-bms/COUSR03.CPY} line 84; the longest message the five programs emit is forty-four
  * characters, at {@code app/cbl/COUSR00C.cbl} line 273, so the declared width is never approached and
- * there is nothing for a truncation path to do. The three sign-on failure messages this operation can
+ * there is nothing for a truncation path to do. The sign-on failure messages this operation can
  * report -- {@code 'Wrong Password. Try again ...'} spanning {@code app/cbl/COSGN00C.cbl} lines 242 and
- * 243, {@code 'User not found. Try again ...'} at line 249 and
- * {@code 'Unable to verify the User ...'} at line 254 -- travel in
+ * 243, and {@code 'Unable to verify the User ...'} at line 254 -- travel in
  * {@code com.carddemo.common.error.ApiError} rather than in any component declared here.
+ *
+ * <p>Assumptions: the reference's third failure message is deliberately absent from that list. It is
+ * {@code 'User not found. Try again ...'} at {@code app/cbl/COSGN00C.cbl} line 249, and this operation
+ * cannot report it: the identity provider answers an unknown identifier and a wrong credential
+ * identically, so the first literal above covers both. That is a registered divergence,
+ * {@code D-SIGNON-EXISTENCE-UNIFORM} in section 7.4 of
+ * {@code docs/architecture/cobol-to-service-traceability.md}, and the literal survives in the browser
+ * application's message catalogue for traceability alone. Listing all three here would have described
+ * a response this record can never accompany.</p>
  *
  * <h2>Authoring decisions for this record</h2>
  *

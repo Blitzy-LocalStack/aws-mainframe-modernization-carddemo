@@ -206,35 +206,35 @@ Assumptions:
     substitution passes every check and reaches the ledger.
 """
 
-# WHY (Alternatives Considered): this subpackage is a REGULAR package with an explicit
-#   documented entry point, and the implicit PEP 420 namespace package it could have been
-#   instead was rejected. The reference suite is the namespace form and is right to be:
-#   there is no entry-point module anywhere under ``tests/`` -- the count is zero -- and
-#   that tree resolves through ``PYTHONPATH`` pointing at the repository root, exactly as
-#   the reference codec's own module docstring states. This tree is the opposite by
-#   design, an installable distribution discovered through ``where = ["src"]``, and the
-#   two must not be made to match. Package discovery finds a regular package by this file
-#   and finds a namespace child only by falling back to namespace discovery, so a later
-#   ``packages`` or ``exclude`` entry would drop this directory from the built wheel while
-#   every test in the checkout continued to pass; the failure would then arrive as
-#   ``ModuleNotFoundError: carddemo_migration.copybook`` inside a container, which is the
-#   worst place to learn that a package was never shipped. The second reason is this file
-#   rather than the directory: a package entry point is the first artifact kind the
-#   project's explainability rule names, so a documented one is required rather than
-#   preferred, and ruff's ``D104`` enforces it under an ``ignore`` list that is
-#   deliberately empty and a ``per-file-ignores`` table that deliberately does not exist.
+# Alternatives Considered: this subpackage is a REGULAR package with an explicit
+# documented entry point, and the implicit PEP 420 namespace package it could have been
+# instead was rejected. The reference suite is the namespace form and is right to be:
+# there is no entry-point module anywhere under ``tests/`` -- the count is zero -- and
+# that tree resolves through ``PYTHONPATH`` pointing at the repository root, exactly as
+# the reference codec's own module docstring states. This tree is the opposite by
+# design, an installable distribution discovered through ``where = ["src"]``, and the
+# two must not be made to match. Package discovery finds a regular package by this file
+# and finds a namespace child only by falling back to namespace discovery, so a later
+# ``packages`` or ``exclude`` entry would drop this directory from the built wheel while
+# every test in the checkout continued to pass; the failure would then arrive as
+# ``ModuleNotFoundError: carddemo_migration.copybook`` inside a container, which is the
+# worst place to learn that a package was never shipped. The second reason is this file
+# rather than the directory: a package entry point is the first artifact kind the
+# project's explainability rule names, so a documented one is required rather than
+# preferred, and ruff's ``D104`` enforces it under an ``ignore`` list that is
+# deliberately empty and a ``per-file-ignores`` table that deliberately does not exist.
 
-# WHY (Trade-offs): the four modules are imported EAGERLY here, which is the opposite of
-#   what the root ``carddemo_migration`` entry point does, and the two decisions differ
-#   because their costs differ rather than because one of them is inconsistent. Eager
-#   import here costs the import of four standard-library-only modules -- no driver, no
-#   SDK, no configuration read -- and buys the property the folder's own validation gate
-#   checks, that ``import carddemo_migration.copybook`` is sufficient and a caller never
-#   has to know which of the four owns the name it wants. The root imports NO subpackage
-#   at all, because reaching ``loaders`` or ``verify`` from there would pull ``psycopg``
-#   and ``boto3`` in behind them; a copybook-only import would then stop working on a bare
-#   checkout and the standard-library-only guarantee would become false at the very point
-#   the root asserts it. Eager here, lazy there, for one reason stated from two ends.
+# Trade-offs: the four modules are imported EAGERLY here, which is the opposite of
+# what the root ``carddemo_migration`` entry point does, and the two decisions differ
+# because their costs differ rather than because one of them is inconsistent. Eager
+# import here costs the import of four standard-library-only modules -- no driver, no
+# SDK, no configuration read -- and buys the property the folder's own validation gate
+# checks, that ``import carddemo_migration.copybook`` is sufficient and a caller never
+# has to know which of the four owns the name it wants. The root imports NO subpackage
+# at all, because reaching ``loaders`` or ``verify`` from there would pull ``psycopg``
+# and ``boto3`` in behind them; a copybook-only import would then stop working on a bare
+# checkout and the standard-library-only guarantee would become false at the very point
+# the root asserts it. Eager here, lazy there, for one reason stated from two ends.
 from carddemo_migration.copybook.ebcdic_codec import (
     EbcdicFieldDecodeError,
     EbcdicRecordLengthError,
@@ -270,28 +270,28 @@ from carddemo_migration.copybook.zoned import (
     encode_zoned,
 )
 
-# WHY (Alternatives Considered): the surface below is CURATED and sorted, and a star
-#   re-export was rejected. ``layouts`` alone exports seventy-eight names, so re-exporting
-#   the union would put every per-record layout constant, every field-descriptor
-#   constructor helper and every diagnostic helper at this level, and it would promote
-#   ``layouts``' internal vocabulary into a second public spelling for names that already
-#   have one. Two concrete consequences decided it. A star surface makes every subsequent
-#   internal rename a breaking change to this package's public contract, because a name
-#   that leaked once cannot be withdrawn without warning. And the two overpunch tables in
-#   ``zoned`` are private for a reason -- they are an implementation of the mapping, not
-#   the mapping's interface -- so a surface assembled by wildcard would advertise them the
-#   moment either one stopped being underscore-prefixed. Every name here is instead
-#   declared, which is also what keeps this list and the import block above verifiable
-#   against each other by the linter rather than by reading.
-#   The inclusion criterion is correspondingly narrow: the smallest set with which a reader
-#   or a loader can locate a record boundary, resolve a field's declared geometry, decode
-#   each of the three storage regimes and catch what any of them raises, all without
-#   reaching into a submodule. Everything else -- the per-record layout constants, the
-#   field-descriptor constructors, the masking helpers, the field-oriented codec forms --
-#   stays reachable at its owning module, which is the spelling every existing consumer
-#   already uses, so curating withdraws nothing that was available before. The sorted order
-#   is the order each of the four modules declares its own surface in, so all five files in
-#   this directory read the same way.
+# Alternatives Considered: the surface below is CURATED and sorted, and a star
+# re-export was rejected. ``layouts`` alone exports seventy-eight names, so re-exporting
+# the union would put every per-record layout constant, every field-descriptor
+# constructor helper and every diagnostic helper at this level, and it would promote
+# ``layouts``' internal vocabulary into a second public spelling for names that already
+# have one. Two concrete consequences decided it. A star surface makes every subsequent
+# internal rename a breaking change to this package's public contract, because a name
+# that leaked once cannot be withdrawn without warning. And the two overpunch tables in
+# ``zoned`` are private for a reason -- they are an implementation of the mapping, not
+# the mapping's interface -- so a surface assembled by wildcard would advertise them the
+# moment either one stopped being underscore-prefixed. Every name here is instead
+# declared, which is also what keeps this list and the import block above verifiable
+# against each other by the linter rather than by reading.
+# The inclusion criterion is correspondingly narrow: the smallest set with which a reader
+# or a loader can locate a record boundary, resolve a field's declared geometry, decode
+# each of the three storage regimes and catch what any of them raises, all without
+# reaching into a submodule. Everything else -- the per-record layout constants, the
+# field-descriptor constructors, the masking helpers, the field-oriented codec forms --
+# stays reachable at its owning module, which is the spelling every existing consumer
+# already uses, so curating withdraws nothing that was available before. The sorted order
+# is the order each of the four modules declares its own surface in, so all five files in
+# this directory read the same way.
 __all__ = [
     "AlternateKeySpec",
     "EbcdicFieldDecodeError",

@@ -657,21 +657,43 @@ public final class StatementTextMapper {
         }
 
         /**
-         * Renders this record for a log line or an assertion message, naming only the account
-         * identifier.
+         * Renders this record for a log line or an assertion message, naming no component.
          *
-         * <p>Trade-offs: six of the seven components are omitted outright rather than abbreviated,
-         * and the omission is unconditional because a rendering reached through string
+         * <p>Refactoring Rationale: ALL SEVEN components are withheld now, and an earlier revision
+         * named the account identifier. That revision withheld the other six with care and correct
+         * reasoning, and then treated the identifier as the one safe thing left to say -- describing
+         * itself as "naming only the account identifier" as though that were the conservative
+         * choice. It is not: the sensitive-data logging contract in
+         * {@code docs/architecture/observability.md} names account and customer identifiers in a
+         * clause of their own. Withholding a name, an address, a balance and a credit score and then
+         * emitting the identifier that ties them all to one account defeats most of what the other
+         * six omissions bought, because a log holding the identifier per statement is the index into
+         * whatever else names it.</p>
+         *
+         * <p>Trade-offs: the omission is unconditional because a rendering reached through string
          * concatenation, a log template or a debugger cannot be asked to remember to withhold
-         * anything. Four of the six -- the assembled name, both address lines and the assembled
-         * address -- are the account holder's name and postal address, which the migration plan
-         * treats as data to be narrowed at a mapping boundary and never widened at a diagnostic
-         * one. The remaining two are the current balance and the credit score, which the sibling
-         * view types of this module also omit from their own renderings, so omitting them here
-         * keeps one rule across the module rather than two that differ. The cost accepted is that a
-         * reader cannot reconstruct a statement header from a log line, and the compensation is
-         * that no log line written from this record can carry a name, an address, a balance or a
-         * credit score at all.</p>
+         * anything. Four of the seven components -- the assembled name, both address lines and the
+         * assembled address -- are the account holder's name and postal address, which the migration
+         * plan treats as data to be narrowed at a mapping boundary and never widened at a diagnostic
+         * one. Two more are the current balance and the credit score, which the sibling view types of
+         * this module also omit, so omitting them here keeps one rule across the module rather than
+         * two that differ. The seventh is the account identifier, and it now joins them. The cost
+         * accepted is that a reader cannot reconstruct a statement header from a log line, nor tell
+         * two headers apart; the compensation is that no log line written from this record can carry a
+         * name, an address, a balance, a credit score or an account identifier at all.</p>
+         *
+         * <p>Alternatives Considered: an opaque, non-reversible token derived from the account
+         * identifier, so that two headers stayed distinguishable without the identifier being
+         * disclosed -- which is what {@code com.carddemo.common.security.OpaqueIdentifier} produces.
+         * Rejected here for a structural reason rather than a preference. That type is keyed: it
+         * requires deployment key material supplied as a constructor argument, and {@code toString}
+         * accepts no argument while a record's members are set by its canonical constructor, so the
+         * only way to reach a keyed helper from here is static mutable state. A diagnostic method must
+         * not depend on start-up ordering and must not throw, and static state gives it both. An
+         * UNKEYED digest was considered in its place and rejected on the shared kernel's own recorded
+         * analysis: an eleven-digit identifier is low-entropy enough that a guess can be hashed and
+         * confirmed, so an unkeyed token would look opaque while being reversible by enumeration. A
+         * withheld marker discloses nothing and claims nothing.</p>
          *
          * <p>Alternatives Considered: reporting each withheld component's length instead of its
          * content, so that a width fault could be diagnosed from a log line. Rejected because every
@@ -679,14 +701,18 @@ public final class StatementTextMapper {
          * instance that exists has only one possible length per component and the report would
          * restate seven constants.</p>
          *
-         * @return a single-line rendering naming the type and the account identifier, with the
-         *     identifier's declared trailing blanks dropped so the line reads cleanly; this is a
-         *     diagnostic form and is never the band rendering, which
+         * <p>Assumptions: the marker and its wording are the ones the sibling
+         * {@link PreparedTrailerFields#toString()} already uses, so a reader meets one withheld form
+         * in this file rather than two, and a log line still says which value reached that point
+         * without saying what it was.</p>
+         *
+         * @return a single-line rendering naming the type and marking its account identifier
+         *     withheld; this is a diagnostic form and is never the band rendering, which
          *     {@link StatementTextMapper#emitHeaderBlock(PreparedHeaderFields)} alone produces
          */
         @Override
         public String toString() {
-            return "PreparedHeaderFields[accountId=" + accountId.strip() + ']';
+            return "PreparedHeaderFields[accountId=" + WITHHELD + ']';
         }
     }
 
@@ -1007,9 +1033,9 @@ public final class StatementTextMapper {
      * and is <b>wider</b> than its numeric-display source, so the 11 digits land left-justified
      * with 9 trailing <b>blanks</b>.</p>
      *
-     * <p><b>Assumptions: this is the exact opposite of the same source item's behaviour in the
+     * <p>Assumptions: this is the <b>exact opposite</b> of the same source item's behaviour in the
      * daily transaction report, and the contrast is stated here because a reader arriving from that
-     * side will otherwise carry the wrong expectation.</b> There, the account identifier moves into
+     * side will otherwise carry the wrong expectation. There, the account identifier moves into
      * a character item of the same 11 characters, so the digit form transfers whole with its
      * leading zeros and the report prints eleven digits and nothing else. Here the receiving item
      * is 20, so COBOL left-justifies and blank-pads on the right. One source field, two renderings,
@@ -1087,6 +1113,25 @@ public final class StatementTextMapper {
      */
     public static String renderDescriptionItem(String description) {
         requireAtMost(description, DESCRIPTION_SOURCE_WIDTH, "description");
+
+        // WHY : Assumptions: this value is UNTRUSTED free text and it is deliberately NOT escaped
+        //       here. app/cpy/CVTRA05Y.cpy line 9 declares TRAN-DESC PIC X(100), so every character
+        //       in the code page is admissible in it, and a client supplies it through the
+        //       transaction-add request. It reaches two artifacts and only one of them has a grammar
+        //       a character can be significant in.
+        // WHY : Trade-offs: escaping at this shared point was weighed and rejected, and the reason is
+        //       the reason the value is left alone. The item this method produces is the plain-text
+        //       statement's own content, which is not markup and which a byte comparison against the
+        //       recorded golden output runs on -- so escaping here would break parity on the one side
+        //       that has an oracle, in order to protect a side that is not this one. Escaping belongs
+        //       at each sink, and the markup sink performs it: StatementHtmlMapper routes every value
+        //       it embeds through StatementHtmlMapper's own text-node escaping, and the divergence
+        //       that creates is registered as D-STMT-HTML-ESCAPING in
+        //       docs/architecture/cobol-to-service-traceability.md.
+        // WHY : Assumptions: the consequence for a consumer of this artifact is stated because it is
+        //       not obvious from the bytes. The plain-text statement is text and must be delivered as
+        //       text; rendering it as markup would reintroduce exactly what the markup artifact's
+        //       encoding removes, and no encoding on this side would prevent that.
 
         // WHY : Assumptions: narrowing and blank-padding are one operation here because the source
         //       is a declared-width item. A description of 20 characters occupies the first 20 of
@@ -1554,8 +1599,8 @@ public final class StatementTextMapper {
      * the first blank of the sending item; if the item holds no blank at all the whole item
      * transfers.</p>
      *
-     * <p><b>Assumptions: this is not a trim, and the difference is behavioural rather than
-     * cosmetic.</b> A value holding an internal blank contributes only what precedes it, so a
+     * <p>Assumptions: this is <b>not a trim</b>, and the difference is behavioural rather than
+     * cosmetic. A value holding an internal blank contributes only what precedes it, so a
      * compound given name loses its second word and a two-word street line loses everything after
      * the first word. {@code String.strip()} and {@code String.trim()} are the rejected
      * alternatives and are wrong twice over: they would keep the internal blank and everything

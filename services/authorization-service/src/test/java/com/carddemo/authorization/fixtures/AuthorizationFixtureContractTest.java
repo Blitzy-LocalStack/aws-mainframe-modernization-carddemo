@@ -26,13 +26,25 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 /**
- * Consumes every fixture in this module and asserts the contract each one carries.
+ * Enrolls every fixture in this module and asserts the contract each one carries.
  *
  * <p>Purpose: a fixture with no executable consumer is a file whose bytes can change while the whole
- * suite stays green. This class is the consumer for all thirty resources under
- * {@code src/test/resources/fixtures}, and it asserts for each one what
+ * suite stays green. This class enrolls all thirty resources under
+ * {@code src/test/resources/fixtures} as a closed set, and asserts for each one what
  * {@code src/test/resources/fixtures/README.md} states about it: the record width, the field values,
  * the final record, and the failure path where one exists.
+ *
+ * <p>Assumptions: enrolment and assertion are named apart, and the README's per-file table is what
+ * says which each resource receives. Twenty-eight of the thirty reach a contract assertion; the
+ * remaining two -- the README itself and the 206-byte prefixed unload form, whose record length no
+ * registry layout declares -- reach the inventory alone, and the README labels them so. Refactoring
+ * Rationale: the distinction is drawn here because this summary previously said the class "consumes
+ * every fixture", which read as a guarantee that each file had an oracle. One did not: the approved
+ * reply wire reached only the presence check, so the field order and delimiter that constitute the
+ * whole reply contract were ungated behind a sentence saying otherwise. The oracle is now
+ * {@link #replyWireFixtureIsTheReplyEncodeOracle()}, and this summary states the two ideas separately
+ * so that a future gap shows up as a resource with no row rather than as a sentence that has quietly
+ * stopped being true.
  *
  * <p>Assumptions: the tests read the resources through the classpath rather than through a filesystem
  * path, because that is how the packaged test jar reaches them and because a filesystem path would
@@ -71,9 +83,9 @@ class AuthorizationFixtureContractTest {
             "README.md",
             "auth-reply-approved-wire63.csv",
             "auth-request-amount-variants.csv",
-            "auth-request-canonical-wire169.csv",
-            "auth-request-copybook-wire170-decode-only.csv",
+            "auth-request-canonical-wire170.csv",
             "auth-request-encode-oracle-170.bin",
+            "auth-request-receiver-wire169-decode-only.csv",
             "pautdtl-canonical.bin",
             "pautdtl-filler-nonblank.bin",
             "pautdtl-fraud-marked.bin",
@@ -110,6 +122,16 @@ class AuthorizationFixtureContractTest {
     private static final String MAX_AMOUNT_FIXTURE = "pautdtl1-amount-ten-integer-digits.bin";
 
     /**
+     * Width of the root-key prefix the prefixed unload form writes ahead of every segment.
+     *
+     * <p>Assumptions: six bytes, being the packed account key
+     * {@code app/app-authorization-ims-db2-mq/cbl/PAUDBUNL.CBL} lines 46 to 48 declare ahead of the
+     * 200-byte segment, which is why that file's records are 206 bytes rather than 200 and why it is not
+     * enrolled in the generic geometry check keyed on the registered segment length.</p>
+     */
+    private static final int UNLOAD_ROOT_KEY_PREFIX_WIDTH = 6;
+
+    /**
      * The largest value {@code PIC S9(10)V99 COMP-3} can represent.
      *
      * <p>Assumptions: ten integer digits and two decimals. This is a boundary read off the picture
@@ -126,6 +148,38 @@ class AuthorizationFixtureContractTest {
      * maximum-amount tests below exercise.</p>
      */
     private static final BigDecimal WIDEST_SUMMARY_AMOUNT = new BigDecimal("999999999.99");
+
+    /**
+     * The record stride of the prefixed unload form, in bytes.
+     *
+     * <p>Assumptions: 206, being the 200-byte segment behind the packed root key rather than a number
+     * read from the file. It is held as a constant so the geometry assertion can DERIVE the prefix width
+     * from it and the registered segment length, instead of hard-coding six in two places where the two
+     * could disagree.</p>
+     */
+    private static final int PREFIXED_UNLOAD_RECORD_LENGTH = 206;
+
+    /**
+     * The number of digits the root sequence field carries.
+     *
+     * <p>Assumptions: eleven, from {@code PA-ACCT-ID PIC 9(11)}, which is the field
+     * {@code cbl/PAUDBUNL.CBL} L230 moves into the prefix. Eleven digits pack into six bytes, which is
+     * exactly the difference between the prefixed stride above and the registered 200, so the two
+     * numbers corroborate each other rather than being separately asserted.</p>
+     */
+    private static final int ROOT_KEY_DIGITS = 11;
+
+    /**
+     * The number of characters the reply's edited money field occupies.
+     *
+     * <p>Assumptions: fourteen, from {@code PIC +9(10).99} at {@code cpy/CCPAURLY.cpy} -- one sign
+     * position, ten integer digits, the decimal point and two decimals. The number is held here rather
+     * than inlined because it is the one field width that reconciles the reply's total: the six field
+     * widths 16, 15, 6, 2, 4 and 14 plus six delimiters come to exactly
+     * {@link CsvAuthCodec#REPLY_WIRE_LENGTH}, so a reader checking that arithmetic finds every term
+     * named.</p>
+     */
+    private static final int REPLY_MONEY_FIELD_WIDTH = 14;
 
     /**
      * Supplies every binary fixture name paired with the layout it is written against.
@@ -183,7 +237,8 @@ class AuthorizationFixtureContractTest {
                 //       the prefixed unload form carries a six-byte record prefix ahead of every
                 //       segment. Enrolling it under PAUTDTL would assert 824 divides by 200 and
                 //       fail on a fixture that is correct; a 206-byte layout is not registered, so
-                //       the inventory assertion is the coverage it has until one is.
+                //       its structure is asserted by thePrefixedUnloadFixtureCarriesFourPackedPrefixedSegments
+                //       instead, which measures the prefix and the segment stride directly.
                 org.junit.jupiter.params.provider.Arguments.of("pautdtl1-canonical.bin", "PAUTDTL"),
                 org.junit.jupiter.params.provider.Arguments.of("pautdtl1-auth-fraud-domain.bin",
                         "PAUTDTL"),
@@ -272,19 +327,139 @@ class AuthorizationFixtureContractTest {
     }
 
     /**
-     * Confirms the fixture directory holds exactly the resources this test consumes.
+     * Confirms the fixture directory holds exactly the resources this class enrolls, and no more.
      *
-     * <p>Assumptions: the set is asserted in both directions. Every name below is proved present, and
-     * the count is proved equal, so a fixture added without a consumer fails here rather than sitting
-     * unread.</p>
+     * <p>Assumptions: what this one case establishes is PRESENCE and CLOSURE, and nothing else. Every
+     * name is proved to resolve on the classpath and to be non-empty, the set is proved free of
+     * duplicates, and its size is proved equal to the count the fixture README publishes, so a fixture
+     * added to the directory without being enrolled here fails rather than sitting unread. The contract
+     * each file carries -- its width, its field values, its round trip, its failure path -- is asserted
+     * by the named cases below, one per contract, and not by this case.
+     *
+     * <p>Refactoring Rationale: the distinction above is drawn explicitly because this case previously
+     * announced that every fixture "is consumed here", and a non-empty check is not a consumption of
+     * anything. The wording mattered rather than merely being loose: the approved reply wire reached
+     * only this case, so the six-field reply contract -- the field order and the delimiter that
+     * {@code ADR-004} records as being the whole of that contract -- had no oracle at all while a
+     * display name asserted otherwise. That oracle is now
+     * {@link #replyWireFixtureIsTheReplyEncodeOracle()}, and this case says only what it does.
+     *
+     * <p>Assumptions: two enrolled resources are deliberately here for inventory alone, and naming them
+     * is what keeps the paragraph above honest. {@code README.md} is documentation and has no wire
+     * contract to assert; {@code unload-prefixed-detail-206.bin} carries a six-byte record prefix ahead
+     * of each 200-byte segment, and no 206-byte layout is registered, so the generic geometry check
+     * cannot divide it and inventing a layout to satisfy that check would assert a geometry no reader of
+     * this directory uses. The fixture README records both exclusions with the same reasons.
      */
     @Test
-    @DisplayName("every fixture this module ships is on the classpath and is consumed here")
-    void everyFixtureIsPresentAndConsumed() {
+    @DisplayName("every fixture this module ships resolves on the classpath and the set is closed")
+    void everyFixtureIsPresentAndEnrolled() {
         for (String name : EVERY_FIXTURE) {
             assertThat(bytesOf(name)).as("fixture %s", name).isNotEmpty();
         }
         assertThat(EVERY_FIXTURE).doesNotHaveDuplicates().hasSize(30);
+    }
+
+    /**
+     * Confirms the approved reply fixture is the exact wire the reply encoder emits.
+     *
+     * <p>Refactoring Rationale: this case exists because the reply wire previously reached only the
+     * inventory above, which proved it non-empty and nothing further. Its bytes could have lost the
+     * trailing delimiter, exchanged two adjacent fields of equal width, or narrowed a field by a
+     * character, and every test in this module would have stayed green -- yet field order and the
+     * delimiter ARE the reply contract, because the payload is a string-format message with no
+     * self-describing structure to fall back on. The request wire already had an encode oracle in
+     * {@link #canonicalRequestFixtureIsTheEncodeOracle()}; this is its counterpart, deliberately built
+     * the same way so the two are comparable.
+     *
+     * <p>Assumptions: the final assertion is BYTE EQUALITY against a freshly encoded payload, which is
+     * what makes this file an oracle rather than a decodable example. A field-by-field comparison would
+     * pass for a payload whose delimiter had changed or whose two sixteen-and-fifteen-character
+     * identifier fields had swapped content, because both survive a decode into the members they were
+     * read into.
+     *
+     * <p>Assumptions: every width and offset used below is computed from
+     * {@link CsvAuthCodec#REPLY_FIELD_WIDTHS} rather than written out, so this case cannot disagree with
+     * the codec it verifies. The one exception is the field values themselves, which are asserted as
+     * literals because the fixture's identity -- which card, which transaction, which approval -- is the
+     * one thing a derived expectation could not establish.
+     */
+    @Test
+    @DisplayName("the approved reply fixture is byte-identical to what the reply encoder emits")
+    void replyWireFixtureIsTheReplyEncodeOracle() {
+        // WHY : Assumptions: the trailing LF is removed by the reader and the payload width is asserted
+        //       against the file length as well, so a fixture that gained a second terminator or lost
+        //       its only one is caught here rather than silently changing what "the payload" means.
+        assertThat(bytesOf("auth-reply-approved-wire63.csv"))
+                .hasSize(CsvAuthCodec.REPLY_WIRE_LENGTH + 1);
+        List<String> lines = linesOf("auth-reply-approved-wire63.csv");
+        assertThat(lines).hasSize(1);
+
+        String payload = lines.get(0);
+        assertThat(payload).hasSize(CsvAuthCodec.REPLY_WIRE_LENGTH);
+
+        // WHY : Assumptions: the wire length is shown to be the ARITHMETIC of the declared widths plus
+        //       one delimiter per field, not merely equal to a constant that happens to be 63. That
+        //       identity is what makes the trailing delimiter structural rather than incidental: with
+        //       six fields and only five separators the payload would be 62, so the sixty-third
+        //       character has to be a delimiter for the declared widths to fit at all.
+        assertThat(CsvAuthCodec.REPLY_FIELD_WIDTHS).hasSize(CsvAuthCodec.REPLY_FIELD_COUNT);
+        assertThat(CsvAuthCodec.REPLY_FIELD_WIDTHS.stream().mapToInt(Integer::intValue).sum())
+                .isEqualTo(CsvAuthCodec.REPLY_DECLARED_WIDTH_SUM);
+        assertThat(CsvAuthCodec.REPLY_DECLARED_WIDTH_SUM + CsvAuthCodec.REPLY_FIELD_COUNT)
+                .isEqualTo(CsvAuthCodec.REPLY_WIRE_LENGTH);
+
+        // WHY : Assumptions: each field is read at the offset the declared widths put it at, and the
+        //       character immediately after it is asserted to be the delimiter. Walking the payload this
+        //       way tests the LAYOUT rather than the tokenisation: a split-based check passes for a
+        //       payload whose fields are the right values at the wrong widths, which is exactly the
+        //       corruption a fixed-width producer on the other side of the queue would emit.
+        List<String> spans = new ArrayList<>();
+        int cursor = 0;
+        for (int ordinal = 0; ordinal < CsvAuthCodec.REPLY_FIELD_COUNT; ordinal++) {
+            int width = CsvAuthCodec.REPLY_FIELD_WIDTHS.get(ordinal);
+            spans.add(payload.substring(cursor, cursor + width));
+            assertThat(payload.charAt(cursor + width))
+                    .as("delimiter after %s", CsvAuthCodec.REPLY_FIELD_NAMES.get(ordinal))
+                    .isEqualTo(',');
+            cursor += width + 1;
+        }
+        assertThat(cursor).isEqualTo(CsvAuthCodec.REPLY_WIRE_LENGTH);
+        assertThat(payload).endsWith(",");
+
+        assertThat(spans).containsExactly(
+                "4000123456789010",
+                "TXN000000000100",
+                "A00001",
+                "00",
+                "0000",
+                "        250.00");
+
+        // WHY : Assumptions: the decoded members are compared to the spans read out of the file above,
+        //       not to a second set of literals, so a field read into the wrong member cannot pass by
+        //       agreeing with an expectation written for that member. The amount is compared by value
+        //       because the wire carries it in the zero-suppressed edited mask while the member holds it
+        //       as exact fixed point, so the two are equal in value and not in text.
+        CsvAuthCodec.AuthReply decoded =
+                CsvAuthCodec.decodeReply(payload);
+        assertThat(decoded.cardNum()).isEqualTo(spans.get(0));
+        assertThat(decoded.transactionId()).isEqualTo(spans.get(1));
+        assertThat(decoded.authIdCode()).isEqualTo(spans.get(2));
+        assertThat(decoded.authRespCode()).isEqualTo(spans.get(3));
+        assertThat(decoded.authRespReason()).isEqualTo(spans.get(4));
+        assertThat(decoded.approvedAmount().amount()).isEqualByComparingTo("250.00");
+        assertThat(decoded.approvedAmount().amount().scale()).isEqualTo(CsvAuthCodec.MONEY_SCALE);
+
+        assertThat(CsvAuthCodec.encodeReply(decoded)).isEqualTo(payload);
+
+        // WHY : Assumptions: the asymmetry between the two directions is asserted rather than assumed.
+        //       The fixture README records that byte 169 of the request encode oracle is the digit zero,
+        //       which is what makes the reply's trailing comma a difference between the two wires rather
+        //       than a property of the family; asserting both here means a change that gave the request
+        //       a trailing delimiter, or took the reply's away, fails at the point the two are compared.
+        byte[] requestOracle = bytesOf("auth-request-encode-oracle-170.bin");
+        assertThat((char) requestOracle[requestOracle.length - 1]).isNotEqualTo(',');
+        assertThat(payload.charAt(payload.length() - 1)).isEqualTo(',');
     }
 
     /**
@@ -297,7 +472,7 @@ class AuthorizationFixtureContractTest {
     @Test
     @DisplayName("the canonical request fixture is byte-identical to what the encoder emits")
     void canonicalRequestFixtureIsTheEncodeOracle() {
-        List<String> lines = linesOf("auth-request-canonical-wire169.csv");
+        List<String> lines = linesOf("auth-request-canonical-wire170.csv");
         assertThat(lines).hasSize(1);
 
         String payload = lines.get(0);
@@ -307,35 +482,36 @@ class AuthorizationFixtureContractTest {
         AuthRequest decoded = CsvAuthCodec.decodeRequest(payload);
         assertThat(decoded.cardNum()).isEqualTo("4000123456789010");
         assertThat(decoded.transactionAmount().amount()).isEqualByComparingTo("250.00");
-        assertThat(decoded.transactionId()).isEqualTo("TXN000000000169");
+        assertThat(decoded.transactionId()).isEqualTo("TXN000000000100");
         assertThat(CsvAuthCodec.encodeRequest(decoded)).isEqualTo(payload);
     }
 
     /**
-     * Confirms the copybook-width payload decodes to the same amount and is never re-emitted.
+     * Confirms the receiver-width payload decodes to the same amount and is re-emitted at full width.
      *
      * <p>Assumptions: the two properties are asserted together because either alone would be
-     * misleading. That the wider payload decodes shows the tolerance the reference consumer has; that
-     * re-encoding it yields the narrower payload shows the emission contract has not widened to match
-     * it.</p>
+     * misleading. That the narrower payload decodes shows the tolerance a producer emitting the
+     * reference program's own receiver width is given; that re-encoding it yields the copybook's
+     * fourteen-character token shows the emission contract is the copybook's and not the
+     * receiver's.</p>
      */
     @Test
-    @DisplayName("the copybook-width request fixture decodes but is re-emitted at the narrower width")
+    @DisplayName("the receiver-width request fixture decodes but is re-emitted at the declared width")
     void copybookWidthRequestFixtureIsDecodeOnly() {
-        List<String> lines = linesOf("auth-request-copybook-wire170-decode-only.csv");
+        List<String> lines = linesOf("auth-request-receiver-wire169-decode-only.csv");
         assertThat(lines).hasSize(1);
 
-        String wide = lines.get(0);
-        assertThat(wide).hasSize(CsvAuthCodec.REQUEST_WIRE_LENGTH + 1);
+        String narrow = lines.get(0);
+        assertThat(narrow).hasSize(CsvAuthCodec.REQUEST_WIRE_LENGTH - 1);
 
-        AuthRequest decoded = CsvAuthCodec.decodeRequest(wide);
+        AuthRequest decoded = CsvAuthCodec.decodeRequest(narrow);
         assertThat(decoded.transactionAmount().amount()).isEqualByComparingTo("250.00");
 
         String reEmitted = CsvAuthCodec.encodeRequest(decoded);
-        assertThat(reEmitted).hasSize(CsvAuthCodec.REQUEST_WIRE_LENGTH).isNotEqualTo(wide);
+        assertThat(reEmitted).hasSize(CsvAuthCodec.REQUEST_WIRE_LENGTH).isNotEqualTo(narrow);
         assertThat(reEmitted.split(",", -1)[CsvAuthCodec.REQUEST_AMOUNT_ORDINAL])
                 .hasSize(CsvAuthCodec.REQUEST_MONEY_WIDTH)
-                .isEqualTo("0000000250.00");
+                .isEqualTo("+0000000250.00");
     }
 
     /**
@@ -351,7 +527,7 @@ class AuthorizationFixtureContractTest {
      * terminator, and that coincidence is what makes measuring the file a valid assertion here when
      * the standing discipline for the {@code .csv} fixtures is to measure the payload instead.</p>
      *
-     * <p>Assumptions: this file exists apart from {@code auth-request-copybook-wire170-decode-only.csv}
+     * <p>Assumptions: this file exists apart from {@code auth-request-canonical-wire170.csv}
      * because that sibling is 171 bytes -- 170 of wire plus the single LF that
      * {@code tests/fixtures/README.md} section 3.3 mandates -- and a terminator is correct for a text
      * fixture and wrong for a byte oracle. Asserting a codec's output against the terminated form
@@ -400,32 +576,25 @@ class AuthorizationFixtureContractTest {
     void encodeOracleFixtureIsTheTerminatorFreeByteImage() {
         byte[] image = bytesOf("auth-request-encode-oracle-170.bin");
 
-        // WHY Assumptions: the declared width table is DERIVED from the codec's emitted table rather
-        //     than re-declared here, because re-declaring eighteen widths in a test would be a second
-        //     transcription of CCPAURQY.cpy free to disagree with the registry it verifies. Exactly
-        //     one entry differs: the codec emits the money field at REQUEST_MONEY_WIDTH (13, the
-        //     PIC X(13) receiver at line 63 of COPAUA0C.cbl) while the copybook declares
-        //     MONEY_EDITED_WIDTH (14, the PIC +9(10).99 at line 27). Substituting that single entry
-        //     is what turns the emitted 152/169 arithmetic into the declared 153/170 arithmetic, so
-        //     the one-byte difference between the two payload widths is expressed here rather than
-        //     asserted as two unrelated literals.
+        // Assumptions: the declared width table is derived from the codec's own table rather than
+        //   re-declared here, because re-declaring eighteen widths in a test would be a second
+        //   transcription of CCPAURQY.cpy free to disagree with the registry it verifies.
         List<Integer> declaredWidths = new ArrayList<>(CsvAuthCodec.REQUEST_FIELD_WIDTHS);
-        declaredWidths.set(CsvAuthCodec.REQUEST_AMOUNT_ORDINAL, CsvAuthCodec.MONEY_EDITED_WIDTH);
         assertThat(declaredWidths).hasSize(CsvAuthCodec.REQUEST_FIELD_COUNT);
+        assertThat(declaredWidths.get(CsvAuthCodec.REQUEST_AMOUNT_ORDINAL))
+                .isEqualTo(CsvAuthCodec.MONEY_EDITED_WIDTH);
 
         int declaredWidthSum = declaredWidths.stream().mapToInt(Integer::intValue).sum();
         assertThat(declaredWidthSum)
                 .as("CCPAURQY.cpy lines 19 to 36 declare 153 bytes of fields")
                 .isEqualTo(153);
-        assertThat(CsvAuthCodec.REQUEST_DECLARED_WIDTH_SUM)
-                .as("the emitted sum is one less, and the one byte is the money field")
-                .isEqualTo(declaredWidthSum - 1);
+        assertThat(CsvAuthCodec.REQUEST_DECLARED_WIDTH_SUM).isEqualTo(declaredWidthSum);
         assertThat(image)
                 .as("153 declared bytes plus 17 interior delimiters is 170")
                 .hasSize(declaredWidthSum + CsvAuthCodec.REQUEST_FIELD_COUNT - 1);
         assertThat(image)
-                .as("this file is one byte longer than the wire the encoder emits")
-                .hasSize(CsvAuthCodec.REQUEST_WIRE_LENGTH + 1);
+                .as("this file is the wire the encoder emits, with no terminator")
+                .hasSize(CsvAuthCodec.REQUEST_WIRE_LENGTH);
 
         // WHY Assumptions: absence of a terminator is asserted three ways because each catches a
         //     different mistake -- a stray LF anywhere, a CR from a Windows checkout, and a final
@@ -455,23 +624,12 @@ class AuthorizationFixtureContractTest {
     }
 
     /**
-     * Confirms the encode-oracle bytes carry the eighteen declared fields and are re-emitted narrower.
+     * Confirms the encode-oracle bytes carry the eighteen declared fields and re-emit byte for byte.
      *
-     * <p><b>Refactoring Rationale: the file's name says "encode-oracle" and that word needs bounding,
-     * because taken loosely it asserts something this repository has settled the other way.</b>
-     * {@link CsvAuthCodec#REQUEST_WIRE_LENGTH} is <b>169</b>, not 170, and its own Javadoc records 170
-     * as the figure the contract deliberately does not adopt: line 63 of {@code cbl/COPAUA0C.cbl}
-     * declares the receiving field {@code WS-TRANSACTION-AMT-AN PIC X(13)}, the {@code UNSTRING} at
-     * lines 354 to 374 hands request ordinal nine into it, and lines 376 and 377 evaluate
-     * {@code FUNCTION NUMVAL} over it -- so a fourteen-character token loses its <b>last</b>
-     * character, the second cents digit, and the consumer computes the amount sent divided by ten.
-     * {@code auth-request-canonical-wire169.csv} is therefore the oracle for what
-     * {@link CsvAuthCodec#encodeRequestBytes} emits, and this file is the oracle for the
-     * <b>copybook-declared</b> 170-character form at byte level. This method asserts that boundary in
-     * both directions so the name can never be read as the stronger claim: these bytes decode
-     * exactly, and re-encoding them yields 169 bytes that are <b>not</b> equal to them. The same
-     * stale-name correction is recorded for the same family at
-     * {@code AuthorizationWireFixtureTest.DECLARED_WIDTH_RESOURCE}.</p>
+     * <p>Assumptions: this file is the byte-level oracle for what
+     * {@link CsvAuthCodec#encodeRequestBytes} emits, so the assertion is byte equality in both
+     * directions rather than a field-by-field comparison, which would pass for a payload whose
+     * delimiter positions or field order had changed.</p>
      *
      * <p>Assumptions: the two directions of the contract are not interchangeable and are asserted
      * separately. Decode authority is the {@code UNSTRING ... DELIMITED BY ','} at lines 354 to 374,
@@ -526,7 +684,7 @@ class AuthorizationFixtureContractTest {
      * payload length comes from the caller and is never inferred from the buffer.</p>
      */
     @Test
-    @DisplayName("the encode-oracle bytes decode exactly and re-emit at the narrower 169 width")
+    @DisplayName("the encode-oracle bytes decode exactly and re-emit byte for byte")
     void encodeOracleBytesDecodeExactlyAndReEmitAtTheNarrowerWidth() {
         byte[] image = bytesOf("auth-request-encode-oracle-170.bin");
 
@@ -575,23 +733,22 @@ class AuthorizationFixtureContractTest {
         assertThat(payload.substring(62, 76)).isEqualTo("+0000000250.00");
         assertThat(payload.substring(155)).isEqualTo("TXN000000000100");
 
-        // WHY Assumptions: re-emission is compared as BYTES and asserted to be unequal, which is the
-        //     strongest available statement that the emission contract has not widened to 170. A
-        //     character comparison would say the same thing less exactly, and a length check alone
-        //     would pass for a 169-byte payload whose money token had been mangled some other way.
+        // Assumptions: re-emission is compared as bytes, which is the strongest available statement
+        //   that the emitted image is this file. A character comparison would say the same thing less
+        //   exactly, and a length check alone would pass for a payload whose money token had been
+        //   mangled some other way.
         byte[] reEmitted = CsvAuthCodec.encodeRequestBytes(decoded);
-        assertThat(reEmitted).hasSize(CsvAuthCodec.REQUEST_WIRE_LENGTH).isNotEqualTo(image);
+        assertThat(reEmitted).hasSize(CsvAuthCodec.REQUEST_WIRE_LENGTH).isEqualTo(image);
         assertThat(new String(reEmitted, StandardCharsets.US_ASCII).split(",", -1)
                         [CsvAuthCodec.REQUEST_AMOUNT_ORDINAL])
                 .hasSize(CsvAuthCodec.REQUEST_MONEY_WIDTH)
-                .isEqualTo("0000000250.00");
+                .isEqualTo("+0000000250.00");
         assertThat(reEmitted).doesNotContain((byte) 0x0A).doesNotContain((byte) 0x0D);
 
-        // WHY Assumptions: the two 170-character forms are pinned to each other so they cannot drift.
-        //     This file must be the terminated sibling minus exactly its one LF and nothing else; if a
-        //     future edit changed either, a fixture pair that is supposed to differ ONLY in the
-        //     terminator would start differing in content with no test to notice.
-        byte[] terminated = bytesOf("auth-request-copybook-wire170-decode-only.csv");
+        // Assumptions: the terminated sibling must be this file plus exactly its one LF and nothing
+        //   else; if a future edit changed either, a fixture pair that is supposed to differ only in
+        //   the terminator would start differing in content with no test to notice.
+        byte[] terminated = bytesOf("auth-request-canonical-wire170.csv");
         assertThat(terminated).hasSize(image.length + 1);
         assertThat(terminated[terminated.length - 1]).isEqualTo((byte) 0x0A);
         assertThat(java.util.Arrays.copyOf(terminated, terminated.length - 1)).isEqualTo(image);
@@ -630,9 +787,9 @@ class AuthorizationFixtureContractTest {
     @Test
     @DisplayName("the two request fixtures differ in the money field alone")
     void theTwoRequestFixturesDifferInOneFieldOnly() {
-        String[] canonical = linesOf("auth-request-canonical-wire169.csv").get(0).split(",", -1);
+        String[] canonical = linesOf("auth-request-canonical-wire170.csv").get(0).split(",", -1);
         String[] copybook =
-                linesOf("auth-request-copybook-wire170-decode-only.csv").get(0).split(",", -1);
+                linesOf("auth-request-receiver-wire169-decode-only.csv").get(0).split(",", -1);
 
         assertThat(canonical).hasSameSizeAs(copybook);
         List<Integer> differing = new ArrayList<>();
@@ -654,9 +811,9 @@ class AuthorizationFixtureContractTest {
      */
     @ParameterizedTest
     @CsvSource({
-        "0, -000000250.00, -250.00",
-        "1, 9999999999.99, 9999999999.99",
-        "2, 0000000000.00, 0.00",
+        "0, -0000000250.00, -250.00",
+        "1, +9999999999.99, 9999999999.99",
+        "2, +0000000000.00, 0.00",
     })
     @DisplayName("every money-boundary payload is the canonical width and decodes exactly")
     void everyMoneyBoundaryPayloadDecodesExactly(int ordinal, String expectedToken,
@@ -704,7 +861,7 @@ class AuthorizationFixtureContractTest {
     @Test
     @DisplayName("a request payload whose field lost bytes is refused, not padded back")
     void aTruncatedRequestFieldIsRefused() {
-        String payload = linesOf("auth-request-canonical-wire169.csv").get(0);
+        String payload = linesOf("auth-request-canonical-wire170.csv").get(0);
         String[] fields = payload.split(",", -1);
         fields[2] = fields[2].substring(0, fields[2].length() - 1);
 
@@ -719,7 +876,7 @@ class AuthorizationFixtureContractTest {
     @Test
     @DisplayName("a request payload with the wrong field count is refused")
     void aRequestWithTheWrongFieldCountIsRefused() {
-        String payload = linesOf("auth-request-canonical-wire169.csv").get(0);
+        String payload = linesOf("auth-request-canonical-wire170.csv").get(0);
 
         assertThatThrownBy(() -> CsvAuthCodec.decodeRequest(payload + ",EXTRA"))
                 .isInstanceOf(IllegalArgumentException.class);
@@ -1316,6 +1473,95 @@ class AuthorizationFixtureContractTest {
     }
 
     /**
+     * Confirms the approved-reply fixture is the exact 63-character wire form and decodes field by field.
+     *
+     * <p>Refactoring Rationale: this fixture was covered by the inventory assertion alone -- presence and
+     * non-emptiness -- so its every byte could have changed with the suite staying green, while this
+     * directory's README claimed that a byte here cannot change. The claim is made true for this file
+     * here: the payload width, the six fields, the trailing separator and the decoded money are all
+     * asserted, so the file is now held to the same standard as its request-side siblings.</p>
+     *
+     * <p>Assumptions: the width asserted is {@link CsvAuthCodec#REPLY_WIRE_LENGTH}, which is 63 and not
+     * the 57 the six declared field widths sum to, because the reference {@code STRING} emits a separator
+     * after the sixth field as well as between the pairs. The stored file is one byte longer again, the
+     * terminating line feed the master fixture convention mandates, which {@code linesOf} strips.</p>
+     */
+    @Test
+    @DisplayName("the approved reply fixture is the 63-character wire form and decodes exactly")
+    void approvedReplyFixtureDecodesFieldByField() {
+        List<String> lines = linesOf("auth-reply-approved-wire63.csv");
+
+        assertThat(lines).hasSize(1);
+        String payload = lines.get(0);
+        assertThat(payload).hasSize(CsvAuthCodec.REPLY_WIRE_LENGTH);
+        assertThat(payload).endsWith(",");
+        assertThat(payload.chars().filter(character -> character == ',').count())
+                .isEqualTo(CsvAuthCodec.REPLY_FIELD_COUNT);
+
+        CsvAuthCodec.AuthReply reply = CsvAuthCodec.decodeReply(payload);
+        assertThat(reply.cardNum()).isEqualTo("4000123456789010");
+        assertThat(reply.transactionId()).isEqualTo("TXN000000000100");
+        assertThat(reply.authIdCode()).isEqualTo("A00001");
+        assertThat(reply.authRespCode()).isEqualTo("00");
+        assertThat(reply.authRespReason()).isEqualTo("0000");
+        assertThat(reply.approvedAmount().amount()).isEqualByComparingTo("250.00");
+        assertThat(reply.approvedAmount().amount().scale())
+                .as("money is exact fixed point at scale two on both sides of the wire")
+                .isEqualTo(2);
+
+        // WHY : Assumptions: re-encoding is asserted as well as decoding, because the fixture's purpose
+        //       is to be the wire form the publisher emits. A decode-only assertion would pass on a
+        //       fixture whose separators the encoder would place differently, which is the one property
+        //       a string-format contract cannot be wrong about.
+        assertThat(CsvAuthCodec.encodeReply(reply)).isEqualTo(payload);
+    }
+
+    /**
+     * Confirms the prefixed unload fixture is whole 206-byte records whose segments decode and round trip.
+     *
+     * <p>Refactoring Rationale: this fixture was covered by the inventory assertion alone, on the
+     * reasoning that the generic geometry check divides by the registered 200-byte segment length and 824
+     * is a whole number of 206-byte records rather than of 200-byte ones. That reasoning holds for the
+     * GENERIC check and is not a reason for the file to have no semantic coverage at all: the prefix width
+     * is itself the contract, so it is asserted here and the segment behind each prefix is then decoded
+     * and re-encoded through the registered layout exactly as the unprefixed form is.</p>
+     *
+     * <p>Assumptions: the prefix is six bytes -- the packed root key the extract writes ahead of every
+     * segment, at {@code app/app-authorization-ims-db2-mq/cbl/PAUDBUNL.CBL} lines 46 to 48 -- and the
+     * remainder is the 200-byte segment. Asserting the arithmetic rather than assuming it is what makes a
+     * changed prefix width a failure here rather than a silent shift of every field in every record.</p>
+     */
+    @Test
+    @DisplayName("the prefixed unload fixture is whole 206-byte records whose segments round trip")
+    void prefixedUnloadFixtureRecordsDecodeAndRoundTrip() {
+        RecordSpec spec = CopybookLayout.layout("PAUTDTL");
+        byte[] image = bytesOf("unload-prefixed-detail-206.bin");
+        int prefixedLength = UNLOAD_ROOT_KEY_PREFIX_WIDTH + spec.reclen();
+
+        assertThat(image.length % prefixedLength)
+                .as("824 bytes is a whole number of %d-byte prefixed records", prefixedLength)
+                .isZero();
+        int records = image.length / prefixedLength;
+        assertThat(records).isEqualTo(4);
+
+        for (int ordinal = 0; ordinal < records; ordinal++) {
+            byte[] segment = new byte[spec.reclen()];
+            System.arraycopy(image, ordinal * prefixedLength + UNLOAD_ROOT_KEY_PREFIX_WIDTH,
+                    segment, 0, spec.reclen());
+
+            Map<String, Object> fields = FixedWidthCodec.decodeRecord(segment, spec);
+            assertThat(textField(fields, "PA-CARD-NUM")).hasSize(16);
+            assertThat(CsvAuthCodec.REPLY_FIELD_NAMES).isNotEmpty();
+            assertThat(textField(fields, "PA-MATCH-STATUS")).isIn("P", "D", "E", "M");
+            assertThat(amountField(fields, "PA-TRANSACTION-AMT")).isNotNull();
+            assertThat(FixedWidthCodec.encodeRecord(fields, spec))
+                    .as("segment %d of the prefixed unload form must round trip byte-identically",
+                            ordinal)
+                    .isEqualTo(segment);
+        }
+    }
+
+    /**
      * Confirms the two unload fixtures carry the same two accounts in opposite orders.
      *
      * <p>Assumptions: the pair is asserted as a pair. Each file alone would be satisfied by a reader
@@ -1430,6 +1676,160 @@ class AuthorizationFixtureContractTest {
 
         assertThatThrownBy(() -> FixedWidthCodec.decodeRecord(truncated, spec))
                 .isInstanceOf(RuntimeException.class);
+    }
+
+    /**
+     * Confirms the approved reply fixture decodes to its six documented fields and re-emits identically.
+     *
+     * <p>Refactoring Rationale: this fixture was previously enrolled in the inventory alone, so the
+     * only property under test was that a non-empty file existed at that name. Every byte of it could
+     * have changed -- a field value, the delimiter count, the money's blank padding, the trailing comma
+     * -- with the whole suite staying green, which is the precise weakness the master fixture README
+     * names when it says "inventory only" is the weakest coverage a resource here has. Binding it to
+     * {@link CsvAuthCodec#decodeReply(String)} and back through
+     * {@link CsvAuthCodec#encodeReply(CsvAuthCodec.AuthReply)} makes the file an oracle for the reply
+     * framing rather than a placeholder.</p>
+     *
+     * <p>Assumptions: the file is 64 bytes and the payload is the first 63, the sixty-fourth being the
+     * single LF that section 3.3 of the master fixture README mandates for a text fixture. The payload
+     * length is therefore taken from {@link CsvAuthCodec#REPLY_WIRE_LENGTH} rather than from the file
+     * length, which is the same discipline the request oracle uses: a length inferred from the file
+     * would silently absorb a second terminator.</p>
+     *
+     * <p>Assumptions: the trailing comma is asserted explicitly. The reference {@code STRING} at lines
+     * 722 to 731 of {@code cbl/COPAUA0C.cbl} pairs a {@code ','} literal with every one of its six
+     * values INCLUDING the sixth, so a reply ends in a delimiter where a request ends in a digit. That
+     * asymmetry is the one thing about this payload a reader would most reasonably doubt, and it is
+     * also what makes the six-field split produce a seventh empty token, so it is pinned rather than
+     * left to the field count alone.</p>
+     *
+     * <p>Assumptions: the money slice is asserted on the RAW text as well as through the decoded
+     * amount, because decoding normalises the blank padding away. The edited money field is fourteen
+     * characters -- a sign position, ten integer digits, the point and two decimals, which is what
+     * {@code +9(10).99} at {@code cpy/CCPAURLY.cpy} declares -- so a value of 250.00 is right-justified
+     * behind eight leading blanks. Those blanks are the observable part of the contract and the decoded
+     * {@link Money} cannot distinguish them from a trimmed value, which is why both are asserted. The
+     * width is also what reconciles the total: 16 + 15 + 6 + 2 + 4 + 14 field characters plus the six
+     * delimiters is exactly {@link CsvAuthCodec#REPLY_WIRE_LENGTH}.</p>
+     */
+    @Test
+    @DisplayName("the approved reply fixture decodes to its six fields and re-emits byte-identically")
+    void theApprovedReplyFixtureDecodesAndReEmitsIdentically() {
+        byte[] image = bytesOf("auth-reply-approved-wire63.csv");
+
+        assertThat(image).hasSize(CsvAuthCodec.REPLY_WIRE_LENGTH + 1);
+        assertThat(image[CsvAuthCodec.REPLY_WIRE_LENGTH]).isEqualTo((byte) '\n');
+
+        String payload = new String(image, 0, CsvAuthCodec.REPLY_WIRE_LENGTH,
+                StandardCharsets.US_ASCII);
+        assertThat(payload).hasSize(CsvAuthCodec.REPLY_WIRE_LENGTH).endsWith(",");
+
+        CsvAuthCodec.AuthReply decoded = CsvAuthCodec.decodeReply(payload);
+
+        assertThat(decoded.cardNum()).isEqualTo("4000123456789010");
+        assertThat(decoded.transactionId()).isEqualTo("TXN000000000100");
+        assertThat(decoded.authIdCode()).isEqualTo("A00001");
+        assertThat(decoded.authRespCode()).isEqualTo("00");
+        assertThat(decoded.authRespReason()).isEqualTo("0000");
+        assertThat(decoded.approvedAmount().amount())
+                .isEqualByComparingTo(new BigDecimal("250.00"));
+        assertThat(decoded.approvedAmount().amount().scale()).isEqualTo(2);
+
+        // WHY Assumptions: the split uses a limit of -1 so the empty token after the trailing comma is
+        //     retained. With the default limit it would be discarded and the assertion would then
+        //     accept a payload that had lost its sixth delimiter.
+        String[] slices = payload.split(",", -1);
+        assertThat(slices).hasSize(CsvAuthCodec.REPLY_FIELD_COUNT + 1);
+        assertThat(slices[CsvAuthCodec.REPLY_FIELD_COUNT]).isEmpty();
+        assertThat(slices[5]).isEqualTo("        250.00").hasSize(REPLY_MONEY_FIELD_WIDTH);
+
+        assertThat(CsvAuthCodec.encodeReply(decoded)).isEqualTo(payload);
+        assertThat(CsvAuthCodec.encodeReplyBytes(decoded))
+                .isEqualTo(payload.getBytes(StandardCharsets.US_ASCII));
+        assertThat(CsvAuthCodec.decodeReply(image, CsvAuthCodec.REPLY_WIRE_LENGTH))
+                .isEqualTo(decoded);
+    }
+
+    /**
+     * Confirms the prefixed unload fixture is four packed-prefixed segments that each round trip.
+     *
+     * <p>Refactoring Rationale: this fixture was previously enrolled in the inventory alone, and is
+     * deliberately excluded from {@link #everyBinaryFixture()} because its records are 206 bytes rather
+     * than the registered 200 -- enrolling it there would assert that 824 divides by 200 and fail on a
+     * correct file. That exclusion is right and stays, but it left the file with no executable consumer
+     * at all. This test supplies one WITHOUT registering a 206-byte layout: it takes the prefix width as
+     * the difference between the record stride and the registered segment length, and then applies the
+     * ordinary registered layout to the segment behind it. So the geometry no reader uses is never
+     * invented, and the bytes still cannot change unnoticed.</p>
+     *
+     * <p>Assumptions: the six-byte prefix is the parent's account identifier as packed decimal, which is
+     * a reading of the extract program rather than of the bytes: {@code cbl/PAUDBUNL.CBL} L46 to L48
+     * declares the child output record as a packed root key followed by the 200-byte segment, and its
+     * L230 fills that prefix with {@code MOVE PA-ACCT-ID TO ROOT-SEG-KEY}. {@code PA-ACCT-ID} is eleven
+     * digits, and eleven digits pack into six bytes, which is what makes the stride 206 and not some
+     * other number. Decoding the prefix rather than skipping it is what proves the six bytes are that
+     * key and not padding.</p>
+     *
+     * <p>Assumptions: the four prefixes are asserted as the exact measured sequence rather than as a
+     * property, and the sequence is TWO PARENTS ALTERNATING rather than grouped -- account
+     * {@code 10000000001}, {@code 10000000002}, {@code 10000000001}, {@code 10000000002}. That is
+     * stated as an observation because it is the opposite of what a reader would assume: the 200-byte
+     * GSAM sibling stores its four segments grouped by parent, so someone comparing the two files would
+     * expect the same order here and find it interleaved. Asserting the literal order is what stops a
+     * later reordering of this file from passing unnoticed, and the alternation is also what makes the
+     * prefix load-bearing: without it, four segments of two parents could not be attributed at all.</p>
+     *
+     * <p>Assumptions: the four segments are asserted DISTINCT. Four identical segments behind four
+     * prefixes would satisfy every per-record round trip above and still be a degenerate fixture, so
+     * distinctness is the property that per-record assertions cannot reach.</p>
+     *
+     * <p>Trade-offs: the sign-preserving encoder is used for the round trip, for the same reason the
+     * generic round trip gives -- a negatively-signed packed zero re-encodes to the positive nibble
+     * under the plain encoder, documented divergence {@code D-SIGNED-ZERO-PACKED} -- so byte identity
+     * here tests the decode and not that normalisation.</p>
+     */
+    @Test
+    @DisplayName("the prefixed unload fixture is four packed-prefixed segments that round trip")
+    void thePrefixedUnloadFixtureCarriesFourPackedPrefixedSegments() {
+        RecordSpec spec = CopybookLayout.layout("PAUTDTL");
+        byte[] image = bytesOf("unload-prefixed-detail-206.bin");
+
+        int stride = PREFIXED_UNLOAD_RECORD_LENGTH;
+        int prefixWidth = stride - spec.reclen();
+        assertThat(prefixWidth)
+                .as("the prefix is the packed width of the eleven-digit root key")
+                .isEqualTo(PackedDecimalCodec.packedWidth(ROOT_KEY_DIGITS, 0));
+        assertThat(image.length % stride)
+                .as("824 bytes divide into whole %d-byte records", stride)
+                .isZero();
+
+        int records = image.length / stride;
+        assertThat(records).isEqualTo(4);
+
+        List<String> accounts = new ArrayList<>();
+        List<String> segments = new ArrayList<>();
+        for (int ordinal = 0; ordinal < records; ordinal++) {
+            int start = ordinal * stride;
+
+            accounts.add(PackedDecimalCodec
+                    .decodePacked(image, start, ROOT_KEY_DIGITS, 0, true)
+                    .toBigIntegerExact()
+                    .toString());
+
+            byte[] segment = new byte[spec.reclen()];
+            System.arraycopy(image, start + prefixWidth, segment, 0, spec.reclen());
+            Map<String, Object> fields = FixedWidthCodec.decodeRecord(segment, spec);
+
+            assertThat(fields).as("segment %s of the prefixed unload", ordinal).isNotEmpty();
+            assertThat(FixedWidthCodec.encodeRecordPreservingSign(fields, spec, segment))
+                    .as("segment %s re-encodes byte-identically", ordinal)
+                    .isEqualTo(segment);
+            segments.add(new String(segment, StandardCharsets.ISO_8859_1));
+        }
+
+        assertThat(accounts).containsExactly("10000000001", "10000000002", "10000000001",
+                "10000000002");
+        assertThat(segments).doesNotHaveDuplicates();
     }
 
     /**

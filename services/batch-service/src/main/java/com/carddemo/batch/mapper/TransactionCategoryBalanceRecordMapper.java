@@ -188,8 +188,10 @@ import java.util.Objects;
  * the migration reproduces as versioned object-storage prefixes retaining five noncurrent versions,
  * and {@code app/jcl/PRTCATBL.jcl} lines 35 to 39 write that generation from the cluster with
  * {@code LRECL=50}. A backup generation is only useful if it is byte-identical to the record it
- * copies, so {@link #toRecord(TransactionCategoryBalance)} is not dead code and must not be removed
- * as such.</p>
+ * copies, so neither encode overload is dead code and neither must be removed as such -- and it is
+ * {@link #toRecord(TransactionCategoryBalance, byte[])} rather than
+ * {@link #toRecord(TransactionCategoryBalance)} that a generation must be written through, for the
+ * reason the next section gives.</p>
  *
  * <h2>The parity obligation, stated where the bytes are produced</h2>
  *
@@ -203,25 +205,32 @@ import java.util.Objects;
  * those files are read as the specification, they are never modified, and the suite's pinned
  * dependencies are never moved.</b></p>
  *
- * <p>Trade-offs: {@code toRecord(toEntity(image))} reproduces {@code image} byte for byte, subject to
- * two limits that are stated rather than engineered away. The first is the {@code FILLER} asymmetry
- * the package charter rules on: the span at {@code app/cpy/CVTRA01Y.cpy} line 10 is dropped on decode
- * and rebuilt as blanks on encode, so the round trip is exact when the source padding was blank and
- * substitutes blanks when it was not. That case is real rather than hypothetical, and this record
- * demonstrates it twice over with two DIFFERENT non-blank paddings:
- * {@code tests/golden/posting/happy_path/tcatbal.expected} carries twenty-two ASCII zeros in that
- * span, inherited from the seed row the update arm rewrote, while
+ * <p>Assumptions: {@code toRecord(toEntity(image), image)} reproduces {@code image} byte for byte, and
+ * the SECOND ARGUMENT is what makes that true. Two regions of this record survive a decode only as
+ * bytes. The first is the {@code FILLER} asymmetry the package charter rules on: the span at
+ * {@code app/cpy/CVTRA01Y.cpy} line 10 is dropped on decode and has no entity member to rebuild it
+ * from, so the single-argument overload writes blanks there. That matters rather than being
+ * hypothetical, and this record demonstrates it twice over with two DIFFERENT non-blank paddings --
+ * {@code tests/golden/posting/happy_path/tcatbal.expected} carries twenty-two ASCII zeros in that span,
+ * inherited from the seed row the update arm rewrote, while
  * {@code tests/golden/posting/zero_balance/tcatbal.expected} carries twenty-two low-value bytes,
  * because {@code INITIALIZE} does not reach a {@code FILLER} item and the create arm therefore wrote
- * whatever the record area held. A caller comparing a re-encoded row from either scenario against its
- * source will see that span differ and nothing else. The second limit is negative zero: an exact
- * decimal has no signed zero, so a balance whose source span carried the negative-zero overpunch
- * character, a right brace, re-encodes carrying the positive-zero overpunch character, a left brace.
- * A caller needing byte exactness across that one span has
- * {@code com.carddemo.common.codec.FixedWidthCodec.encodeRecordPreservingSign} available, which takes
- * the source image and restores the carrier; no overload is offered here, because every committed
- * expectation file for this record carries the positive-zero form and an unused overload is a second
- * encode path to keep in step with this one.</p>
+ * whatever the record area held. The authoritative seed agrees with the goldens and not with blanks:
+ * bytes 28 to 49 of the first record of {@code app/data/ASCII/tcatbal.txt} are ASCII zeros. The second
+ * region is negative zero: an exact decimal has no signed zero, so a balance whose source span carried
+ * the negative-zero overpunch character, a right brace, re-encodes through the single-argument overload
+ * carrying the positive-zero overpunch character, a left brace.</p>
+ *
+ * <p>Refactoring Rationale: {@link #toRecord(TransactionCategoryBalance, byte[])} restores both regions
+ * from the source image, and it exists because an earlier revision of this class argued that no such
+ * overload was warranted -- on the grounds that "every committed expectation file for this record
+ * carries the positive-zero form" and that an unused overload would be a second encode path to keep in
+ * step. Both halves of that were wrong. The claim was about the SIGN and silently left the PAD
+ * unaddressed, and two committed expectations carry a non-blank pad; and the overload is not unused,
+ * because the backup generation described above is exactly the caller that needs it. The two overloads
+ * are kept in step by sharing one field map, so the only difference between them is what the second one
+ * restores afterwards. The single-argument overload remains correct, and remains the right entry point,
+ * for a row this module ORIGINATED and which therefore has no source image at all.</p>
  *
  * <h2>What this class does not do</h2>
  *
@@ -556,6 +565,109 @@ public final class TransactionCategoryBalanceRecordMapper {
      *     without losing precision
      */
     public static byte[] toRecord(TransactionCategoryBalance entity) {
+        return FixedWidthCodec.encodeRecord(fieldMap(entity), LAYOUT);
+    }
+
+    /**
+     * Encodes one running-balance row into its 50-byte image, restoring from a source image what the
+     * entity cannot carry.
+     *
+     * <p>Refactoring Rationale: this overload exists because the plain one CANNOT satisfy the
+     * byte-identical obligation this class states for a backup generation, and an earlier revision of
+     * this file argued the opposite -- that no overload was warranted because "every committed
+     * expectation file for this record carries the positive-zero form". That reasoning was wrong on the
+     * pad and incomplete on the sign. Two of the committed expectations carry a NON-BLANK pad in the
+     * twenty-two byte span at {@code app/cpy/CVTRA01Y.cpy} line 10:
+     * {@code tests/golden/posting/happy_path/tcatbal.expected} carries twenty-two ASCII zeros,
+     * inherited from the seed row the update arm rewrote, and
+     * {@code tests/golden/posting/zero_balance/tcatbal.expected} carries twenty-two low-value bytes,
+     * because {@code INITIALIZE} does not reach a {@code FILLER} item so the create arm wrote whatever
+     * the record area held. The authoritative seed agrees: bytes 28 to 49 of the first record of
+     * {@code app/data/ASCII/tcatbal.txt} are ASCII zeros, not spaces. Re-encoding either row through
+     * the plain overload therefore substitutes blanks across that span and produces a generation that
+     * differs from the dataset it copies, which is precisely the failure the parity comparison would
+     * report and precisely what a backup generation must not do.</p>
+     *
+     * <p>Assumptions: the two regions restored here are the two a decode cannot carry, and each has a
+     * named cause. The {@code FILLER} span has no entity member at all, because the package charter
+     * drops a pad carrying neither a {@code REDEFINES} nor a {@code VALUE} clause, so it is copied
+     * unconditionally. The sign carrier of a zero balance is restored because an exact decimal has no
+     * signed zero, so a span whose source carried the negative-zero overpunch character would otherwise
+     * re-encode carrying the positive-zero one.</p>
+     *
+     * <p>Assumptions: the plain overload REMAINS and is not deprecated. It is the correct entry point
+     * for a row this module ORIGINATED -- one the posting or interest service just computed, which has
+     * no source image because no image was ever read -- and for that row a blank pad is the right pad.
+     * The two overloads therefore answer two different questions, "render this row" and "reproduce the
+     * record this row came from", and collapsing them would force a caller with no image to invent one.</p>
+     *
+     * <p>Trade-offs: the restoration is unconditional for both spans rather than conditional on the
+     * value being unchanged, which is a deliberate difference from the timestamp handling on the
+     * daily-transaction feed. It is safe here because neither restored region is derived from an entity
+     * member: the pad has no member to disagree with, and the sign carrier is restored by the shared
+     * codec only where the encoded and source magnitudes already agree. There is no third region whose
+     * value a caller could have legitimately changed, so no equality test is needed to keep the method
+     * from ignoring its own input.</p>
+     *
+     * @param entity the row to render, whose composite identifier supplies the three key components and
+     *     whose balance supplies the fourth field; must not be {@code null}
+     * @param sourceImage the byte array of exactly 50 bytes the entity was decoded from; it is read and
+     *     never modified, and it supplies the twenty-two byte trailing pad and the zero-balance sign
+     *     carrier
+     * @return a newly allocated byte array of exactly 50 bytes that reproduces {@code sourceImage}
+     *     wherever the entity's members still agree with it, including the pad exactly as it was read
+     * @throws NullPointerException if {@code entity} is {@code null}
+     * @throws IllegalArgumentException if the row's identifier or any of its three components is
+     *     {@code null}, if the account identifier is negative or wider than its span, if the category
+     *     code is not exactly four ASCII digits, or if the balance is {@code null}, carries a scale
+     *     other than the descriptor's, or has a magnitude the descriptor's integer digit positions
+     *     cannot hold
+     * @throws CopybookLayout.LayoutException if the registered descriptor no longer declares a field
+     *     this class names
+     * @throws FixedWidthCodec.RecordLengthException if {@code sourceImage} is {@code null} or is not
+     *     exactly 50 bytes
+     * @throws FixedWidthCodec.FieldCodecException if a supplied value does not fit its declared field
+     * @throws ZonedDecimalCodec.ZonedDecimalException if the balance cannot be represented in its span
+     *     without losing precision
+     */
+    public static byte[] toRecord(TransactionCategoryBalance entity, byte[] sourceImage) {
+        // WHY : Assumptions: the sign-preserving entry point is used rather than the plain one because
+        //       it also performs the width check on the source image, so a caller that passed an image
+        //       of the wrong length is told so by width rather than by an array bounds failure raised
+        //       from inside the pad copy below.
+        byte[] encoded =
+                FixedWidthCodec.encodeRecordPreservingSign(fieldMap(entity), LAYOUT, sourceImage);
+
+        copySpan(sourceImage, encoded, LAYOUT.field(FIELD_FILLER));
+        return encoded;
+    }
+
+    /**
+     * Builds the four-entry field map both encode overloads render.
+     *
+     * <p>Assumptions: the four values are inserted in the copybook's declaration order, which is the key
+     * order the interest job's control break depends on. The shared codec keys by field name and so does
+     * not require any particular insertion order, but a map that reads in a different order from the
+     * record it produces is a map a reader has to reconcile against the descriptor by hand, and this is
+     * the record where a reordering is least visible and most damaging.</p>
+     *
+     * <p>Assumptions: the {@code FILLER} span is supplied to the codec by OMISSION. The plain overload
+     * relies on that to get blanks; the source-image overload relies on it so that the copy it performs
+     * afterwards is writing over blanks rather than fighting a value this map had asserted.</p>
+     *
+     * <p>Refactoring Rationale: extracted so the two overloads share one construction of the map rather
+     * than each building its own. Two copies would be two places for a field name or an insertion order
+     * to drift, and the whole point of the second overload is that it differs from the first ONLY in
+     * what it restores afterwards.</p>
+     *
+     * @param entity the row whose four field values are wanted; must not be {@code null}
+     * @return a mutable map in copybook declaration order, carrying the three key components and the
+     *     balance and deliberately omitting the pad
+     * @throws NullPointerException if {@code entity} is {@code null}
+     * @throws IllegalArgumentException if the identifier, any component or the balance is unusable, on
+     *     the terms the two public overloads document
+     */
+    private static Map<String, Object> fieldMap(TransactionCategoryBalance entity) {
         Objects.requireNonNull(entity, "transaction category balance entity must not be null");
         TransactionCategoryBalance.TransactionCategoryBalanceId id = requiredIdentity(entity.getId());
 
@@ -564,8 +676,7 @@ public final class TransactionCategoryBalanceRecordMapper {
         fields.put(FIELD_TYPE_CD, requiredComponent(id.getTypeCd(), "typeCd", FIELD_TYPE_CD));
         fields.put(FIELD_CATEGORY_CD, requiredCategoryCode(id.getCategoryCd()));
         fields.put(FIELD_BALANCE, encodableBalance(entity.getBalance()));
-
-        return FixedWidthCodec.encodeRecord(fields, LAYOUT);
+        return fields;
     }
 
     /**
@@ -1154,4 +1265,21 @@ public final class TransactionCategoryBalanceRecordMapper {
         return "field " + field.name() + " at offset " + field.start() + " with length "
                 + field.length() + " and kind " + field.kind();
     }
+
+    /**
+     * Copies one field's span verbatim from a source image into an encoded image.
+     *
+     * <p>Assumptions: the span is addressed through the registered descriptor rather than through
+     * literal offsets, so a change to the record's geometry moves this copy with it instead of
+     * silently overwriting the wrong bytes.</p>
+     *
+     * @param source the byte array to read from, of the record's declared length
+     * @param target the byte array to write into, of the same length; the span is overwritten in place
+     * @param field the {@code CopybookLayout.FieldSpec} descriptor naming the offset and length of the
+     *     span to copy
+     */
+    private static void copySpan(byte[] source, byte[] target, CopybookLayout.FieldSpec field) {
+        System.arraycopy(source, field.start(), target, field.start(), field.length());
+    }
+
 }

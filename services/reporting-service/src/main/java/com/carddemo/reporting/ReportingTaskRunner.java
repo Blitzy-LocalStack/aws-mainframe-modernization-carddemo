@@ -161,6 +161,27 @@ public final class ReportingTaskRunner {
     public static final String ERROR_CODE_FATAL = "CARDDEMO-REPORT-0004";
 
     /**
+     * The most links of a cause chain a diagnostic renders, being ten.
+     *
+     * <p>Assumptions: ten is chosen as a depth no genuine chain in this module reaches -- an assembly
+     * invariant wrapped by a task, wrapped by the framework, is three -- while still bounding a chain
+     * that a defective wrapper has made cyclic. Refactoring Rationale: it is a bound rather than an
+     * unbounded walk because a diagnostic that loops turns a reportable failure into a hung task, and
+     * the task is the thing the orchestrator is waiting on.</p>
+     */
+    static final int CAUSE_CHAIN_LIMIT = 10;
+
+    /**
+     * The value reported when a throwable carries no stack trace at all.
+     *
+     * <p>Assumptions: a sentinel rather than an empty value or a null, because a journal line reading
+     * {@code origin=} or {@code origin=null} cannot be told from a formatting defect, whereas this
+     * value states that the trace was absent. A virtual machine may omit a trace for an exception it
+     * has thrown repeatedly.</p>
+     */
+    static final String ORIGIN_FRAME_UNAVAILABLE = "unavailable";
+
+    /**
      * Prevents instantiation.
      *
      * <p>Assumptions: this type is a process entry point and holds no state, so an instance would carry
@@ -273,9 +294,26 @@ public final class ReportingTaskRunner {
             return EXIT_STATUS_CLEAN;
 
         } catch (Exception failure) {
-            LOG.error("event=reporting.task.failed code={} job={} exception={}",
+            // WHY : Refactoring Rationale: the throwable is NOT handed to the journal. An earlier
+            //       revision passed it as the trailing argument, which the logging facade renders as the
+            //       full stack trace INCLUDING every message in the cause chain -- and the messages a
+            //       failed statement run produces carry statement data: this module assembles customer
+            //       names, street addresses and transaction descriptions, and a provider or an assembly
+            //       invariant that fails while holding one of those puts it into a retained log stream
+            //       that every holder of log access can read. The class chain and the origin frame
+            //       answer where the failure came from without carrying what it was holding.
+            // WHY : Trade-offs: the stack trace is given up, and that is a real diagnostic cost rather
+            //       than a free win. What replaces it is the class of every throwable in the cause chain
+            //       plus the declaring class, method and line of the frame the failure was raised at,
+            //       which is what a reader actually navigates by; the frames between are recoverable
+            //       from the source once the origin is known. Alternatives Considered: logging the trace
+            //       and relying on each raised exception carrying no data -- which the statement
+            //       assembly of this module now honours. Rejected because it cannot hold for a throwable
+            //       this module did not raise: a driver-level failure may quote the row it was binding,
+            //       and no discipline inside this module governs that message.
+            LOG.error("event=reporting.task.failed code={} job={} exception={} origin={}",
                     ERROR_CODE_TASK_FAILED, LogSafeText.sanitize(jobName),
-                    failure.getClass().getName(), failure);
+                    causeChainOf(failure), originFrameOf(failure));
             return EXIT_STATUS_HARD_FAILURE;
         } catch (Error fatal) {
             // WHY : Assumptions: an Error is caught rather than allowed to propagate, and the reason is
@@ -283,10 +321,93 @@ public final class ReportingTaskRunner {
             //       the orchestrator's gates would refuse correctly but which would be indistinguishable
             //       from any other non-zero cause; catching it lets the run report the tier and the
             //       cause it belongs to before terminating.
-            LOG.error("event=reporting.task.fatal code={} job={} error={}", ERROR_CODE_FATAL,
-                    LogSafeText.sanitize(jobName), fatal.getClass().getName(), fatal);
+            // WHY : Assumptions: the same withholding applies here as to the tier above, and for the
+            //       same reason. A StackOverflowError raised inside a recursive assembly, or an
+            //       OutOfMemoryError raised while a statement's records were held, can carry a message
+            //       composed from whatever was in hand, and this line is written to the same retained
+            //       stream. The two tiers are kept symmetrical so that neither becomes the one that
+            //       leaks.
+            LOG.error("event=reporting.task.fatal code={} job={} error={} origin={}", ERROR_CODE_FATAL,
+                    LogSafeText.sanitize(jobName), causeChainOf(fatal), originFrameOf(fatal));
             return EXIT_STATUS_HARD_FAILURE;
         }
+    }
+
+    /**
+     * Renders the class names of a throwable and of every throwable that caused it.
+     *
+     * <p>Assumptions: only the CLASS of each link is rendered and never its message, because the class is
+     * the part that identifies the kind of failure and the message is the part that can quote statement
+     * data. A caller reading {@code java.lang.IllegalStateException<-org.postgresql.util.PSQLException}
+     * knows both which layer failed and how the failure surfaced, without having been shown a row.</p>
+     *
+     * <p>Assumptions: the walk is bounded by {@value #CAUSE_CHAIN_LIMIT} links and by identity, so a
+     * self-referential or cyclic chain cannot make this method run away. A framework wrapper that set
+     * itself as its own cause would otherwise loop, and a diagnostic that hangs is worse than one that
+     * is short. Refactoring Rationale: the bound is a stated constant rather than a magic number, so a
+     * reader can tell a truncated chain from a complete one.</p>
+     *
+     * <p>Assumptions: package-private rather than private, for the same reason
+     * {@code BatchApplication.logJobOutcome} is: what a diagnostic line carries is a disclosure decision,
+     * and the only way to assert that it carries no message is to call the thing that renders it. Reaching
+     * it through {@link #main(String[])} would need a started application context, a datasource and a
+     * migrated schema before a single line could be observed.</p>
+     *
+     * @param throwable the failure to render, of type {@code Throwable}; must not be {@code null}
+     * @return the chain of class names joined by {@code <-}, oldest cause last, never {@code null} and
+     *     never blank
+     */
+    static String causeChainOf(Throwable throwable) {
+        StringBuilder chain = new StringBuilder(throwable.getClass().getName());
+        Throwable cause = throwable.getCause();
+        int links = 1;
+        while (cause != null && cause != throwable && links < CAUSE_CHAIN_LIMIT) {
+            chain.append("<-").append(cause.getClass().getName());
+            Throwable next = cause.getCause();
+            if (next == cause) {
+                break;
+            }
+            cause = next;
+            links++;
+        }
+        return chain.toString();
+    }
+
+    /**
+     * Renders the frame a throwable was raised at, as a declaring class, a method and a line.
+     *
+     * <p>Assumptions: the ORIGIN frame is taken from the deepest cause rather than from the wrapper,
+     * because the wrapper's own top frame is the place that caught and re-threw, which a reader already
+     * knows from the event name. The deepest cause's top frame is where the failure actually happened.</p>
+     *
+     * <p>Assumptions: an absent stack trace answers a stated sentinel rather than {@code null}. A trace
+     * can be empty when a virtual machine is configured to omit it for a repeatedly-thrown exception, and
+     * a journal line reading {@code origin=null} is indistinguishable from a formatting defect.</p>
+     *
+     * <p>Assumptions: package-private for the same reason as {@link #causeChainOf(Throwable)}, and the
+     * two are kept at the same visibility so that a reader does not conclude one of them is the tested
+     * one and the other is not.</p>
+     *
+     * @param throwable the failure to locate, of type {@code Throwable}; must not be {@code null}
+     * @return the declaring class, method and line of the origin frame, or
+     *     {@value #ORIGIN_FRAME_UNAVAILABLE} when the throwable carries no stack trace; never
+     *     {@code null}
+     */
+    static String originFrameOf(Throwable throwable) {
+        Throwable deepest = throwable;
+        int links = 1;
+        while (deepest.getCause() != null && deepest.getCause() != deepest
+                && links < CAUSE_CHAIN_LIMIT) {
+            deepest = deepest.getCause();
+            links++;
+        }
+
+        StackTraceElement[] frames = deepest.getStackTrace();
+        if (frames.length == 0) {
+            return ORIGIN_FRAME_UNAVAILABLE;
+        }
+        StackTraceElement frame = frames[0];
+        return frame.getClassName() + "." + frame.getMethodName() + ":" + frame.getLineNumber();
     }
 
     /**

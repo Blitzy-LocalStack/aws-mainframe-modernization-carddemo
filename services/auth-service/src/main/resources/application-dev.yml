@@ -114,7 +114,15 @@ management:
         # group and the container HEALTHCHECK both poll, neither of which can
         # present a JWT. Losing it would deregister every task and fail
         # container liveness at once. Which principals may reach the other
-        # endpoints is still decided in SecurityConfig, not by this key.
+        # endpoints is still decided in SecurityConfig, not by this key -- and
+        # that division is only true because the chain matches the management
+        # NAMESPACE. Refactoring Rationale: while it named only info, metrics
+        # and prometheus, the three ids added below reached the chain's
+        # catch-all instead, which required merely a valid token; a token
+        # carrying no CardDemo group satisfies that. SecurityConfig.OPERATOR_PATHS
+        # now ends in /actuator/**, so an id added to THIS list is confined to
+        # the task-local addresses without this file having to be read alongside
+        # that one.
         #
         # Trade-offs: the four added ids are the ones no other profile
         # publishes, and each gives away something nameable. env and configprops

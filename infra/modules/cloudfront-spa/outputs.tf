@@ -260,7 +260,7 @@ output "spa_bucket_arn" {
 }
 
 output "log_bucket_arn" {
-  description = "ARN of the CMK-encrypted S3 destination for CloudFront standard logging v2. The KMS module consumes it as an exact allowed S3 encryption context."
+  description = "ARN of the SSE-S3 (AES256) encrypted S3 destination for CloudFront standard logging v2. Its default encryption is deliberately NOT the supplied customer-managed key, because CloudFront standard log delivery cannot write to a bucket whose default encryption is SSE-KMS; the constraint and its compensating controls are recorded on the encryption resource in main.tf. The KMS module still consumes this ARN as an exact allowed S3 encryption context, so the key policy stays scoped to this bucket rather than widened, and a destination that can carry the key later needs no policy change."
   value       = aws_s3_bucket.logs.arn
 }
 

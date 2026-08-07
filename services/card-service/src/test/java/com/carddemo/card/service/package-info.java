@@ -4,24 +4,6 @@
  * writes. Each behaviour is asserted against the COBOL paragraphs it was transcribed
  * from, so a failure here names a business rule rather than merely a layer.
  *
- * <h2>What this charter describes: a target contract, not a directory listing</h2>
- *
- * <p>Assumptions: every class name, sibling file and count below states the <b>target
- * contract</b> assigned to this package as the migration plan assigns it, not an inventory
- * of what sits beside this file. It is read against the plan, and it says as much about what
- * this package may never hold as about what it does.</p>
- *
- * <p>Alternatives Considered: deriving the roster from the directory instead of from the
- * plan. Rejected, because a roster that describes whatever is present cannot say what may
- * <em>not</em> be added, which is the half of the contract a reader cannot reconstruct from
- * the files. The names the plan assigns are {@code CardListServiceTest} and
- * {@code CardUpdateServiceTest} in this package, {@code CardControllerTest} in
- * {@code com.carddemo.card.api}, {@code CardRepositoryIT} in
- * {@code com.carddemo.card.repository}, {@code LayeringRulesTest} in
- * {@code services/common-lib/src/test/java/com/carddemo/common/architecture}, and
- * {@code services/card-service/src/test/resources/fixtures/README.md}; a test class in this
- * package that is none of those is outside the contract rather than merely new.</p>
- *
  * <h2>The two behaviours and their baseline provenance</h2>
  *
  * <p>The line numbers below locate paragraphs and declarations in the reference sources.
@@ -136,29 +118,5 @@
  * whereas the Checkstyle configuration is a living file whose module positions move
  * whenever a module or its rationale is edited. Checkstyle modules are therefore cited by
  * name, which survives those edits, and only immutable sources are cited by line.</p>
- *
- * <h2>The closed set, and why this file cannot be omitted</h2>
- *
- * <p>This package holds exactly two test classes, {@code CardListServiceTest} and
- * {@code CardUpdateServiceTest}, together with this file. Nothing else belongs in it, and
- * it has no subpackages.</p>
- *
- * <p>Assumptions: this file is a build requirement rather than a courtesy.
- * {@code config/checkstyle/checkstyle.xml} pairs two modules to that end.
- * {@code JavadocPackage} runs above the tree walker, because it inspects the file system,
- * and asserts only that a {@code package-info.java} exists; {@code MissingJavadocPackage}
- * runs inside the tree walker, because it inspects parsed Javadoc, and asserts that the
- * file carries documentation. Either module alone is satisfied by a file that documents
- * nothing, which is why both are configured. {@code services/pom.xml} binds that gate to
- * the Maven {@code validate} phase with test sources included, so this document is audited
- * before a single class in this module is compiled, and no in-code suppression can waive
- * it because the configuration registers no suppression filter at all.</p>
- *
- * <h2>What a green build here does and does not mean</h2>
- *
- * <p>The outcome of this module's build is binary: the Checkstyle gate, the compiler and
- * the JUnit engine each pass or fail. The graded return-code rubric that tolerates a warn
- * level belongs to the COBOL parity suite under {@code tests} and carries no meaning for
- * this module, so a passing run here must never be described in its terms.</p>
  */
 package com.carddemo.card.service;

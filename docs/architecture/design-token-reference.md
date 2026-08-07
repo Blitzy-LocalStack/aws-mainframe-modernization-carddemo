@@ -123,7 +123,7 @@ sampled, not estimated, and not restricted to the 17 under `app/bms` — and the
 resulting histogram is what the mapping in
 [§4](#4-the-measured-bms-attribute-to-token-mapping) resolves.
 
-- **Refactoring Rationale — why the measurement scope is 21 and not 17.** An
+- Refactoring Rationale: **why the measurement scope is 21 and not 17.** An
   earlier revision of this document measured only the 17 mapsets under `app/bms`.
   That scope is wrong for a token bridge, because the target renders **21** screens:
   the specification's screen inventory is the 17 base mapsets *plus* the 4 from the
@@ -263,7 +263,7 @@ a theme object setting a seed token, a **map**-layer token (`colorTextSecondary`
 `motionDurationMid`), a preset colour (`pink`) and a component-scoped alias
 (`components.Table.headerBg`) all compile under `strict`.
 
-- **Refactoring Rationale — "read, not set" was wrong and is corrected here.** The
+- Refactoring Rationale: **"read, not set" was wrong and is corrected here.** The
   previous revision labelled the map and alias layers *"Read, not set"* and named
   the seed layer as the one the bridge sets. That describes the *derivation* graph
   correctly and the *override* surface incorrectly, and the error is consequential
@@ -274,7 +274,7 @@ a theme object setting a seed token, a **map**-layer token (`colorTextSecondary`
   A reader who believed those layers were read-only would conclude the mapping was
   unimplementable and either abandon the snaps or write literal CSS for them, which
   is what rule 1 of [§7](#7-the-three-non-negotiable-rules) exists to prevent.
-- **Trade-offs — settable is not the same as should-be-set.** The bridge sets the
+- Trade-offs: **settable is not the same as should-be-set.** The bridge sets the
   **seed** layer wherever a seed token expresses the role, precisely because the map
   and alias layers are *derived*: overriding a derived token pins one value while
   everything computed alongside it keeps moving, so a palette can be left internally
@@ -414,7 +414,7 @@ literally true rather than approximately true:
   no `DFHYELLO`, `DFHTURQ` or `DFHPINK` reference anywhere in the repository,
   verified repo-wide across `.cbl` and `.cpy`.
 
-- **Assumptions — every program-side count excludes commented-out code.** COBOL
+- Assumptions: **every program-side count excludes commented-out code.** COBOL
   fixed-format source marks a comment with `*` or `/` in **column 7**, and the
   baseline contains commented-out statements that mention the very constants being
   counted: `COACTUPC.cbl:3201` is a disabled `MOVE DFHRED`, and
@@ -425,7 +425,7 @@ literally true rather than approximately true:
   these numbers rather than the naive ones. The mapset counts need no such filter:
   BMS comment lines cannot carry a `COLOR=` operand.
 
-- **Assumptions — the two counting surfaces are independent and must not be
+- Assumptions: **the two counting surfaces are independent and must not be
   reconciled.** A `COLOR=` operand is a *static* property of a map field; a `DFH*`
   constant is a colour a program moves into a field's attribute byte at *run time*.
   A field can therefore be counted once in the map histogram and repainted many
@@ -613,7 +613,7 @@ bindings** in a hook, so the original keyboard-only workflow continues to work
 unchanged while also becoming discoverable to a reader who has never used a 3270.
 Neither replaces the other.
 
-- **Refactoring Rationale — why the count changed from seven to nine.** The previous
+- Refactoring Rationale: **why the count changed from seven to nine.** The previous
   revision measured only the raw `DFH*` surface across the 18 files matching
   `app/cbl/CO*.cbl`, and concluded that *"only these seven identifiers are actually
   compared anywhere … there is no reference to `DFHPF1`, `DFHPF2`, `DFHPF6`,
@@ -624,7 +624,7 @@ Neither replaces the other.
   surface that was not being counted. A target built on "exactly seven" would leave
   the transaction-type list screen with no way to add a record and no way to confirm
   a delete — the two things that screen exists to do.
-- **Assumptions — the semantics are now read, not inferred.** The previous revision
+- Assumptions: **the semantics are now read, not inferred.** The previous revision
   inferred each key's meaning from usage frequency because *"the baseline contains no
   document stating what PF5 means"*. It does, in the place a 3270 application always
   puts it: the on-screen legend. The four extension mapsets label their keys in
@@ -632,7 +632,7 @@ Neither replaces the other.
   `ENTER=Process`, `F4=Delete`, `F5=Save`, `F6=Add`, `F12=Cancel`), which is
   authoritative in a way a frequency count is not. Every semantic above is now
   sourced from that text, and the frequencies are retained only as evidence of reach.
-- **Trade-offs — two baseline inconsistencies are recorded rather than reconciled.**
+- Trade-offs: **two baseline inconsistencies are recorded rather than reconciled.**
   The two transaction-type screens disagree with each other: the list screen binds
   **F2** to Add and **F10** to Save, while the update screen binds **F6** to Add and
   **F5** to Save. Worse, `COTRTUP.bms:130` advertises `F6=Add` but **no program
@@ -715,7 +715,7 @@ Counts sum to 3 + 6 + 7 + 1 + 1 = **18**, which is the repo-wide `DRK` total. Th
 base-17 subtotal is **14**; the four extension occurrences are the `COTRTUP` legend
 slots in job 3.
 
-- **Refactoring Rationale — why one gap became five.** The previous revision stated
+- Refactoring Rationale: **why one gap became five.** The previous revision stated
   G2 as a single gap ("non-display renders blank, a password input renders dots")
   and resolved it with a single answer, while citing the **6** `ASKIP,DRK,FSET`
   fields as its evidence. Those six are the job-2 row carriers, which are not
@@ -725,7 +725,7 @@ slots in job 3.
   it, an implementer reading G2 would reasonably render all 18 as password inputs,
   which would put seven function-key legends and six invisible transport characters
   on the screen as masked text boxes.
-- **Assumptions — the operand list is the grep surface, not the semantic.** `DRK`
+- Assumptions: **the operand list is the grep surface, not the semantic.** `DRK`
   appears in five different operand lists, so a reader who greps a single list finds
   a fraction of the total and concludes a figure is wrong. Every row above therefore
   publishes the exact list to grep for alongside the count it produces.
@@ -850,7 +850,7 @@ And one region is adjacent enough to be mistaken for the band: `COMEN01C` and
 rows, not the band. The same program feeds both, because its unavailable-option
 messages go to `WS-MESSAGE` instead.
 
-- **Refactoring Rationale — the previous claim was the wrong way round.** This
+- Refactoring Rationale: **the previous claim was the wrong way round.** This
   section previously listed three widths and concluded that *"only the 75-character
   screen contract survives as a rendering constraint … it is the only one of the
   three that describes a region of a screen."* The 75 of `CVCRD01Y` is the one width
@@ -860,13 +860,13 @@ messages go to `WS-MESSAGE` instead.
   the old claim is concrete and silent: a band rendered at 75 clips three characters
   from nineteen screens and five from two of them, on exactly the longest messages —
   the ones a truncation matters most on.
-- **Assumptions — both limits are real, and which applies depends on the path.** A
+- Assumptions: **both limits are real, and which applies depends on the path.** A
   program that moves the 75-byte work area into a 78-character display field leaves
   COBOL to pad the remainder with spaces, so the *content* limit stays 75 for any
   message that crosses the work area. A program that composes straight into its
   80-byte `WS-MESSAGE` and moves that to the map can fill 78 or 80. Neither number
   is the answer on its own.
-- **Trade-offs — this contract is duplicated in code, deliberately.**
+- Trade-offs: **this contract is duplicated in code, deliberately.**
   `ui/src/messages/messages.ts` exports the same five widths as `MESSAGE_BAND`, a
   per-mapset `MESSAGE_BAND_BY_MAPSET` table and a `messageBandWidthForMapset()`
   resolver, so a renderer resolves the width by calling a function rather than by

@@ -198,9 +198,17 @@ exported from Terraform rather than discover an unrelated random token.
 
 ## Inputs, assumptions, and outputs
 
-The generated reference lists the complete contract: 14 inputs and nine
+The generated reference lists the complete contract: 14 inputs and eight
 outputs. The tables provide types and defaults; the prose below records the
 cross-module relationships those values create.
+
+Refactoring Rationale: this sentence said nine outputs. `outputs.tf` declares
+eight — `distribution_id`, `distribution_arn`, `distribution_domain_name`,
+`spa_bucket_name`, `spa_bucket_arn`, `log_bucket_arn`, `log_delivery_source_arn`
+and `origin_access_control_id` — and the consumer table below has always listed
+exactly those eight, so the prose count disagreed with the table beneath it as
+well as with the HCL. The count is corrected rather than the table extended,
+because a ninth output would be a contract addition and none is wanted here.
 
 ### What the module consumes
 
@@ -249,18 +257,23 @@ Renaming or removing any output is a breaking change for the consumers below.
 | `distribution_arn` | The environment root passes the exact distribution identity into the KMS key policy rather than granting an account-wide distribution wildcard. |
 | `distribution_domain_name` | Environment outputs and DNS wiring use the CloudFront-assigned host as the distribution target; the custom alias remains the viewer-facing name. |
 | `distribution_id` | [The deployment workflow](../../../.github/workflows/deploy.yml) invalidates the entry document after publishing a build. |
-| `log_bucket_arn` | The environment root includes the log destination in its exact S3 policy context. The executable encryption setting in `main.tf` is SSE-S3. |
+| `log_bucket_arn` | The environment root includes the log destination in its exact S3 policy context, which keeps the KMS key policy scoped to this bucket rather than widened. The destination's own default encryption is **SSE-S3 (`AES256`)**, not the supplied customer-managed key, because CloudFront standard log delivery cannot write to an SSE-KMS bucket, as the three-bucket warning above records. |
 | `log_delivery_source_arn` | The KMS key policy scopes CloudWatch Logs delivery permissions to this exact CloudFront source. |
 | `origin_access_control_id` | Operators use the identifier to confirm which OAC is attached while diagnosing an origin 403. |
 | `spa_bucket_arn` | Publisher IAM policy and KMS policy wiring use the ARN form for resource scoping. |
 | `spa_bucket_name` | The deployment workflow syncs the built `ui/dist/` bundle to the name form accepted by S3 commands. |
 
 Assumptions: terraform-docs renders output descriptions directly from
-`outputs.tf`. Its generated `log_bucket_arn` row retains a CMK-encryption
-description, while the executable `aws_s3_bucket_server_side_encryption_configuration.logs`
-resource uses `AES256`. The resource argument is authoritative; the generated
-region remains byte-derived from the HCL contract so the check-only
-documentation gate can detect any source change.
+`outputs.tf`, so the generated `log_bucket_arn` row and the row above it are the
+same sentence and cannot disagree. Refactoring Rationale: they once did. The
+generated row described the destination as CMK-encrypted while
+`aws_s3_bucket_server_side_encryption_configuration.logs` declared `AES256`, and
+this paragraph recorded the disagreement instead of resolving it — which left a
+generated document asserting a stronger control than the resource carried, in the
+one place a reviewer is most likely to read a control from. The output's
+description in `outputs.tf` now states the `AES256` boundary and the delivery
+constraint that forces it, the generated region was regenerated from it, and the
+check-only documentation gate keeps the two byte-identical from here on.
 
 The SPA receives its API endpoint through the environment variables documented
 in [`ui/.env.example`](../../../ui/.env.example). Neither this README nor the
@@ -282,15 +295,14 @@ unexplained extra input or output is exactly the pattern Rule 1 forbids.
 | output `log_bucket_arn` | the KMS module's exact allowed S3 encryption contexts, in both roots | The log destination is created in-module by necessity (see the three-bucket callout above), so its ARN is the only way a sibling can scope a grant to it. |
 | output `log_delivery_source_arn` | `cloudwatch_log_delivery_source_arns` on the KMS module, in both roots | Log-delivery data-key generation is scoped to the exact delivery source. |
 
-Trade-offs: the accepted cost is five interface members beyond the enumerated
-set. Removing any one of them breaks a root that consumes it, and each exists to
-keep a KMS grant or a browser policy scoped to an exact resource rather than
-widened to a wildcard — so the narrower interface would be bought with a broader
-permission, which is the wrong trade. Refactoring Rationale: one further output,
-`distribution_hosted_zone_id`, was put to the same test and failed it, so it was
-withdrawn: no root reads it, neither root creates a Route 53 record, and
-`distribution_domain_name` already serves any DNS consumer. The rule applied here
-is therefore *consumed or withdrawn*, not *convenient to publish*.
+Trade-offs: the accepted cost is a wider interface than the charter enumerates.
+Removing any one of the members above breaks a root that consumes it, and each
+exists to keep a KMS grant or a browser policy scoped to an exact resource rather
+than widened to a wildcard — so the narrower interface would be bought with a
+broader permission, which is the wrong trade. Assumptions: the rule applied to
+every member is *consumed or withdrawn*, not *convenient to publish*, which is why
+no output exists for a DNS consumer that `distribution_domain_name` already
+serves.
 
 
 ## Module boundary and usage
@@ -522,10 +534,6 @@ items are implemented or documented as follows:
 | HTTPS and viewer TLS | HTTP redirects to HTTPS; the required custom certificate makes the validated modern `minimum_protocol_version` effective. |
 | WAF posture | WAF association is not one of the workflow's selected material checks. Its absence is nevertheless documented: the fixed module catalogue has no WAF owner, the distribution serves immutable public assets, authenticated operations use API Gateway plus Cognito JWT validation, and `web_acl_arn` permits an environment-owned attachment. |
 
-The module is authored and statically validated; applying it to a live AWS
-account is an operator action outside this scope. It has not been benchmarked
-or penetration-tested.
-
 ## Troubleshooting
 
 | Symptom | Cause and action |
@@ -632,7 +640,7 @@ or penetration-tested.
 | <a name="output_distribution_arn"></a> [distribution\_arn](#output\_distribution\_arn) | ARN of the CloudFront distribution serving the SPA. The environment root passes this exact ARN back to the KMS module so the CloudFront service principal can decrypt only this distribution's SSE-KMS origin objects. |
 | <a name="output_distribution_domain_name"></a> [distribution\_domain\_name](#output\_distribution\_domain\_name) | CloudFront-assigned hostname of the distribution. This is the SPA's public entry point, the address that replaces a 3270 terminal session against CICS transaction CC00, and the environment roots re-export it as the deployed front-end host. |
 | <a name="output_distribution_id"></a> [distribution\_id](#output\_distribution\_id) | Id of the CloudFront distribution serving the SPA. The deployment pipeline passes it to a cache invalidation after uploading a new build, and an operator uses it to address the distribution from the CLI. |
-| <a name="output_log_bucket_arn"></a> [log\_bucket\_arn](#output\_log\_bucket\_arn) | ARN of the CMK-encrypted S3 destination for CloudFront standard logging v2. The KMS module consumes it as an exact allowed S3 encryption context. |
+| <a name="output_log_bucket_arn"></a> [log\_bucket\_arn](#output\_log\_bucket\_arn) | ARN of the SSE-S3 (AES256) encrypted S3 destination for CloudFront standard logging v2. Its default encryption is deliberately NOT the supplied customer-managed key, because CloudFront standard log delivery cannot write to a bucket whose default encryption is SSE-KMS; the constraint and its compensating controls are recorded on the encryption resource in main.tf. The KMS module still consumes this ARN as an exact allowed S3 encryption context, so the key policy stays scoped to this bucket rather than widened, and a destination that can carry the key later needs no policy change. |
 | <a name="output_log_delivery_source_arn"></a> [log\_delivery\_source\_arn](#output\_log\_delivery\_source\_arn) | Exact CloudWatch Logs delivery-source ARN for the distribution's standard logging v2 stream. The KMS key policy uses it to scope log-delivery data-key generation. |
 | <a name="output_origin_access_control_id"></a> [origin\_access\_control\_id](#output\_origin\_access\_control\_id) | Id of the origin access control that signs this distribution's requests to the private origin bucket. Published so an operator diagnosing a 403 from the origin can confirm which origin access control the bucket policy is scoped to. |
 | <a name="output_spa_bucket_arn"></a> [spa\_bucket\_arn](#output\_spa\_bucket\_arn) | ARN of the SPA origin bucket, for an IAM policy that grants a deployment role write access to this bucket and to no other. Published alongside spa\_bucket\_name because the two forms are not interchangeable. |

@@ -138,14 +138,6 @@ import org.hibernate.type.SqlTypes;
  * did not create and does not seed, so time spent reading this package looking for the cause is
  * time spent in the wrong service.</p>
  *
- * <p>Trade-offs: the migrated job preserves that abend rather than substituting a zero rate, and
- * the alternative is worth naming because it looks kinder and is worse. Defaulting silently to zero
- * would let a run complete successfully having accrued no interest at all on every category whose
- * group was missing. Nothing would fail, the exit status would be clean, and the golden-master
- * comparison would pass on the records that were produced -- while the business result was simply
- * absent. Failing loudly is the behaviour the baseline has, and it is the behaviour the target
- * keeps, because a run that stops is a run an operator can correct.</p>
- *
  * <h2>What this type does not do</h2>
  *
  * <p>It holds a rate and does not apply one. The accrual formula lives at
@@ -154,147 +146,97 @@ import org.hibernate.type.SqlTypes;
  * and is the single place either is expressed. No arithmetic of any kind is performed here, and in
  * particular the division that converts an annual percentage into a monthly fraction is not.</p>
  *
- * <p>Assumptions: the rate is also not money, and is deliberately not carried as
- * {@code com.carddemo.common.money.Money}. It is an operand that money is multiplied by, never an
- * amount that is added to another amount; the mapper package charter records it as the one number
- * that package handles that is not money and is never summed with any. Carrying it as
- * {@code java.math.BigDecimal} keeps that distinction visible at every call site.</p>
- *
- * <p>Assumptions: no value reaching this type is still in its baseline physical representation. The
- * rate is zoned decimal with a sign overpunch in the dataset, and
- * {@code com.carddemo.common.codec.ZonedDecimalCodec} is the one boundary that decodes it. Nothing
- * here decodes a sign nibble, and no column stores one.</p>
- *
  * @see DisclosureGroupId
  */
 @Entity
-// WHY : Alternatives Considered: reusing reference-service's own mapping of this table instead of
-//       declaring a second one over it, or hoisting one shared mapping up into common-lib. The
-//       first would create a compile-time dependency on another service's domain package, which
-//       the architecture gate forbids and the architecture-rules Surefire execution fails a build
-//       over rather than attracting a review comment. The second would put a persistence mapping
-//       into the one artifact all nine modules depend on, making a reference-data schema change a
-//       rebuild of every module, and common-lib deliberately ships no persistence contract at all.
-//       The consequence is worth stating as a rule: this module and reference-service agree
-//       through the physical schema, and never through code.
-// WHY : Trade-offs: two mappings over one table can drift and no compiler will notice. What is
-//       accepted in exchange is that the drift is loud rather than silent, because both mappings
-//       are asserted against the same physical schema when their process starts, so a mapping
-//       naming a column the schema does not have fails before a row is read. Compile-time
-//       agreement is genuinely given up, and that is the price of independent deployability.
-// WHY : Assumptions: the type-level immutability annotation is the enforcement of the read-only
-//       boundary described above, and it is chosen over marking each column insertable and
-//       updatable false. The per-column form was evaluated and rejected because it has to be
-//       repeated on every column and a column added later would silently be writable by default,
-//       so the guarantee would decay by omission; the type-level form is a single statement that
-//       cannot be partially applied. It also stops a write earlier: the provider excludes the type
-//       from dirty checking altogether rather than assembling a statement that names no columns.
+// Alternatives Considered: reusing reference-service's own mapping of this table instead of
+//     declaring a second one over it, or hoisting one shared mapping up into common-lib. The
+//     first would create a compile-time dependency on another service's domain package, which
+//     the architecture gate forbids and the architecture-rules Surefire execution fails a build
+//     over rather than attracting a review comment. The second would put a persistence mapping
+//     into common-lib, the one artifact all eight service modules depend on, making a
+//     reference-data schema change a rebuild of every one of them, and common-lib deliberately
+//     ships no persistence contract at all.
+//     The consequence is worth stating as a rule: this module and reference-service agree
+//     through the physical schema, and never through code.
+// Trade-offs: two mappings over one table can drift and no compiler will notice. What is
+//     accepted in exchange is that the drift is loud rather than silent, because both mappings
+//     are asserted against the same physical schema when their process starts, so a mapping
+//     naming a column the schema does not have fails before a row is read. Compile-time
+//     agreement is genuinely given up, and that is the price of independent deployability.
 @Immutable
-// WHY : Alternatives Considered: leaving the table name unqualified and letting the pinned
-//       connection search path resolve it, which is what this module's sibling mappings for its
-//       own schema rely on. Declined for THIS mapping because the schema it names is one this
-//       module holds no write grant on at all, and naming it on the annotation puts that boundary
-//       where a reader of the entity finds it instead of requiring a trip to the connection
-//       configuration to discover that this read crosses a context. This module spans four schemas
-//       at three different grant levels, so the qualification is what makes the level legible.
-// WHY : Assumptions: this declaration is DDL-passive, and that is a hard constraint rather than a
-//       preference. It names no index, no unique constraint, no column definition and no key
-//       generation strategy, because the table, its columns, its types and its primary key are
-//       created by reference-service's V1__reference.sql and its mandatory rows are seeded by that
-//       service's V2__seed_reference.sql. The provider is never permitted to emit DDL in this
-//       module -- its setting is at most an assertion against the shape that already exists -- so
-//       the annotations here DESCRIBE that shape rather than request it. An annotation that
-//       requested DDL would be asking a module holding no write grant to create or alter another
-//       service's schema, and it would surface as a permission error naming nothing about the
-//       actual mistake. Seeding is prohibited on the same ground and by name: a missing DEFAULT
-//       row is not repaired from here, not on start-up and not through a migration in this module.
+// Alternatives Considered: leaving the table name unqualified and letting the pinned
+//     connection search path resolve it, which is what this module's sibling mappings for its
+//     own schema rely on. Declined for THIS mapping because the schema it names is one this
+//     module holds no write grant on at all, and naming it on the annotation puts that boundary
+//     where a reader of the entity finds it instead of requiring a trip to the connection
+//     configuration to discover that this read crosses a context. This module spans four schemas
+//     at three different grant levels, so the qualification is what makes the level legible.
+// Assumptions: this declaration is DDL-passive, and that is a hard constraint rather than a
+//     preference. It names no index, no unique constraint, no column definition and no key
+//     generation strategy, because the table, its columns, its types and its primary key are
+//     created by reference-service's V1__reference.sql and its mandatory rows are seeded by that
+//     service's V2__seed_reference.sql. The provider is never permitted to emit DDL in this
+//     module -- its setting is at most an assertion against the shape that already exists -- so
+//     the annotations here DESCRIBE that shape rather than request it. An annotation that
+//     requested DDL would be asking a module holding no write grant to create or alter another
+//     service's schema, and it would surface as a permission error naming nothing about the
+//     actual mistake. Seeding is prohibited on the same ground and by name: a missing DEFAULT
+//     row is not repaired from here, not on start-up and not through a migration in this module.
 @Table(name = "disclosure_groups", schema = "reference")
 public class DisclosureGroup {
 
-    // WHY : Alternatives Considered: a JPA association from these key components to the entities
-    //       that supply them -- a to-one mapping from the group component to Account, or from the
-    //       type and category components to TransactionCategoryBalance -- expressed with a join
-    //       column. Rejected on three independent grounds. The join would cross a schema boundary
-    //       at a DIFFERENT grant level, so a lazy traversal written innocently in a job would
-    //       issue a query this module's role may not be permitted, failing on a permission error
-    //       that names nothing about the traversal. The baseline never navigates: it builds the
-    //       key field by field and issues a keyed read, at app/cbl/CBACT04C.cbl lines 210 to 213.
-    //       Decisively, the fallback at line 437 performs that read again after DELIBERATELY
-    //       MUTATING one component of the key and keeping the other two -- searching for a row
-    //       that is related to nothing the first key pointed at -- and an object association has
-    //       no way to express a lookup whose key is rewritten between attempts. Nor is a database
-    //       foreign key implied: reference-service's V1__reference.sql records that the baseline
-    //       declares no such relationship, this record being a standalone layout, so a constraint
-    //       added here would refuse a disclosure row the baseline accepts. The object graph
-    //       therefore stays flat and every query a job issues is visible at the query site.
-    // WHY : Alternatives Considered: three ways of expressing a three-part key were weighed.
-    //       (a) A separate top-level DisclosureGroupId.java. Rejected because the package charter
-    //       in package-info.java fixes this package's membership at eight entity types and no
-    //       ninth, so a tenth compilation unit here would put the package outside its own declared
-    //       contract. (b) An @IdClass over a nested class. Workable, and rejected because it
-    //       requires the three components to be restated as fields of the entity as well, which is
-    //       precisely the duplication that lets the two copies disagree. (c) A Java record as the
-    //       embeddable. Rejected because a record is implicitly final with final fields and no
-    //       no-argument constructor, and the provider's instantiation contract for an embedded
-    //       identifier is reflective construction followed by field assignment; a plain class with
-    //       a protected no-argument constructor is the portable choice. @EmbeddedId over a nested
-    //       class also keeps the key addressable as one named object, which is what the fallback
-    //       path needs: it replaces one component and reuses the other two, and an object with
-    //       three components expresses that far more directly than three loose fields do.
+    // Alternatives Considered: a JPA association from these key components to the entities
+    //     that supply them -- a to-one mapping from the group component to Account, or from the
+    //     type and category components to TransactionCategoryBalance -- expressed with a join
+    //     column. Rejected on three independent grounds. The join would cross a schema boundary
+    //     at a DIFFERENT grant level, so a lazy traversal written innocently in a job would
+    //     issue a query this module's role may not be permitted, failing on a permission error
+    //     that names nothing about the traversal. The baseline never navigates: it builds the
+    //     key field by field and issues a keyed read, at app/cbl/CBACT04C.cbl lines 210 to 213.
+    //     Decisively, the fallback at line 437 performs that read again after DELIBERATELY
+    //     MUTATING one component of the key and keeping the other two -- searching for a row
+    //     that is related to nothing the first key pointed at -- and an object association has
+    //     no way to express a lookup whose key is rewritten between attempts. Nor is a database
+    //     foreign key implied: reference-service's V1__reference.sql records that the baseline
+    //     declares no such relationship, this record being a standalone layout, so a constraint
+    //     added here would refuse a disclosure row the baseline accepts. The object graph
+    //     therefore stays flat and every query a job issues is visible at the query site.
+    // Alternatives Considered: three ways of expressing a three-part key were weighed.
+    //     (a) A separate top-level DisclosureGroupId.java. Rejected because the package charter
+    //     in package-info.java fixes this package's membership at eight entity types and no
+    //     ninth, so a tenth compilation unit here would put the package outside its own declared
+    //     contract. (b) An @IdClass over a nested class. Workable, and rejected because it
+    //     requires the three components to be restated as fields of the entity as well, which is
+    //     precisely the duplication that lets the two copies disagree. (c) A Java record as the
+    //     embeddable. Rejected because a record is implicitly final with final fields and no
+    //     no-argument constructor, and the provider's instantiation contract for an embedded
+    //     identifier is reflective construction followed by field assignment; a plain class with
+    //     a protected no-argument constructor is the portable choice. @EmbeddedId over a nested
+    //     class also keeps the key addressable as one named object, which is what the fallback
+    //     path needs: it replaces one component and reuses the other two, and an object with
+    //     three components expresses that far more directly than three loose fields do.
     @EmbeddedId
     private DisclosureGroupId id;
 
-    // WHY : Assumptions: NUMERIC(6,2) is the exact image of the PIC S9(04)V99 declared at
-    //       app/cpy/CVTRA02Y.cpy line 9 -- four integer digits and two fractional, so six display
-    //       bytes, the same 9999.99 ceiling and the same hundredth of a unit of resolution. The
-    //       migration declares interest_rate NUMERIC(6,2) NOT NULL to match, and BigDecimal is the
-    //       only Java type that carries it without loss. No approximate type is admissible here
-    //       under the migration plan's transformation rule T3, and the reason is specific rather
-    //       than stylistic: this rate is an operand and not a value that is merely displayed, so a
-    //       rate such as 15.00 or 2.50 that no binary floating-point type represents exactly would
-    //       carry its error into the multiplication and settle into money a customer is charged.
-    // WHY : Assumptions: the value is an ANNUAL PERCENTAGE and not a monthly fraction, which is
-    //       the single fact needed to read the accrual formula correctly. app/cbl/CBACT04C.cbl
-    //       lines 464 to 465 divide by 1200, and that constant is twelve months multiplied by the
-    //       hundred that converts a percentage to a fraction -- not twelve. A reader who took the
-    //       stored value for a rate already expressed per month would divide by 12 and overstate
-    //       every accrual by two orders of magnitude.
-    // WHY : Assumptions: the arithmetic that consumes this value is owned by
-    //       com.carddemo.common.money.Money and is never performed here, and the entity's scale is
-    //       what makes the order of that arithmetic matter. The baseline parenthesises the
-    //       multiplication in its own source -- the balance is multiplied by this rate first, and
-    //       only the product is divided -- and because both operands carry scale 2 the raw product
-    //       carries scale 4, so the product has to be formed at full precision before anything is
-    //       scaled. Dividing first and multiplying second yields a different final cent on many
-    //       balances, which is why transformation rule T4 keeps the order and why no helper here
-    //       offers a shortcut that would invite it to be reordered.
-    // WHY : Assumptions: that division truncates rather than rounding, and the evidence is an
-    //       absence. The accrual statement stores its result into a PIC S9(09)V99 receiver
-    //       declared at app/cbl/CBACT04C.cbl line 168 and carries no ROUNDED phrase; no statement
-    //       anywhere in that program does, so the discarded digits are dropped toward zero. Money
-    //       owns that truncating path as a mode distinct from the general half-up one it applies
-    //       everywhere else, and the caller selects it explicitly. Line 467 then adds each
-    //       truncated result into a running total, so the semantics are the sum of truncated
-    //       values and never the truncation of a sum -- an order this type must not let a caller
-    //       collapse by exposing anything that pre-aggregates.
-    // WHY : Assumptions: the picture is SIGNED, so a negative rate is representable in the source
-    //       contract, and no constraint narrowing the domain is declared on this member for that
-    //       reason. A positive-only or minimum-value assertion would refuse a row the baseline
-    //       accepts and the seed data is free to contain, and the refusal would happen in this
-    //       module over data another service owns.
-    // WHY : Assumptions: a zero rate is a meaningful value here rather than an absent one, and it
-    //       is why any comparison against zero must be made on numeric value and not on object
-    //       equality. app/cbl/CBACT04C.cbl line 214 gates the whole pipeline on the rate being
-    //       non-zero, and lines 215 and 216 show both the accrual and the fee paragraph inside
-    //       that gate, so a zero rate suppresses accrual entirely and no interest transaction is
-    //       written for the category at all. The hazard is created by this member's scale: a rate
-    //       stored as 0.00 arrives as a BigDecimal of scale 2, and BigDecimal equality compares
-    //       scale as well as value, so an equality test against the unscaled zero constant reports
-    //       false and the gate opens when it should stay shut. A signum or comparison test is
-    //       correct at every scale. The test itself lives in the service layer; it is documented
-    //       here because this mapping is what creates the hazard, and because the rate-lookup
-    //       result must keep a genuine zero rate distinguishable from a fallback to the DEFAULT
-    //       group rather than collapsing the two into one absent-rate case.
+    // Assumptions: NUMERIC(6,2) is the exact image of the PIC S9(04)V99 declared at
+    //     app/cpy/CVTRA02Y.cpy line 9 -- four integer digits and two fractional, so six display
+    //     bytes, the same 9999.99 ceiling and the same hundredth of a unit of resolution. The
+    //     migration declares interest_rate NUMERIC(6,2) NOT NULL to match, and BigDecimal is the
+    //     only Java type that carries it without loss. No approximate type is admissible here
+    //     under the migration plan's transformation rule T3, and the reason is specific rather
+    //     than stylistic: this rate is an operand and not a value that is merely displayed, so a
+    //     rate such as 15.00 or 2.50 that no binary floating-point type represents exactly would
+    //     carry its error into the multiplication and settle into money a customer is charged.
+    // Assumptions: the arithmetic that consumes this value is owned by
+    //     com.carddemo.common.money.Money and is never performed here, and the entity's scale is
+    //     what makes the order of that arithmetic matter. The baseline parenthesises the
+    //     multiplication in its own source -- the balance is multiplied by this rate first, and
+    //     only the product is divided -- and because both operands carry scale 2 the raw product
+    //     carries scale 4, so the product has to be formed at full precision before anything is
+    //     scaled. Dividing first and multiplying second yields a different final cent on many
+    //     balances, which is why transformation rule T4 keeps the order and why no helper here
+    //     offers a shortcut that would invite it to be reordered.
     @Column(name = "interest_rate", precision = 6, scale = 2, nullable = false)
     private BigDecimal interestRate;
 
@@ -310,11 +252,11 @@ public class DisclosureGroup {
      * fully-specified constructor available instead.</p>
      */
     protected DisclosureGroup() {
-        // WHY : Assumptions: the body is deliberately empty because the provider assigns both
-        //       members after construction. Initialising anything here would be overwritten on a
-        //       hydrate, and initialising the rate to zero would be actively harmful: a row that
-        //       failed to populate would then read as a genuine zero rate, which is the one value
-        //       that suppresses accrual outright, so a load fault would present as a business rule.
+        // Assumptions: the body is deliberately empty because the provider assigns both
+        //     members after construction. Initialising anything here would be overwritten on a
+        //     hydrate, and initialising the rate to zero would be actively harmful: a row that
+        //     failed to populate would then read as a genuine zero rate, which is the one value
+        //     that suppresses accrual outright, so a load fault would present as a business rule.
     }
 
     /**
@@ -330,13 +272,6 @@ public class DisclosureGroup {
      * type is annotated immutable, so rows originate in {@code reference-service} or in the
      * extract-transform-load load. This constructor serves test fixtures and in-memory
      * construction; a job in normal operation obtains an instance by reading one.</p>
-     *
-     * <p>Trade-offs: only the identifier is checked. The rate is left unguarded even though its
-     * column is not nullable, because the schema's own constraint is the authority on nullability
-     * and restating it here would create a second validation site that can disagree with the first
-     * -- and the one that disagreed would be this one, since it cannot see a constraint introduced
-     * by the owning service. The identifier is the exception because equality and hashing below
-     * depend on it, so a null there breaks this type's own contract rather than the schema's.</p>
      *
      * @param id the three-part lookup key of account group, transaction type and transaction
      *     category, in that physical order; must not be {@code null}
@@ -414,18 +349,18 @@ public class DisclosureGroup {
         if (this == other) {
             return true;
         }
-        // WHY : Assumptions: a pattern match is used rather than an exact class comparison because
-        //       the provider may return an instrumented subclass for a lazily-loaded reference, and
-        //       a strict class comparison would then report a row as unequal to itself. No subclass
-        //       of this type is authored, so widening the test costs nothing.
+        // Assumptions: a pattern match is used rather than an exact class comparison because
+        //     the provider may return an instrumented subclass for a lazily-loaded reference, and
+        //     a strict class comparison would then report a row as unequal to itself. No subclass
+        //     of this type is authored, so widening the test costs nothing.
         if (!(other instanceof DisclosureGroup that)) {
             return false;
         }
-        // WHY : Alternatives Considered: including the rate in the comparison was evaluated and
-        //       rejected. Two rows cannot share this key, so the key alone already discriminates
-        //       every row the table can hold; adding the rate would only let two readings of the
-        //       SAME row compare unequal if the rate were ever changed by its owning service
-        //       between them, which is the opposite of what identity should express.
+        // Alternatives Considered: including the rate in the comparison was evaluated and
+        //     rejected. Two rows cannot share this key, so the key alone already discriminates
+        //     every row the table can hold; adding the rate would only let two readings of the
+        //     SAME row compare unequal if the rate were ever changed by its owning service
+        //     between them, which is the opposite of what identity should express.
         return Objects.equals(id, that.id);
     }
 
@@ -458,22 +393,6 @@ public class DisclosureGroup {
      * the surrounding text. An operator diagnosing a lookup that found nothing is looking for
      * exactly that class of difference, and an unquoted rendering would hide it.</p>
      *
-     * <p>Assumptions: the group identifier will nonetheless appear here WITHOUT the padding that
-     * the baseline supplies, and that has to be stated so it is not misread as evidence of a
-     * fault. PostgreSQL treats trailing blanks in a {@code character(n)} value as semantically
-     * insignificant and strips them on output, so a row whose stored key occupies its full ten
-     * octets still yields the seven-character {@code DEFAULT} here. An operator who sees
-     * {@code 'DEFAULT'} in a log is therefore looking at the padded stored key, not at a row that
-     * was loaded unpadded, and must not conclude either that the padding was lost or that the
-     * column is variable-length -- under a variable-length column the padding would have survived
-     * into this rendering, and the lookup would have behaved differently.</p>
-     *
-     * <p>Assumptions: no member of this record is a primary account number, a card verification
-     * value or a national identifier -- the disclosure-group record declares none of them, holding
-     * only reference codes and a rate. Nothing here therefore needs masking, and that is recorded
-     * so a change does not add a sensitive member to this rendering on the assumption that the
-     * method was already safe for one.</p>
-     *
      * @return a single-line rendering naming the type, the three key components and the rate
      */
     @Override
@@ -496,8 +415,8 @@ public class DisclosureGroup {
      * {@code RECORD KEY IS FD-DISCGRP-KEY} -- so the key is one 16-byte value and not three
      * independent lookups.</p>
      *
-     * <p><b>Assumptions: the constructor takes its three arguments in the physical order of the
-     * key, which is NOT the order the interest program assigns them in.</b> The parameter order is
+     * <p>Assumptions: the constructor takes its three arguments in the physical order of the
+     * key, which is NOT the order the interest program assigns them in. The parameter order is
      * group, then type, then category, matching {@code app/cpy/CVTRA02Y.cpy} lines 6 to 8, the file
      * description at {@code app/cbl/CBACT04C.cbl} lines 79 to 81, and the primary key the migration
      * declares. The program assigns the category at {@code app/cbl/CBACT04C.cbl} line 211 and the
@@ -517,14 +436,14 @@ public class DisclosureGroup {
      * reaches the database rather than at the point of construction.</p>
      */
     @Embeddable
-    // WHY : Assumptions: the persistence specification requires the type of an embedded identifier
-    //       to be serializable, because the provider holds a detached copy of the key in its own
-    //       structures -- the entry key of the persistence context and of a second-level cache
-    //       region -- independently of the entity instance. The interface is therefore implemented
-    //       to satisfy that contract rather than for any use this module makes of serialization
-    //       itself, and the version below is pinned to a literal rather than left to the default
-    //       computation so that recompiling the class cannot change it and invalidate a serialized
-    //       form that a cache region is still holding.
+    // Assumptions: the persistence specification requires the type of an embedded identifier
+    //     to be serializable, because the provider holds a detached copy of the key in its own
+    //     structures -- the entry key of the persistence context and of a second-level cache
+    //     region -- independently of the entity instance. The interface is therefore implemented
+    //     to satisfy that contract rather than for any use this module makes of serialization
+    //     itself, and the version below is pinned to a literal rather than left to the default
+    //     computation so that recompiling the class cannot change it and invalidate a serialized
+    //     form that a cache region is still holding.
     public static class DisclosureGroupId implements Serializable {
 
         /**
@@ -533,97 +452,56 @@ public class DisclosureGroup {
          */
         private static final long serialVersionUID = 1L;
 
-        // WHY : Assumptions: this is the LEADING component, and the declaration order of the three
-        //       members in this class is load-bearing rather than cosmetic. It is the copybook's
-        //       own order at app/cpy/CVTRA02Y.cpy lines 6 to 8, which is the order of the group
-        //       item at line 5 and therefore the order of the reference file's 16-byte record key,
-        //       and it is confirmed a second time by the file description at
-        //       app/cbl/CBACT04C.cbl lines 79 to 81 and a third time by the KEYS(16 0) operand of
-        //       app/jcl/DISCGRP.jcl line 40. The owning service's migration declares its primary
-        //       key on (acct_group_id, tran_type_cd, tran_cat_cd) to match.
-        // WHY : Assumptions: CHAR(10) exactly, because the baseline presents this key in two
-        //       different widths and only a fixed-character column treats them as one value.
-        //       app/cpy/CVTRA02Y.cpy line 6 declares the component PIC X(10);
-        //       app/cbl/CBACT04C.cbl line 210 moves ACCT-GROUP-ID into it, itself PIC X(10) at
-        //       app/cpy/CVACT01Y.cpy line 16, so that path supplies ten characters; and on a
-        //       lookup miss line 437 moves the SEVEN-character literal 'DEFAULT' into that same
-        //       ten-byte field, where COBOL left-justifies and space-fills it. The key the retry
-        //       searches for is therefore 'DEFAULT' followed by three spaces, while a predicate a
-        //       reader would naturally write names the bare literal.
-        // WHY : Trade-offs: fixed-character semantics are what reconcile those two widths, and the
-        //       behaviour was measured rather than assumed because the detail is easy to get
-        //       backwards. PostgreSQL treats trailing blanks in a character(n) value as
-        //       semantically insignificant in BOTH directions: a shorter value is blank-filled to
-        //       the declared width on the way in, so storage always occupies ten octets, and the
-        //       trailing blanks are stripped again on the way out, so this member reads back as the
-        //       seven-character 'DEFAULT' whichever form was written. Comparison ignores them too,
-        //       so the padded key and the bare literal are one key and neither form can miss.
-        //       Under VARCHAR(10) none of that holds: the padding would be preserved as data, the
-        //       padded and bare forms would be two distinct values, and every call site would have
-        //       to agree on padding or miss. Missing there is not loud -- the lookup would find
-        //       nothing, the baseline would take its DEFAULT fallback, that would find nothing
-        //       either, and the run would abend reporting a missing default group, an error naming
-        //       neither the column type nor the padding. Both sides of this join are therefore
-        //       pinned at CHAR(10) together: Account.groupId in this same package is the other
-        //       side, and changing one without the other silently breaks the rate lookup.
-        // WHY : Assumptions: the fixed-character binding is expressed through the provider's JDBC
-        //       type code rather than through a column definition. Standard column metadata cannot
-        //       express the CHAR-versus-VARCHAR distinction at all, and a column definition is a
-        //       DDL-implying attribute this DDL-passive mapping may not declare, so the type code
-        //       describes the existing binding while length retains the declared width. The
-        //       override is repeated on each of the three components rather than stated once,
-        //       because it applies per member and an omission on any one would leave the provider
-        //       to infer a variable-length binding for that component independently.
+        // Assumptions: this is the LEADING component, and the declaration order of the three
+        //     members in this class is load-bearing rather than cosmetic. It is the copybook's
+        //     own order at app/cpy/CVTRA02Y.cpy lines 6 to 8, which is the order of the group
+        //     item at line 5 and therefore the order of the reference file's 16-byte record key,
+        //     and it is confirmed a second time by the file description at
+        //     app/cbl/CBACT04C.cbl lines 79 to 81 and a third time by the KEYS(16 0) operand of
+        //     app/jcl/DISCGRP.jcl line 40. The owning service's migration declares its primary
+        //     key on (acct_group_id, tran_type_cd, tran_cat_cd) to match.
+        // Assumptions: CHAR(10) exactly, because the baseline presents this key in two
+        //     different widths and only a fixed-character column treats them as one value.
+        //     app/cpy/CVTRA02Y.cpy line 6 declares the component PIC X(10);
+        //     app/cbl/CBACT04C.cbl line 210 moves ACCT-GROUP-ID into it, itself PIC X(10) at
+        //     app/cpy/CVACT01Y.cpy line 16, so that path supplies ten characters; and on a
+        //     lookup miss line 437 moves the SEVEN-character literal 'DEFAULT' into that same
+        //     ten-byte field, where COBOL left-justifies and space-fills it. The key the retry
+        //     searches for is therefore 'DEFAULT' followed by three spaces, while a predicate a
+        //     reader would naturally write names the bare literal.
         @JdbcTypeCode(SqlTypes.CHAR)
         @Column(name = "acct_group_id", length = 10, nullable = false, updatable = false)
         private String acctGroupId;
 
-        // WHY : Assumptions: the SECOND component, DIS-TRAN-TYPE-CD PIC X(02) at
-        //       app/cpy/CVTRA02Y.cpy line 7, occupying zero-based offsets 10 and 11. It is carried
-        //       as text and not as a number because the picture is alphanumeric, so the two
-        //       characters are a code rather than a quantity, and it is fixed-width rather than
-        //       variable because it is a key component -- the declared width is part of the
-        //       contract, which is what the 16-byte key operand depends on. The owning service
-        //       declares it CHAR(2), deliberately the same type the transaction tables give the
-        //       same code, so a lookup across them needs no cast.
+        // Assumptions: the SECOND component, DIS-TRAN-TYPE-CD PIC X(02) at
+        //     app/cpy/CVTRA02Y.cpy line 7, occupying zero-based offsets 10 and 11. It is carried
+        //     as text and not as a number because the picture is alphanumeric, so the two
+        //     characters are a code rather than a quantity, and it is fixed-width rather than
+        //     variable because it is a key component -- the declared width is part of the
+        //     contract, which is what the 16-byte key operand depends on. The owning service
+        //     declares it CHAR(2), deliberately the same type the transaction tables give the
+        //     same code, so a lookup across them needs no cast.
         @JdbcTypeCode(SqlTypes.CHAR)
         @Column(name = "tran_type_cd", length = 2, nullable = false, updatable = false)
         private String tranTypeCd;
 
-        // WHY : Assumptions: the TRAILING component, DIS-TRAN-CAT-CD PIC 9(04) at
-        //       app/cpy/CVTRA02Y.cpy line 8, occupying zero-based offsets 12 to 15.
-        // WHY : Alternatives Considered: this member was derived one way from the copybook and then
-        //       settled the other way by the migration, and the divergence is recorded rather than
-        //       smoothed over. Deriving from the picture alone gives a bounded four-digit numeric
-        //       code, which would narrow to a small integer the way a three-digit credit score
-        //       does elsewhere in the migration. The owning service's V1__reference.sql instead
-        //       declares tran_cat_cd CHAR(4) NOT NULL, and its own note gives the reason: six
-        //       independent baseline sources carry this field as CHARACTER, and an integer column
-        //       would drop the leading zeros all six depend on, turning 0001 into 1. Being part of
-        //       the key makes that stronger here rather than weaker, because 0001 and 1 must not
-        //       resolve to two different keys. A text type it is, therefore, and the picture is
-        //       recorded above for provenance. Two further reasons make this binding, and not the
-        //       narrower one, the only workable choice from inside this module: the provider
-        //       asserts its mappings against the physical schema at start-up, so an integer member
-        //       over a fixed-character column would fail that assertion before a row was read;
-        //       and this module holds no grant that could alter the column to suit the mapping.
-        // WHY : Assumptions: the numeric picture still constrains the VALUES, and preserving the
-        //       leading zeros is what keeps that faithful. app/cbl/CBACT04C.cbl line 483 sets the
-        //       category of the interest transaction it generates by moving the two-character
-        //       literal '05' into a PIC 9(04) field, and a numeric picture right-justifies and
-        //       zero-fills, so the value stored is 0005 and never '05' followed by two spaces.
-        //       The four characters must therefore be supplied at their declared width with the
-        //       leading zeros intact, and the fixed-character column offers no safety net for a
-        //       caller who omits them: its trailing-blank insensitivity forgives a value that is
-        //       short on the RIGHT, whereas a missing leading zero is short on the LEFT. A value
-        //       of '5' is stored as '5' plus three blanks and compares as '5', which is simply a
-        //       different key from '0005' -- so it misses rather than being normalised.
-        // WHY : Assumptions: the digits-only half of the picture is deliberately not re-asserted as
-        //       a constraint on this member. Nothing reads this field arithmetically, the owning
-        //       service does not assert it either, and the baseline does not enforce it at rest --
-        //       the utility that loads the cluster copies bytes without consulting a picture
-        //       clause. The two properties the composite key actually depends on, fixed width and
-        //       preserved leading zeros, are exactly what the fixed-character binding guarantees.
+        // Assumptions: the TRAILING component, DIS-TRAN-CAT-CD PIC 9(04) at
+        //     app/cpy/CVTRA02Y.cpy line 8, occupying zero-based offsets 12 to 15.
+        // Alternatives Considered: this member was derived one way from the copybook and then
+        //     settled the other way by the migration, and the divergence is recorded rather than
+        //     smoothed over. Deriving from the picture alone gives a bounded four-digit numeric
+        //     code, which would narrow to a small integer the way a three-digit credit score
+        //     does elsewhere in the migration. The owning service's V1__reference.sql instead
+        //     declares tran_cat_cd CHAR(4) NOT NULL, and its own note gives the reason: six
+        //     independent baseline sources carry this field as CHARACTER, and an integer column
+        //     would drop the leading zeros all six depend on, turning 0001 into 1. Being part of
+        //     the key makes that stronger here rather than weaker, because 0001 and 1 must not
+        //     resolve to two different keys. A text type it is, therefore, and the picture is
+        //     recorded above for provenance. Two further reasons make this binding, and not the
+        //     narrower one, the only workable choice from inside this module: the provider
+        //     asserts its mappings against the physical schema at start-up, so an integer member
+        //     over a fixed-character column would fail that assertion before a row was read;
+        //     and this module holds no grant that could alter the column to suit the mapping.
         @JdbcTypeCode(SqlTypes.CHAR)
         @Column(name = "tran_cat_cd", length = 4, nullable = false, updatable = false)
         private String tranCatCd;
@@ -638,11 +516,11 @@ public class DisclosureGroup {
          * value on which equality and hashing would both be meaningless.</p>
          */
         protected DisclosureGroupId() {
-            // WHY : Assumptions: the body is deliberately empty because the provider assigns all
-            //       three components after construction, so anything initialised here would be
-            //       overwritten on a hydrate. Defaulting a component to spaces or zeros would be
-            //       worse than leaving it absent: it would produce a syntactically valid key that
-            //       silently matches no row.
+            // Assumptions: the body is deliberately empty because the provider assigns all
+            //     three components after construction, so anything initialised here would be
+            //     overwritten on a hydrate. Defaulting a component to spaces or zeros would be
+            //     worse than leaving it absent: it would produce a syntactically valid key that
+            //     silently matches no row.
         }
 
         /**
@@ -716,15 +594,15 @@ public class DisclosureGroup {
             if (!(other instanceof DisclosureGroupId that)) {
                 return false;
             }
-            // WHY : Assumptions: the components are compared exactly as held, with no trimming and
-            //       no padding applied here. Normalising either way was the alternative and is
-            //       declined because it would make in-memory equality disagree with the database
-            //       for one of the two forms, and a key that behaves one way in a collection and
-            //       another in a query is worse than one that is simply literal. It is also
-            //       unnecessary: the fixed-width column already strips the trailing blanks of a
-            //       character(n) value on the way out, so a value that arrived padded and one that
-            //       arrived bare are the same string by the time either reaches this method.
-            //       Equality is therefore literal on values the database has already normalised.
+            // Assumptions: the components are compared exactly as held, with no trimming and
+            //     no padding applied here. Normalising either way was the alternative and is
+            //     declined because it would make in-memory equality disagree with the database
+            //     for one of the two forms, and a key that behaves one way in a collection and
+            //     another in a query is worse than one that is simply literal. It is also
+            //     unnecessary: the fixed-width column already strips the trailing blanks of a
+            //     character(n) value on the way out, so a value that arrived padded and one that
+            //     arrived bare are the same string by the time either reaches this method.
+            //     Equality is therefore literal on values the database has already normalised.
             return Objects.equals(acctGroupId, that.acctGroupId)
                     && Objects.equals(tranTypeCd, that.tranTypeCd)
                     && Objects.equals(tranCatCd, that.tranCatCd);

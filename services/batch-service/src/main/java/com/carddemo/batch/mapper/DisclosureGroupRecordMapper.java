@@ -118,22 +118,32 @@ import java.util.Objects;
  * package handles that is not money. No binary floating-point type appears anywhere in this class,
  * which the {@code LayeringRulesTest} architecture gate asserts rather than requests.</p>
  *
- * <h2>Round-tripping, and its two documented limits</h2>
+ * <h2>Round-tripping, and the argument that makes it exact</h2>
  *
- * <p>Trade-offs: {@code toRecord(toEntity(image))} reproduces {@code image} byte for byte, subject to
- * two limits that are stated rather than engineered away. The first is the {@code FILLER} asymmetry
- * the package charter rules on: the span at {@code app/cpy/CVTRA02Y.cpy} line 10 is dropped on decode
- * and rebuilt as blanks on encode, so the round trip is exact when the source padding was blank and
- * substitutes blanks when it was not. That case is real rather than hypothetical --
- * {@code app/data/ASCII/discgrp.txt} fills those 28 bytes with ASCII zeros -- so a caller comparing a
- * re-encoded seed record against its source will see the padding differ and nothing else. The second
- * is negative zero: an exact decimal has no signed zero, so a rate whose source span carried the
- * negative-zero overpunch character, a right brace, re-encodes carrying the positive-zero overpunch
- * character, a left brace. A caller that needs byte exactness across that one span has
- * {@code com.carddemo.common.codec.FixedWidthCodec.encodeRecordPreservingSign} available, which takes
- * the source image and restores the carrier; no overload is offered here, because the baseline's own
- * disclosure-group data holds no negative rate at all and an unused overload is a second encode path
- * to keep in step with this one.</p>
+ * <p>Assumptions: {@code toRecord(toEntity(image), image)} reproduces {@code image} byte for byte, and
+ * the SECOND ARGUMENT is what makes that true. Two regions of this record survive a decode only as
+ * bytes. The first is the {@code FILLER} asymmetry the package charter rules on: the span at
+ * {@code app/cpy/CVTRA02Y.cpy} line 10 is dropped on decode and has no entity member to rebuild it
+ * from, so the single-argument overload writes blanks there. That is real rather than hypothetical, and
+ * the AUTHORITATIVE data is the counterexample: bytes 22 to 49 of the first record of
+ * {@code app/data/ASCII/discgrp.txt} are ASCII zeros, not spaces, and every record in that file is
+ * padded the same way. So a seed record re-encoded through the single-argument overload differs from
+ * its source across the whole 28-byte pad. The second region is negative zero: an exact decimal has no
+ * signed zero, so a rate whose source span carried the negative-zero overpunch character, a right
+ * brace, re-encodes through the single-argument overload carrying the positive-zero one, a left
+ * brace.</p>
+ *
+ * <p>Refactoring Rationale: {@link #toRecord(DisclosureGroup, byte[])} restores both regions from the
+ * source image, and it exists because an earlier revision of this class argued that no such overload
+ * was warranted -- on the grounds that "the baseline's own disclosure-group data holds no negative rate
+ * at all" and that an unused overload would be a second encode path to keep in step. Both halves of
+ * that were wrong. The claim was about the SIGN and left the PAD unaddressed even while the sentence
+ * before it recorded that the seed pad is ASCII zeros, so the class documented the defect and then
+ * declined to fix it; and the overload is not unused, because the backup generation named above is
+ * exactly the caller that needs it. The two overloads are kept in step by sharing one field map, so
+ * the only difference between them is what the second one restores afterwards. The single-argument
+ * overload remains correct, and remains the right entry point, for a row that has no source image
+ * because none was ever read.</p>
  *
  * <h2>What this class does not do</h2>
  *
@@ -202,6 +212,16 @@ public final class DisclosureGroupRecordMapper {
      * The copybook name of the signed annual percentage rate that follows the key.
      */
     private static final String FIELD_INT_RATE = "DIS-INT-RATE";
+
+    /**
+     * The registered name of the trailing pad span.
+     *
+     * <p>Assumptions: the anonymous {@code FILLER} at {@code app/cpy/CVTRA02Y.cpy} line 10 is registered
+     * under this exact name, which is why the span can be addressed for the source-image restoration in
+     * {@link #toRecord(DisclosureGroup, byte[])}. It is named as a constant rather than inlined so that
+     * the one place it is looked up cannot disagree with the descriptor over its spelling.</p>
+     */
+    private static final String FIELD_FILLER = "FILLER";
 
     // WHY : Assumptions: this span is SIX bytes and not seven. PIC S9(04)V99 at
     //       app/cpy/CVTRA02Y.cpy:9 declares four digit positions before the implied decimal point and
@@ -375,30 +395,104 @@ public final class DisclosureGroupRecordMapper {
      *     which covers a group identifier or type code longer than its declared width
      */
     public static byte[] toRecord(DisclosureGroup entity) {
-        Objects.requireNonNull(entity, "disclosure group entity must not be null");
+        return FixedWidthCodec.encodeRecord(fieldMap(entity), LAYOUT);
+    }
 
-        // WHY : Assumptions: an encode path exists on a row this module cannot write, and the two
-        //       senses of read-only are different. The grant on reference.disclosure_groups is SELECT
-        //       only, per the migration plan's section 0.4.1.3, so no row is ever written from here --
-        //       but this method writes no row. It returns a byte array, and the disclosure-group
-        //       backup generation group defined at app/jcl/DEFGDGD.jcl:74-76 at LIMIT(5) with SCRATCH
-        //       needs that array to be byte-identical to the record it copies. Reading the database
-        //       restriction as making the byte image decode-only would delete this path as dead code
-        //       and take the backup family with it; reading this path as a licence to persist would
-        //       reach a grant that refuses it. Neither reading is right, which is why both are named.
+    /**
+     * Encodes one interest-rate row into its 50-byte image, restoring from a source image what the
+     * entity cannot carry.
+     *
+     * <p>Refactoring Rationale: this overload exists because the single-argument one cannot reproduce
+     * the AUTHORITATIVE pad. Bytes 22 to 49 of every record of {@code app/data/ASCII/discgrp.txt} are
+     * ASCII zeros rather than spaces, and the {@code FILLER} span at {@code app/cpy/CVTRA02Y.cpy} line
+     * 10 has no entity member to rebuild it from, so a seed record re-encoded without its source image
+     * differs from that source across all 28 pad bytes. A disclosure-group backup generation --
+     * {@code app/jcl/DEFGDGD.jcl:74-76} defines one at {@code LIMIT(5)} with {@code SCRATCH} -- is
+     * expected to be the bytes that were read rather than a rendering of them, so this is the overload
+     * a generation must be written through.</p>
+     *
+     * <p>Assumptions: the two regions restored here are the two a decode cannot carry. The pad is copied
+     * unconditionally, having no entity member that could disagree with it. The sign carrier of a zero
+     * rate is restored because an exact decimal has no signed zero, so a span whose source carried the
+     * negative-zero overpunch character would otherwise re-encode carrying the positive-zero one.</p>
+     *
+     * <p>Assumptions: this method still writes no database row, exactly as the single-argument overload
+     * does not. The grant on {@code reference.disclosure_groups} is {@code SELECT} only, per the
+     * migration plan's section 0.4.1.3; both overloads return a byte array and neither persists
+     * anything, so the restriction on the table and the existence of an encode path do not conflict.
+     * That is recorded because reading the grant as making the byte image decode-only would delete both
+     * paths as dead code and take the backup family with them.</p>
+     *
+     * @param entity the row to render, whose composite identifier supplies the three key components and
+     *     whose rate supplies the fourth field; must not be {@code null}
+     * @param sourceImage the byte array of exactly 50 bytes the entity was decoded from; it is read and
+     *     never modified, and it supplies the 28-byte trailing pad and the zero-rate sign carrier
+     * @return a newly allocated byte array of exactly 50 bytes that reproduces {@code sourceImage}
+     *     wherever the entity's members still agree with it, including the pad exactly as it was read
+     * @throws NullPointerException if {@code entity} is {@code null}
+     * @throws IllegalArgumentException if the row's identifier or any of its three components is
+     *     {@code null}, if the category code is not exactly four ASCII digits, or if the rate is
+     *     {@code null}, carries a scale other than the descriptor's, or has a magnitude the
+     *     descriptor's integer digit positions cannot hold
+     * @throws CopybookLayout.LayoutException if the registered descriptor no longer declares a field
+     *     this class names
+     * @throws FixedWidthCodec.RecordLengthException if {@code sourceImage} is {@code null} or is not
+     *     exactly 50 bytes
+     * @throws FixedWidthCodec.FieldCodecException if a supplied value does not fit its declared field
+     */
+    public static byte[] toRecord(DisclosureGroup entity, byte[] sourceImage) {
+        // WHY : Assumptions: the sign-preserving entry point is used rather than the plain one because
+        //       it also performs the width check on the source image, so a caller that passed an image
+        //       of the wrong length is told so by width rather than by an array bounds failure raised
+        //       from inside the pad copy below.
+        byte[] encoded =
+                FixedWidthCodec.encodeRecordPreservingSign(fieldMap(entity), LAYOUT, sourceImage);
+
+        copySpan(sourceImage, encoded, LAYOUT.field(FIELD_FILLER));
+        return encoded;
+    }
+
+    /**
+     * Builds the four-entry field map both encode overloads render.
+     *
+     * <p>Assumptions: all three key components are rendered by {@link DisclosureGroupKey} rather than
+     * padded again here. The group identifier is reached through that type's blank-padding entry point,
+     * because a value read back out of a fixed-character column arrives with its trailing blanks already
+     * stripped, and the category code is rendered by that type's four-digit form. Two places that pad
+     * one key are how two representations of one key drift apart, and only one of the two is ever
+     * brought back into line.</p>
+     *
+     * <p>Assumptions: insertion order is preserved so the map reads in copybook declaration order,
+     * matching the order the codec walks the descriptor in. The codec keys by name and so does not
+     * require it, but a map that reads in a different order from the record it produces is a map a
+     * reader has to reconcile against the descriptor by hand.</p>
+     *
+     * <p>Assumptions: the {@code FILLER} span is supplied to the codec by OMISSION. The single-argument
+     * overload relies on that to get blanks; the source-image overload relies on it so that the copy it
+     * performs afterwards writes over blanks rather than fighting a value this map had asserted.</p>
+     *
+     * <p>Refactoring Rationale: extracted so the two overloads share one construction of the map rather
+     * than each building its own. Two copies would be two places for a field name or an insertion order
+     * to drift, and the whole point of the second overload is that it differs from the first ONLY in
+     * what it restores afterwards.</p>
+     *
+     * @param entity the row whose four field values are wanted; must not be {@code null}
+     * @return a mutable map in copybook declaration order, carrying the three key components and the
+     *     rate and deliberately omitting the pad
+     * @throws NullPointerException if {@code entity} is {@code null}
+     * @throws IllegalArgumentException if the identifier, any component or the rate is unusable, on the
+     *     terms the two public overloads document
+     */
+    private static Map<String, Object> fieldMap(DisclosureGroup entity) {
+        Objects.requireNonNull(entity, "disclosure group entity must not be null");
         DisclosureGroupKey key = toJobKey(entity.getId());
 
-        // WHY : Assumptions: insertion order is preserved so the map reads in copybook declaration
-        //       order, matching the order the codec walks the descriptor in. The codec keys by name
-        //       and so does not require it, but a map that reads in a different order from the record
-        //       it produces is a map a reader has to reconcile against the descriptor by hand.
         Map<String, Object> fields = new LinkedHashMap<>();
         fields.put(FIELD_ACCT_GROUP_ID, key.accountGroupId());
         fields.put(FIELD_TRAN_TYPE_CD, key.transactionTypeCode());
         fields.put(FIELD_TRAN_CAT_CD, key.transactionCategoryCodeField());
         fields.put(FIELD_INT_RATE, encodableRate(entity.getInterestRate()));
-
-        return FixedWidthCodec.encodeRecord(fields, LAYOUT);
+        return fields;
     }
 
     /**
@@ -783,4 +877,21 @@ public final class DisclosureGroupRecordMapper {
         return "field " + field.name() + " at offset " + field.start() + " with length "
                 + field.length() + " and kind " + field.kind();
     }
+
+    /**
+     * Copies one field's span verbatim from a source image into an encoded image.
+     *
+     * <p>Assumptions: the span is addressed through the registered descriptor rather than through
+     * literal offsets, so a change to the record's geometry moves this copy with it instead of
+     * silently overwriting the wrong bytes.</p>
+     *
+     * @param source the byte array to read from, of the record's declared length
+     * @param target the byte array to write into, of the same length; the span is overwritten in place
+     * @param field the {@code CopybookLayout.FieldSpec} descriptor naming the offset and length of the
+     *     span to copy
+     */
+    private static void copySpan(byte[] source, byte[] target, CopybookLayout.FieldSpec field) {
+        System.arraycopy(source, field.start(), target, field.start(), field.length());
+    }
+
 }

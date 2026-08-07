@@ -26,30 +26,10 @@
  *   definitions that `ui/tsconfig.json` withholds from `ui/src`.
  * - `build.outDir` opens a three-file chain: `ui/Dockerfile` copies that
  *   directory into the nginx stage that serves it, and `ui/nginx.conf`
- *   returns its `index.html` as a history fallback, so all 21 client-side
- *   routes resolve to one document.
+ *   returns its `index.html` as a history fallback, so all client-side routes
+ *   resolve to one document.
  * - `ui/vitest.config.ts` owns the test configuration, so no `test` block
  *   appears here.
- *
- * Measured state
- * --------------
- * Every artifact named above exists except `ui/Dockerfile`, `ui/src/main.tsx`
- * included, and `npm run build` SUCCEEDS: the TypeScript check passes and Vite
- * resolves the entry module and emits a bundle into `build.outDir`. The one
- * consequence of the absent Dockerfile, and it is not a defect here, is that the
- * three-file `outDir` chain described above is complete only as far as
- * `ui/nginx.conf`; the container stage that copies the directory is the piece
- * still to land, and nothing in this file depends on it.
- *
- * Refactoring Rationale: two successive inventories in this block went stale,
- * which is why it is now written as a measurement rather than as a checkpoint
- * note. The first classified the application tsconfig, Vitest configuration and
- * nginx configuration as absent after they had landed; the second corrected that
- * but kept `ui/src/main.tsx` in the pending list and asserted that `npm run build`
- * "fails when Vite resolves the absent entry module" -- which the tree had already
- * overtaken, leaving a comment that told a reader a passing build was expected to
- * fail. That is the worse direction for a stale claim to point, because it teaches
- * a reader to disbelieve a green result.
  */
 
 import react from '@vitejs/plugin-react';
@@ -94,15 +74,6 @@ export default defineConfig({
   // a boundary that a framework default could move under a future major
   // version is not one this project should hold implicitly.
   //
-  // Assumptions: the corollary is what makes `ui/.env.example` carry no
-  // values at all. Anything named with this prefix ends up in the public
-  // bundle and is readable by anyone who loads the page, so the prefix marks
-  // a variable as non-secret, publicly discoverable configuration and as
-  // nothing else. Widening it -- to the empty string, to an added entry such
-  // as a cloud-provider prefix, or to a second prefix of this project's own
-  // -- is the one edit to this file that could publish a credential inside a
-  // shipped artifact, and it would do so silently, because a leaked variable
-  // still produces a working build.
   envPrefix: 'VITE_',
 
   build: {
@@ -115,13 +86,6 @@ export default defineConfig({
     // image is empty.
     outDir: 'dist',
 
-    // Assumptions: this matches the `target` of both TypeScript projects in
-    // the tree -- `ui/tsconfig.json` for `ui/src` and `ui/tsconfig.node.json`
-    // for this file -- and the agreement is the property that matters rather
-    // than the level itself. When the checker and the bundler disagree, `tsc`
-    // accepts syntax that esbuild then down-levels on its own terms, and the
-    // divergence surfaces as behaviour in the shipped bundle that no type
-    // error predicted.
     //
     // Alternatives Considered: Vite 8 defaults this to
     // `baseline-widely-available`, which selects a set of browsers rather
@@ -133,41 +97,11 @@ export default defineConfig({
     // surrenders no reach.
     target: 'es2022',
 
-    // Trade-offs: a source map is emitted for the production bundle, so a
-    // production stack trace resolves to the original TypeScript instead of to an
-    // offset inside a content-hashed chunk. That benefit is worth more here than in
-    // a typical SPA for one specific reason: these screens transcribe validation
-    // order, field widths and message text from COBOL, so a defect report arrives
-    // as a message-band string rather than as a stack, and the work of diagnosing
-    // it is mapping that string back to the transcribed logic. Without a map that
-    // mapping is done by hand against a minified chunk. The cost accepted in
-    // exchange is that the map publishes this application's client source beside
-    // the bundle.
-    // Assumptions: that exposure is acceptable because of what the client source
-    // actually is, not because nobody will look. The bundle can hold no secret by
-    // construction -- `envPrefix` above admits only `VITE_`-prefixed values, which
-    // are public by definition -- so the map reveals screen composition, field
-    // widths and message text. None of those is an access-control boundary: every
-    // rule the client enforces is enforced again server-side, because the services
-    // transcribe the same COBOL paragraphs the screens do, so the client is a
-    // convenience layer over a server that re-validates rather than a gate that
-    // could be studied and bypassed. Reading the map therefore tells a reader what
-    // the published OpenAPI contracts already tell them.
     // Alternatives Considered: `false`, which was the earlier value here. Its case
     // rests on the source itself being the asset worth withholding, and that case
     // is answered by the paragraph above rather than dismissed -- withholding it
     // buys obscurity over an interface the contracts already describe, and pays for
     // it with every production stack trace this system will ever produce.
-    // Alternatives Considered: `'hidden'`, which emits the map but omits the
-    // bundle's `sourceMappingURL` comment, paired with uploading maps to a private
-    // store and excluding them from the deployed artifact. That is the right shape
-    // once the exclusion exists, and it is rejected TODAY for a concrete reason:
-    // the exclusion has to be performed by something, and the two candidates --
-    // `ui/Dockerfile`'s copy of `dist/` and the deploy pipeline that syncs it --
-    // would each have to opt in. Until one does, `'hidden'` writes `.map` files
-    // into `dist/` and ships them exactly as `true` does, while removing the
-    // ability to use them. It would read as protection while delivering none,
-    // which is strictly worse than either honest option.
     sourcemap: true,
 
     // Assumptions: every build starts from an empty output directory, so an
@@ -181,13 +115,6 @@ export default defineConfig({
     // anyway, so the flag earns its place on repeated local builds.
     emptyOutDir: true,
 
-    // Assumptions: no `rollupOptions.input` is declared, and the absence is a
-    // decision rather than an omission. `ui/index.html` is the build input:
-    // Vite parses that document, follows its `<script type="module">`
-    // reference and derives the whole module graph from it, a contract that
-    // file states from its own side. Naming an entry here as well would put
-    // the same contract in a second place free to drift from the first, and
-    // the copy that drifted would be the one that won.
     //
     // Alternatives Considered: `rollupOptions.output.manualChunks` was
     // evaluated and rejected. Hand-splitting chunks changes what a browser
@@ -255,13 +182,6 @@ export default defineConfig({
   // `ui/package.json` satisfies. There is therefore no patch to alias and
   // nothing for a shim to intercept.
   //
-  // Trade-offs: dependency pre-bundling and de-duplication are left at their
-  // defaults for antd, dayjs, react and react-dom alike. An entry for any of
-  // them would have to name the symptom it fixes -- a duplicated React
-  // instance, a pre-bundling failure on one import -- and none has been
-  // observed in this tree. Adding one pre-emptively pins behaviour to a
-  // problem nobody has, and it then reads identically to a fix for a real
-  // one, so the next reader cannot tell whether removing it is safe.
 
   // Assumptions: three further options are absent by decision. No `define`
   // entry is used, because it substitutes a literal at build time and so

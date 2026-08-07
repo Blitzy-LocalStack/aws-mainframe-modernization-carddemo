@@ -1466,4 +1466,3 @@ resource "aws_sfn_state_machine" "adhoc" {
 
   depends_on = [aws_iam_role_policy.this]
 }
-

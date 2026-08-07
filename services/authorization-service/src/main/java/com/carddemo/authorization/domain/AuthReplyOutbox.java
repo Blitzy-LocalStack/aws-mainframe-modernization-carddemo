@@ -12,20 +12,24 @@ import java.time.LocalDateTime;
  * One authorization reply awaiting publication, held in the transactional outbox.
  *
  * <p>This table has no counterpart in the baseline, and its absence there is precisely why it exists
- * here. The baseline consumer commits its database work with a syncpoint at
- * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} line 335 and then publishes the reply with
- * a no-syncpoint put at line 753. Those are two separate units of work, so a failure between them
- * leaves an authorization that the data says was decided and an acquirer that never received an answer.
- * Writing the reply into this table inside the SAME transaction as the decision, and publishing it
- * afterwards, closes that window: the row and the decision commit together or neither commits, and the
- * publisher can then retry publication as often as it needs to without re-deciding anything.</p>
+ * here. The baseline consumer publishes its reply BEFORE it persists or commits the decision:
+ * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} performs {@code 7100-SEND-RESPONSE} at line
+ * 461, reaching the no-syncpoint put at lines 753 to 758; performs {@code 8000-WRITE-AUTH-TO-DB} only
+ * afterwards at line 464; and reaches its syncpoint at line 335 later still, because the whole paragraph
+ * is performed at line 330. The put, the write and the commit are three separate units of work in that
+ * order, so a failure after the put leaves an acquirer holding an answer that no committed row accounts
+ * for -- and the request behind it was destroyed on read by the no-syncpoint get at line 389, so it
+ * cannot be presented again to re-derive the decision. Writing the reply into this table inside the SAME
+ * transaction as the decision, and publishing it afterwards, closes that window from the other side: the
+ * row and the decision commit together or neither commits, no answer can precede the row that justifies
+ * it, and the publisher can retry publication as often as it needs to without re-deciding anything.</p>
  *
- * <p>Trade-offs: the alternative was to publish first and commit second, which trades a lost reply for
- * a duplicate one. That is not obviously worse in isolation -- the reply queue is a FIFO queue with a
- * deduplication identifier, so a duplicate would be suppressed -- but it makes the acquirer's answer
- * arrive before the row that justifies it exists, so a subsequent inquiry against a just-answered
- * authorization can legitimately find nothing. The outbox has neither failure mode and costs one extra
- * row write per authorization.</p>
+ * <p>Trade-offs: the alternative was to keep publishing first and commit second, as the baseline does,
+ * which trades a duplicate reply for an unjustified one. That is not obviously worse in isolation -- the
+ * reply queue is a FIFO queue with a deduplication identifier, so a duplicate would be suppressed -- but
+ * it makes the acquirer's answer arrive before the row that justifies it exists, so a subsequent inquiry
+ * against a just-answered authorization can legitimately find nothing. The outbox has neither failure
+ * mode and costs one extra row write per authorization.</p>
  *
  * <p>Assumptions: publication order is preserved by the identity column, which is monotonic, so the
  * publisher can drain in insertion order and the FIFO queue receives per-card messages in the order
@@ -79,26 +83,56 @@ public class AuthReplyOutbox {
     private String correlationId;
 
     /**
-     * The ordering group the reply belongs to, which is the card number.
+     * The ordering group the reply belongs to, as the purpose-scoped keyed token over the card number.
      *
      * <p>Assumptions: grouping by card preserves per-card ordering while leaving different cards free
      * to be delivered in parallel, which is what the queue's group semantics provide. A single constant
      * group would serialise every reply in the system behind one another; a per-message group would
      * preserve no ordering at all.</p>
+     *
+     * <p>Refactoring Rationale: the value stored here is a TOKEN and no longer the card number itself,
+     * and the column is named for what it holds. That mattered because this column is not payload: the
+     * publisher copies it onto the send as the queue's {@code MessageGroupId}, which is message
+     * METADATA -- server-side encryption covers the message body and not its metadata, so a group
+     * identifier appears in queue telemetry, in send traces and in anything observing the queue.
+     * Storing the raw number therefore both wrote a primary account number into this table and
+     * published one on every reply. A keyed token from
+     * {@link com.carddemo.common.codec.CsvAuthCodec.AuthReply#orderGroup(
+     * com.carddemo.common.security.OpaqueIdentifier)} preserves the whole grouping SEMANTIC -- equal
+     * for equal cards, different for different cards -- which is the only property the ordering
+     * guarantee rests on, and it discloses nothing to a holder without the key. The requirement is
+     * stated in {@code docs/adr/ADR-004-messaging.md} under "Ordering is grouped by card".</p>
+     *
+     * <p>Assumptions: the token is derived once, inside the deciding transaction, and stored. Deriving
+     * it at publication time would make the publisher hold key material and would make an unparseable
+     * payload unpublishable, which is precisely the case where publishing matters most.</p>
+     *
+     * <p>Assumptions: the declared width stays 128 although a token occupies exactly
+     * {@code OpaqueIdentifier.TOKEN_LENGTH} characters. The column is not narrowed to the token width,
+     * because narrowing it would make the schema depend on the current derivation's output length, and a
+     * future purpose-scoped derivation with a different width would then need a migration to store a
+     * value that is in every other respect the same thing.</p>
+
      */
-    @Column(name = "message_group_id", nullable = false, length = 128)
-    private String messageGroupId;
+    @Column(name = "order_group_token", nullable = false, length = 128)
+    private String orderGroupToken;
 
     /**
-     * The deduplication identifier, which is the acquirer's transaction identifier.
+     * The deduplication identity, as the purpose-scoped keyed token over the card and transaction pair.
      *
-     * <p>Assumptions: using the transaction identifier rather than a content hash makes duplicate
-     * suppression independent of the payload, so a re-decided authorization that produces a
-     * byte-different reply is still recognised as the same reply. A content hash would treat it as a new
-     * message and the acquirer would receive two answers to one request.</p>
+     * <p>Assumptions: tokenising the card-and-transaction pair rather than hashing the payload makes
+     * duplicate suppression independent of the bytes, so a re-published reply whose rendering changed is
+     * still recognised as the same reply. A content hash would treat it as a new message and the
+     * acquirer would receive two answers to one request.</p>
+     *
+     * <p>Refactoring Rationale: the acquirer's transaction identifier was stored and published raw. It
+     * is tokenised for the same reason as the group: a deduplication identifier is metadata rather than
+     * body, and the transaction identifier is the value that joins a queue observer's view to a
+     * cardholder's purchase everywhere else it is recorded. The purpose string differs from the
+     * correlation purpose, so the two tokens over that one pair cannot be joined to each other.</p>
      */
-    @Column(name = "deduplication_id", nullable = false, length = 128)
-    private String deduplicationId;
+    @Column(name = "deduplication_token", nullable = false, length = 128)
+    private String deduplicationToken;
 
     /**
      * The encoded reply body, in the wire format named by {@link #getContentType()}.
@@ -178,22 +212,23 @@ public class AuthReplyOutbox {
      * @param replyQueueUrl where the reply must be sent, taken from the request; must not be
      *     {@code null}
      * @param correlationId the correlation identifier to echo; may be {@code null}
-     * @param messageGroupId the ordering group, which is the card number; must not be {@code null}
-     * @param deduplicationId the deduplication identifier, which is the transaction identifier; must
-     *     not be {@code null}
+     * @param orderGroupToken the ordering group, as the keyed token over the card number rather than
+     *     the number itself; must not be {@code null}
+     * @param deduplicationToken the deduplication identity, as the keyed token over the card and
+     *     transaction pair rather than the pair itself; must not be {@code null}
      * @param payload the encoded reply body; must not be {@code null}
      * @param expiresAt when the reply stops being worth sending, in coordinated universal time; may be
      *     {@code null} to mean it never expires
      * @param createdAt when this row was written, in coordinated universal time; must not be
      *     {@code null}
      */
-    public AuthReplyOutbox(String replyQueueUrl, String correlationId, String messageGroupId,
-            String deduplicationId, String payload, LocalDateTime expiresAt,
+    public AuthReplyOutbox(String replyQueueUrl, String correlationId, String orderGroupToken,
+            String deduplicationToken, String payload, LocalDateTime expiresAt,
             LocalDateTime createdAt) {
         this.replyQueueUrl = replyQueueUrl;
         this.correlationId = correlationId;
-        this.messageGroupId = messageGroupId;
-        this.deduplicationId = deduplicationId;
+        this.orderGroupToken = orderGroupToken;
+        this.deduplicationToken = deduplicationToken;
         this.payload = payload;
         this.contentType = CONTENT_TYPE_CSV;
         this.expiresAt = expiresAt;
@@ -231,19 +266,21 @@ public class AuthReplyOutbox {
     /**
      * Returns the ordering group the reply belongs to.
      *
-     * @return the message group identifier, never {@code null} on a persisted instance
+     * @return the keyed group token, never the card number and never {@code null} on a persisted
+     *     instance
      */
-    public String getMessageGroupId() {
-        return this.messageGroupId;
+    public String getOrderGroupToken() {
+        return this.orderGroupToken;
     }
 
     /**
-     * Returns the deduplication identifier.
+     * Returns the deduplication identity.
      *
-     * @return the deduplication identifier, never {@code null} on a persisted instance
+     * @return the keyed deduplication token, never the transaction identifier and never {@code null} on
+     *     a persisted instance
      */
-    public String getDeduplicationId() {
-        return this.deduplicationId;
+    public String getDeduplicationToken() {
+        return this.deduplicationToken;
     }
 
     /**

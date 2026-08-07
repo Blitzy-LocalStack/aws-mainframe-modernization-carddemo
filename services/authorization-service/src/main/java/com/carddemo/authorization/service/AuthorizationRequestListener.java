@@ -4,7 +4,9 @@ import com.carddemo.authorization.domain.AuthReplyOutbox;
 import com.carddemo.authorization.domain.PendingAuthDetail;
 import com.carddemo.authorization.domain.PendingAuthDetailKey;
 import com.carddemo.authorization.domain.PendingAuthSummary;
+import com.carddemo.authorization.config.MessagingIdentityConfig.MessagingTokeniser;
 import com.carddemo.authorization.dto.AuthorizationRequestPayload;
+import com.carddemo.authorization.mapper.AuthorizationMessageMapper;
 import com.carddemo.authorization.repository.OutboxRepository;
 import com.carddemo.authorization.repository.PendingAuthDetailRepository;
 import com.carddemo.authorization.repository.PendingAuthSummaryRepository;
@@ -12,9 +14,13 @@ import com.carddemo.common.codec.CsvAuthCodec;
 import com.carddemo.common.codec.CsvAuthCodec.AuthMessageFormatException;
 import com.carddemo.common.codec.CsvAuthCodec.AuthReply;
 import com.carddemo.common.codec.CsvAuthCodec.AuthRequest;
+import com.carddemo.common.messaging.MessageExpiry;
+import com.carddemo.common.messaging.MessagingCorrelationId;
 import com.carddemo.common.money.Money;
-import com.carddemo.common.web.CorrelationIdFilter;
+import com.carddemo.common.observability.LogSafeText;
+import com.carddemo.common.security.OpaqueIdentifier;
 import io.awspring.cloud.sqs.annotation.SqsListener;
+import jakarta.validation.ConstraintViolationException;
 import java.time.Clock;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
@@ -22,6 +28,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -37,9 +44,13 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <p>This is the migrated form of {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl}. The
  * baseline is a long-running task that reads its request queue at line 389, resolves the card, account
- * and customer at lines 448 to 452, decides at lines 657 to 734, writes the decision to its databases at
- * lines 790 to 791, commits with a syncpoint at line 335 and puts its reply at line 753. Four properties
- * of that program are preserved here and one defect in it is deliberately not:</p>
+ * and customer at lines 448 to 452, decides at lines 657 to 734, PUTS ITS REPLY at line 461 -- reaching
+ * the no-syncpoint put at lines 753 to 758 -- writes the decision to its databases afterwards at lines
+ * 790 to 791 under the guard at line 463, and commits with a syncpoint at line 335 later still, the whole
+ * paragraph having been performed at line 330. Reading only the line numbers suggests commit-then-publish;
+ * the paragraph order is what settles it, and it is publish-then-write-then-commit. Four properties of
+ * that program are preserved here, and one of its orderings is deliberately inverted rather than
+ * reproduced:</p>
  *
  * <ul>
  *   <li>The unit of work is ONE MESSAGE. The baseline commits per message, so a failure affects the
@@ -54,12 +65,16 @@ import org.springframework.transaction.annotation.Transactional;
  *       subject to the allowlist argued at {@link #enqueueReply}.</li>
  * </ul>
  *
- * <p>Refactoring Rationale: the defect not preserved is the lost-reply window. The baseline commits its
- * data and then publishes its reply as two separate units of work, so a failure between them leaves an
- * authorization the data says was decided and a requester that never hears back. This method writes the
- * reply into {@link AuthReplyOutbox} INSIDE the deciding transaction, and {@link OutboxPublisher} sends
- * it afterwards. The row and the decision therefore commit together or neither does, and publication can
- * be retried without re-deciding. The divergence is registered in
+ * <p>Refactoring Rationale: the ordering not reproduced is publish-before-commit. The baseline puts its
+ * reply first and writes and commits its decision afterwards, as three separate units of work, so a
+ * failure after the put leaves a requester holding an answer that no committed row accounts for -- and
+ * the request cannot be presented again to re-derive it, because the destructive no-syncpoint get at line
+ * 389 destroyed it on read. This method writes the reply into {@link AuthReplyOutbox} INSIDE the deciding
+ * transaction, and {@link OutboxPublisher} sends it afterwards. The row and the decision therefore commit
+ * together or neither does, no answer precedes the row that justifies it, and publication can be retried
+ * without re-deciding. Assumptions: this is a documented difference between source and target, not an
+ * assertion that the baseline is wrong -- the baseline is the parity oracle and is unchanged. The
+ * divergence is registered as {@code D-5} in
  * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
  *
  * <p>Refactoring Rationale: the card was previously resolved to an account by reading the account
@@ -95,7 +110,11 @@ public class AuthorizationRequestListener {
      * deciding it would reserve funds against an authorization whose requester has already given up
      * waiting. The resolution is recorded in {@code docs/adr/ADR-004-messaging.md}.</p>
      */
-    public static final String HEADER_EXPIRES_AT = "expiresAt";
+    // WHY : Refactoring Rationale: this now ALIASES the shared constant rather than repeating its
+    //   literal. The expiry attribute is honoured by three consumers and its name is part of the
+    //   contract every producer writes against, so a second literal spelling here could drift from
+    //   the one the other two consumers read, and nothing would report the divergence.
+    public static final String HEADER_EXPIRES_AT = MessageExpiry.HEADER_EXPIRES_AT;
 
     /**
      * The message attribute carrying the requester's correlation identifier, echoed onto the reply.
@@ -202,9 +221,47 @@ public class AuthorizationRequestListener {
     private final AuthorizationDecisionService decisions;
 
     /**
+     * The validated crossing from the decoded wire record to the structured payload.
+     *
+     * <p>Refactoring Rationale: this collaborator is what makes the DECLARED contract the LIVE one. The
+     * decoder establishes that a message splits into eighteen fields of admissible widths; it does not
+     * establish that those fields satisfy the payload's own domains, because those constraints are
+     * declared on the payload and there was nothing to apply them to. This consumer previously worked
+     * straight from the decoded record, so every constraint the payload declared -- requiredness, the
+     * digits-only expressions on the two numeric-picture fields, the amount domain -- was asserted only
+     * by tests and by the never-invoked structured path, and the live queue path enforced none of
+     * them.</p>
+     */
+    private final AuthorizationMessageMapper payloads;
+
+    /**
      * The seam to the context that owns the cross-reference, account and customer records.
      */
     private final AccountContextClient accounts;
+
+    /**
+     * The keyed tokeniser every identity this consumer writes into queue metadata is derived through.
+     *
+     * <p>Refactoring Rationale: this collaborator did not exist, and its absence is the whole of finding
+     * C-04. Without it the only per-card stable value available for a first-in-first-out group identity
+     * was the card number, so the card number was used -- and a group identity is metadata, not payload:
+     * the publisher copies it onto the send, where it leaves the encrypted body, appears in queue
+     * telemetry and reaches every log and metric that observes the queue. Holding the tokeniser as a
+     * collaborator rather than deriving tokens inline also keeps the key in one place, so a rotation is a
+     * configuration change rather than a code change.</p>
+     *
+     * <p>Assumptions: the SAME key is shared with every other producer on this queue. That sharing is
+     * required rather than incidental: the group identity has to be equal for equal cards across
+     * producers, because that equality IS the per-card ordering guarantee. A per-instance key would put
+     * one card's messages into as many groups as there are instances.</p>
+     *
+     * <p>Assumptions: ONE tokeniser serves both queue identities the outbox row carries -- the ordering
+     * group and the deduplication identity -- rather than one collaborator per identity. A second
+     * collaborator would be a second key to rotate for no gain: the two derivations are already kept
+     * unjoinable by their differing PURPOSE strings, which is a property of the derivation rather than
+     * of the key it is performed with.</p>
+     */
+    private final OpaqueIdentifier messagingTokeniser;
 
     /**
      * The reply destinations this consumer is permitted to publish to.
@@ -232,7 +289,8 @@ public class AuthorizationRequestListener {
      * <p>Assumptions: an atomic counter rather than a plain field, because the listener container delivers
      * messages on several threads concurrently -- its concurrency is configured on the annotation below --
      * so a non-atomic increment would lose counts and the window would run past its quota by an amount
-     * nothing bounds.</p>
+     * nothing bounds. The counter holds the slots USED in the current window and is advanced and wrapped
+     * in one atomic update, so it is always between zero and one less than the quota.</p>
      *
      * <p>Trade-offs: the counter is per INSTANCE and therefore per task, not per queue. Two tasks each
      * handle up to the quota before each closes its own window, so the platform-wide figure is the quota
@@ -259,7 +317,11 @@ public class AuthorizationRequestListener {
      * @param details the detail repository; must not be {@code null}
      * @param outbox the outbox repository; must not be {@code null}
      * @param decisions the decision logic; must not be {@code null}
+     * @param payloads the validated crossing from the wire record to the structured payload; must not
+     *     be {@code null}
      * @param accounts the account-context seam; must not be {@code null}
+     * @param messagingTokeniser the keyed tokeniser every queue identity is derived through; must not be
+     *     {@code null}
      * @param replyQueueAllowlist the reply destinations this consumer may publish to; must not be empty
      * @param clock the clock staleness, timestamps and authorization keys are read from; must not be
      *     {@code null}
@@ -269,10 +331,14 @@ public class AuthorizationRequestListener {
      *     {@code null}
      * @throws IllegalArgumentException if {@code requestProcessLimit} is not positive, a non-positive
      *     window admitting no request at all
+     * @throws NullPointerException if {@code messagingTokeniser} is {@code null}, because an absent
+     *     tokeniser has no safe fallback: the only value available to group by would be the card number
      */
     public AuthorizationRequestListener(PendingAuthSummaryRepository summaries,
             PendingAuthDetailRepository details, OutboxRepository outbox,
-            AuthorizationDecisionService decisions, AccountContextClient accounts,
+            AuthorizationDecisionService decisions, AuthorizationMessageMapper payloads,
+            AccountContextClient accounts,
+            @MessagingTokeniser OpaqueIdentifier messagingTokeniser,
             @Value("${carddemo.messaging.reply-queue-allowlist}") List<String> replyQueueAllowlist,
             Clock clock,
             @Value("${carddemo.messaging.request-process-limit:" + DEFAULT_REQUEST_PROCESS_LIMIT + "}")
@@ -288,7 +354,14 @@ public class AuthorizationRequestListener {
         this.details = details;
         this.outbox = outbox;
         this.decisions = decisions;
+        this.payloads = payloads;
         this.accounts = accounts;
+        // WHY : Assumptions: an absent tokeniser fails here rather than being tolerated with a fallback.
+        //   The only other value this consumer holds that is per-card and stable is the card number
+        //   itself, so any fallback would be the exact exposure the tokeniser exists to remove, and it
+        //   would appear silently at run time on the reply path rather than at startup.
+        this.messagingTokeniser =
+                Objects.requireNonNull(messagingTokeniser, "messagingTokeniser must not be null");
         this.replyQueueAllowlist = List.copyOf(replyQueueAllowlist);
         this.clock = clock;
         this.requestProcessLimit = requestProcessLimit;
@@ -320,20 +393,49 @@ public class AuthorizationRequestListener {
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void onRequest(Message<String> message) {
         String correlationId = conformingCorrelationId(message);
-        MDC.put(MDC_CORRELATION_ID, correlationId == null ? "" : correlationId);
+
+        // WHY : Assumptions: the LOGGING context carries the sanitised rendering while the reply carries
+        // the value verbatim. The two are deliberately different renderings of one identity: a log record
+        // must not be able to carry a delimiter or a line terminator, and a reply must carry the
+        // requester's own bytes. Putting the raw value here would make every log line this message
+        // produces forgeable by its sender.
+        MDC.put(MDC_CORRELATION_ID, MessagingCorrelationId.logSafe(correlationId));
         try {
             LocalDateTime now = LocalDateTime.ofInstant(this.clock.instant(), ZoneOffset.UTC);
+            if (hasUnparseableExpiry(message)) {
+                // WHY : Alternatives Considered: treating an unparseable expiry as ABSENT, which is what
+                // the two INQUIRY consumers of the same helper do, and which would let a request whose
+                // attribute merely differs in formatting still be answered. Rejected on THIS flow because
+                // it fails open on the one control that stops a stale request being DECIDED: a producer
+                // that wants an expired request honoured need only corrupt the attribute. The two inquiry
+                // flows answer read-only questions, so honouring a stale one costs a wasted reply; this one
+                // commits a decision and moves the account's counters, and the reference broker never
+                // delivered an expired request to the program at all.
+                // WHY : Assumptions: only the LENGTH is logged and the value itself never is. It came off
+                // the wire, it did not parse as an instant, and therefore nothing bounds what it contains
+                // -- which is exactly the case the sanitiser cannot be relied on to make safe to read.
+                LOG.warn("event=auth.request.dropped reason=expiry-unparseable length={}",
+                        expiryLength(message));
+                return;
+            }
             if (isStale(message, now)) {
                 // WHY : Trade-offs: a stale request is dropped rather than declined. Declining would
                 // publish a reply to a requester that has already stopped waiting and would consume a
                 // deduplication identifier, so a legitimate retry of the same transaction would then be
                 // suppressed as a duplicate of an answer nobody read.
+                // WHY : Assumptions: the header is passed through the shared sanitiser even though
+                // reaching this line already implies it PARSED as an instant -- the guard above has
+                // already refused every value that did not -- so the value here cannot carry free text.
+                // The sanitiser is applied anyway because the guarantee is indirect: it holds only while
+                // that guard keeps standing in front of this one, and a later edit reordering the two
+                // would silently turn this into a raw wire value in a log record. One call is a cheaper
+                // guarantee than a comment asking a future reader to re-derive the argument.
                 LOG.warn("event=auth.request.dropped reason=expired expiresAt={}",
-                        header(message, HEADER_EXPIRES_AT));
+                        LogSafeText.sanitize(header(message, HEADER_EXPIRES_AT)));
                 return;
             }
             AuthRequest request = CsvAuthCodec.decodeRequest(message.getPayload());
-            requireAmountWithinRecordDomain(request.transactionAmount());
+            requireDeclaredContract(request);
             Optional<PendingAuthDetail> alreadyDecided = existingDecision(request);
             if (alreadyDecided.isPresent()) {
                 // WHY : Assumptions: the queue suppresses duplicates only inside its deduplication
@@ -366,18 +468,34 @@ public class AuthorizationRequestListener {
      * received and still occupied the window; not counting it would let one poison message that redelivers
      * indefinitely keep a window open indefinitely.</p>
      *
-     * <p>Refactoring Rationale: the counter is reset BEFORE the boundary is invoked rather than after, so
-     * the next window starts counting immediately even while the boundary is still cycling the container
-     * on its own thread. Resetting afterwards would leave a window that is nominally full but still
-     * receiving, and every message arriving in that gap would fire the boundary again.</p>
+     * <p>Refactoring Rationale: the count and the reset are ONE atomic step, and they were two -- an
+     * increment, a comparison, then a separate subtraction of the observed value. Two steps could not hold
+     * under the container's configured concurrency: with several handlers finishing at once, two threads
+     * could each observe a count at or past the quota, each subtract its own observation, and leave the
+     * counter NEGATIVE -- after which the next window admitted the quota plus the deficit before closing,
+     * and the boundary fired twice for one window. The update below is applied by
+     * {@link java.util.concurrent.atomic.AtomicInteger#getAndUpdate}, which retries until it wins, so the
+     * counter walks 0 to quota-1 and back to 0 and can be neither negative nor greater than the quota.
+     * Exactly one thread observes the last slot of a window, so the boundary fires exactly once.</p>
+     *
+     * <p>Assumptions: the quota bounds the messages ADMITTED to a window, not the messages in flight at
+     * one instant. When the boundary fires, up to the container's configured concurrency of messages may
+     * still be executing -- each already counted -- and the boundary stops further INTAKE rather than
+     * interrupting them; a message that arrives while the container is cycling belongs to the next window
+     * and is counted there. That is the same discipline the reference program has: its counter bounds the
+     * gets it issues, and the message it is holding when the count is reached is still processed to
+     * completion before the loop exits.</p>
      */
     private void countTowardsWindow() {
-        int handled = this.handledInWindow.incrementAndGet();
-        if (handled < this.requestProcessLimit) {
-            return;
+        int slotsUsedBefore = this.handledInWindow.getAndUpdate(
+                used -> used + 1 >= this.requestProcessLimit ? 0 : used + 1);
+        if (slotsUsedBefore + 1 >= this.requestProcessLimit) {
+            // WHY : Assumptions: the reported figure is the quota itself rather than a recount, because
+            //       the thread that took the last slot is by construction the quota-th admission of this
+            //       window. Reporting a re-read of the counter would report the NEXT window's count, the
+            //       reset having already happened inside the atomic update above.
+            this.windowBoundary.onWindowComplete(this.requestProcessLimit);
         }
-        this.handledInWindow.addAndGet(-handled);
-        this.windowBoundary.onWindowComplete(handled);
     }
 
     /**
@@ -508,6 +626,15 @@ public class AuthorizationRequestListener {
      * nothing on the retry, because the failed insert never committed, and the retry lands on a later
      * millisecond.</p>
      *
+     * <p>Refactoring Rationale: the MATCH STATUS is derived from the decision here and passed in,
+     * where an earlier revision let the entity fix it to pending. The reference insert selects between
+     * two values on exactly this condition -- {@code cbl/COPAUA0C.cbl} L902 tests
+     * {@code IF AUTH-RESP-APPROVED}, L903 sets the pending value on that branch and L905 the declined
+     * value on the other -- so a fixed value recorded every decline as an authorization still awaiting
+     * a match. Deriving it from {@link AuthorizationDecisionService.Decision#approved()} is what keeps
+     * the persisted state, the response code and the approved amount three renderings of ONE decision
+     * rather than three independent ones.</p>
+     *
      * @param accountId the resolved account; must not be {@code null}
      * @param request the decoded request; must not be {@code null}
      * @param decision the decision reached; must not be {@code null}
@@ -527,7 +654,31 @@ public class AuthorizationRequestListener {
                 request.merchantCategoryCode(), request.acquirerCountryCode(),
                 shortOf(request.posEntryMode()), request.merchantId(), request.merchantName(),
                 request.merchantCity(), request.merchantState(), request.merchantZip(),
-                request.transactionId());
+                request.transactionId(), matchStatusFor(decision));
+    }
+
+    /**
+     * Renders a decision as the match status the segment stores.
+     *
+     * <p>Assumptions: the mapping is total and has exactly two outcomes, because the reference test at
+     * {@code cbl/COPAUA0C.cbl} L902 has exactly two branches and no default. An approval becomes
+     * {@link PendingAuthDetail#MATCH_STATUS_PENDING} -- pending a match against a posted transaction,
+     * which is a live commitment -- and a decline becomes
+     * {@link PendingAuthDetail#MATCH_STATUS_DECLINED}, which is terminal because nothing will ever
+     * match a declined authorization.</p>
+     *
+     * <p>Assumptions: the two states the domain also admits are NOT reachable from here.
+     * {@code PA-MATCH-PENDING-EXPIRED} is set when a pending row ages out and
+     * {@code PA-MATCHED-WITH-TRAN} when posting matches one, so both are later transitions on an
+     * existing row rather than initial states, and the entity refuses either at construction.</p>
+     *
+     * @param decision the decision reached; must not be {@code null}
+     * @return the one-character match status to persist, never {@code null}
+     */
+    private String matchStatusFor(AuthorizationDecisionService.Decision decision) {
+        return decision.approved()
+                ? PendingAuthDetail.MATCH_STATUS_PENDING
+                : PendingAuthDetail.MATCH_STATUS_DECLINED;
     }
 
     /**
@@ -554,35 +705,54 @@ public class AuthorizationRequestListener {
     }
 
     /**
-     * Refuses a requested amount the pending-authorization record cannot hold.
+     * Refuses a decoded request that does not satisfy the payload contract this context publishes.
      *
-     * <p>Assumptions: the domain itself is stated once, by
-     * {@link AuthorizationRequestPayload#isAmountWithinRecordDomain(Money)}, and this method only
-     * decides what happens when a value fails it. Duplicating the bounds here would put the same rule in
-     * two executable places, and the copy is the one that would fall behind -- which is exactly how the
-     * queue payload's constraints and the live path came to differ.</p>
+     * <p>Refactoring Rationale: this is the LIVE validation boundary, and it did not exist. The consumer
+     * previously applied exactly one hand-written check here -- the amount domain -- and worked from the
+     * decoded wire record for everything else, so every other constraint
+     * {@link AuthorizationRequestPayload} declares was enforced only on the structured path that no
+     * message travels. The consequences were concrete rather than theoretical: an absent field passed,
+     * because the decoder only splits and does not require; and a processing code or entry mode holding
+     * letters passed and was then silently rewritten by digit-stripping into a plausible number, so a
+     * malformed value was persisted as a well-formed different one. Routing the decoded record through
+     * {@link AuthorizationMessageMapper#toPayload(AuthRequest)} makes the declared contract the enforced
+     * contract, and the amount domain arrives with it rather than being restated.</p>
      *
-     * <p>Assumptions: the check runs BEFORE the idempotency seek and before every lookup, so a
-     * nonconforming request touches neither the account context nor a row. Ordering it after the seek
-     * would let a malformed amount take a row lock on the way to being refused.</p>
+     * <p>Assumptions: the crossing runs BEFORE the idempotency seek and before every lookup and every
+     * transformation, so a nonconforming request touches neither the account context nor a row and no
+     * value is normalised on the way to being refused. Ordering it after the seek would let a malformed
+     * message take a row lock; ordering it after the transformations is what allowed a stripped value to
+     * be stored.</p>
      *
      * <p>Trade-offs: the request is refused rather than declined. Declining would record an
      * authorization and consume the account's declined counter for a message that never conformed to the
      * contract, and would answer a requester as though its request had been considered; refusing lets the
-     * queue redeliver it and then dead-letter it, which is the same treatment every other malformed field
+     * queue redeliver it and then dead-letter it, which is the same treatment every malformed field
      * already receives from the decoder. The refusal is a divergence from the baseline, which performs no
      * such check and would approve a negative amount, and it is registered as
      * {@code D-NEGATIVE-AUTH-AMOUNT} in
      * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
      *
-     * @param requested the decoded request amount; must not be {@code null}
-     * @throws AuthMessageFormatException if the amount is negative or beyond the record's magnitude
+     * <p>Assumptions: the raised message names the violated COMPONENTS and never their values. A
+     * violation report from the engine quotes the invalid value by default, and one of these components
+     * is a primary account number, so the paths are collected and the values are dropped -- which keeps
+     * the dead-letter diagnostic useful without writing cardholder data into it.</p>
+     *
+     * @param request the decoded wire record; must not be {@code null}
+     * @throws AuthMessageFormatException if the derived payload violates the published contract
      */
-    private void requireAmountWithinRecordDomain(Money requested) {
-        if (!AuthorizationRequestPayload.isAmountWithinRecordDomain(requested)) {
-            throw new AuthMessageFormatException("PA-RQ-TRANSACTION-AMT is outside the domain"
-                    + " 0.00 through " + Money.MAX_MAGNITUDE.toPlainString()
-                    + " that PA-TRANSACTION-AMT PIC S9(10)V99 COMP-3 accepts for a charge");
+    private void requireDeclaredContract(AuthRequest request) {
+        try {
+            this.payloads.toPayload(request);
+        } catch (ConstraintViolationException violations) {
+            String components = violations.getConstraintViolations().stream()
+                    .map(violation -> String.valueOf(violation.getPropertyPath()))
+                    .sorted()
+                    .distinct()
+                    .collect(Collectors.joining(", "));
+            throw new AuthMessageFormatException(
+                    "the request does not satisfy the published payload contract; the components at"
+                            + " fault are: " + components);
         }
     }
 
@@ -630,8 +800,23 @@ public class AuthorizationRequestListener {
                     + " allowlistSize={}", this.replyQueueAllowlist.size());
             return;
         }
-        this.outbox.save(new AuthReplyOutbox(replyQueueUrl, correlationId, reply.cardNum(),
-                reply.transactionId(), CsvAuthCodec.encodeReply(reply),
+        // WHY : Refactoring Rationale: the row carries KEYED TOKENS for the two queue identities, and it
+        //   carried the card number and the transaction identifier themselves before. Both values become
+        //   message metadata at publication -- MessageGroupId and MessageDeduplicationId -- and the
+        //   queue's server-side encryption covers a body and not its metadata, so the raw form put the
+        //   primary account number and the acquirer's transaction identifier into queue telemetry and
+        //   every send trace. The tokens keep both SEMANTICS intact, because each is equal for equal
+        //   inputs and different for different ones, which is the only property first-in-first-out
+        //   ordering and duplicate suppression need. This is what docs/adr/ADR-004-messaging.md requires
+        //   under "Ordering is grouped by card".
+        // WHY : Assumptions: both tokens are derived HERE, inside the deciding transaction, rather than at
+        //   publication. The publisher then needs no key material, and a row whose payload could not be
+        //   parsed is still publishable -- which is precisely the case where publishing matters most.
+        this.outbox.save(new AuthReplyOutbox(replyQueueUrl, correlationId,
+                reply.orderGroup(this.messagingTokeniser),
+                reply.deduplicationKey(this.messagingTokeniser),
+
+                CsvAuthCodec.encodeReply(reply),
                 now.plusSeconds(DEFAULT_REPLY_EXPIRY_SECONDS), now));
     }
 
@@ -669,37 +854,60 @@ public class AuthorizationRequestListener {
     }
 
     /**
-     * Reads the correlation attribute and returns it only when it conforms to the shared rule.
+     * Reads the correlation attribute and returns it unaltered when it satisfies the MESSAGING rule.
      *
-     * <p>Refactoring Rationale: this attribute previously went straight from the message into the logging
-     * context and into a persisted outbox row with no width and no alphabet check, while the servlet
-     * transport applied both to the same field. A requester could therefore write a quotation mark, a
-     * comma or sixty-four characters of anything into the log field the other transport refuses one
-     * character of. The rule now comes from
-     * {@link CorrelationIdFilter#isConformingCorrelationId(String)}, which is the single place it is
-     * defined, so the two transports cannot diverge again.</p>
+     * <p>Refactoring Rationale: the rule applied here is
+     * {@link MessagingCorrelationId#isCanonical(String)} and not the servlet one. Two defects are being
+     * corrected at once. First, this attribute once went straight from the message into the logging
+     * context and into a persisted row with no check at all, so a requester could write a line
+     * terminator into a log record. Second, the fix for that borrowed the SERVLET predicate, which
+     * bounds an identity at twenty-four characters drawn from a short alphabet -- appropriate for a value
+     * this system mints for a response header, and wrong for one a requester renders from a twenty-four
+     * BYTE queue field. Forty-eight hexadecimal characters, thirty-two base64 characters and a
+     * hyphenated identifier are all legitimate renderings of that field and all three failed the
+     * borrowed rule, so the consumer discarded identities its requesters were waiting on and answered
+     * with a reply carrying no correlation attribute at all.</p>
      *
-     * <p>Trade-offs: a nonconforming value is DROPPED and the request is still decided, where the servlet
-     * transport refuses the request outright. The asymmetry is deliberate: a caller holding an open
-     * connection can be told to correct its header and retry, whereas a queued authorization request
-     * cannot be corrected by its sender in time to matter, and destroying it over a log field would turn
-     * a diagnostics problem into a declined payment.</p>
+     * <p>Assumptions: a conforming value is returned VERBATIM -- not trimmed, not case-folded, not
+     * re-encoded -- because the requester pairs the answer to the question on the exact opaque value it
+     * sent. The separately sanitised rendering used for the logging context is produced by
+     * {@link MessagingCorrelationId#logSafe(String)}, so the value that reaches a log and the value that
+     * reaches the reply are allowed to differ, which is what lets the echo be exact without making the
+     * log forgeable.</p>
+     *
+     * <p>Trade-offs: a value that is PRESENT and non-canonical now REFUSES the message, where an earlier
+     * revision dropped the attribute and decided the request anyway. The reversal follows from the rule
+     * having widened: under the borrowed servlet rule a failing value was usually a legitimate identity
+     * in an unexpected shape, and destroying a payment authorization over that would have been wrong;
+     * under this rule a failing value carries a control character or exceeds the width the store can
+     * hold, and neither is something a legitimate requester expresses. Refusing lets the queue redeliver
+     * and then dead-letter the message, which leaves evidence, whereas dropping the attribute left the
+     * requester holding a correlation value that never came back and nothing to explain why.</p>
+     *
+     * <p>Assumptions: an ABSENT attribute is not a malformed one and is not refused. The baseline sets
+     * its own correlation field to a no-match constant before the read at {@code cbl/COPAUA0C.cbl} L396,
+     * so a requester that supplies none is ordinary; its reply carries none either.</p>
      *
      * @param message the received message; must not be {@code null}
-     * @return the correlation identifier to carry, or {@code null} when none was supplied or it did not
-     *     conform
+     * @return the correlation identifier to echo, exactly as supplied, or {@code null} when the message
+     *     carried none
+     * @throws AuthMessageFormatException if the attribute is present and not canonical
      */
     private String conformingCorrelationId(Message<String> message) {
         String candidate = header(message, HEADER_CORRELATION_ID);
-        if (candidate == null || candidate.isBlank()) {
+        if (!MessagingCorrelationId.isPresent(candidate)) {
             return null;
         }
-        if (!CorrelationIdFilter.isConformingCorrelationId(candidate)) {
-            // WHY : Assumptions: the LENGTH is reported and the value is not, for the same reason the
-            // value was refused -- writing it into this line would achieve exactly what the check
-            // prevents.
-            LOG.warn("event=auth.request.correlation-id-rejected length={}", candidate.length());
-            return null;
+        if (!MessagingCorrelationId.isCanonical(candidate)) {
+            // WHY : Assumptions: the length and the SANITISED rendering are reported, and the raw value
+            // is not. Reporting the sanitised form gives an operator enough to recognise which requester
+            // sent it while keeping out of the log record exactly what the refusal is for.
+            LOG.warn("event=auth.request.correlation-id-rejected length={} sanitised={}",
+                    candidate.length(), MessagingCorrelationId.logSafe(candidate));
+            throw new AuthMessageFormatException("the correlationId attribute is not canonical: a"
+                    + " messaging correlation identity must be at most "
+                    + MessagingCorrelationId.MAX_LENGTH
+                    + " printable US-ASCII characters with no space and no control character");
         }
         return candidate;
     }
@@ -712,48 +920,43 @@ public class AuthorizationRequestListener {
      * @return {@code true} when the message carries a parseable expiry that is at or before {@code now}
      */
     private boolean isStale(Message<String> message, LocalDateTime now) {
-        String raw = header(message, HEADER_EXPIRES_AT);
-        if (raw == null || raw.isBlank()) {
-            return false;
-        }
-        LocalDateTime expiresAt = parseExpiry(raw);
-        if (expiresAt == null) {
-            // WHY : Trade-offs: an unparseable expiry is treated as ABSENT rather than as already
-            // passed. Treating it as passed would let one malformed attribute silently discard every
-            // request from a requester whose formatting differs, and the request itself may be perfectly
-            // valid; the malformed attribute is logged where it is parsed instead.
-            LOG.warn("event=auth.request.expiry-unparseable length={}", raw.length());
-            return false;
-        }
-        return !now.isBefore(expiresAt);
+        // WHY : Refactoring Rationale: the parsing this delegates to was a private method here until two
+        // further consumers acquired the same obligation. Three copies of a rule about when to DISCARD a
+        // message would be three chances to disagree about it, and the symptom of a disagreement would be
+        // one requester's expiry honoured differently by two consumers -- an intermittently unanswered
+        // request rather than an error anywhere.
+        // WHY : Assumptions: the helper answers false for an unparseable value, so this method alone would
+        // fail open. The caller therefore refuses an unparseable value BEFORE consulting this one, and this
+        // method deliberately does not repeat that check: a second copy of the malformed rule here is how
+        // the two would drift apart.
+        return MessageExpiry.isExpired(header(message, HEADER_EXPIRES_AT),
+                now.toInstant(ZoneOffset.UTC));
     }
 
     /**
-     * Parses an expiry attribute, accepting either an epoch-millisecond value or a local date and time.
+     * Reports whether a message supplied an expiry attribute that will not parse as an instant.
      *
-     * <p>Assumptions: two forms are accepted because the attribute crosses a service boundary and the
-     * requester is not necessarily this codebase. Accepting one form only would make interoperability
-     * depend on a formatting choice nobody negotiated.</p>
+     * <p>Assumptions: an ABSENT attribute is not unparseable. A request that states no expiry is answered
+     * under the separately documented no-expiry policy, which is what keeps a producer that never adopted
+     * the attribute working; a request that states one this consumer cannot read is refused instead,
+     * because the alternative is to let the attribute be defeated by corrupting it.</p>
      *
-     * @param raw the attribute value; must not be {@code null}
-     * @return the parsed instant in coordinated universal time, or {@code null} when neither form parses
+     * @param message the received message; must not be {@code null}
+     * @return {@code true} when the attribute is present, non-blank and does not parse
      */
-    private LocalDateTime parseExpiry(String raw) {
-        String trimmed = raw.trim();
-        try {
-            if (!trimmed.isEmpty() && trimmed.chars().allMatch(Character::isDigit)) {
-                return LocalDateTime.ofEpochSecond(Long.parseLong(trimmed) / 1000L,
-                        (int) (Long.parseLong(trimmed) % 1000L) * 1_000_000, ZoneOffset.UTC);
-            }
-            return LocalDateTime.parse(trimmed);
-        } catch (ArithmeticException | NumberFormatException
-                | java.time.format.DateTimeParseException notAnExpiry) {
-            // WHY : Assumptions: the caught value is deliberately not logged here. It came off the wire
-            // and this class has no way to know it carries no cardholder data, so the caller logs only
-            // its length. The exception is not rethrown because an attribute this class treats as
-            // optional must not be able to fail a message.
-            return null;
-        }
+    private boolean hasUnparseableExpiry(Message<String> message) {
+        return MessageExpiry.isMalformed(header(message, HEADER_EXPIRES_AT));
+    }
+
+    /**
+     * Reports the trimmed length of the supplied expiry attribute, for a diagnostic that omits its value.
+     *
+     * @param message the received message; must not be {@code null}
+     * @return the number of characters the attribute carries once trimmed, or zero when it is absent
+     */
+    private int expiryLength(Message<String> message) {
+        String raw = header(message, HEADER_EXPIRES_AT);
+        return raw == null ? 0 : raw.trim().length();
     }
 
     /**
@@ -769,24 +972,41 @@ public class AuthorizationRequestListener {
     }
 
     /**
-     * Parses the digits of a fixed-width numeric text field.
+     * Parses a fixed-width numeric text field, refusing anything that is not a digit.
      *
      * <p>Assumptions: the field is blank-padded rather than zero-padded in the baseline extract, so a
      * blank field parses to zero rather than failing. Zero is the value the packed field holds when the
-     * baseline leaves it unset.</p>
+     * baseline leaves it unset, and a blank-padded numeric field is the one case where an absence is
+     * legitimately a zero rather than a defect.</p>
+     *
+     * <p>Refactoring Rationale: a non-digit is REFUSED where it was previously STRIPPED. Stripping was
+     * the more serious of the two defects this method had: {@code "1A2"} became {@code 12} and
+     * {@code "N/A"} became {@code 0}, so a malformed value was silently rewritten into a well-formed
+     * DIFFERENT value and then persisted as though the acquirer had sent it. A refusal cannot be
+     * mistaken for data. The payload contract now also refuses such a value at the intake boundary, by
+     * the digits-only expressions {@link AuthorizationRequestPayload} declares on the two
+     * numeric-picture fields, so this method should never see one; it refuses rather than trusting that,
+     * because it is the last place the value is still recognisable as text.</p>
      *
      * @param text the field text; may be {@code null}
-     * @return the parsed value, or zero when the text holds no digits
+     * @return the parsed value, or zero when the text is absent or entirely blank
+     * @throws AuthMessageFormatException if the text holds any character that is neither a digit nor a
+     *     blank
      */
     private Integer digitsOf(String text) {
-        if (text == null) {
+        if (text == null || text.isBlank()) {
             return 0;
         }
         StringBuilder digits = new StringBuilder(text.length());
         for (int index = 0; index < text.length(); index++) {
             char character = text.charAt(index);
-            if (Character.isDigit(character)) {
+            if (character >= '0' && character <= '9') {
                 digits.append(character);
+            } else if (character != ' ') {
+                throw new AuthMessageFormatException(
+                        "a numeric-picture field carries a character that is neither a digit nor a"
+                                + " blank at position " + (index + 1) + "; the value is not rendered"
+                                + " here because this method is reached by fields the acquirer supplies");
             }
         }
         return digits.isEmpty() ? 0 : Integer.valueOf(digits.toString());

@@ -560,6 +560,45 @@ CREATE TABLE pending_auth_detail (
     --       table instead, and the reason each exists is given there.
     CONSTRAINT pk_pending_auth_detail PRIMARY KEY (account_id, auth_date, auth_time),
 
+    -- WHY : Assumptions: a RANGE is not the domain of a packed value, and these two
+    --       constraints exist because three values inside the obvious ranges name no
+    --       row at all. auth_date is YYDDD, so 367 is day 367 of year zero and 10000
+    --       is day ZERO of year ten; auth_time is HHMMSSmmm, so 126099999 is minute 60
+    --       and second 99 of hour twelve. Each is inside the five- and nine-digit
+    --       envelopes yet addresses either a row nobody meant or nothing at all, and a
+    --       key column that accepts a value no reader can render is the failure class
+    --       this migration is most exposed to -- plausible numbers that are wrong.
+    --       Decomposing the packed value and bounding each component is what refuses
+    --       them at the one place every writer passes through.
+    -- WHY : Assumptions: the year component of auth_date needs no test of its own,
+    --       because the ceiling of 99366 with a day of at most 366 already bounds the
+    --       quotient at 99. The hour and millisecond components of auth_time are
+    --       bounded the same way, by the 235959999 ceiling and by the modulus itself.
+    --       Only the minute and the second require an explicit bound.
+    -- WHY : Trade-offs: day 366 is admitted for EVERY two-digit year rather than only
+    --       for leap years, so one impossible value per non-leap year passes. Resolving
+    --       the leap year needs a century pivot, and the rationale on auth_orig_date
+    --       below records that the baseline never chose one; a pivot invented here would
+    --       reject a genuine leap-day authorization whose century this schema cannot
+    --       know. Admitting the wider of the two cannot lose a real row.
+    -- WHY : Assumptions: these are declared as TWO constraints rather than one, so a
+    --       violation names which column was wrong. A single combined constraint would
+    --       report only that the row failed, and the two columns are written by three
+    --       different paths -- the queue consumer, the HTTP marking flow and the extract
+    --       load -- so naming the column is what makes the diagnostic actionable.
+    -- WHY : Assumptions: FraudMarkRequest states the identical decomposition as Bean
+    --       Validation for the HTTP caller, and openapi/authorization-api.yaml states it
+    --       a third time as prose because a schema can express a range but not a modular
+    --       decomposition. The duplication is deliberate: an invariant asserted at one
+    --       door cannot bind the others, and this is the door every writer passes.
+    CONSTRAINT ck_pending_auth_detail_auth_date_domain
+        CHECK (auth_date BETWEEN 1 AND 99366
+               AND auth_date % 1000 BETWEEN 1 AND 366),
+    CONSTRAINT ck_pending_auth_detail_auth_time_domain
+        CHECK (auth_time BETWEEN 0 AND 235959999
+               AND (auth_time / 100000) % 100 <= 59
+               AND (auth_time / 1000) % 100 <= 59),
+
     -- WHY : Assumptions: this is the durable idempotency key of the request path,
     --       enforced rather than assumed, for the reasons recorded on
     --       transaction_id above. It is (card_num, transaction_id) and not
@@ -581,6 +620,62 @@ CREATE TABLE pending_auth_detail (
     --       status is not an out-of-domain one.
     CONSTRAINT ck_pending_auth_detail_match_status
         CHECK (match_status IN ('P', 'D', 'E', 'M')),
+
+    -- WHY : Assumptions: the two accepted codes are the only two the producer can
+    --       write, and both are statements in the decision paragraph rather than
+    --       values taken from a scheme specification. cbl/COPAUA0C.cbl L688 moves
+    --       the declined code '05' and L693 moves the approved code '00', with no
+    --       third branch, and 88 PA-AUTH-APPROVED VALUE '00' at cpy/CIPAUDTY.cpy
+    --       L31 corroborates which of the two means approved. The published
+    --       contract closes the same domain -- openapi/authorization-api.yaml
+    --       declares the detail member's enum as those two values and null -- so
+    --       without this constraint a row loaded from an extract could carry a
+    --       third value that the response schema then refused to describe, and the
+    --       API would be publishing a body it cannot legally produce.
+    -- WHY : Refactoring Rationale: an earlier revision left this column
+    --       deliberately unconstrained, reasoning that one condition name closes no
+    --       domain. The reasoning was sound about the CONDITION NAME and wrong
+    --       about the producer: the domain is closed by the two MOVE statements, not
+    --       by the 88-level, and the two statements are exhaustive. The constraint
+    --       now carries what the code asserts, for the same reason the match-status
+    --       constraint above does -- the column is written by more than one path,
+    --       the consumer and the ETL, and an invariant asserted in one program
+    --       cannot bind the other.
+    -- WHY : Assumptions: NULL passes and so does an all-blank value, and both are
+    --       required rather than lenient. The column is nullable because an extract
+    --       row may carry no reply at all, and a COBOL X(02) field that nothing was
+    --       moved into holds two spaces rather than a null -- the same blank state
+    --       the fraud constraint below admits for the same reason. btrim is used
+    --       rather than a literal comparison because bpchar comparison ignores
+    --       trailing blanks, which would make a two-space value compare equal to an
+    --       empty string and leave a reader unsure which state was intended.
+    CONSTRAINT ck_pending_auth_detail_auth_resp_code
+        CHECK (auth_resp_code IS NULL
+               OR btrim(auth_resp_code) = ''
+               OR auth_resp_code IN ('00', '05')),
+
+    -- WHY : Assumptions: the domain is EIGHT values and every one of them is a
+    --       statement in the same decision paragraph. cbl/COPAUA0C.cbl L698 sets the
+    --       approved reason '0000' unconditionally and then, only on a decline,
+    --       L700-L717 selects one of seven: '3100' when the cross-reference, the
+    --       account master or the customer master did not resolve (all three
+    --       collapse into one value at L704), '4100' insufficient funds at L706,
+    --       '4200' card not active at L708, '4300' account closed at L710, '5100'
+    --       card fraud at L712, '5200' merchant fraud at L714 and '9000' the
+    --       catch-all at L716. The published contract closes the same eight plus
+    --       null, so this constraint and that enum now state one domain.
+    -- WHY : Trade-offs: constraining a reason code makes a future decline reason a
+    --       migration rather than a code change. That cost is accepted because the
+    --       alternative is worse in a specific way: the response schema already
+    --       enumerates these eight, so an unconstrained column lets a stored value
+    --       exist that no response can carry, and the failure then surfaces as a
+    --       serialisation or contract-validation error on a read of somebody else's
+    --       row rather than as a refused write of the row that caused it.
+    CONSTRAINT ck_pending_auth_detail_auth_resp_reason
+        CHECK (auth_resp_reason IS NULL
+               OR btrim(auth_resp_reason) = ''
+               OR auth_resp_reason IN ('0000', '3100', '4100', '4200', '4300',
+                                       '5100', '5200', '9000')),
 
     -- WHY : Assumptions: this domain admits a BLANK as well as NULL, and the
     --       blank is the part that matters. cpy/CIPAUDTY.cpy L50-L52 declares
@@ -896,15 +991,46 @@ CREATE TABLE auth_reply_outbox (
     --       stored rather than regenerated at publication.
     correlation_id        VARCHAR(64),
 
-    -- WHY : Assumptions: the ordering group is the CARD NUMBER and the
-    --       deduplication key is the TRANSACTION IDENTIFIER, and both are stored
-    --       rather than derived when the row is drained. A publisher that had to
-    --       parse the payload to recover them would be unable to publish a
-    --       payload it could not parse, which is precisely the case where
-    --       publishing matters most. Grouping by card is what preserves the
-    --       per-card ordering the baseline gets from a single-threaded consumer.
-    message_group_id      VARCHAR(128)   NOT NULL,
-    deduplication_id      VARCHAR(128)   NOT NULL,
+    -- WHY : Assumptions: these two columns hold PURPOSE-SCOPED KEYED TOKENS and
+    --       not the values they stand for -- the first a token over the card
+    --       number, the second a token over the card and transaction pair --
+    --       which is why each is named for the token rather than for the field.
+    --       Grouping by card is what preserves the per-card ordering the baseline
+    --       gets from a single-threaded consumer, and deduplicating by the pair is
+    --       what makes suppression independent of the payload bytes.
+    -- WHY : Refactoring Rationale: an earlier revision stored the card number and
+    --       the transaction identifier themselves, under the names
+    --       message_group_id and deduplication_id. They are tokenised here
+    --       because these are the two values the publisher passes as SQS
+    --       MessageGroupId and MessageDeduplicationId, and those are message
+    --       METADATA: the queue's server-side encryption covers a message body and
+    --       not its metadata, so the raw form published a primary account number
+    --       into queue telemetry and into the trace of every send -- defeating the
+    --       body encryption for the one field that most needs it, and the one field
+    --       docs/adr/ADR-008-security-and-identity.md most requires be masked
+    --       outside the boundary. The tokens come from
+    --       CsvAuthCodec.AuthReply.orderGroup and .deduplicationKey through
+    --       common-lib's OpaqueIdentifier, are equal for equal inputs, and are not
+    --       reversible by a holder without the shared key. The derivation and its
+    --       purpose strings are specified in
+    --       docs/architecture/messaging-contracts.md.
+    -- WHY : Assumptions: the two purposes DIFFER, so the two tokens over one
+    --       authorization are unrelated and an observer holding one cannot join it
+    --       to the other. That is the property purpose scoping exists for, and it
+    --       is why one token is not reused for both attributes.
+    -- WHY : Assumptions: both are stored rather than derived at drain time, so the
+    --       publisher holds no key material and a row whose payload cannot be
+    --       parsed is still publishable -- which is precisely the case where
+    --       publishing matters most.
+    -- WHY : Alternatives Considered: narrowing these columns to the current token's
+    --       exact width. Rejected because it would make the schema depend on the
+    --       derivation's output length: a later purpose-scoped derivation of a
+    --       different width would then need a migration to store what is in every
+    --       other respect the same thing. The width stays 128, comfortably above
+    --       the present token, and a wider bound costs nothing in a varying type.
+    order_group_token     VARCHAR(128)   NOT NULL,
+    deduplication_token   VARCHAR(128)   NOT NULL,
+
 
     -- WHY : Assumptions: the payload is stored as the delimited text the wire
     --       carries, not as structured columns. For a string-format message the
@@ -1015,4 +1141,28 @@ CREATE TABLE auth_reply_outbox (
 --       undefined and a paged drain able to repeat or skip one at a page boundary.
 CREATE INDEX idx_auth_reply_outbox_unpublished
     ON auth_reply_outbox (outbox_id)
+    WHERE published_at IS NULL;
+
+-- WHY : Assumptions: the SECOND partial index exists because the publisher's claim
+--       is per ORDERING GROUP rather than global. It answers two statements: the
+--       per-group minimum that selects each group's head row, and the follow-on
+--       claim that advances one group after its head has been accepted. Both are
+--       (order_group_token, outbox_id) predicates over unpublished rows only, which
+--       is exactly this index's key and predicate, so each is an index scan rather
+--       than a scan-and-sort of the whole pending set.
+-- WHY : Refactoring Rationale: the group index is added here because a global claim
+--       could not preserve per-card order. A first-in-first-out queue orders
+--       messages within a group only AFTER it accepts them, so the order the
+--       publisher calls send in is the order the group is delivered in; a pass
+--       holding two rows of one group whose first send failed would place the newer
+--       reply ahead of the older one. Claiming one head per group makes that
+--       reversal unrepresentable, and this index is what makes the head claim cheap.
+-- WHY : Trade-offs: two partial indexes over one predicate rather than one wider
+--       index. A single index on (order_group_token, outbox_id) would answer the
+--       group statements and could answer the oldest-first drain only by scanning
+--       every group, so the identity-ordered index above is kept for that path. Both
+--       are partial over unpublished rows, so together they stay bounded by the
+--       pending backlog rather than growing with the published history.
+CREATE INDEX idx_auth_reply_outbox_group
+    ON auth_reply_outbox (order_group_token, outbox_id)
     WHERE published_at IS NULL;

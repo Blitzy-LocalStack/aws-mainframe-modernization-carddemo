@@ -363,8 +363,11 @@ Availability, using the `[present]` and `[planned]` convention of master section
   claimed here. Where these records feed a list path, that path pages by **key** and not
   by ordinal position, so record order matters to any page boundary such a test asserts.
 - [`../../application-test.yml`](../../application-test.yml) -- **[present]** sibling. It pins
-  schema resolution to `ledger` and pins the clock to one instant, without which no
-  assertion on a 26-character timestamp is reproducible.
+  schema resolution to `ledger`. It does **not** pin the clock: its own exclusion list rules
+  out any clock or current-time property, and the pinned instant is
+  `TransactionRepositoryIT.FIXED_CLOCK` at that class's lines 259 and 260,
+  `Clock.fixed(Instant.parse("2022-07-18T00:00:00Z"), ZoneOffset.UTC)`. Without a pinned
+  instant no assertion on a 26-character timestamp is reproducible.
 - [`V1__ledger.sql`](../../../../main/resources/db/migration/V1__ledger.sql) --
   **[present]**. It creates the four `ledger` tables these records load into, including
   `ledger.transaction_rejects` at line 542.

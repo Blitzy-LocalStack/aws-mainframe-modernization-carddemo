@@ -75,7 +75,12 @@ import secrets
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
-from carddemo_migration.config import SCHEMA_ROLES, quote_identifier
+from carddemo_migration.config import (
+    LOGIN_ROLE_NAMES,
+    MIGRATION_SCHEMA_ROLES,
+    SCHEMA_ROLES,
+    quote_identifier,
+)
 
 __all__ = [
     "SCRAM_DEFAULT_ITERATIONS",
@@ -190,36 +195,44 @@ def service_role_names() -> tuple[str, ...]:
     Purpose
     -------
     Provide the one role inventory this module works from, taken from
-    :data:`carddemo_migration.config.SCHEMA_ROLES` rather than restated here.
+    :data:`carddemo_migration.config.LOGIN_ROLE_NAMES` rather than restated here.
 
     WHY : Assumptions: single-sourcing the inventory is what stops this module and V0 from
     disagreeing about which roles exist. A hard-coded list here would be a second place to add a
     ninth bounded context, and the failure it produces is the quiet one -- a role created by V0
     that this module never applies a credential to would be reported as missing by
     :func:`verify_role_credentials` only if it appeared in this list, so an omission here would
-    hide itself. All eight roles are included, ``carddemo_reporting`` among them: it owns no
-    schema, which is a different question from whether it logs in, and it does.
+    hide itself.
+
+    WHY : Refactoring Rationale: this returned the EIGHT connection roles
+    (``SCHEMA_ROLES.values()``). It now returns fifteen, because V0 creates seven
+    ``carddemo_<context>_migrator`` login roles alongside them -- the credentials Flyway
+    authenticates as so that no runtime credential holds DDL authority. Leaving them out was the
+    self-hiding omission this docstring warns about in the paragraph above: the seven roles would
+    exist with a null ``rolpassword``, :func:`verify_role_credentials` would report the cluster
+    fully bootstrapped, and the first affected service would fail to start on an authentication
+    error that named a role no bootstrap report had mentioned.
 
     WHY : Assumptions: this inventory is the LOGIN roles only, and excluding the owner roles is a
-    correctness requirement rather than a simplification. V0 also creates
-    ``carddemo_reporting_owner``, which exists to own the reporting views and is created
-    ``NOLOGIN``; a ``NOLOGIN`` role never authenticates, so its ``rolpassword`` is null
-    permanently and correctly. Including it here
-    would make :func:`verify_role_credentials` fail forever on a cluster that is in fact fully
-    bootstrapped -- and a verification that cannot pass is indistinguishable, to whoever next
-    reads it, from one that is not worth running. Verified against a live PostgreSQL 17.10
-    catalogue: of the ten ``carddemo*`` roles V0 creates, exactly eight have ``rolcanlogin``
-    true and are exactly the values of
-    :data:`~carddemo_migration.config.SCHEMA_ROLES`; the master user has a
-    credential already, and ``carddemo_reporting_owner`` has ``rolcanlogin`` false.
+    correctness requirement rather than a simplification. V0 also creates eight
+    ``carddemo_<context>_owner`` roles, which own the schemas and are created ``NOLOGIN``; a
+    ``NOLOGIN`` role never authenticates, so its ``rolpassword`` is null permanently and
+    correctly. Including one here would make :func:`verify_role_credentials` fail forever on a
+    cluster that is in fact fully bootstrapped -- and a verification that cannot pass is
+    indistinguishable, to whoever next reads it, from one that is not worth running. Verified
+    against a live PostgreSQL 17.10 catalogue after replaying V0: of the twenty-three
+    ``carddemo*`` roles it creates, exactly fifteen have ``rolcanlogin`` true and they are
+    exactly :data:`~carddemo_migration.config.LOGIN_ROLE_NAMES`; the master user has a credential
+    already, and all eight ``_owner`` roles have ``rolcanlogin`` false.
 
     Returns
     -------
     tuple of str
-        Every service login role name, sorted so that output ordering is deterministic across
-        runs and a diff of two bootstrap logs is meaningful.
+        Every service login role name -- eight connection roles and seven migration roles --
+        sorted so that output ordering is deterministic across runs and a diff of two bootstrap
+        logs is meaningful.
     """
-    return tuple(sorted(SCHEMA_ROLES.values()))
+    return LOGIN_ROLE_NAMES
 
 
 def scram_sha256_verifier(
@@ -422,7 +435,7 @@ def roles_without_credential(connection: _Connection) -> tuple[str, ...]:
 
     Purpose
     -------
-    Answer the question V0 can only report on: which of the eight roles exist but cannot
+    Answer the question V0 can only report on: which of the fifteen login roles exist but cannot
     authenticate. Reads ``pg_authid.rolpassword`` and tests it for null, never selecting or
     returning the column's value.
 
@@ -537,6 +550,16 @@ def credentials_from_config() -> dict[str, str]:
     the object cannot leak it. Reading the secrets directly with boto3 here would duplicate the
     resolution and lose all three.
 
+    WHY : Refactoring Rationale: a second pass over ``MIGRATION_SCHEMA_ROLES`` calling
+    ``resolve_migration_settings`` was added. Without it this function returned eight entries
+    while :func:`service_role_names` expected fifteen, so :func:`bootstrap_role_credentials`
+    would refuse the run for an incomplete mapping -- which is the right refusal, but the fix
+    belongs here: the seven migration credentials exist in Secrets Manager and this is the
+    function whose job is to read them. The passes are separate rather than merged because the two
+    tiers resolve through two different entry points, and a single loop would have to branch on
+    whether a schema has a migration role -- restating the exclusion
+    ``MIGRATION_SCHEMA_ROLES`` already encodes.
+
     WHY : Trade-offs: the returned mapping holds plaintext credentials in process memory for the
     life of the bootstrap. That is unavoidable for anything that applies them, and it is bounded
     deliberately: the mapping is built immediately before use, is never written anywhere, and no
@@ -546,7 +569,8 @@ def credentials_from_config() -> dict[str, str]:
     Returns
     -------
     dict of str to str
-        Role name to plaintext credential, one entry per service role.
+        Role name to plaintext credential, one entry per login role -- eight connection roles and
+        seven migration roles.
 
     Raises
     ------
@@ -561,20 +585,24 @@ def credentials_from_config() -> dict[str, str]:
     #       reaches boto3 through config's resolution path, and the module docstring records that
     #       importing this file must not require AWS or a driver -- that is what lets
     #       scram_sha256_verifier be tested in isolation. A top-level import would undo it.
-    from carddemo_migration.config import resolve_aurora_settings
+    from carddemo_migration.config import resolve_aurora_settings, resolve_migration_settings
 
     credentials: dict[str, str] = {}
-    for schema, role in sorted(SCHEMA_ROLES.items()):
-        settings = resolve_aurora_settings(schema)
-        existing = credentials.get(role)
-        if existing is not None and existing != settings.password:
-            raise RoleCredentialError(
-                f"Two schemas resolve to role {role!r} with different credentials. The role "
-                f"inventory and the Secrets Manager entries disagree; resolve that before "
-                f"bootstrapping, because applying either value would leave one service unable "
-                f"to authenticate."
-            )
-        credentials[role] = settings.password
+    for inventory, resolve in (
+        (SCHEMA_ROLES, resolve_aurora_settings),
+        (MIGRATION_SCHEMA_ROLES, resolve_migration_settings),
+    ):
+        for schema, role in sorted(inventory.items()):
+            settings = resolve(schema)
+            existing = credentials.get(role)
+            if existing is not None and existing != settings.password:
+                raise RoleCredentialError(
+                    f"Two schemas resolve to role {role!r} with different credentials. The role "
+                    f"inventory and the Secrets Manager entries disagree; resolve that before "
+                    f"bootstrapping, because applying either value would leave one service "
+                    f"unable to authenticate."
+                )
+            credentials[role] = settings.password
     return credentials
 
 

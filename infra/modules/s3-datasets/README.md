@@ -22,21 +22,20 @@
 > versioned S3 prefixes. The four `.tf` files beside this README are
 > authoritative for the module's implemented resources, inputs, and outputs.
 >
-> **Parameters.** The generated Inputs table is the typed input contract. The
-> two required values are `environment` and `kms_key_arn`; the two inventory maps
-> have closed default key sets, and the retention, transition, logging,
-> destruction, naming and tag controls have validated defaults. Twelve inputs in
-> total.
+> **Parameters.** The generated Inputs table is the typed input contract. Only
+> `environment` and `kms_key_arn` are required; the two inventory maps have closed
+> default key sets, and the retention, transition, logging, destruction, naming
+> and tag controls have validated defaults.
 >
-> **Return values.** The module publishes ten outputs: seven data-path values
-> for the dataset bucket, generation and statement locations, and effective
-> same-key retention count; plus the audit bucket name, audit bucket ARN, and
-> object-access trail ARN. [Outputs and consumers](#outputs-and-consumers)
-> records the dependency direction and the named readers.
+> **Return values.** The generated Outputs table is authoritative. It publishes
+> the data-path values for the dataset bucket, the generation and statement
+> locations and the effective same-key retention count, plus the audit bucket name
+> and ARN and the object-access trail ARN. [Outputs and
+> consumers](#outputs-and-consumers) records the dependency direction and the
+> named readers.
 >
-> **Exceptions / errors.** This document describes a statically validated
-> module, not evidence of a live deployment. Apply-time failures include a
-> globally occupied bucket name, a KMS key the caller cannot use, an
+> **Exceptions / errors.** Apply-time failures include a globally occupied bucket
+> name, a KMS key the caller cannot use, an
 > unreachable server-access-log target bucket, and destruction of a populated
 > bucket while
 > `force_destroy` is false. Logical-generation cleanup — pruning all but the
@@ -53,13 +52,11 @@
 > state is recovery material, while this module bounds recoverable dataset
 > revisions and logical generations.
 
-This README is the prose half of Rule 1's Explainability obligation for HCL.
-Terraform has no docstring construct, so the typed variables, output
-descriptions, and adjacent rationale in the module provide the mechanical half,
-while this document provides the module-level purpose, lineage, alternatives,
-trade-offs, and honest boundaries. See the
-[code documentation standard](../../../docs/CODE_DOCUMENTATION_STANDARD.md)
-and the REFERENCE-only precedent in `tests/README.md` §12.
+Terraform has no docstring construct, so this README carries the module-level
+purpose, lineage, alternatives and trade-offs while the typed variables, output
+descriptions and adjacent rationale in the `.tf` files carry the mechanical half.
+See the
+[code documentation standard](../../../docs/CODE_DOCUMENTATION_STANDARD.md).
 
 ## Authoritative ten-family inventory
 
@@ -430,9 +427,6 @@ the dataset bucket's access-logging check fires, the resolution is to supply
 - **Not the state backend.** `infra/bootstrap` owns the remote-state bucket and
   lock table. Its state-history retention is intentionally unbounded by a
   noncurrent-version lifecycle rule.
-- **Static validation only.** No claim is made that either bucket has been
-  provisioned, populated, load-tested, or measured in a live account. Applying
-  an environment root is an operator action outside this module's scope.
 - **Protected destruction.** `force_destroy` defaults to `false`, so deletion
   of a populated dataset bucket fails. A versioned bucket must be purged of
   current objects, noncurrent versions, and delete markers through the
@@ -451,10 +445,27 @@ the dataset bucket's access-logging check fires, the resolution is to supply
   pre-existing log bucket. Both environment roots are expected to supply a
   different target bucket; targeting the dataset bucket itself would create
   recursive log writes.
-- **Audit scope.** CloudTrail records data events for objects under the dataset
-  bucket. The audit bucket is versioned, publicly blocked, TLS-only, and subject
-  to its own finite evidence lifecycle; it is not another dataset-generation
-  store.
+- **Audit scope, and the audit bucket's unbounded retention.** CloudTrail records
+  data events for objects under the dataset bucket. The audit bucket is
+  versioned, publicly blocked and TLS-only, and it is not another
+  dataset-generation store. Its lifecycle configuration carries exactly one rule
+  and that rule's only action is `abort_incomplete_multipart_upload`: there is no
+  `expiration` and no `noncurrent_version_expiration`, so **evidence accumulates
+  without horizon** and storage cost on this bucket grows monotonically for as
+  long as the trail runs. Setting a horizon is the responsibility of whoever
+  instantiates this module — the environment root, acting for the organisation's
+  compliance owner — which is why the module publishes `audit_bucket_name` as an
+  output: a root-owned `aws_s3_bucket_lifecycle_configuration` over that name is
+  the intended place for it, and it can be added without editing this module.
+  Refactoring Rationale: this bullet formerly said the bucket was "subject to its
+  own finite evidence lifecycle", which contradicted
+  [the removal recorded above](#what-this-module-deliberately-does-not-own) in
+  the same file — the `audit_log_retention_days` input that drove both
+  expirations was withdrawn because the module had no basis for the seven-year
+  figure it defaulted to. Of the two statements the finite one was the dangerous
+  one to leave standing: a reviewer reading the caveats section is reading it to
+  learn what the module does *not* guarantee, so an unbounded retention described
+  there as finite is the one place the gap would not be noticed.
 - **Topology boundary.** Cross-region replication, multi-region or
   disaster-recovery topology, S3 Object Lock, and compliance-retention mode are
   outside this module. The target remains one region across three availability

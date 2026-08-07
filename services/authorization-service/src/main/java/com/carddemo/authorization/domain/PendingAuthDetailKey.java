@@ -141,18 +141,39 @@ public class PendingAuthDetailKey implements Serializable {
     }
 
     /**
-     * Returns a diagnostic rendering of the three key parts.
+     * Returns a diagnostic rendering of the two clock parts of this key.
      *
-     * <p>Assumptions: a key is safe to log in full. It carries an account identifier and two clock
-     * values and no cardholder data, which is why this type has a rendering at all while
-     * {@link PendingAuthDetail} deliberately does not.</p>
+     * <p>Refactoring Rationale: THE ACCOUNT IDENTIFIER IS OMITTED, and an earlier revision rendered it
+     * on the argument that "a key is safe to log in full", because it "carries an account identifier
+     * and two clock values and no cardholder data". The premise about cardholder data is true and the
+     * conclusion does not follow from it. The sensitive-data logging contract in
+     * {@code docs/architecture/observability.md} names account and customer identifiers in a clause of
+     * their own, so being a key part is not what settles whether a value may be rendered -- the
+     * contract asks what the value IS, not what role it plays in an index. The same correction was
+     * applied to the composite keys of the batch and transaction contexts, so all three now agree.</p>
      *
-     * @return the three key parts in key order
+     * <p>Trade-offs: the omission is total rather than partial, because abbreviating a protected value
+     * IS masking and masking has one owner per context, {@code com.carddemo.authorization.mapper} for
+     * this module; an entity key producing its own slightly different rule would give one value two
+     * renderings with neither authoritative. The two clock values survive and are the more diagnostic
+     * half in practice: an authorization date and an authorization time to the declared precision
+     * locate a row in the pending stream to a narrow window, which is what an operator reading a
+     * consumer or purge failure is looking for. What is given up is that two accounts' rows recorded in
+     * the same instant are no longer distinguishable from a log line alone; the accessor returns the
+     * identifier to any caller that needs it, and a request-scoped line already carries the correlation
+     * identifier {@code com.carddemo.common.web.CorrelationIdFilter} publishes.</p>
+     *
+     * <p>Assumptions: this type still has a rendering while {@link PendingAuthDetail} deliberately has
+     * none, and the reason is unchanged by the omission. A key rendered without its account identifier
+     * still names a position in the pending stream; the detail segment is packed monetary and merchant
+     * content throughout, so there is no subset of it worth rendering.</p>
+     *
+     * @return the authorization date and the authorization time, in key order, and no account
+     *     identifier
      */
     @Override
     public String toString() {
-        return "PendingAuthDetailKey[accountId=" + this.accountId
-                + ", authDate=" + this.authDate
+        return "PendingAuthDetailKey[authDate=" + this.authDate
                 + ", authTime=" + this.authTime + "]";
     }
 }

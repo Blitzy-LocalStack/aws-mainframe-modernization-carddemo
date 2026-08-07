@@ -1,5 +1,6 @@
 /**
- * JPA keyed operations plus exactly two keyset browse queries. No offset paging.
+ * JPA keyed operations, exactly two keyset browse queries and one alternate-key
+ * lookup. No offset paging.
  *
  * <h2>Target contract, not a directory listing</h2>
  *
@@ -16,13 +17,34 @@
  *
  * <p>Purpose: this package is the persistence boundary of the auth bounded
  * context. It declares one Spring Data type, {@code UserRepository}, and that
- * type reaches the {@code auth.users} table in two ways and in no third way.
+ * type reaches the {@code auth.users} table in three ways and in no fourth way.
  * The first is keyed access through the primary key: find by identifier,
  * existence check, save and delete. The second is keyset browsing: exactly two
  * queries, one reading forward from a key and one reading backward from a key.
- * The exclusions are as much the charter as the inclusions are, because each of
- * them is load bearing rather than an oversight: no offset pagination of any
- * kind, no page number, no total count, and no third browse direction.</p>
+ * The third is a single lookup by the table's one alternate key,
+ * {@code cognito_sub}, returning at most one row. The exclusions are as much the
+ * charter as the inclusions are, because each of them is load bearing rather
+ * than an oversight: no offset pagination of any kind, no page number, no total
+ * count, and no third browse direction.</p>
+ *
+ * <p>Refactoring Rationale: this charter previously closed the set at two ways
+ * and named no alternate-key access, and the third way is admitted by revising
+ * it rather than by adding a member against it -- which is the process the
+ * ruling above prescribes for exactly this case. What made the revision
+ * necessary is that the target's identity design reaches a row by the subject a
+ * validated token carries, and no primary-key or keyset member can express that:
+ * a token names a subject, not an eight-character identifier. Admitting it as a
+ * NAMED third way rather than widening the charter to "keyed access generally"
+ * keeps the boundary enforceable -- one column, at most one row, no predicate
+ * beyond equality -- so a proposed fourth query is still something a reviewer can
+ * refuse.</p>
+ *
+ * <p>Assumptions: the third way is bounded by the schema and not merely by
+ * intention. {@code cognito_sub} is declared {@code NOT NULL UNIQUE} in
+ * V1__auth.sql, so the lookup is total and one-to-one and its return type is
+ * single-valued as a consequence of the constraint. Were the column ever made
+ * nullable or non-unique, this way of reaching the table would stop being sound,
+ * which is why the constraint is cited here and not only in the entity.</p>
  *
  * <p>The neighbouring packages are shaped by that charter.
  * {@code com.carddemo.auth.service} composes these operations into the

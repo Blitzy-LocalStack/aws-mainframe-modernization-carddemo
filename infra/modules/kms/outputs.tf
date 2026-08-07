@@ -3,15 +3,15 @@
 # -----------------------------------------------------------------------------
 # Purpose:
 #   The entire public contract of the `kms` module. Nothing else in this
-#   directory is reachable from outside it: the four customer-managed keys, the
-#   four aliases and the four key policies declared in
-#   infra/modules/kms/main.tf are all module-internal, so the twelve values
+#   directory is reachable from outside it: the five customer-managed keys, the
+#   five aliases and the five key policies declared in
+#   infra/modules/kms/main.tf are all module-internal, so the sixteen values
 #   below are the only way any other directory in this tree can encrypt anything
 #   with a key this module owns.
 #
 #   Three values are published per key -- the key ARN, the bare key identifier
-#   and the alias name -- for each of the four data classes the module keeps
-#   apart. They are grouped below in the order the keys are declared in main.tf,
+#   and the alias name -- for each of the five data classes the module keeps
+#   apart, plus one ordering token the CloudFront logging path needs. They are grouped below in the order the keys are declared in main.tf,
 #   and each group names the sibling module or modules that consume it:
 #
 #     aurora   infra/modules/aurora-postgresql, through its `kms_key_arn`
@@ -23,8 +23,9 @@
 #              infra/modules/cloudfront-spa, through `s3_kms_key_arn`; and the
 #              log-producing modules plus observability, through their log
 #              group or topic key inputs. The root wires one data-domain key
-#              into those uses because the AAP defines four keys rather than a
-#              fifth logging key.
+#              into those uses because the target architecture defines a key per
+#              DATA CLASS rather than a separate logging key -- logs and stored
+#              objects are the same class of content here.
 #     secrets  infra/modules/secrets, through `kms_key_arn`, and
 #              infra/modules/cognito, through `secrets_kms_key_arn`. Each sets
 #              it as the `kms_key_id` of the entries holding the credentials the
@@ -32,30 +33,49 @@
 #     sqs      infra/modules/sqs, through `kms_key_arn`. It becomes the
 #              `kms_master_key_id` of all five queues and of each of their five
 #              dead-letter queues.
+#     application
+#              No sibling module. This group is consumed by the environment
+#              roots directly: the ARN in the resource element of the card
+#              workload's task-role policy, and the ALIAS NAME as the
+#              CARDDEMO_SECURITY_CVV_KEY_ID runtime parameter the card service
+#              reads at startup. It is the one key here that a workload calls
+#              itself rather than reaching through an integrated service, which
+#              is why it is the one group whose consumer is a root.
 #
 # Parameters:
-#   None. An outputs.tf declares no input. The module's nine inputs, each
+#   None. An outputs.tf declares no input. The module's twenty inputs, each
 #   carrying its own `type` and `description`, are declared in
 #   infra/modules/kms/variables.tf, and not one of them is republished here.
 #   An output echoing an input returns to the caller only what that caller
 #   passed in, while adding the value to this module's published surface and to
-#   its state. The four trust lists are the case where that would actually cost
+#   its state. The five trust lists are the case where that would actually cost
 #   something: they name caller-supplied principals, so re-emitting them would
 #   place those principal names in the plan output of every root that calls this
 #   module, on behalf of no reader that needed them.
 #
 # Return values:
-#   Twelve outputs, every one of type string, every one resolved from an
+#   Sixteen outputs, every one of type string, every one resolved from an
 #   attribute of a resource this module creates -- three per key, in group
-#   order:
+#   order, plus one:
 #
 #     aurora_key_arn          aurora_key_id          aurora_key_alias_name
 #     s3_key_arn              s3_key_id              s3_key_alias_name
 #     secrets_key_arn         secrets_key_id         secrets_key_alias_name
 #     sqs_key_arn             sqs_key_id             sqs_key_alias_name
+#     application_key_arn     application_key_id     application_key_alias_name
+#
+#     s3_key_policy_id        -- the sixteenth, and the one exception to the
+#                                shape above. It publishes the applied S3 key
+#                                POLICY rather than a key, because the
+#                                CloudFront log-delivery path needs an ordering
+#                                token proving the grants exist before delivery
+#                                is enabled. Named here rather than left to be
+#                                discovered so the shape rule below reads as
+#                                having one documented exception instead of
+#                                being wrong.
 #
 #   Read as a table: each row is one data class, and the three columns are the
-#   key ARN, the bare key identifier and the alias name. Every one of the twelve
+#   key ARN, the bare key identifier and the alias name. Every one of the sixteen
 #   carries a `description`, which is at once this file's central obligation,
 #   the whole of what a tool can check about it, and the only text that reaches
 #   this module's generated documentation -- infra/.terraform-docs.yml is
@@ -81,16 +101,16 @@
 # WHY (non-obvious design decisions):
 #   - Trade-offs: no output here is marked `sensitive`, and that is a decision
 #     rather than an omission.
-#   - Alternatives Considered: twelve discretely named outputs rather than one
-#     map keyed by data class.
+#   - Alternatives Considered: discretely named outputs rather than one map
+#     keyed by data class.
 #   - Assumptions: key ARNs travel outward from this module only, never inward.
-#   - Assumptions: these twelve names are a one-way contract that six sibling
-#     modules depend on through the two environment roots.
+#   - Assumptions: these sixteen names are a one-way contract that six sibling
+#     modules and both environment roots depend on.
 #   - Assumptions: three values per key, with the ARN as the primary form.
 #   - Alternatives Considered: no output guarded by a `precondition`.
 #   Every bullet is expanded, with its mechanism, in the shared-notes section
-#   immediately below -- all six govern all twelve outputs rather than any one
-#   of them, so stating them per group would create four copies to keep in step.
+#   immediately below -- all six govern all sixteen outputs rather than any one
+#   of them, so stating them per group would create five copies to keep in step.
 #
 #   Nothing in this file reports on a provisioned stack. No key it names has
 #   been created, rotated or used: this tree is authored and statically checked,
@@ -101,20 +121,20 @@
 # =============================================================================
 
 # =============================================================================
-# Notes shared by all twelve outputs
+# Notes shared by all sixteen outputs
 # -----------------------------------------------------------------------------
 # The six notes in this section govern every output in the file. They are stated
 # once here rather than repeated per group for the same reason main.tf states its
-# per-key argument reasoning once: four copies of one rationale drift apart, and
-# a rationale corrected in three places out of four is worse than one kept in a
-# single place, because the three corrected copies make the fourth look
+# per-key argument reasoning once: five copies of one rationale drift apart, and
+# a rationale corrected in four places out of five is worse than one kept in a
+# single place, because the four corrected copies make the fifth look
 # deliberate. What is genuinely per-key -- which data class a key protects and
 # which sibling modules consume it -- is documented at each group below and in
 # each `description` instead.
 # =============================================================================
 
 # Trade-offs: NO OUTPUT HERE IS MARKED `sensitive`, and the alternative is a real
-# one -- redacting all twelve on the reasoning that a value naming an encryption
+# one -- redacting all sixteen on the reasoning that a value naming an encryption
 # key is security-adjacent and so ought not to appear in plan output or logs. It
 # is rejected on what the marking would actually do, in three parts.
 #   First, what these values are. A key ARN and a key identifier are NAMES. They
@@ -127,9 +147,9 @@
 #   Second, what it would cost. `sensitive` suppresses a value from
 #   `terraform plan` output, and the plan is the artifact this tree is reviewed
 #   through -- being able to read a plan as a review artifact is one of the
-#   reasons the migration provisions with Terraform at all. Twelve redacted
+#   reasons the migration provisions with Terraform at all. Sixteen redacted
 #   values reduce the one diff a reviewer reads to check the stack's encryption
-#   wiring to twelve placeholders, so the review that would catch the database
+#   wiring to sixteen placeholders, so the review that would catch the database
 #   being pointed at the queue key is precisely the review the marking blinds.
 #   Third, where it would spread. The marking propagates through expressions: an
 #   environment root that passes a sensitive output into a sibling module makes
@@ -137,29 +157,32 @@
 #   with no stake in this decision begin redacting themselves, and each has to be
 #   unwrapped by hand to be readable again. The cost is paid in other files.
 #   What does protect these keys is stated where it is implemented rather than
-#   claimed here: the four key policies in main.tf, each naming the account root
+#   claimed here: the five key policies in main.tf, each naming the account root
 #   as administrator and granting cryptographic use only to the principals that
 #   key's own trust list names. Output redaction is not part of that mechanism
 #   and substituting it for that mechanism is the error this note exists to
 #   prevent.
 
-# Alternatives Considered: TWELVE DISCRETELY NAMED OUTPUTS RATHER THAN ONE MAP.
-# A single map keyed by data class would replace twelve blocks with one and is
-# the obvious compression. It is rejected on how the two forms fail. All four
+# Alternatives Considered: DISCRETELY NAMED OUTPUTS RATHER THAN ONE MAP.
+# A single map keyed by data class would replace sixteen blocks with one and is
+# the obvious compression. It is rejected on how the two forms fail. All five
 # ARNs are strings, so nothing in the type system tells them apart: a map lookup
 # for the dataset-bucket key handed to the database module's `kms_key_arn` is
 # accepted, plans cleanly, and creates the cluster encrypted under the wrong key.
 # That mis-wiring then surfaces only when someone asks which key opens the
 # database backups, and by then it is not a value that can be edited -- changing
-# the key of an encrypted cluster means creating a new cluster. With twelve
+# the key of an encrypted cluster means creating a new cluster. With discrete
 # names the same mistake reads as an s3-named value passed to a database input,
 # on one line of the calling root, where the argument name and the value name
 # disagree in plain sight and a reviewer needs no knowledge of this module to see
 # it.
-#   Trade-offs: the accepted cost is real and is not merely length -- twelve
-#   blocks and twelve descriptions instead of one, a fifth key would add three
-#   more rather than one map entry, and a caller wanting to treat all four keys
-#   uniformly has to assemble its own map from the four names. That is accepted
+#   Trade-offs: the accepted cost is real and is not merely length -- sixteen
+#   blocks and sixteen descriptions instead of one, a sixth key would add three
+#   more rather than one map entry, and a caller wanting to treat all five keys
+#   uniformly has to assemble its own map from the five names. The cost has
+#   already been paid once, by the application-data key: adding it added three
+#   blocks here. That is the measured price of the decision rather than a
+#   hypothetical one, and it is still accepted for the reason below. That is accepted
 #   because no caller in this tree does treat them uniformly: each key goes to a
 #   differently-named input on a different sibling module, so there is no
 #   iteration for a map to serve and its only function would be brevity here at
@@ -178,7 +201,7 @@
 # direction is a property of the module rather than of either file, and stating
 # it at only one end would leave the other end looking like an oversight.
 
-# Assumptions: THESE TWELVE NAMES ARE A ONE-WAY CONTRACT. Six sibling modules --
+# Assumptions: THESE SIXTEEN NAMES ARE A ONE-WAY CONTRACT. Six sibling modules --
 # aurora-postgresql, s3-datasets, cloudfront-spa, secrets, cognito and sqs --
 # receive a value from this file, and each receives it through
 # infra/envs/dev/main.tf or infra/envs/prod/main.tf, which name these outputs
@@ -187,14 +210,20 @@
 # directory be understood and validated on its own, and which is also why
 # renaming an output here breaks every root and every consuming module while
 # breaking nothing that `terraform validate` would report in this directory.
-#   Both roots hold a variables.tf and a versions.tf but no composition file
-#   yet; theirs is authored at a later index of the same plan. The names below
-#   are therefore the contract those roots will be written against rather than a
-#   description of wiring that exists today, and that is the reason all twelve
-#   follow one shape -- the data class, then `_key_arn`, `_key_id` or
-#   `_key_alias_name` -- with no abbreviation and no per-key exception. A root
-#   author transcribing twelve names should be able to derive each one from the
-#   key it belongs to instead of looking it up.
+#   Refactoring Rationale: this paragraph previously recorded that both roots
+#   held "no composition file yet" and that the names below were therefore a
+#   contract those roots "will be written against". Both roots now hold a
+#   main.tf that names these outputs literally -- infra/envs/dev/main.tf and
+#   infra/envs/prod/main.tf each read `module.kms.application_key_alias_name`
+#   and `module.kms.application_key_arn`, among others -- so the paragraph is
+#   restated as describing wiring that exists. The naming rule it justified is
+#   unchanged and is the reason FIFTEEN of the sixteen follow one shape -- the
+#   data class, then `_key_arn`, `_key_id` or `_key_alias_name` -- with no
+#   abbreviation and no per-key exception. A root author transcribing them
+#   should be able to derive each one from the key it belongs to instead of
+#   looking it up. The sixteenth, `s3_key_policy_id`, is deliberately outside
+#   the rule because it names a policy rather than a key, and a name that
+#   pretended otherwise would be the more confusing of the two.
 
 # Assumptions: THREE VALUES PER KEY, AND THE ARN IS THE PRIMARY FORM. Every
 # consumer in this tree takes the ARN, which is why it leads each group: the
@@ -231,7 +260,7 @@
 # created, so it cannot be absent or malformed without that resource having
 # failed and stopped the run before any output is evaluated. The assertions that
 # do earn their place in this module guard its INPUTS, where a caller-supplied
-# value genuinely can be wrong, and they are already there: the three
+# value genuinely can be wrong, and they are already there: the nineteen
 # `validation` blocks in variables.tf. A precondition here would restate a
 # guarantee the provider already makes, while having to be read and maintained as
 # though it were load-bearing.
@@ -255,8 +284,8 @@
 # The relational records the VSAM masters become, and the cluster's automated
 # backups and managed master-credential secret alongside them. This is the key
 # whose loss would leave the migrated system of record unreadable, which is why
-# it leads the four groups and why it is a key of its own rather than one shared
-# with the three data classes below.
+# it leads the five groups and why it is a key of its own rather than one shared
+# with the four data classes below.
 # =============================================================================
 
 output "aurora_key_arn" {
@@ -301,7 +330,7 @@ output "s3_key_alias_name" {
 }
 
 output "s3_key_policy_id" {
-  description = "Provider identifier of the fully applied S3 key policy. The CloudFront logging v2 delivery consumes this as an ordering token so log delivery is not enabled before the exact distribution and delivery-source grants exist."
+  description = "Provider identifier of the fully applied S3 key policy. The CloudFront logging v2 delivery consumes this as an ordering token ONLY -- it is not a key reference and it does not encrypt a log object, the delivery destination being SSE-S3 -- so that delivery is not enabled before the exact distribution and delivery-source grants on this key exist."
   value       = aws_kms_key_policy.s3.id
 }
 
@@ -310,10 +339,10 @@ output "s3_key_policy_id" {
 # infra/modules/cognito
 #
 # The credentials the stack generates at provisioning time instead of committing.
-# Of the four keys this is the one whose compromise would be worth the most to an
+# Of the five keys this is the one whose compromise would be worth the most to an
 # attacker, since what it protects is the material that opens everything else --
-# which is the strongest single reason the module provisions four keys rather
-# than one.
+# which is the strongest single reason the module provisions a key per data class
+# rather than one.
 # =============================================================================
 
 output "secrets_key_arn" {
@@ -353,4 +382,33 @@ output "sqs_key_id" {
 output "sqs_key_alias_name" {
   description = "Alias name this module assigns to the SQS key, carrying the module's name prefix and the environment. It survives replacement of the key behind it, so a procedure that inspects or redrives a queue should identify the key by this name rather than by its identifier."
   value       = aws_kms_alias.sqs.name
+}
+
+# =============================================================================
+# Application data -- consumed by the environment roots directly
+#
+# The values the migrated code enciphers itself, which today is the card
+# verification value. This is the only group with no sibling module between it
+# and its consumer: the roots name the ARN in the card workload's task-role
+# policy and publish the alias as a runtime parameter, because the code that
+# calls this key is the workload rather than a service acting for it.
+# =============================================================================
+
+# Assumptions: the alias output below is the one an application is configured with
+# and is therefore the one that matters most of the three here. The identifier is
+# published beside it for a policy condition written against an identifier, and the
+# ARN for an identity-based policy's resource element.
+output "application_key_arn" {
+  description = "ARN of the customer-managed key the application generates envelope data keys from. A calling environment root names this in the resource element of the card workload's task-role policy, granting kms:GenerateDataKey* and kms:Decrypt on this key alone."
+  value       = aws_kms_key.application.arn
+}
+
+output "application_key_id" {
+  description = "Bare identifier -- not the ARN -- of the application-data key, for a consumer whose resource argument or IAM policy condition key is written against a key identifier rather than a full ARN."
+  value       = aws_kms_key.application.key_id
+}
+
+output "application_key_alias_name" {
+  description = "Alias name this module assigns to the application-data key, carrying the module's name prefix and the environment. This is the value a task definition publishes as CARDDEMO_SECURITY_CVV_KEY_ID: an alias survives replacement of the key behind it, so a rotation does not require every task definition holding an identifier to be revised."
+  value       = aws_kms_alias.application.name
 }

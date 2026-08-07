@@ -16,24 +16,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
  * outcome. That answer is what turns a redriven, already-completed step into a no-op instead of a
  * second pass over the same input.</p>
  *
- * <p>Assumptions: this type block carries no parameter, return or exception at-clause, and the
- * omission is deliberate rather than incomplete. An interface declaration takes no argument, yields
- * no value, declares no type parameter of its own here and raises nothing, so no such at-clause has
- * a subject to describe; inventing one would add a claim a reader cannot check, and an at-clause
- * with an empty body is a violation in its own right. Every at-clause in this file therefore sits on
- * a declared method, which is where the house convention recorded in
- * {@code docs/CODE_DOCUMENTATION_STANDARD.md} attaches them.</p>
- *
  * <h2>Why this one interface carries the full read and write surface</h2>
- *
- * <p>Assumptions: {@code batch.batch_run} is the ONE table this module owns outright, and that
- * ownership is what licenses the inherited mutators. Its data-definition authority is
- * {@code services/batch-service/src/main/resources/db/migration/V1__batch.sql}, which this module
- * ships and applies itself, so the insert and the update reached through the inherited
- * {@code save} are backed by an ownership grant rather than by a borrowed one. The other seven
- * interfaces the package charter names reach {@code ledger}, {@code account} or {@code reference}
- * instead, under the narrowly scoped cross-schema grant that the charter records as this
- * migration's one documented exception to schema-per-service ownership.</p>
  *
  * <p>Alternatives Considered: a narrower base type, so that this interface exposed only the two
  * finders below and none of the inherited surface. Rejected because the ownership above is real and
@@ -71,35 +54,6 @@ import org.springframework.data.jpa.repository.JpaRepository;
  * means part-way through a nightly chain, with earlier steps already committed. Both members below
  * are derived methods bound to property names declared on {@code BatchRun}, so no physical column
  * name appears anywhere in this file.</p>
- *
- * <p>Alternatives Considered: offset paging over a run's steps. Rejected because an offset read
- * counts rows from the start and re-evaluates its ordering on each call, so a row inserted ahead of
- * the current position shifts every later row and a caller can miss one or receive one twice. The
- * charter beside this file records that argument and its evidence in full, and is cited rather than
- * restated so that the two cannot drift apart. Nothing here names the framework's paging types or
- * the offset vocabulary, and neither the shared page envelope nor its cursor token is referenced:
- * both belong to the HTTP keyset contract, and this module has no client to hand a cursor to.</p>
- *
- * <p>Assumptions: no stereotype annotation is declared on this interface. Spring Data already
- * registers a proxy for every interface extending its repository types, so the annotation would
- * restate what the {@code JpaRepository} supertype already says, and its presence here would leave a
- * reader wondering whether its absence on the sibling interfaces meant something. No peer repository
- * interface in this migration carries one either.</p>
- *
- * <p>Assumptions: no transaction attribute is declared, in either direction, and that includes a
- * read-only one. Transformation rule T5 maps a reference syncpoint to a declarative transaction
- * boundary, but the boundary belongs to the calling job rather than to a repository: the reference
- * commit is issued by the program, and the posting unit of work spans three record types of which
- * any one repository owns at most one. A boundary asserted at this level could therefore only ever
- * be the wrong size, and a read-only attribute would quietly fragment a caller's unit of work into
- * one transaction per query.</p>
- *
- * <p>Assumptions: no index or column metadata is declared here. {@code V1__batch.sql} is the single
- * normative physical contract for this table and the provider validates against it rather than
- * generating it, so such metadata would create nothing while remaining free to drift from the file
- * that owns it. That migration declares exactly two indexes on this table -- the primary key, and
- * the unique index the database builds for the uniqueness constraint -- and both members below are
- * served by them, the first as an exact seek and the second on that index's leading column.</p>
  */
 public interface BatchRunRepository extends JpaRepository<BatchRun, Long> {
 
@@ -122,29 +76,23 @@ public interface BatchRunRepository extends JpaRepository<BatchRun, Long> {
      *     this run -- which is a normal outcome rather than an error, since the first execution of
      *     any step necessarily finds nothing
      */
-    // WHY : Assumptions: the single-result contract this optional states is a claim about the
-    //       SCHEMA and not a convenience of the return type. V1__batch.sql declares
-    //       uq_batch_run_run_step UNIQUE (run_id, step_name), and BatchRun mirrors it as a named
-    //       unique constraint on its mapping, so the pair matches at most one row and the query is
-    //       provably single valued. Were that constraint absent, this same signature would be a
-    //       latent runtime failure instead: Spring Data raises an incorrect-result-size data-access
-    //       exception the first time a second row matched, and no earlier check would have caught
-    //       it. That is exactly why the contrast with the sibling CardXrefRepository is worth
-    //       stating -- its account-id lookup cannot be shaped this way, because
-    //       app/jcl/XREFFILE.jcl:74-75 defines that access path as KEYS(11,25) NONUNIQUEKEY and its
-    //       relational replacement is a non-unique index. An optional is earned per table.
-    // WHY : Refactoring Rationale: this method is the one the reference pipeline has no counterpart
-    //       for. The pipeline's only restart directive is the inert comment at
-    //       app/jcl/DEFGDGD.jcl:2, and no checkpoint directive appears in any of the thirty-eight
-    //       members of app/jcl, so there is no prior mechanism to reproduce and no behaviour to
-    //       compare a result against. The capability is one the target adds, which is why the
-    //       divergence is registered in the traceability matrix rather than presented as parity.
-    // WHY : Alternatives Considered: a native statement naming the two physical columns, and a
-    //       query-language statement over the same two property paths. Both are declined because
-    //       the derived name already carries the whole predicate, so either would restate it in a
-    //       second place able to disagree with the first. The native form is declined the more
-    //       firmly of the two: with provider schema handling set to validate, a mistyped column
-    //       inside a query string is not examined at start-up and would surface inside a batch step.
+    // Assumptions: the single-result contract this optional states is a claim about the
+    //     SCHEMA and not a convenience of the return type. V1__batch.sql declares
+    //     uq_batch_run_run_step UNIQUE (run_id, step_name), and BatchRun mirrors it as a named
+    //     unique constraint on its mapping, so the pair matches at most one row and the query is
+    //     provably single valued. Were that constraint absent, this same signature would be a
+    //     latent runtime failure instead: Spring Data raises an incorrect-result-size data-access
+    //     exception the first time a second row matched, and no earlier check would have caught
+    //     it. That is exactly why the contrast with the sibling CardXrefRepository is worth
+    //     stating -- its account-id lookup cannot be shaped this way, because
+    //     app/jcl/XREFFILE.jcl:74-75 defines that access path as KEYS(11,25) NONUNIQUEKEY and its
+    //     relational replacement is a non-unique index. An optional is earned per table.
+    // Refactoring Rationale: this method is the one the reference pipeline has no counterpart
+    //     for. The pipeline's only restart directive is the inert comment at
+    //     app/jcl/DEFGDGD.jcl:2, and no checkpoint directive appears in any of the thirty-eight
+    //     members of app/jcl, so there is no prior mechanism to reproduce and no behaviour to
+    //     compare a result against. The capability is one the target adds, which is why the
+    //     divergence is registered in the traceability matrix rather than presented as parity.
     Optional<BatchRun> findByRunIdAndStepName(String runId, String stepName);
 
     /**
@@ -165,36 +113,20 @@ public interface BatchRunRepository extends JpaRepository<BatchRun, Long> {
      *     identity ascending, and an EMPTY list when the run holds no step in that state -- which is
      *     a normal outcome rather than an error, since a clean run holds no failed step at all
      */
-    // WHY : Trade-offs: this member returns a list where the finder above returns an optional, and
-    //       the asymmetry between the two is deliberate rather than an inconsistency. No uniqueness
-    //       is declared over the run and state pair, and none could be: a run legitimately holds
-    //       several steps in one state, and a clean nightly chain ends with every one of its steps
-    //       completed. Shaping this member as an optional would therefore fail the moment a second
-    //       step matched. Uniqueness over the run and step pair is what makes the other shape safe,
-    //       and it does not extend to this pair.
-    // WHY : Alternatives Considered: ordering by the recorded start time, which is the ordering a
-    //       reader expects of a chronology. Declined because that value is supplied by the caller
-    //       from an injected clock and is normalised to a constant under test, so equal values are
-    //       routine and the resulting order would be partial rather than total. The identity is
-    //       assigned by the database as the row is inserted, and a row is inserted when its step
-    //       OPENS, so ordering by it is the same chronology and is a total order. The sibling
-    //       OutboxRepository declines timestamp ordering on the same ground, that two rows written
-    //       inside one microsecond cannot be separated by it.
-    // WHY : Assumptions: the two argument domains are closed differently, and conflating them would
-    //       misstate one of them. The state vocabulary is closed IN CODE -- BatchRunStatus admits
-    //       three constants, and ck_batch_run_status in V1__batch.sql asserts the same three against
-    //       the deployed column -- so an unrepresentable state cannot be asked for. The step
-    //       vocabulary is closed by the carddemo-daily-batch orchestration definition instead, which
-    //       BatchRun deliberately does not mirror as an enumeration so that a state implemented
-    //       outside this module can be recorded without a release here; the names this module writes
-    //       are the ones its own job enumeration declares. Neither domain is re-validated in this
-    //       file, because a second copy of either could only drift from the authority that holds it.
-    // WHY : Alternatives Considered: a third finder returning a run's steps irrespective of state,
-    //       and a fourth counting them. Both are declined because no caller in
-    //       com.carddemo.batch.job needs either one: a redrive decision is taken per step and is
-    //       served by the finder above, while an operational view of a run is a state-scoped
-    //       question and is served by this one. The inherited members already cover administrative
-    //       access, and a member with no caller is surface that has to be maintained and that no
-    //       test can meaningfully exercise.
+    // Alternatives Considered: ordering by the recorded start time, which is the ordering a
+    //     reader expects of a chronology. Declined because that value is supplied by the caller
+    //     from an injected clock and is normalised to a constant under test, so equal values are
+    //     routine and the resulting order would be partial rather than total. The identity is
+    //     assigned by the database as the row is inserted, and a row is inserted when its step
+    //     OPENS, so ordering by it is the same chronology and is a total order. The sibling
+    //     OutboxRepository declines timestamp ordering on the same ground, that two rows written
+    //     inside one microsecond cannot be separated by it.
+    // Alternatives Considered: a third finder returning a run's steps irrespective of state,
+    //     and a fourth counting them. Both are declined because no caller in
+    //     com.carddemo.batch.job needs either one: a redrive decision is taken per step and is
+    //     served by the finder above, while an operational view of a run is a state-scoped
+    //     question and is served by this one. The inherited members already cover administrative
+    //     access, and a member with no caller is surface that has to be maintained and that no
+    //     test can meaningfully exercise.
     List<BatchRun> findByRunIdAndStatusOrderByIdAsc(String runId, BatchRunStatus status);
 }

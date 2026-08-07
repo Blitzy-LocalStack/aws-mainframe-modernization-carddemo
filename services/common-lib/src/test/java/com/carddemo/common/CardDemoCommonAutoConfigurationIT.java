@@ -5,9 +5,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.carddemo.common.error.GlobalExceptionHandler;
 import com.carddemo.common.money.MoneyModule;
 import com.carddemo.common.web.CorrelationIdFilter;
+import com.carddemo.common.web.CursorToken;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
@@ -16,6 +18,9 @@ import org.springframework.boot.test.context.runner.WebApplicationContextRunner;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.MutablePropertySources;
+import org.springframework.core.env.StandardEnvironment;
+import org.springframework.core.env.SystemEnvironmentPropertySource;
 import tools.jackson.databind.JacksonModule;
 
 /**
@@ -61,6 +66,16 @@ class CardDemoCommonAutoConfigurationIT {
     /** The auto-configuration under test, applied exactly as a consumer's classpath would apply it. */
     private static final AutoConfigurations UNDER_TEST =
             AutoConfigurations.of(CardDemoCommonAutoConfiguration.class);
+
+    /**
+     * Thirty-two bytes of base64-encoded key material, the minimum the sealer accepts.
+     *
+     * <p>Assumptions: a readable phrase rather than random bytes, so a reader can see at a glance that
+     * this is test material and not a key copied from a deployment. Exactly at the floor, because a
+     * longer value would leave the floor itself unexercised by the sibling that asserts refusal.
+     */
+    private static final String TEST_SIGNING_KEY_BASE64 =
+            "Y2FyZGRlbW8tY3Vyc29yLXRlc3Qta2V5LTMyYnl0ZXM=";
 
     /**
      * A servlet web context receives all four contributions.
@@ -135,6 +150,127 @@ class CardDemoCommonAutoConfigurationIT {
                     assertThat(context.getBean(Clock.class))
                             .isSameAs(FixedClockConfiguration.FIXED_CLOCK);
                 });
+    }
+
+    /**
+     * No signing key named means no cursor sealer, and a context that still starts.
+     *
+     * <p>Assumptions: this is the shape a service with no paged read has, and asserting the ABSENCE
+     * is what proves the sealer cannot arrive with key material this module invented. A bean here
+     * would mean a signing key shipped in source, which is the one thing a sealed cursor exists to
+     * prevent.
+     *
+     * <p>Trade-offs: "no bean" and "no failure" are asserted together on purpose. Withholding the
+     * bean is only useful if a context that never pages still starts, and that guarantee holds only
+     * while no configuration file declares the property -- a placeholder with no default makes the
+     * property EXIST, so condition evaluation resolves it and every importing context fails. The
+     * four transaction-service repository integration tests are exactly that shape, which is why
+     * {@link #bindsTheCursorSigningKeyFromItsDocumentedEnvironmentVariableName()} carries the other
+     * half of the decision: the key reaches a deployment through its environment, not through a
+     * declared property.
+     */
+    @Test
+    @DisplayName("no cursor sealer is published until a deployment names key material")
+    void withholdsTheCursorSealerUntilAKeyIsNamed() {
+        new ApplicationContextRunner()
+                .withConfiguration(UNDER_TEST)
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).doesNotHaveBean(CursorToken.class);
+                });
+    }
+
+    /**
+     * A named signing key yields exactly one sealer, and that sealer round-trips a cursor.
+     *
+     * <p>Assumptions: the round trip is asserted rather than the bean's mere presence, because a
+     * sealer built from a mis-decoded key would still be a single bean of the right type and would
+     * still seal -- it would simply refuse every token the application itself issued, and the symptom
+     * would surface only when a client paged.
+     */
+    @Test
+    @DisplayName("a named signing key publishes one sealer that round-trips a cursor")
+    void publishesTheCursorSealerWhenAKeyIsNamed() {
+        new ApplicationContextRunner()
+                .withConfiguration(UNDER_TEST)
+                .withPropertyValues(
+                        CardDemoCommonAutoConfiguration.CURSOR_SIGNING_KEY_PROPERTY + "="
+                                + TEST_SIGNING_KEY_BASE64,
+                        CardDemoCommonAutoConfiguration.CURSOR_LIFETIME_PROPERTY + "=PT5M")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(CursorToken.class);
+
+                    CursorToken sealer = context.getBean(CursorToken.class);
+                    String sealed = sealer.seal("transaction-list:0000000001", "0000000000000042");
+                    assertThat(CursorToken.hasSealedShape(sealed)).isTrue();
+                    assertThat(sealer.open("transaction-list:0000000001", sealed))
+                            .isEqualTo("0000000000000042");
+                });
+    }
+
+    /**
+     * The documented environment-variable spelling activates the sealer through relaxed binding.
+     *
+     * <p>Assumptions: no {@code application.yml} in this repository declares the signing key, not
+     * even as an environment placeholder, because a declared property resolves during condition
+     * evaluation and an unresolvable placeholder then fails every context that merely imports this
+     * auto-configuration. Supplying the environment variable IS therefore the whole wiring, and it
+     * only works if Spring Boot maps {@code CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY} onto the
+     * hyphenated property name.
+     *
+     * <p>Refactoring Rationale: that mapping is asserted here rather than trusted. It is the single
+     * step between a correctly-provisioned secret and a service that cannot assemble its list
+     * screen, it is invisible in every other test because they all set the property directly, and
+     * the underscore-for-hyphen substitution is exactly the kind of convention a reader assumes
+     * without checking. A {@code SystemEnvironmentPropertySource} is used rather than a plain map
+     * because only that source type carries the relaxed-binding mapper under test.
+     */
+    @Test
+    @DisplayName("the documented environment variable name activates the cursor sealer")
+    void bindsTheCursorSigningKeyFromItsDocumentedEnvironmentVariableName() {
+        new ApplicationContextRunner()
+                .withConfiguration(UNDER_TEST)
+                .withInitializer(context -> {
+                    MutablePropertySources sources =
+                            context.getEnvironment().getPropertySources();
+                    sources.replace(
+                            StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
+                            new SystemEnvironmentPropertySource(
+                                    StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
+                                    Map.of(
+                                            "CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY",
+                                            TEST_SIGNING_KEY_BASE64)));
+                })
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(CursorToken.class);
+                    assertThat(
+                                    context.getEnvironment()
+                                            .getProperty(
+                                                    CardDemoCommonAutoConfiguration
+                                                            .CURSOR_SIGNING_KEY_PROPERTY))
+                            .isEqualTo(TEST_SIGNING_KEY_BASE64);
+                });
+    }
+
+    /**
+     * Key material too short to key the authentication code fails the context, naming the property.
+     *
+     * <p>Assumptions: a short key produces a perfectly well-formed and verifiable -- but weaker --
+     * code, so nothing downstream can detect it. Failing at assembly is the only point at which an
+     * operator learns of it, and the property name in the message is what makes the failure
+     * actionable rather than merely fatal.
+     */
+    @Test
+    @DisplayName("key material shorter than the authentication code requires fails the context")
+    void refusesKeyMaterialShorterThanTheAuthenticationCodeRequires() {
+        new ApplicationContextRunner()
+                .withConfiguration(UNDER_TEST)
+                .withPropertyValues(
+                        CardDemoCommonAutoConfiguration.CURSOR_SIGNING_KEY_PROPERTY
+                                + "=dG9vLXNob3J0LWZvci1obWFjLXNoYTI1Ng==")
+                .run(context -> assertThat(context).hasFailed());
     }
 
     /**

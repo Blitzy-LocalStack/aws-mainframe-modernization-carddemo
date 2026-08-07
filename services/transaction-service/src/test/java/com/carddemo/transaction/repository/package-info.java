@@ -48,13 +48,20 @@
  *
  * <h2>The closed set: four integration tests and no fifth type</h2>
  *
- * <p>Exactly five {@code .java} files constitute this package, mirroring the
- * five that constitute the main-tree package it verifies -- this charter, and
- * one integration test per repository interface. TWO are landed, this charter
- * and the first entry below; the other three arrive with the queries they pin.
- * The distinction is stated rather than left to the tense of the list, because
- * a roster that cannot be told apart from a directory listing sends a reader
- * looking for a file that was never written.
+ * <p>Exactly five {@code .java} files constitute this package -- this charter, and one integration
+ * test per repository interface -- and ALL FIVE are landed. The count no longer mirrors the main-tree
+ * package, which stands at seven: that package's category-balance write path is a fragment interface
+ * and its implementation beside the repository, and all three are exercised by the single integration
+ * test named for that repository. A write member is not a fourth access path deserving a test of its
+ * own; it is part of the contract of the interface that composes it.
+ *
+ * <p>Refactoring Rationale: this paragraph twice reported fewer landed files than the directory holds
+ * -- first TWO of five and then FOUR of five -- and the distinction between planned and landed was
+ * stated precisely so that a reader would not go looking for a file that was never written. The
+ * inverse failure is the one that actually occurred: a reader told a test is absent writes it again.
+ * The markers are therefore re-read from the directory whenever this charter is touched, and the
+ * relationship to the main-tree count is stated as a ratio rather than as an identity, so a new
+ * fragment there does not silently falsify a number here.
  *
  * <ul>
  *   <li>{@code package-info.java}, this charter;</li>
@@ -84,7 +91,11 @@
  *       {@code ledger.transaction_category_balances} -- the only one of the
  *       four tables whose key is composite, spanning account identifier, type
  *       code and category code -- together with the create-versus-update
- *       decision, asserted along both paths separately;</li>
+ *       decision, asserted along both paths separately. It is also the only
+ *       test here that drives a composed write fragment rather than derived
+ *       queries alone, so it additionally pins what that fragment refuses: a
+ *       create onto a key another writer holds, an update against a key no row
+ *       carries, and either member called without a caller's transaction;</li>
  *   <li>{@code TransactionRejectRepositoryIT}, which pins
  *       {@code ledger.transaction_rejects} and the 430-byte reject contract,
  *       keyed like the feed above on a generated ordinal --

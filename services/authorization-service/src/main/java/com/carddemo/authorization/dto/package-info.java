@@ -72,13 +72,16 @@
  *       identifier code, response code, response reason and approved amount. The same field-order
  *       observation applies, and the six are the complete set rather than a selection from a
  *       larger record.</li>
- *   <li>{@code FraudMarkRequest} - the request half of the fraud-marking pair, carrying the five
- *       request-direction components of the {@code LINKAGE SECTION} of {@code cbl/COPAUS2C.cbl}
- *       L73 to L86: the account identifier at L75 and the customer identifier at L76, the two
- *       decoded key parts of the detail row the account identifier completes, and the action at
- *       L80. The action component carries the two values that section admits, one to report an
- *       authorization fraudulent and one to remove that mark, so the component is a closed
- *       two-value domain and not free text.</li>
+ *   <li>{@code FraudMarkRequest} - the request half of the fraud-marking pair, carrying one of the
+ *       five request-direction components of the {@code LINKAGE SECTION} of
+ *       {@code cbl/COPAUS2C.cbl} L73 to L86: the action at L80, whose two values report an
+ *       authorization fraudulent and remove that mark, so the component is a closed two-value
+ *       domain and not free text. Assumptions: the four remaining components of that block -- the
+ *       account identifier at L75, the customer identifier at L76 and the two decoded key parts --
+ *       are deliberately NOT reproduced. The baseline's caller is a sibling program reached by
+ *       {@code EXEC CICS LINK} inside one task, whereas this caller is a browser, so the row is
+ *       named by the operation's sealed path selector and the customer is resolved server-side from
+ *       the account's summary row.</li>
  *   <li>{@code FraudMarkResponse} - the reply half of the same pair, carrying the two
  *       response-direction components of the same L73 to L86 block: an outcome component drawn
  *       from a closed two-value domain at L83, and an action message whose declared width is 50
@@ -105,13 +108,11 @@
  *   <li>{@code PendingAuthDetailView} - the read body, the realisation of the contract's
  *       {@code PendingAuthDetail} schema. It publishes the STORED value of every column, the three
  *       compositions the detail screen performs being the browser client's.</li>
- *   <li>{@code FraudMarkRequest} - the HTTP request body of the fraud-state operation, naming the row
- *       by the three decoded key columns, naming the customer the fraud row is filed against, and
- *       carrying the state to END IN rather than an operation to perform, which is registered
- *       divergence D-AUTH-FRAUD-TARGET-STATE. Assumptions: the row is named in the path AND in the
- *       body, and the redundancy is a checked invariant -- a disagreement is refused with 400 and the
- *       disagreeing members are named, so the service never chooses silently between the row the URL
- *       named and the row the body named.</li>
+ *   <li>{@code FraudMarkRequest} - the HTTP request body of the fraud-state operation, carrying the
+ *       state to END IN rather than an operation to perform, which is registered divergence
+ *       D-AUTH-FRAUD-TARGET-STATE. Assumptions: the row is named in the path and NOWHERE else. A body
+ *       that named it too would add a disagreement to detect rather than a capability, and would let a
+ *       browser supply identity the service must take from the selector it issued.</li>
  *   <li>{@code FraudMarkResponse} - the body of a successful fraud-state write, carrying exactly the
  *       two components the response direction of the reference area declares: the success flag and the
  *       fifty-character sentence the fraud subprogram reported. Assumptions: which of the two write

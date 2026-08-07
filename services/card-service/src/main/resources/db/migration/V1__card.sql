@@ -3,370 +3,233 @@
 -- -----------------------------------------------------------------------------
 -- Purpose:
 --   Establishes the entire persistent shape of the card bounded context: one
---   table, card.cards, and one secondary index over it,
---   idx_cards_account_id.
+--   table, card.cards, and one secondary index over it, idx_cards_account_id.
 --
 --   The table is derived field for field from app/cpy/CVACT02Y.cpy, where
 --   01 CARD-RECORD is declared at :4 and its six named fields plus trailing
 --   padding occupy the 150-byte record announced at :2. That copybook is the
---   normative source for this schema: each PICTURE clause decides the column
---   type it becomes, and no width, scale or value domain here was chosen
---   independently of it.
---
---   This file is the authoritative column list for the whole card-service
---   module. The JPA entity, the repository, the mapper and the served
---   OpenAPI contract are all authored after it and mirror the names, widths
---   and nullability settled here rather than re-deriving them from the
---   copybook, so that one reading of the record exists instead of five.
---
---   The 150-byte length this column set accounts for is corroborated four
---   ways beyond the copybook's own declaration: the same seven-item layout
---   is re-declared as CARD-UPDATE-RECORD at app/cbl/COCRDUPC.cbl:314-321;
---   FD-CARDFILE-REC splits it into a 16-byte key plus 134 bytes of data at
---   app/cbl/CBACT02C.cbl:38-40; the cluster definition pins it as minimum
---   and maximum alike with RECORDSIZE(150 150) at app/jcl/CARDFILE.jcl:55;
---   and every record of the seed extract app/data/ASCII/carddata.txt
---   measures exactly 150 bytes.
+--   normative source: each PICTURE clause decides the column type it becomes,
+--   and no width, scale or value domain here was chosen independently of it.
+--   This file is then the authoritative column list for the whole module --
+--   the entity, repository, mapper and OpenAPI contract mirror it rather than
+--   re-deriving from the copybook, so one reading of the record exists.
 --
 -- Parameters:
---   A migration takes no arguments, so its inputs are the Flyway state and
---   configuration it is applied under. All of them are declared in sibling
---   resources rather than here, and each is named with the key that pins it.
---
---   - Target schema: card. Pinned three times over, by spring.flyway.schemas
---     and spring.flyway.default-schema in application.yml, and by
---     spring.jpa.properties.hibernate.default_schema beside them. The second of
---     the Flyway pair also decides where the schema history table lives,
---     which is what keeps this module's migration state out of every other
---     module's.
---   - Discovery location: classpath:db/migration, set by spring.flyway.locations. The
---     file name is part of that contract, not decoration: a capital V, the
---     version 1, two underscores, then the description. Renaming it or
---     altering the prefix removes the script from discovery, and a location
---     that resolves to nothing is reported as zero migrations applied rather
---     than as an error.
---   - Applied-version state: the schema history table in schema card.
---     Version 1 is the identifier that decides whether this script runs at
---     all; a history row already recording it means this file is skipped.
---   - A pre-existing schema, owner role and privilege graph, bootstrapped by
---     data-migration/sql/V0__schemas_and_roles.sql, which is the exclusive
---     authority for schemas, roles and grants in this system. The schema and
---     owner for this context are established at V0:505-506. Because
---     spring.flyway.create-schemas is false in application.yml, this
---     script may migrate the card schema and may not create it.
---   - The executing role: the schema's owning role. V0 keys its cross-schema
---     read privileges on that role using ALTER DEFAULT PRIVILEGES at
---     V0:803-804 and V0:877-878, and V0:661-664 records that each
---     per-service migration is expected to run as the owner for exactly that
---     reason. That is what gives the table created below its batch and
---     reporting read privileges without this file issuing a single GRANT.
+--   A migration takes no arguments. Its inputs are the Flyway keys declared in
+--   application.yml (spring.flyway.schemas, default-schema, locations, and
+--   spring.jpa.properties.hibernate.default_schema) and the pre-existing
+--   schema, owner role and privilege graph created by
+--   data-migration/sql/V0__schemas_and_roles.sql, which is the exclusive
+--   authority for schemas, roles and grants. spring.flyway.create-schemas is
+--   false, so this script may migrate the card schema and may not create it,
+--   and it runs as the schema owner, which is how the table below acquires its
+--   batch and reporting read privileges without issuing a single GRANT.
 --
 -- Return values:
---   The schema objects this script leaves behind, and nothing besides.
---
---   - Table card.cards, with seven columns: card_num, account_id,
---     cvv_encrypted, embossed_name, expiration_date, active_status and
---     version. Six carry a named copybook field; version carries no
---     copybook field and is explained where it is declared.
---   - Primary key pk_cards on card_num.
---   - Check constraint ck_cards_active_status on active_status.
---   - Non-unique index idx_cards_account_id on account_id.
---
---   Deliberately absent: no schema, no role, no privilege change, no view,
---   no trigger, no sequence and no seed data. Schema-level objects belong to
---   the bootstrap named above, and this context owns one table with no
---   reference data to load, so there is no second migration in this module.
---
---   Because spring.jpa.hibernate.ddl-auto is none in application.yml,
---   Hibernate emits no DDL and validates nothing. Every object listed above
---   exists at runtime only because this script created it, and anything
+--   Table card.cards with seven columns, primary key pk_cards, check
+--   constraint ck_cards_active_status, and non-unique index
+--   idx_cards_account_id. Deliberately absent: no schema, role, privilege
+--   change, view, trigger, sequence or seed data. Because
+--   spring.jpa.hibernate.ddl-auto is none, Hibernate emits no DDL, so anything
 --   omitted here is simply absent from the running system.
 --
 -- Exceptions or errors:
---   The failure modes a reader will actually meet, so that each one reads as
---   intended behaviour rather than as a defect in this file.
---
---   1. Absent schema, or insufficient privilege. create-schemas is false and
---      the executing role needs CREATE on schema card, so applying this script
---      to a database on which the bootstrap never ran fails naming the schema
---      it wanted, instead of quietly producing a second card schema owned by
---      whichever role happened to connect and carrying none of the privileges
---      V0 grants. The sibling configuration enumerates the three causes of a
---      migration that cannot apply, in its own header.
---   2. Missing PostgreSQL support module. The migration engine and its
---      PostgreSQL dialect are separate Maven coordinates, and this module's
---      pom.xml declares org.flywaydb:flyway-database-postgresql precisely
---      because the engine alone cannot match a PostgreSQL connection. Neither
---      coordinate carries a version; the aggregator manages both, and nothing
---      here should ever add one. The failure surfaces at application startup
---      with no compile-time signal, so a build that succeeded is not evidence
---      that this script can run.
---   3. Missing migration autoconfiguration. With the Flyway starter off the
---      classpath, every spring.flyway.* key binds to nothing and this script
---      never runs at all, while the service starts and reports healthy against
---      a database that has no cards table. This module's pom.xml states that
---      dependency where it declares org.springframework.boot:
---      spring-boot-starter-flyway, which is the coordinate that activates the
---      autoconfiguration.
---   4. Checksum mismatch, or pre-existing objects with no history. Flyway
---      refuses to re-run a script whose checksum changed after it was applied,
---      and with baseline-on-migrate false a card schema that already holds
---      objects but carries no history table aborts startup rather than being
---      recorded as already migrated. Treat this file as immutable from its
---      first successful application onward: a correction arrives as a new
---      versioned migration, never as an edit here, because the alternative
---      leaves a table of the wrong shape in place and undetected.
---   5. No destructive path exists. clean is disabled by the profile overlay,
---      and this script contains no clean, no drop and no truncate of its own,
---      so there is nothing here for such a request to act on.
+--   Assumptions: the failure modes below are intended behaviour rather than
+--   defects in this file. An absent schema or insufficient privilege fails
+--   naming the schema it wanted rather than quietly creating a second card
+--   schema carrying none of V0's privileges. A missing
+--   org.flywaydb:flyway-database-postgresql surfaces only at startup, because
+--   the engine alone cannot match a PostgreSQL connection -- so a successful
+--   build is not evidence that this script can run. A checksum mismatch, or a
+--   populated schema with no history table, aborts startup because
+--   baseline-on-migrate is false. Treat this file as immutable from its first
+--   successful application: a correction arrives as a new versioned migration,
+--   never as an edit here, because the alternative leaves a table of the wrong
+--   shape in place and undetected.
 --
 -- Provenance:
---   Every app/** path cited in this file is REFERENCE-ONLY and is never
---   modified by this migration or by anything else in the migrated trees.
---   The COBOL baseline is the specification this schema encodes, and it
---   keeps running: the migration adds a path, it does not remove one.
---
+--   Every app/** path cited here is REFERENCE-ONLY and is never modified.
 --   Primary sources: app/cpy/CVACT02Y.cpy for the record layout;
 --   app/jcl/CARDFILE.jcl for the cluster, alternate index and path
 --   definitions; app/cbl/COCRDUPC.cbl for the value domains, the date
 --   decomposition and the before-image concurrency discipline;
 --   app/cbl/CBACT02C.cbl and app/cbl/COCRDSLC.cbl for the record length and
---   the access paths; app/csd/CARDDEMO.CSD for the two CICS file
---   definitions; and app/data/ASCII/carddata.txt as the seed extract every
+--   access paths; and app/data/ASCII/carddata.txt as the seed extract every
 --   empirical statement below was measured against. Field-level lineage,
---   including the single target-side rename noted at expiration_date, is
---   recorded in docs/architecture/data-model-and-schema-mapping.md.
---
---   Documentation convention: docs/CODE_DOCUMENTATION_STANDARD.md, whose SQL
---   section requires this header block plus a rationale on each non-obvious
---   constraint and index, and records that nothing in the build inspects a
---   migration's comments. The user-specified Explainability rule is answered
---   here by the four sections above (its lines 18 to 21) and below by an
---   adjacent rationale on every non-obvious choice (its lines 27 and 40),
---   each tagged with one of the four categories it names at lines 31 to 34.
--- =============================================================================
+--   including the single target-side rename noted at expiration_date, is in
+--   docs/architecture/data-model-and-schema-mapping.md. The documentation
+--   convention is docs/CODE_DOCUMENTATION_STANDARD.md, whose SQL section
+--   requires this header plus a rationale on each non-obvious constraint and
+--   index.
 
--- WHY : Assumptions: every object below is written schema-qualified as
---       card.<object> rather than left to the connection's search path. The
---       pooled datasource does pin that path to this one schema
---       (the connection-init-sql search path in application.yml), so an unqualified name would resolve
---       correctly today; the qualification is what keeps the script
---       deterministic when something other than that pool applies it, which
---       the repository integration test and any operator-run session both
---       are. The failure it converts is the silent kind: an unqualified
---       CREATE TABLE run under a search path someone later changed succeeds
---       against the wrong schema, whereas a qualified one fails and names
---       the schema it could not find.
+-- Assumptions: every object below is written schema-qualified as
+--   card.<object> rather than left to the connection's search path. The
+--   pooled datasource does pin that path to this one schema
+--   (the connection-init-sql search path in application.yml), so an unqualified name would resolve
+--   correctly today; the qualification is what keeps the script
+--   deterministic when something other than that pool applies it, which
+--   the repository integration test and any operator-run session both
+--   are. The failure it converts is the silent kind: an unqualified
+--   CREATE TABLE run under a search path someone later changed succeeds
+--   against the wrong schema, whereas a qualified one fails and names
+--   the schema it could not find.
 CREATE TABLE card.cards (
 
-    -- WHY : Assumptions: character, of a settled width, and never a numeric
-    --       type at any hop. CARD-NUM is PIC X(16)
-    --       (app/cpy/CVACT02Y.cpy:5) and the cluster keys on all sixteen of
-    --       those bytes from offset zero (app/jcl/CARDFILE.jcl:54), so the
-    --       width is part of the contract and not merely a ceiling. Two
-    --       concrete consequences rule out an integer column: five of the
-    --       fifty records in app/data/ASCII/carddata.txt begin with a zero
-    --       digit, which any numeric type discards on the way in, and
-    --       sixteen significant digits exceed what an IEEE-754 double
-    --       represents exactly, so a client that parsed the value as a JSON
-    --       number would hand back a different card. CHAR rather than
-    --       VARCHAR because a value shorter than sixteen is a defect to be
-    --       refused, not a shorter name to be stored.
+    -- Assumptions: character, of a settled width, and never a numeric
+    --   type at any hop. CARD-NUM is PIC X(16)
+    --   (app/cpy/CVACT02Y.cpy:5) and the cluster keys on all sixteen of
+    --   those bytes from offset zero (app/jcl/CARDFILE.jcl:54), so the
+    --   width is part of the contract and not merely a ceiling. Two
+    --   concrete consequences rule out an integer column: five of the
+    --   fifty records in app/data/ASCII/carddata.txt begin with a zero
+    --   digit, which any numeric type discards on the way in, and
+    --   sixteen significant digits exceed what an IEEE-754 double
+    --   represents exactly, so a client that parsed the value as a JSON
+    --   number would hand back a different card. CHAR rather than
+    --   VARCHAR because a value shorter than sixteen is a defect to be
+    --   refused, not a shorter name to be stored.
     card_num          CHAR(16)     NOT NULL,
 
-    -- WHY : Assumptions: CARD-ACCT-ID is PIC 9(11)
-    --       (app/cpy/CVACT02Y.cpy:6) and is used throughout as an identifier
-    --       rather than as a quantity, so it maps to an integer type; eleven
-    --       digits overflow INTEGER and sit well inside BIGINT. NOT NULL
-    --       because the alternate index over this field is declared UPGRADE
-    --       (app/jcl/CARDFILE.jcl:87), meaning the baseline maintains an
-    --       entry for every base record as it changes: a card carrying no
-    --       account would have no entry to maintain and could not be reached
-    --       at all through the access path the index at the foot of this file
-    --       carries across.
+    -- Assumptions: CARD-ACCT-ID is PIC 9(11)
+    --   (app/cpy/CVACT02Y.cpy:6) and is used throughout as an identifier
+    --   rather than as a quantity, so it maps to an integer type; eleven
+    --   digits overflow INTEGER and sit well inside BIGINT. NOT NULL
+    --   because the alternate index over this field is declared UPGRADE
+    --   (app/jcl/CARDFILE.jcl:87), meaning the baseline maintains an
+    --   entry for every base record as it changes: a card carrying no
+    --   account would have no entry to maintain and could not be reached
+    --   at all through the access path the index at the foot of this file
+    --   carries across.
     account_id        BIGINT       NOT NULL,
 
-    -- WHY : Refactoring Rationale: the baseline holds CARD-CVV-CD as three
-    --       display digits in the clear (app/cpy/CVACT02Y.cpy:7), on files
-    --       defined with JOURNAL(NO) and RECOVERY(NONE)
-    --       (app/csd/CARDDEMO.CSD:19 and :21 for the alternate index, :31
-    --       and :33 for the base cluster). That is a property of the storage
-    --       platform rather than a defect of the programs: a non-recoverable
-    --       VSAM cluster has nowhere to keep ciphertext keys or an audit
-    --       trail. The relational target stores the enciphered value
-    --       instead, so it is unreadable at rest in a page image or a
-    --       backup. BYTEA rather than CHAR(3) follows directly: ciphertext
-    --       is opaque bytes of a length the cipher chooses, and a
-    --       three-character column could not hold it.
-    --
-    --       This preserves an absence the baseline already had rather than
-    --       withdrawing something it showed. The value has no read path
-    --       there either: it appears on none of the three card screens,
-    --       neither in the mapsets app/bms/COCRDLI.bms, app/bms/COCRDSL.bms
-    --       and app/bms/COCRDUP.bms nor in their symbolic maps
-    --       app/cpy-bms/COCRDLI.CPY, app/cpy-bms/COCRDSL.CPY and
-    --       app/cpy-bms/COCRDUP.CPY, so it was never displayed and never
-    --       accepted as input. No endpoint of this service selects this
-    --       column, it is absent from every request and response shape, and
-    --       it is never written to a log or an error payload.
-    --
-    --       Nullable, alone among these columns, and deliberately so: the
-    --       ciphertext is produced outside this schema, and a deployment
-    --       that chooses to retain no verification value at all then stores
-    --       no value here rather than a placeholder that would afterwards
-    --       have to be told apart from a genuine one.
+    -- Refactoring Rationale: the baseline holds CARD-CVV-CD as three
+    --   display digits in the clear (app/cpy/CVACT02Y.cpy:7), on files
+    --   defined with JOURNAL(NO) and RECOVERY(NONE)
+    --   (app/csd/CARDDEMO.CSD:19 and :21 for the alternate index, :31
+    --   and :33 for the base cluster). That is a property of the storage
+    --   platform rather than a defect of the programs: a non-recoverable
+    --   VSAM cluster has nowhere to keep ciphertext keys or an audit
+    --   trail. The relational target stores the enciphered value
+    --   instead, so it is unreadable at rest in a page image or a
+    --   backup. BYTEA rather than CHAR(3) follows directly: ciphertext
+    --   is opaque bytes of a length the cipher chooses, and a
+    --   three-character column could not hold it.
     cvv_encrypted     BYTEA,
 
-    -- WHY : Trade-offs: VARCHAR here, against CHAR everywhere else in this
-    --       table, is the one place a PIC X width is read as a maximum
-    --       instead of as data. CARD-EMBOSSED-NAME is PIC X(50)
-    --       (app/cpy/CVACT02Y.cpy:8) and all fifty records of
-    --       app/data/ASCII/carddata.txt are left-justified and space-padded
-    --       to fill it, so those trailing blanks are the record format
-    --       asserting itself and not part of anybody's name. CHAR(50) would
-    --       make them part of the value, and every equality test and every
-    --       rendered field would carry them. The cost accepted is that this
-    --       column no longer states the stored width on its face, which is
-    --       why the padding rule is written here; the declared width still
-    --       binds, so an over-long name is refused rather than silently
-    --       truncated.
+    -- Trade-offs: VARCHAR here, against CHAR everywhere else in this
+    --   table, is the one place a PIC X width is read as a maximum
+    --   instead of as data. CARD-EMBOSSED-NAME is PIC X(50)
+    --   (app/cpy/CVACT02Y.cpy:8) and all fifty records of
+    --   app/data/ASCII/carddata.txt are left-justified and space-padded
+    --   to fill it, so those trailing blanks are the record format
+    --   asserting itself and not part of anybody's name. CHAR(50) would
+    --   make them part of the value, and every equality test and every
+    --   rendered field would carry them. The cost accepted is that this
+    --   column no longer states the stored width on its face, which is
+    --   why the padding rule is written here; the declared width still
+    --   binds, so an over-long name is refused rather than silently
+    --   truncated.
     embossed_name     VARCHAR(50)  NOT NULL,
 
-    -- WHY : Assumptions: a true DATE, from a PIC X(10) source field
-    --       (app/cpy/CVACT02Y.cpy:9), because those ten bytes are
-    --       demonstrably ISO 'YYYY-MM-DD' and not an arbitrary string. Three
-    --       independent declarations inside app/cbl/COCRDUPC.cbl agree on
-    --       it: the REDEFINES at :115-121 decomposes the field 4-1-2-1-2,
-    --       placing the separators at bytes 5 and 8; the further REDEFINES
-    --       at :122-123 declares all ten bytes as PIC 9(10); and the
-    --       reference modification at :1505-1507 independently reads the
-    --       year at (1:4), the month at (6:2) and the day at (9:2). Every
-    --       record of app/data/ASCII/carddata.txt matches that pattern.
-    --       Keeping the text form would preserve the bytes while giving up
-    --       date arithmetic and range predicates; because ISO ordering makes
-    --       a lexical comparison and a date comparison agree, DATE keeps the
-    --       ordering behaviour the baseline already relies on and makes
-    --       those operations expressible as well.
-    --
-    --       The column name spells out a word that the source field name,
-    --       CARD-EXPIRAION-DATE, abbreviates. That is a target-side naming
-    --       decision taken at this column and nowhere else: the COBOL field
-    --       is untouched and stays exactly as it reads, no other field of
-    --       this record is renamed, and the lineage is recorded in
-    --       docs/architecture/data-model-and-schema-mapping.md so the
-    --       correspondence is never left to inference.
+    -- Assumptions: a true DATE, from a PIC X(10) source field
+    --   (app/cpy/CVACT02Y.cpy:9), because those ten bytes are
+    --   demonstrably ISO 'YYYY-MM-DD' and not an arbitrary string. Three
+    --   independent declarations inside app/cbl/COCRDUPC.cbl agree on
+    --   it: the REDEFINES at :115-121 decomposes the field 4-1-2-1-2,
+    --   placing the separators at bytes 5 and 8; the further REDEFINES
+    --   at :122-123 declares all ten bytes as PIC 9(10); and the
+    --   reference modification at :1505-1507 independently reads the
+    --   year at (1:4), the month at (6:2) and the day at (9:2). Every
+    --   record of app/data/ASCII/carddata.txt matches that pattern.
+    --   Keeping the text form would preserve the bytes while giving up
+    --   date arithmetic and range predicates; because ISO ordering makes
+    --   a lexical comparison and a date comparison agree, DATE keeps the
+    --   ordering behaviour the baseline already relies on and makes
+    --   those operations expressible as well.
     expiration_date   DATE         NOT NULL,
 
-    -- WHY : Assumptions: a one-character code, not a boolean.
-    --       CARD-ACTIVE-STATUS is PIC X(01) (app/cpy/CVACT02Y.cpy:10) and
-    --       the baseline tests it against the closed two-value domain
-    --       declared at app/cbl/COCRDUPC.cbl:89-91, where FLG-YES-NO-VALID
-    --       admits 'Y' and 'N'. BOOLEAN would read more naturally in the
-    --       entity and would change two things that matter: the loader would
-    --       have to translate every byte of every extract, and a third
-    --       character arriving from one would be coerced into true or false
-    --       instead of being refused outright by the constraint declared
-    --       further down.
+    -- Assumptions: a one-character code, not a boolean.
+    --   CARD-ACTIVE-STATUS is PIC X(01) (app/cpy/CVACT02Y.cpy:10) and
+    --   the baseline tests it against the closed two-value domain
+    --   declared at app/cbl/COCRDUPC.cbl:89-91, where FLG-YES-NO-VALID
+    --   admits 'Y' and 'N'. BOOLEAN would read more naturally in the
+    --   entity and would change two things that matter: the loader would
+    --   have to translate every byte of every extract, and a third
+    --   character arriving from one would be coerced into true or false
+    --   instead of being refused outright by the constraint declared
+    --   further down.
     active_status     CHAR(1)      NOT NULL,
 
-    -- WHY : Refactoring Rationale: the baseline already performs optimistic
-    --       concurrency by hand, so this column expresses a discipline that
-    --       exists rather than introducing one that does not. Because a CICS
-    --       task ends at each screen turn, app/cbl/COCRDUPC.cbl cannot hold
-    --       a record lock across the user's think time; it snapshots the
-    --       record into CCUP-OLD-DETAILS (:291, the verification value
-    --       declared at :294 and taken at :1354) before showing the screen,
-    --       then re-compares on submit. Paragraph 9300-CHECK-CHANGE-IN-REC
-    --       (:1498 through its exit at :1521, performed from :1453-1454)
-    --       tests six fields in the single predicate at :1503-1508 -- the
-    --       verification value, the embossed name, the expiry year, month
-    --       and day, and the active status -- and abandons the write at
-    --       :1511 if any of them moved, the whole sequence committing at the
-    --       syncpoint at :469-471. One counter subsumes that entire
-    --       comparison, including the verification value the screens never
-    --       showed, and it keeps holding when a column is added, which a
-    --       hand-maintained field list does not.
-    --
-    --       Alternatives Considered: re-comparing the whole before-image
-    --       row, which is the literal translation of that predicate, and a
-    --       last-updated timestamp. The row comparison has to carry every
-    --       column out to the client and back to be checked, which for this
-    --       table means carrying the verification value to the client -- the
-    --       one thing the cvv_encrypted mapping above exists to prevent. A
-    --       timestamp is only safe while clock resolution stays finer than
-    --       the update rate, a condition nothing in the schema can enforce;
-    --       an integer counter needs no such condition.
-    --
-    --       DEFAULT 0 so that the bulk load can insert a row from the seed
-    --       extract without supplying a column that extract has no field
-    --       for.
+    -- Refactoring Rationale: the baseline already performs optimistic
+    --   concurrency by hand, so this column expresses a discipline that
+    --   exists rather than introducing one that does not. Because a CICS
+    --   task ends at each screen turn, app/cbl/COCRDUPC.cbl cannot hold
+    --   a record lock across the user's think time; it snapshots the
+    --   record into CCUP-OLD-DETAILS (:291, the verification value
+    --   declared at :294 and taken at :1354) before showing the screen,
+    --   then re-compares on submit. Paragraph 9300-CHECK-CHANGE-IN-REC
+    --   (:1498 through its exit at :1521, performed from :1453-1454)
+    --   tests six fields in the single predicate at :1503-1508 -- the
+    --   verification value, the embossed name, the expiry year, month
+    --   and day, and the active status -- and abandons the write at
+    --   :1511 if any of them moved, the whole sequence committing at the
+    --   syncpoint at :469-471. One counter subsumes that entire
+    --   comparison, including the verification value the screens never
+    --   showed, and it keeps holding when a column is added, which a
+    --   hand-maintained field list does not.
     version           INTEGER      NOT NULL DEFAULT 0,
 
-    -- WHY : Trade-offs: the record's trailing 59 bytes stop here, and their
-    --       omission is a decision rather than an oversight. FILLER
-    --       PIC X(59) (app/cpy/CVACT02Y.cpy:11) pads CARD-RECORD out to the
-    --       constant 150-byte length that RECORDSIZE(150 150) demands
-    --       (app/jcl/CARDFILE.jcl:55) and that FD-CARDFILE-REC confirms as
-    --       134 bytes of data behind a 16-byte key
-    --       (app/cbl/CBACT02C.cbl:38-40). It names no field, no program
-    --       reads it, and a relational row has no constant length for it to
-    --       pad out, so it becomes no column. The cost accepted is that this
-    --       table on its own cannot re-emit a byte-identical 150-byte
-    --       record; re-emitting one is the record codec's job, and that pads
-    --       from the layout declaration rather than from padding some row
-    --       had stored. Written here, at the point those bytes would
-    --       otherwise have appeared, because a reader reconciling seven
-    --       columns against six named copybook fields plus padding needs to
-    --       find the missing 59 bytes accounted for somewhere.
+    -- Trade-offs: the record's trailing 59 bytes stop here, and their
+    --   omission is a decision rather than an oversight. FILLER
+    --   PIC X(59) (app/cpy/CVACT02Y.cpy:11) pads CARD-RECORD out to the
+    --   constant 150-byte length that RECORDSIZE(150 150) demands
+    --   (app/jcl/CARDFILE.jcl:55) and that FD-CARDFILE-REC confirms as
+    --   134 bytes of data behind a 16-byte key
+    --   (app/cbl/CBACT02C.cbl:38-40). It names no field, no program
+    --   reads it, and a relational row has no constant length for it to
+    --   pad out, so it becomes no column. The cost accepted is that this
+    --   table on its own cannot re-emit a byte-identical 150-byte
+    --   record; re-emitting one is the record codec's job, and that pads
+    --   from the layout declaration rather than from padding some row
+    --   had stored. Written here, at the point those bytes would
+    --   otherwise have appeared, because a reader reconciling seven
+    --   columns against six named copybook fields plus padding needs to
+    --   find the missing 59 bytes accounted for somewhere.
 
-    -- WHY : Assumptions: both constraints below are named explicitly instead
-    --       of taking a server-generated name, because both are quoted back
-    --       to something that has to recognise them. A unique violation on
-    --       the key and a check violation on the status are the two errors
-    --       this table raises in ordinary operation, and the service answers
-    --       each with its own response; matching on a generated name would
-    --       tie that mapping to a string no file in the repository declares.
+    -- Assumptions: both constraints below are named explicitly instead
+    --   of taking a server-generated name, because both are quoted back
+    --   to something that has to recognise them. A unique violation on
+    --   the key and a check violation on the status are the two errors
+    --   this table raises in ordinary operation, and the service answers
+    --   each with its own response; matching on a generated name would
+    --   tie that mapping to a string no file in the repository declares.
     CONSTRAINT pk_cards PRIMARY KEY (card_num),
 
-    -- WHY : Assumptions: the domain is closed at exactly two values, as
-    --       FLG-YES-NO-VALID declares at app/cbl/COCRDUPC.cbl:89-91. All
-    --       fifty records of app/data/ASCII/carddata.txt carry 'Y', so the
-    --       constraint admits the existing extract unchanged and the load
-    --       needs no exception path for it. It is declared in the schema
-    --       rather than left to the service because the migration ETL loads
-    --       this table directly, and a rule that lives only in application
-    --       code is never reached by a bulk load.
+    -- Assumptions: the domain is closed at exactly two values, as
+    --   FLG-YES-NO-VALID declares at app/cbl/COCRDUPC.cbl:89-91. All
+    --   fifty records of app/data/ASCII/carddata.txt carry 'Y', so the
+    --   constraint admits the existing extract unchanged and the load
+    --   needs no exception path for it. It is declared in the schema
+    --   rather than left to the service because the migration ETL loads
+    --   this table directly, and a rule that lives only in application
+    --   code is never reached by a bulk load.
     CONSTRAINT ck_cards_active_status CHECK (active_status IN ('Y', 'N'))
 );
 
--- WHY : Assumptions: non-unique, and that is the declared contract rather
---       than a cautious default. The baseline does not scan to find an
---       account's cards; it reaches them through a second access path, and
---       the definition of that path is decisive here.
---       app/jcl/CARDFILE.jcl:83 defines an alternate index over the same
---       base cluster (:84) whose key is eleven bytes at offset sixteen
---       (:85) -- which is exactly CARD-ACCT-ID, the eleven bytes occupying
---       positions 17 to 27 of the record -- and declares it NONUNIQUEKEY at
---       :86 and UPGRADE at :87. A path over that index (:100-102) is the
---       object CICS surfaces as the file CARDAIX
---       (app/csd/CARDDEMO.CSD:13-14), enabled for browse, read, update and
---       delete at :19; and app/cbl/COCRDUPC.cbl:251-254 carries the base
---       cluster and that path as two separate file-name literals, so a
---       program addresses them as two distinct files. The access path is
---       therefore part of the structure the programs are written against,
---       and this index is what carries it across.
---
---       NONUNIQUEKEY at :86 is why no UNIQUE appears below: the declared
---       cardinality permits many cards on one account. The seed extract
---       happens to hold fifty cards across fifty distinct accounts, which is
---       incidentally one to one and does not narrow that declaration; a
---       unique index would refuse a second card on an account the baseline
---       accepts, and nothing in that extract would reveal the difference
---       until such a card first appeared.
---
---       UPGRADE at :87 is also why the BLDINDEX step at :110-112 has no
---       counterpart anywhere in this file. That step populates the alternate
---       index as a separate act after the base cluster has been loaded;
---       PostgreSQL maintains an index inside the same transaction that
---       changes the table, so there is no separate build left to express.
+-- Assumptions: non-unique, and that is the declared contract rather
+--   than a cautious default. The baseline does not scan to find an
+--   account's cards; it reaches them through a second access path, and
+--   the definition of that path is decisive here.
+--   app/jcl/CARDFILE.jcl:83 defines an alternate index over the same
+--   base cluster (:84) whose key is eleven bytes at offset sixteen
+--   (:85) -- which is exactly CARD-ACCT-ID, the eleven bytes occupying
+--   positions 17 to 27 of the record -- and declares it NONUNIQUEKEY at
+--   :86 and UPGRADE at :87. A path over that index (:100-102) is the
+--   object CICS surfaces as the file CARDAIX
+--   (app/csd/CARDDEMO.CSD:13-14), enabled for browse, read, update and
+--   delete at :19; and app/cbl/COCRDUPC.cbl:251-254 carries the base
+--   cluster and that path as two separate file-name literals, so a
+--   program addresses them as two distinct files. The access path is
+--   therefore part of the structure the programs are written against,
+--   and this index is what carries it across.
 CREATE INDEX idx_cards_account_id ON card.cards (account_id);

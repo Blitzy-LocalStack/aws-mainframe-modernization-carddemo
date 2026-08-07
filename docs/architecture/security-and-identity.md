@@ -77,28 +77,17 @@
 > defers the cluster-level recoverability replacement to this document at its
 > L508–L517.
 >
-> **Current state.** The ADR, migration guide, deployment runbook, service
-> security configuration, JWT converter, and schema-mapping document are present.
-> Their paths are links rather than future contracts.
->
-> **Caveats, and one of them is load-bearing for every sentence here.** There is
-> **no provisioned environment**. The infrastructure is authored and checked only
-> to the extent its current state admits, and applying it to a live account is an
-> operator action outside this scope. Consequently **no penetration test, security
-> audit, compliance assessment or certification has been performed, and none is
-> claimed anywhere in this document** — not for any regulatory standard, framework
-> or control catalogue. The encryption and identity modules, the network resources,
-> both environment compositions, the per-service security configurations and the
-> shared card-number masker are authored; the API-boundary architecture rule, the
-> response-serialization masking tests, the HTTP controllers and the
-> sensitive-field encryption writer are not. Refactoring Rationale: this sentence
-> previously listed masking, network resources and environment composition among
-> the absences, which had stopped being true; a caveat that understates delivered
-> controls misdirects a security reviewer exactly as badly as one that overstates
-> them, so every item on both sides of the semicolon is now measured by the
+> **Caveats, and one of them is load-bearing for every sentence here.** Applying
+> this infrastructure to a live account is an operator action outside this scope, so
+> **no penetration test, security audit, compliance assessment or certification has
+> been performed, and none is claimed anywhere in this document** — not for any
+> regulatory standard, framework or control catalogue. Which controls are expressed
+> in code and which are not is MEASURED rather than remembered, by the
 > delivery-boundary block in
-> [Reproducing the measurements in this document](#reproducing-the-measurements-in-this-document).
-> The full set of boundaries is in
+> [Reproducing the measurements in this document](#reproducing-the-measurements-in-this-document),
+> because a caveat that understates delivered controls misdirects a security
+> reviewer exactly as badly as one that overstates them. The full set of boundaries
+> is in
 > [Caveats, boundaries and out-of-scope](#caveats-boundaries-and-out-of-scope), and
 > reading that section is not optional for interpreting this one.
 
@@ -390,14 +379,17 @@ an authored `SecurityConfig` that imports the converter explicitly and registers
 resource-server filter chain, and those chains carry route rules that require the
 administrative authority. The shared converter is a building block and the per-service
 filter chain is what applies it; both halves are required, and neither on its own
-establishes that a given route is authorized. What is still missing is the layer those
-rules protect: no `*Controller.java` exists anywhere under `services/*/src/main/java`, so
-no handler method is yet reached through a rule.
-Refactoring Rationale: this paragraph previously reported that no service had a
-`SecurityConfig` at all, which had stopped being true, and the correction has to keep
-the two facts apart. A registered filter chain over an unauthored controller is a
-delivered authorization mechanism with nothing behind it, which is a different — and
-much narrower — gap than an unregistered converter.
+establishes that a given route is authorized. The layer those rules protect is now
+partly authored: **five** `*Controller.java` exist under `services/*/src/main/java` —
+`AccountController`, `CardXrefController` and `CustomerController` in `account-service`,
+`PendingAuthController` and `FraudController` in `authorization-service` — so a handler
+method is reached through a rule on those routes and on no others. Every other route rule
+in this section still guards an unauthored handler, and the two cases are kept apart
+below rather than reported as one.
+Assumptions: a registered filter chain over an unauthored handler is a delivered
+authorization mechanism with nothing behind it, which is a materially narrower gap
+than an unregistered converter. The two are kept apart throughout this section because
+conflating them either overstates a control or invites re-implementing one that exists.
 
 > Alternatives Considered: **one converter in the shared kernel, rather than eight
 > equivalent ones.** Each service could have mapped `cognito:groups` to authorities
@@ -411,6 +403,108 @@ much narrower — gap than an unregistered converter.
 > online service's `SecurityConfig` imports this converter explicitly, because
 > component scanning cannot be assumed across module package roots.
 
+### Machine identity: the calls this platform makes on its own behalf
+
+Every authorization rule above answers the question *which signed-on user may do this*.
+One class of call cannot be answered that way at all. The pending-authorization consumer
+decides an authorization while handling a queue message, and to decide it it reads three
+records the **account** context owns — the card cross-reference, the account master and
+the customer master, which
+[`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl) reads at its
+paragraphs `5100-READ-XREF-RECORD`, `5200-READ-ACCT-RECORD` and
+`5300-READ-CUST-RECORD`. A queue message carries a card number, an amount and a merchant.
+It carries **no user**, so there is no token to present and none to forward.
+
+The seam is therefore authenticated by a credential that identifies the **workload**:
+
+| Concern | Mechanism |
+|---|---|
+| Wire form | `InternalServiceToken` in the shared kernel: a JWT signed with `HS256`, carrying issuer `carddemo-internal`, the calling service as subject, the callee as audience, a `scope` claim naming the family of operations, and an expiry |
+| Header | the ordinary `Authorization: Bearer` header, because the credential **is** a JWT — the callee's resource-server decoder is the thing that verifies it, so no separate header and no separate filter are involved |
+| Minting | `InternalIdentityConfig` in `authorization-service` supplies the minter with subject `carddemo-authorization-service`; `RestAccountContextClient` mints a FRESH token per request rather than reusing one, so a token is never presented near its expiry |
+| Checking | `InternalApiSecurityConfig` in `account-service`, through `NimbusJwtDecoder.withSecretKey` plus validators pinning the issuer to `InternalServiceToken.ISSUER` and requiring `InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT` among the audiences |
+| Authority granted | `InternalApiSecurityConfig.INTERNAL_READ_AUTHORITY`, which is `SCOPE_internal:account-context.read` and is **not** either group authority, so no user token reaches an internal path and no machine token reaches a business route |
+| Paths | a separately-ordered chain at `@Order(10)` whose `securityMatcher` names the three internal endpoints EXACTLY — `/api/v1/card-xrefs/lookup`, `/api/v1/accounts/{accountId}` and `/api/v1/customers/{customerId}` — so the internal surface is isolated without the chain capturing the whole `/api/v1/accounts/**` subtree a person also reads |
+| Callers admitted | exactly two — `authorization-service` and `transaction-service`, each minting through its own `InternalIdentityConfig` — because the signing key is held by exactly those two callers plus the one callee, and the audience constant names exactly one callee; a token minted for any other audience is refused by the validator rather than by an allow-list the application maintains. Refactoring Rationale: this row read "exactly one" caller and "exactly two" key holders while a second consumer of the account context was landing. The two numbers move together and were corrected together, because reading either alone would have understated who can mint |
+| Lifetime | 60 seconds from `InternalIdentityConfig.DEFAULT_LIFETIME`, bounded absolutely at 5 minutes by `InternalServiceToken.MAX_LIFETIME`; a longer lifetime is refused at minting rather than truncated |
+| Key material | one Secrets Manager entry created by [`infra/modules/secrets`](../../infra/modules/secrets), at least `InternalServiceToken.MIN_KEY_LENGTH` bytes, injected as the container secret `CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY` into exactly three task definitions — the two minting callers and the verifying callee — and readable by exactly those three task roles. `infra/modules/ecs-service` asserts the membership as a biconditional, so a fourth workload receiving the secret and a listed workload missing it both fail the plan |
+| Routing | the two internal subtrees are forwarded on the **internal** load balancer only; `infra/modules/api-gateway-http` publishes no edge route key for either, so neither is reachable from the public edge |
+| Name resolution | a private Route 53 zone in each environment root resolving the internal service name to the load balancer inside the VPC, which is what lets the client verify the listener certificate it already covers |
+
+> Refactoring Rationale: **all four halves of this were missing, and each failed
+> differently.** The client presented no credential of any kind, so a call would have
+> been refused before reaching a handler; `account-service`'s chain required a group
+> authority on every route, so even a credential would not have authorized it; the load
+> balancer forwarded only the account subtree, so two of the three addresses were
+> answered 404 by the load balancer itself; and no DNS record resolved the name the
+> base URL would have used, which neither environment root published either. The
+> composite symptom was an unavailable dependency, which is the least informative of the
+> four causes and the one an operator would have investigated first.
+>
+> Alternatives Considered: **forwarding the end user's token.** Rejected twice over, and
+> the review that found this gap forbids it by name. There is no user token in a queue
+> message to forward; and if there were, letting a cardholder's session authorize a
+> cross-context read of master records would grant that session an authority the
+> disclosure contract above gives it nowhere else.
+>
+> Alternatives Considered: **an OAuth 2.0 client-credentials access token**, which is
+> the standard answer and would have reused `CognitoAccessTokenValidator` unchanged.
+> Rejected because the shipped stack cannot issue one: that grant is served only by a
+> user-pool hosted domain, and [`infra/modules/cognito`](../../infra/modules/cognito)
+> creates none — its `domain_prefix` input defaults to null, neither environment root
+> supplies it, and that module records two independent reasons for not creating one
+> unconditionally.
+>
+> Alternatives Considered: **mutual TLS between tasks.** Rejected on a measured ground:
+> each task now mints its own listener key pair and self-signed certificate at startup,
+> with no shared authority anywhere, so a peer certificate has no trust anchor to be
+> verified against.
+>
+> Alternatives Considered: **a managed-key message authentication code**, with the
+> minting task granted `kms:GenerateMac` and the answering task `kms:VerifyMac` on one
+> key. This is the stronger posture in general — no key material in either task, neither
+> capability implying the other, and a CloudTrail entry per credential — and it was
+> rejected here on two measured grounds. First, it buys nothing against this topology:
+> there is **one** audience and its verifier is the service that owns the records, so a
+> compromise of that verifier already grants everything a forged credential could obtain
+> from it. Second, it would have required a sixth key in
+> [`infra/modules/kms`](../../infra/modules/kms), whose `enable_key_rotation` input
+> accepts only `true` on the stated ground that automatic rotation is an architecture
+> invariant — and a message-authentication key cannot rotate automatically at all, so the
+> key would have had to be carved out of an invariant that module declines to make
+> optional. Assumptions: the first ground holds only while there is one audience. A
+> second audience added under this same key would make a compromise of either verifier
+> the ability to mint for the other, and the managed-key split would then have to be
+> revisited — or a key issued per audience.
+>
+> Trade-offs: a shared key means the **verifier can mint**. The consequence is bounded
+> and stated rather than left implicit: the only audience is the account context itself,
+> so the capability a compromise of that context gains from holding the key is a
+> capability it already has by being that context. What the key does buy is that no
+> **fourth** party can mint, which is why exactly three task roles may read the entry —
+> the two contexts that call the account context and the account context that verifies —
+> and why [`infra/modules/ecs-service`](../../infra/modules/ecs-service) requires the name
+> of each of them and admits it for no other workload.
+>
+> Alternatives Considered: **a hand-written wire form with an application-verified
+> message authentication code** — a version marker, an encoded payload and an HMAC over
+> the payload together with the audience, the HTTP method and the request path, checked by
+> a servlet filter ahead of the resource server. It binds a credential to the exact
+> request that carries it, which the token above does not, and it was still rejected. The
+> verification would be application code on the authentication path, where a signed JWT is
+> verified by the framework's own audited decoder and validators; and the replay window the
+> path binding closes is closed differently here, because the chain admits the token on
+> **three exact addresses and nowhere else**, all three of them reads. Choosing the
+> hand-written form would have traded audited verification for a binding whose benefit this
+> topology already obtains structurally.
+>
+> Assumptions: a **separately-ordered** chain is what makes the exact-address matcher
+> workable. A single chain would have had to admit either credential on
+> `/api/v1/accounts/**`, because a person and the posting decision read the same record —
+> and an either-or rule on a subtree is the weaker statement, since it also admits the
+> machine token on every future route added beneath it. Two chains state the narrower rule
+> directly: the machine token is accepted on three addresses, and the user chain is left
+> exactly as strict as it was.
 
 ## RACF: a mapping, not a port
 
@@ -517,8 +611,53 @@ roles:
 
 The role and grant surface is authored in
 [`data-migration/sql/V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql),
-and it is that file — not a summary of it — that this section reports. Two tiers
-differ from the coarse description, both in the narrower direction.
+and it is that file — not a summary of it — that this section reports. Three
+things differ from the coarse description, all in the narrower direction.
+
+**Every schema is owned by a role that cannot log in.** The script creates
+**three tiers** of role, not one:
+
+| Tier | Count | `LOGIN` | Holds |
+|---|---|---|---|
+| `carddemo_<context>_owner` | 8 | **no** | owns the schema and every object a migration creates in it, so it alone may `ALTER` or `DROP` them |
+| `carddemo_<context>_migrator` | 7 | yes | member of its owner `WITH INHERIT FALSE`; holds nothing until it issues `SET ROLE`, which each service's `spring.flyway.init-sqls` does |
+| `carddemo_<context>` | 8 | yes | `USAGE` on its schema, `SELECT`/`INSERT`/`UPDATE` on its tables, `USAGE`/`SELECT` on its sequences, `CREATE` explicitly **revoked** |
+
+> Refactoring Rationale: **only `reporting` used to have a `NOLOGIN` owner, and the
+> other seven schemas were owned by the very role their service connected as.** That
+> arrangement gave each long-lived runtime credential implicit `CREATE` on its schema
+> and ownership of every table Flyway created in it — so the one credential every
+> request ran under could also `ALTER` or `DROP` the data it served, and `DELETE` and
+> `TRUNCATE` came with ownership rather than being granted. The `reporting` split was
+> already the right shape; it is now applied to all eight contexts. The DDL a startup
+> migration legitimately needs arrives through a **second** credential, injected as
+> `SPRING_FLYWAY_USER`/`SPRING_FLYWAY_PASSWORD`, whose authority is inert until it
+> assumes the owner explicitly.
+>
+> Assumptions: **`WITH INHERIT FALSE` is what makes the migration role safe to ship
+> inside a serving task.** Membership alone would give the migrator its owner's
+> privileges on every statement; with inheritance off, a session that authenticates as
+> the migrator and does not `SET ROLE` can read and write nothing. Verified against a
+> live PostgreSQL 17.10: a migrator session without `SET ROLE` is refused with
+> `permission denied for table`, and a runtime session is refused
+> `permission denied to set role`.
+>
+> Assumptions: **the `SET ROLE` is not cosmetic — the grants depend on it.** Every
+> `ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_<context>_owner` clause in the script is
+> keyed on the **creating** role, so a migration that created tables as the migrator
+> would leave all fourteen of them inert and the runtime role would receive no grant on
+> the tables it must read. Verified end to end against the same instance:
+> `batch-service` migrated as `carddemo_batch_migrator` and all eight resulting
+> tables — including Flyway's own `flyway_schema_history` — are owned by
+> `carddemo_batch_owner`, after which the runtime role could `SELECT`, `INSERT` and
+> `UPDATE` but was refused `DELETE`, `TRUNCATE`, `ALTER`, `DROP` and `SET ROLE`.
+>
+> Trade-offs: **fifteen credentials instead of eight**, one per login role, and a
+> service that forgets its migration credential fails at startup on an unresolved
+> placeholder. Both are accepted: the extra entries are what let one
+> `GetSecretValue` grant per identity stay expressible, and a startup failure naming
+> the missing variable is a better outcome than migrating as the wrong identity and
+> succeeding.
 
 **The batch tier's cross-schema write surface is one named table, not a schema.**
 `batch-service` is the one deliberate departure from database-per-service ownership,
@@ -531,14 +670,14 @@ tables. What belongs here is the **actual privilege**, which is narrower than
 
 | Schema | Privilege held by the batch role | Line |
 |---|---|---|
-| `ledger` | `SELECT`, `INSERT`, `UPDATE` on all tables, plus sequence usage | L691–L692 |
-| `account` | `SELECT` on all tables; `UPDATE` **revoked** schema-wide, then re-granted on **`account.accounts` alone** | L742, L744, L755 |
-| `card` | `SELECT` only | L782 |
-| `reference` | `SELECT` only | L791 |
+| `ledger` | `SELECT`, `INSERT`, `UPDATE` on all tables, plus sequence usage | L1064–L1065 |
+| `account` | `SELECT` on all tables; `UPDATE` **revoked** schema-wide, then re-granted on **`account.accounts` alone** | L1115, L1117, L1128 |
+| `card` | `SELECT` only | L1155 |
+| `reference` | `SELECT` only | L1164 |
 
 > Assumptions: **the revoke-then-narrow sequence is the mechanism, and reading it
 > as redundant would be a mistake.** The script revokes `UPDATE` across the whole
-> `account` schema at L742 *before* granting it on one table at L755, and the second
+> `account` schema at L1115 *before* granting it on one table at L1128, and the second
 > statement is guarded so it applies only once that table exists. The reason the
 > revoke is there at all is that a default-privilege entry or an earlier schema-wide
 > grant is **not** superseded by a narrower later grant — the two are additive — so
@@ -546,37 +685,49 @@ tables. What belongs here is the **actual privilege**, which is narrower than
 > privilege. A reader auditing least privilege needs to see both statements to
 > conclude anything about the resulting surface; either one alone is misleading.
 
-**The reporting tier is two roles, and the service's own role cannot reach a base
-table.** The description "a `SELECT`-only role over read-only cross-schema views"
-is accurate but incomplete, and the missing half is the part that carries the
-isolation:
+**The reporting tier's owner reaches four other schemas, and the service's own role
+cannot reach a base table.** The description "a `SELECT`-only role over read-only
+cross-schema views" is accurate but incomplete, and the missing half is the part that
+carries the isolation:
 
 | Role | Holds | Line |
 |---|---|---|
-| `carddemo_reporting_owner` — no login, owns the views | `USAGE` and `SELECT` on `ledger`, `account`, `card`, `reference` | L841–L861 |
-| `carddemo_reporting` — the role the service actually connects as | `USAGE` and `SELECT` on the `reporting` schema **only**; explicitly **revoked ALL** on `ledger`, `account`, `card` and `reference`; **revoked `CREATE`** on its own schema | L910–L915, L917, L927, L939 |
+| `carddemo_reporting_owner` — no login, owns the views | `USAGE` and `SELECT` on `ledger`, `account`, `card`, `reference` | L1214–L1234 |
+| `carddemo_reporting` — the role the service actually connects as | `USAGE` and `SELECT` on the `reporting` schema **only**; explicitly **revoked ALL** on `ledger`, `account`, `card` and `reference`; **revoked `CREATE`** on its own schema | L1291, L1293, L1303, L1315 |
 
 > Refactoring Rationale: **splitting owner from consumer, rather than letting the
-> reporting service hold the base-table grants directly.** The single-role form is
+> reporting service hold the base-table grants directly.** This is the same split the
+> other seven contexts now use, and reporting is where it was first applied. The
+> single-role form is
 > simpler and was the obvious first shape, and it has a specific defect: a role that
 > can select from the base tables can select from them *directly*, so the views stop
 > being a boundary and become a convenience. Any column a view was written to
 > exclude — an encrypted identifier, a full account number — is then reachable by a
 > query that does not use the view, and no grant prevents it. Separating the two
 > means the base-table grants live on a role that **cannot log in**, so the only path
-> from the reporting service to base-table data is through a view somebody wrote. The
-> `reporting` schema holds **no tables of its own**, as
-> [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md#reporting--reporting-service-a-schema-with-no-tables)
+> from the reporting service to base-table data is through a view somebody wrote.
+> `reporting` is also the one context with **no migration role**, because
+> reporting-service ships no Flyway migration — its views are created by
+> [`V1__reporting_views.sql`](../../data-migration/sql/V1__reporting_views.sql) under
+> the bootstrap principal, and V0 accordingly creates seven
+> `carddemo_<context>_migrator` roles rather than eight. The service role can read **no
+> table at all**: the `reporting` schema holds exactly one, `card_grouping_key`, which
+> the same script grants to the owner and revokes from `carddemo_reporting`, as
+> [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md#reporting--reporting-service-a-schema-it-can-only-read)
 > records. The accepted cost is a second role to provision and a view to add whenever
 > reporting needs a new column.
 
 One further hardening statement applies to the cluster rather than to a role:
-`REVOKE CREATE ON SCHEMA public FROM PUBLIC` at L594, which removes the default
+`REVOKE CREATE ON SCHEMA public FROM PUBLIC` at L953, which removes the default
 ability of any connected role to create objects in the public schema.
 
 **How a role acquires the credential it authenticates with.** The script creates every
-service role with `LOGIN` and **no password clause**, so nothing it leaves behind can
-authenticate — that absence is what lets the file carry no credential material at all.
+one of the fifteen login roles with `LOGIN` and **no password clause**, so nothing it
+leaves behind can authenticate — that absence is what lets the file carry no credential
+material at all. The eight owner roles get no password clause either, and for them the
+absence is permanent rather than transitional: they are `NOLOGIN`, so
+`infra/modules/secrets` deliberately creates no entry for them and there is no
+credential whose loss could hand an attacker DDL authority.
 The credential is supplied by the step that runs immediately after it,
 [`credentials.py`](../../data-migration/src/carddemo_migration/credentials.py), invoked as
 `python -m carddemo_migration.credentials`. It connects as the cluster master credential
@@ -594,18 +745,16 @@ any of them starts.
 > replayed as a password because deriving the client key from the stored key would require
 > inverting SHA-256. The password itself never leaves the step's own process.
 
-> Refactoring Rationale: **this replaces a mechanism that was named and did not exist.**
-> The script, and the two rotation inputs on `infra/modules/secrets`, previously described
-> a Secrets Manager rotation function as what applied each credential for the first time.
-> Both of those inputs default to null, no rotation function is in scope in this migration,
-> and the rotation functions AWS publishes for PostgreSQL cannot perform a first
-> application in any case — single-user rotation authenticates with the credential it is
-> replacing, and these roles have none. The consequence was a stack that provisioned
-> successfully and could not start a single service. The step above is delivered, and it
-> **verifies its own outcome**: it exits non-zero unless every role holds a SCRAM verifier
-> *and* completes a real TLS login as that role, so a deployment cannot report success
-> while a service still cannot reach its schema. Those two rotation inputs configure
-> scheduled rotation and nothing else.
+> Assumptions: **first application of a credential is this step's job and cannot be a
+> rotation function's.** The two rotation inputs on `infra/modules/secrets` default to
+> null, no rotation function is in scope in this migration, and the rotation functions
+> AWS publishes for PostgreSQL cannot perform a first application in any case —
+> single-user rotation authenticates with the credential it is replacing, and these
+> roles have none, so a stack that relied on one would provision successfully and start
+> no service. The step above **verifies its own outcome**: it exits non-zero unless
+> every role holds a SCRAM verifier *and* completes a real TLS login as that role, so a
+> deployment cannot report success while a service still cannot reach its schema. Those
+> two rotation inputs configure scheduled rotation and nothing else.
 
 ### The batch orchestration's execution role
 
@@ -614,26 +763,26 @@ For the cluster **master** credential, the Aurora module configures RDS as the s
 authority because
 [`aurora-postgresql/main.tf`](../../infra/modules/aurora-postgresql/main.tf) sets
 `manage_master_user_password = true`; the only reference published for it is
-`module.aurora.master_user_secret_arn`. The secrets module no longer creates a
-second `database_master` secret, and its former master ARN, name and username
-outputs are removed. This eliminates the previous failure mode in which two
-plausible secret entries existed but only the RDS-managed one could open the
-cluster once the module is instantiated.
+`module.aurora.master_user_secret_arn`. The secrets module declares no second
+`database_master` secret and publishes no master ARN, name or username, so there is
+exactly one secret entry that can open the cluster rather than two plausible ones of
+which only the RDS-managed entry works.
 
-The eight ordinary service login roles are different: RDS does not manage their
+The fifteen ordinary service login roles are different: RDS does not manage their
 credentials. [`infra/modules/secrets/main.tf`](../../infra/modules/secrets/main.tf)
-authors one generated secret per service role, while
-[`V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql)
+authors one generated secret per login role — eight runtime and seven migration —
+while [`V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql)
 creates those roles without a password because the roles must exist before a
 credential can be applied. The required order is therefore explicit:
 
-1. create the cluster and the eight per-service secret entries;
-2. run V0 to create the eight `LOGIN` roles;
-3. connect as the RDS master over a verified TLS connection and call
-   `carddemo_migration.role_credentials.bootstrap_role_credentials`;
-4. let that function derive each SCRAM-SHA-256 verifier client-side, apply all
-   eight in one transaction and call `verify_role_credentials`, which **raises**
-   if any role still has no stored credential.
+1. create the cluster and the fifteen per-role secret entries;
+2. publish each stored credential to the bootstrap session as a **bound-parameter**
+   session setting named `carddemo.credential.<role>`;
+3. run V0, whose final section applies each one with `ALTER ROLE` inside a `DO`
+   block and **fails closed** — rolling the whole transaction back — if any login
+   role would be left unable to authenticate;
+4. only then create the ECS services, so no task starts against a database in
+   which its role does not yet exist.
 
 Only the verifier crosses the database connection; the plaintext values are read
 from the secret store into the bootstrap process, held in memory for the call and
@@ -641,26 +790,54 @@ never sent as SQL text. V0's post-create notice names both the bootstrap entry p
 and the failing verifier so an operator is not left with a report-only query or a
 manual `ALTER ROLE` instruction.
 
-> **Measured delivery status.** The Python bootstrap and its failing verification are
-> authored in
-> [`role_credentials.py`](../../data-migration/src/carddemo_migration/role_credentials.py).
-> Each environment root now composes the *first* half of the ordering: a
-> `database_admin` Lambda packaged with `V0__schemas_and_roles.sql`, invoked by
-> `aws_lambda_invocation.database_bootstrap`, which the `secrets` module then
-> `depends_on` — so V0 runs before any credential is generated. The *second* half is
-> still absent: neither root, nor any Fargate task, nor any workflow calls
-> `bootstrap_role_credentials` or `verify_role_credentials`, and no Terraform variable
-> selects a credential-application mechanism. The eight service roles are therefore
-> created without a stored credential, and closing that gap requires a step that runs
-> the Python entry point after V0 and before any service starts and treats an
-> exception from `verify_role_credentials` as a deployment failure.
+> **Measured delivery status.** All four steps are now composed by each environment
+> root. `module.secrets` creates the fifteen entries first; the `database_admin` Lambda
+> ([`infra/lambda/database_admin.py`](../../infra/lambda/database_admin.py)) is packaged
+> with `V0__schemas_and_roles.sql` and receives the role-to-secret-name mapping
+> projected from that module's output as `DB_CREDENTIAL_SECRETS`;
+> `aws_lambda_invocation.database_bootstrap` `depends_on` the module and invokes the
+> function, which opens one Data API transaction, publishes each credential with
+> `SELECT set_config(:setting_name, :setting_value, false)`, and only then sends V0's
+> statements on that same session; and `module.ecs_service` `depends_on` the invocation.
+> Verified against the roots' own dependency graph: the invocation reaches all four
+> `module.secrets` resources, **no** `module.secrets` resource reaches the invocation,
+> all twenty `module.ecs_service` nodes reach it, and the graph holds no cycle.
 >
-> Refactoring Rationale: this paragraph previously rested the ordering guarantee on a
-> `service_credential_application` input of the `secrets` module, and that input no
-> longer exists anywhere in `infra/**` — the design moved to the Lambda invocation
-> named above. A guarantee attributed to a deleted variable reads as delivered while
-> being unimplementable, which is worse than the plain statement that half the
-> ordering is composed and half is not.
+> A second, independent applicator remains available for operator use rather than for
+> provisioning:
+> [`role_credentials.py`](../../data-migration/src/carddemo_migration/role_credentials.py)
+> derives each SCRAM-SHA-256 verifier client-side and calls `verify_role_credentials`,
+> which raises if any role still has no stored credential. It is what
+> [`docs/runbooks/deploy.md`](../runbooks/deploy.md) invokes to re-apply a replaced
+> credential, and it works from the same fifteen-role inventory.
+>
+> Refactoring Rationale: two successive statements here were wrong, and both are
+> withdrawn. The first rested the ordering guarantee on a
+> `service_credential_application` input of the `secrets` module that no longer exists
+> anywhere in `infra/**`. The second — added when the design moved to the Lambda —
+> described the composed ordering accurately and the ordering itself was **inverted**:
+> the invocation ran BEFORE the module that creates the credentials, and `module.secrets`
+> carried `depends_on = [aws_lambda_invocation.database_bootstrap]` to enforce exactly
+> that. Because V0 refuses to commit without a value for every login role, a fresh apply
+> could not succeed at all: the bootstrap rolled back before any secret existed to read.
+> The edge is inverted, the Lambda now reads the entries and publishes them, and the
+> services are ordered after both.
+>
+> Assumptions: the credential value is a **bound parameter** at every hop, never
+> statement text. PostgreSQL accepts no bind parameter in `ALTER ROLE ... PASSWORD`,
+> which is why V0 builds that statement as dynamic SQL inside a `DO` block from a
+> session setting rather than from a value the caller interpolated — and why the setting
+> itself is delivered through the Data API's `parameters` array. Neither the Lambda's log
+> line nor its response carries a role name or a credential; both report counts only,
+> because `aws_lambda_invocation` stores the response in Terraform state.
+>
+> Trade-offs: the bootstrap function holds `secretsmanager:GetSecretValue` on all
+> fifteen entries at once, which is more than any service task holds. That concentration
+> is inherent to a step whose job is applying every credential, and it is bounded: the
+> grant is enumerated from `module.secrets`' output rather than written as a prefix
+> wildcard — which would additionally have reached the Cognito seed-user entries under
+> the same prefix — the function holds no other permission, and it is invoked only by
+> Terraform.
 
 ### The batch orchestration's execution role for the state machine
 
@@ -677,24 +854,17 @@ two encrypted log groups, `aws_cloudwatch_log_group.daily` and
 belongs to
 [`batch-orchestration.md`](batch-orchestration.md).
 
-Refactoring Rationale: this section previously reported that the module held
-variables and provider constraints but no resource graph. That is measurably no
-longer true, and the direction of the error matters here: understating an IAM
-resource as unauthored invites a reviewer to skip the one artifact whose scoping is
-the whole point of the section.
-
 ### Deployment identity
 
 The deployment workflow authenticates by **short-lived federated role assumption**:
 it exchanges a workload identity token for temporary credentials scoped to a
 deployment role rather than storing an access key.
-[`.github/workflows/deploy.yml`](../../.github/workflows/deploy.yml) is authored and
-implements exactly that — it grants `id-token: write`, calls the official
+[`.github/workflows/deploy.yml`](../../.github/workflows/deploy.yml) implements
+exactly that — it grants `id-token: write`, calls the official
 `aws-actions/configure-aws-credentials` action pinned to a commit SHA, and passes a
 `role-to-assume` supplied as repository configuration rather than as a secret. The
-repository still contains no deployment access key, and that remains a measured
-repository state rather than the proof; the proof is the workflow's own token
-exchange.
+repository contains no deployment access key, but that is a measured repository state
+rather than the proof; the proof is the workflow's own token exchange.
 
 The trust relationship is split across the boundary of this repository and both halves
 should be read together. The identity provider is authored here:
@@ -809,41 +979,81 @@ as "provisioned".
 
 The load-balancer-to-task row is fail-closed by construction: because the target group
 and its health check both speak HTTPS, a task serving cleartext would never become
-healthy, so the two halves cannot be enabled independently. The delivery path for the
-material that makes a task speak HTTPS is composed across three files, and each half is
-worth naming because removing any one of them would break the hop silently. Each online
-service's `application.yml` reads its PEM pair from `${CARDDEMO_SERVER_TLS_CERTIFICATE}`
-and `${CARDDEMO_SERVER_TLS_PRIVATE_KEY}` under `server.ssl`;
-[`infra/modules/ecs-service/main.tf`](../../infra/modules/ecs-service/main.tf) lists both
-names in its per-service `required_secret_environment_names`, so a task definition
-missing either one fails validation rather than starting without TLS; and each
-environment root binds those two names to the Secrets Manager entries the `secrets`
-module owns, through a `tls_secret_sources` local that is merged into every online
-workload's `secret_arns`. The material therefore reaches the task as a secret reference
-rather than as an environment variable, and neither property carries a fallback, so an
-absent certificate stops startup instead of silently serving cleartext.
+healthy, so the two halves cannot be enabled independently.
+
+**The listener material is minted by each task, and this paragraph previously described
+the opposite.** It stated that the delivery path was composed across three files — each
+service's `application.yml` reading a PEM pair from `${CARDDEMO_SERVER_TLS_CERTIFICATE}`
+and `${CARDDEMO_SERVER_TLS_PRIVATE_KEY}`, `ecs-service` requiring both names, and each
+environment root binding them to Secrets Manager entries through a `tls_secret_sources`
+local — and concluded that the material "reaches the task as a secret reference rather
+than as an environment variable". Every one of those mechanisms is now **deleted**,
+because the arrangement had a defect the description obscured: the pair was generated by
+a managed `tls_private_key` resource in each root, so **one** RSA private key was
+persisted in Terraform state, imported into ACM, copied into two Secrets Manager entries
+and injected into **all seven** online services. Anyone who could read an environment's
+state file held every service's listener key.
+
+What is delivered now is one mechanism instead of three, and it holds a strictly stronger
+property. `config/docker/generate-listener-material.sh` is the entry point of all seven
+online images. Before the JVM starts it draws a fresh RSA-2048 key and a self-signed leaf
+with `keytool`, writes them mode `0600` into a PKCS#12 keystore on the task's own
+`writable_mount_paths` volume — a Fargate ephemeral volume that is encrypted at rest and
+destroyed with the task — exports the keystore location, its one-time password and its
+alias, and then `exec`s the JVM so the JVM is still PID 1. Each service's `server.ssl`
+reads that keystore, and `key-store-password` carries **no** fallback, so an absent
+password stops context startup before the port opens. The result is per-task material with
+no shared key, nothing in Terraform state, nothing in Secrets Manager, nothing in a task
+definition, nothing in an image layer, and no operator input.
+
+Three alternatives were measured against the pinned providers and runtimes before this one
+was chosen, and each was rejected on evidence rather than preference: an `ephemeral`
+`tls_private_key` written through the `secret_string_wo` and `private_key_wo` write-only
+arguments (all three mechanisms exist, but `terraform validate` refuses to let an
+ephemeral value reach `tls_self_signed_cert.private_key_pem`, which "must be persisted to
+state" — so the key could be kept out of state only by giving up the certificate); a
+Lambda that mints and imports the pair (the `python:3.13` Lambda runtime carries neither
+`cryptography` nor an `openssl` or `keytool` binary, so a certificate could only be built
+by hand-writing RSA and DER code); and an AWS Private CA so that ACM generates and holds
+the key (a recurring monthly charge for one internal listener, and unnecessary once the
+tasks certify themselves).
+
+The certificate at the hop that *is* verified — the one API Gateway checks against
+`server_name_to_verify` — is unaffected. That one sits on the load balancer's own listener
+and is the operator-supplied ACM ARN in `alb_certificate_arn`, delivered as a `TF_VAR_*`
+value exactly as `cloudfront_acm_certificate_arn` already is for the SPA edge. An
+Application Load Balancer does not validate the certificate a target in an HTTPS target
+group presents, which is why a per-task self-signed leaf is accepted there — the same
+property the previous shared self-signed leaf already relied on.
 
 Two boundaries survive the correction and are the honest remainder. First, **nothing
 here is provisioned** — every statement in the table is a measurement of authored
 Terraform and authored service configuration, not of a running system, and the
 deployment boundary in
 [Caveats, boundaries and out-of-scope](#caveats-boundaries-and-out-of-scope) governs
-it. Second, the **default trust anchor is private**: when a root is applied without
-`alb_certificate_arn`, `service_tls_certificate` and `service_tls_private_key`, it
-generates a `tls_self_signed_cert` for the internal service name and imports it into
-ACM, so the verified server name holds but the chain is self-signed. An operator
-supplying a real ACM certificate and matching PEM pair overrides all three.
+it. Second, the **task-side trust anchor is deliberately private**: each task presents
+the self-signed leaf it minted for itself, which the load balancer accepts because it
+does not validate target certificates. The chain at that hop is therefore
+unauthenticated by design and its confidentiality, not its authentication, is what the
+hop provides; the peer's identity is established instead by the security group, which
+admits load-balancer-to-application traffic on `8080` and nothing else.
 
-Refactoring Rationale: this section previously reported that no root composed the
-edge modules, that `account-service` and `authorization-service` had no
-`application.yml` at all, and that `reporting-service` lacked verified JDBC client
-properties. All three had stopped being true, and the JDBC row was wrong for a
-subtler reason worth recording: the property is written as the Hikari data-source
-**key** `sslmode: verify-full`, not as a `sslmode=verify-full` query parameter on the
-JDBC URL, so a search for the query form finds nothing in a tree where all eight
-services set it. A status table that understates delivered encryption is not the safe
-direction of error — it invites re-implementing a control that exists and diverging
-from it.
+Refactoring Rationale: this paragraph previously described a *fallback*: "when a root is
+applied without `alb_certificate_arn`, `service_tls_certificate` and
+`service_tls_private_key`, it generates a `tls_self_signed_cert` for the internal service
+name and imports it into ACM". That was wrong twice over. `service_tls_certificate` and
+`service_tls_private_key` had already been removed as root inputs, and
+`alb_certificate_arn` is declared `nullable = false` with no default, so a root **cannot**
+be applied without it — the fallback path could never be taken, and the certificate it
+described was generated on every apply and then used by nothing while its private key sat
+in state. The whole chain is deleted; the load-balancer listener certificate is
+operator-supplied, always.
+
+Assumptions: client-side TLS enforcement is written as the Hikari data-source **key**
+`sslmode: verify-full`, not as a `sslmode=verify-full` query parameter on the JDBC URL.
+Searching for the query form therefore finds nothing in a tree where every service sets
+it, which is exactly how a delivered encryption control gets re-implemented and
+diverged from.
 
 
 
@@ -857,22 +1067,62 @@ rather than restated.
 | Data element | Baseline declaration | Target disclosure contract |
 |---|---|---|
 | Primary account number | `CARD-NUM PIC X(16)`, [`CVACT02Y.cpy`](../../app/cpy/CVACT02Y.cpy) L5 | Masked to the **last four digits** in every response **except** the administrative card-detail endpoint |
-| Card verification value | `CARD-CVV-CD PIC 9(03)`, [`CVACT02Y.cpy`](../../app/cpy/CVACT02Y.cpy) L7 | **Never returned by any endpoint**; stored encrypted as binary (`cvv_encrypted BYTEA`) |
+| Card verification value | `CARD-CVV-CD PIC 9(03)`, [`CVACT02Y.cpy`](../../app/cpy/CVACT02Y.cpy) L7 | **Never returned by any endpoint**; stored as an envelope in binary (`cvv_encrypted BYTEA`) — one data key per value from the application-data customer-managed key, enciphered locally under an authenticated cipher |
 | National identifier | `CUST-SSN PIC 9(09)`, [`CVCUS01Y.cpy`](../../app/cpy/CVCUS01Y.cpy) L17 | Stored encrypted (`ssn_encrypted BYTEA`); returned **masked** |
 | Government-issued identifier | `CUST-GOVT-ISSUED-ID PIC X(20)`, [`CVCUS01Y.cpy`](../../app/cpy/CVCUS01Y.cpy) L18 | Stored encrypted (`govt_issued_id_encrypted BYTEA`); returned **masked** |
 | Password | `SEC-USR-PWD PIC X(08)`, [`CSUSR01Y.cpy`](../../app/cpy/CSUSR01Y.cpy) L21 | **Does not exist in the target data model** — see [Identity](#identity-the-one-place-parity-is-explicitly-declined) |
 
-The card verification value is the strictest of the five. The card DDL reserves a
+The card verification value is the strictest of the five, and it is the one of the
+three encrypted columns whose writer is now authored. The card DDL reserves a
 `BYTEA` column named `cvv_encrypted` rather than a three-digit integer, so the schema
-can hold ciphertext without coercion. No class under `services/*/src/main/java`
-references that column, or `ssn_encrypted`, or `govt_issued_id_encrypted`, so no
-writer or encryption mapper is authored; the column name and type do not by themselves
-encrypt anything. The absence is measurable rather than assumed: the only JPA attribute
-converters authored anywhere in the tree are the two `MoneyAmountConverter` declarations
-in `reporting-service`, on `ReportTransactionView` and `StatementTransactionView`, and
-both convert money rather than ciphertext. The target writer must encrypt before
-persistence so that a
-`SELECT *` exposes ciphertext rather than the original three digits.
+can hold ciphertext without coercion — but a column name and type do not by themselves
+encrypt anything, which is why the boundary rather than the column is what this
+section holds to account.
+
+That boundary is three classes and exactly one of each:
+
+- [`EncryptedCvv.java`](../../services/card-service/src/main/java/com/carddemo/card/domain/EncryptedCvv.java)
+  is an immutable value carrying a **self-describing envelope** — a four-byte marker,
+  a format version, the length-prefixed enciphered data key, the initialisation
+  vector and the ciphertext-with-tag. Its minimum framed length is far above three
+  bytes, so a plaintext verification value is not merely rejected, it is
+  **inexpressible** as an instance.
+- [`EncryptedCvvConverter.java`](../../services/card-service/src/main/java/com/carddemo/card/domain/EncryptedCvvConverter.java)
+  is the single persistence boundary, validating the envelope shape in **both**
+  directions so that neither a write nor a read can carry an unframed byte array
+  across it.
+- [`CardVerificationValueCipher.java`](../../services/card-service/src/main/java/com/carddemo/card/service/CardVerificationValueCipher.java)
+  obtains one data key per value from the application-data customer-managed key,
+  enciphers locally under AES/GCM, and zeroes both the key material and the
+  plaintext afterwards. The encryption context is `carddemo:purpose=card-cvv` and
+  deliberately does **not** name the card, because an encryption context is recorded
+  verbatim in the key-service audit trail.
+
+`Card.cvvEncrypted` is declared as `EncryptedCvv` with that converter, and `Card`
+exposes no `byte[]` constructor parameter or setter at all — asserted by reflection
+in `EncryptedCvvPersistenceBoundaryTest`, so the guarantee is a test rather than a
+convention. The key itself is provisioned as `aws_kms_key.application` in
+[`infra/modules/kms/main.tf`](../../infra/modules/kms/main.tf), and each environment
+root grants the card task role exactly `kms:GenerateDataKey*` and `kms:Decrypt` on
+that one key under that one encryption-context value — `kms:Encrypt` is withheld
+deliberately, since envelope encryption never calls it and a role holding it could
+use the key as a general-purpose oracle.
+
+`ssn_encrypted` and `govt_issued_id_encrypted` have **no** writer yet, and that
+remains measurable rather than assumed: the JPA attribute converters authored
+anywhere in the tree are the two `MoneyAmountConverter` declarations in
+`reporting-service`, on `ReportTransactionView` and `StatementTransactionView`,
+which convert money rather than ciphertext, plus the `EncryptedCvvConverter` above.
+The customer-side writers must encrypt before persistence, on the same shape, so
+that a `SELECT *` exposes ciphertext rather than the original identifiers.
+
+Refactoring Rationale: this passage previously stated that no class references any
+of the three columns and that the only converters in the tree convert money. Both
+halves became false when the card verification value acquired its writer, and the
+correction is deliberately narrow: the two customer identifiers are still
+unimplemented, so the passage now separates the column that has a boundary from the
+two that do not, rather than replacing one blanket claim with the opposite blanket
+claim.
 
 > **Required enforcement: the boundary must constrain API → persistence
 > dependencies, not the unrelated reverse direction.** A rule that prevents a
@@ -904,29 +1154,53 @@ persistence so that a
 > a `SecurityConfig` whose filter chain registers `JwtRoleConverter` and whose route
 > rules require the administrative authority.
 > [`LayeringRulesTest.java`](../../services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java)
-> **is** an executable ArchUnit rule class: eight tests, executed nine times in a full
+> **is** an executable ArchUnit rule class: nine tests, executed nine times in a full
 > reactor build — once in each of the eight service modules through the
 > `architecture-rules` execution declared in
 > [`services/pom.xml`](../../services/pom.xml), and once more in `common-lib` itself
 > through that module's own test run, which is the only pass that checks the shared
-> kernel. Four of the eight are the boundaries themselves — a domain type may not reach
+> kernel. Five of the nine are the boundaries themselves — a domain type may not reach
 > a framework or infrastructure type, no context may reach another context's domain
-> package, no money value may be declared as a binary floating-point type, and a
-> security chain must render its refusals — and the other four are anti-vacuity guards
+> package, no money value may be declared as a binary floating-point type, a security
+> chain must render its refusals, and no class may reach for an external retry library
+> the framework's own resilience support replaces — and the other four are anti-vacuity
+> guards
 > that fail if the imported graph is empty, if the ownership contract stops being
 > exactly nine fixed roots, if a prohibition list no longer matches the constructs it
 > names, or if the money rule stops rejecting a planted violation. The reactor carries
-> 82 test classes in total. **Not authored:** no `*Controller.java` exists anywhere under
-> `services/*/src/main/java`, so there is no HTTP response to mask yet; `card-service`'s
-> `mapper` package holds only a `package-info.java` and `account-service` has no `mapper`
-> package at all, so neither has a response mapper; `LayeringRulesTest` holds no
+> 166 test classes in total. **Not authored:** `LayeringRulesTest` holds no
 > `..api..` → `..domain..` or `..repository..` rule, so the specific boundary this
-> section requires is the one ArchUnit rule that is missing; no test serializes a card or
-> customer response through the production object mapper to prove the four disclosure
-> outcomes; and no class under `services/*/src/main/java` writes `cvv_encrypted`,
-> `ssn_encrypted` or `govt_issued_id_encrypted`. The table above therefore remains the
-> required disclosure contract rather than a claim that masking is enforced end to end —
-> but the reason is now the missing controller and boundary rule, not a missing masker.
+> section requires is the one ArchUnit rule that is missing; and no test serializes a
+> *customer* response through the production object mapper, so one of the two response
+> shapes carrying personal data is still unproven at the serialization boundary. The table
+> above therefore remains the required disclosure contract rather than a claim that masking
+> is enforced end to end — but the reason is now the missing boundary rule and the
+> unauthored routes, not a missing masker.
+>
+> Three items have moved off this list since the previous revision, and each is asserted
+> positively in the reproduction block rather than described here. `ssn_encrypted` and
+> `govt_issued_id_encrypted` are written, by exactly one entity — `account-service`'s
+> `Customer` — so the cipher boundary for them is as single as the card verification
+> value's. A card response IS serialized through the production object mapper by
+> `card-service`'s `CardDetailRenderingTest`, which asserts the body keeps the number
+> masked and that the redacted rendering does not merge two distinct shapes. And
+> `account-service` now has a `mapper` package holding `AccountContextMapper` and
+> `AccountInquiryReplyMapper`; `card-service`'s still holds only a `package-info.java`,
+> so the card response mapper remains the unauthored half of that pair.
+>
+> `cvv_encrypted` has moved from this list to the authored one: `card-service` declares
+> `EncryptedCvv`, `EncryptedCvvConverter` and `CardVerificationValueCipher`, `Card`
+> carries the value type behind `@Convert`, and the application-data key and the card
+> task role's two-action grant are both provisioned. What is still absent for that
+> column is only the caller — `card-service` publishes no controller and no response
+> mapper, so nothing invokes the cipher yet.
+>
+> The masked-rendering contract acquired a second enforcement point as well:
+> [`MaskedCardNumber.java`](../../services/common-lib/src/main/java/com/carddemo/common/security/MaskedCardNumber.java)
+> derives the masked SHAPE from `CardNumberMasker`'s own constants and is applied as a
+> `@Pattern` on every masked response member and as a guard in every masked response
+> type's constructor, so a full sixteen-digit number no longer satisfies a
+> width-only check.
 >
 > Refactoring Rationale: the previous wording called `LayeringRulesTest` "package
 > prose" and reported the authored Java tests as covering only the authorization CSV
@@ -934,9 +1208,13 @@ persistence so that a
 > document the cost of understating a control is concrete: a reader who believes no
 > masker exists writes a second one, and two renderings of one masked value are worse
 > than either alone. Assumptions: the two counts above are re-measured rather than
-> carried forward — eight `@Test` methods in that one class, and 82 classes matching the
+> carried forward — nine `@Test` methods in that one class, and 166 classes matching the
 > two runner suffixes across `services/*/src/test/java` — because a count of tests is the
 > first sentence in a security document to go stale and the last one a reader checks.
+> Both numbers were lower at every earlier revision of this paragraph, and each revision
+> re-ran the two commands in the reproduction section rather than adding its own new files
+> to the previous figure, which is the only way either sentence stays true after a batch
+> of work adds tests in several modules at once.
 > [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md) records the
 > same account-number rule at the schema-to-API boundary.
 
@@ -953,16 +1231,15 @@ persistence so that a
 > `card-service`'s `SecurityConfig` declares `ADMIN_CARD_PATH_PATTERN` as
 > `/api/v1/admin/cards/*` and binds it to the administrative authority alone, and the
 > contract's `AdminCardDetail` schema — returned by `getAdminCardDetail` on
-> `/api/v1/admin/cards/{cardNumber}` — extends `CardDetail` with the full number and no
+> `/api/v1/admin/cards/{cardKey}` — extends `CardDetail` with the full number and no
 > card verification value. The third — that a handler actually returns that schema — has
-> nothing behind it yet, because no controller is authored, so the exemption is a bounded
-> rule guarding an unimplemented route rather than a measured control over live data.
-> Refactoring Rationale: an intermediate revision of this paragraph spelled the
-> administrative route as an `/unmasked` suffix inside the card subtree, and the
-> `SecurityConfig` records why that spelling was withdrawn: under it the administrative
-> path was also matched by `CARD_SUBTREE_PATH_PATTERN`, so one route answered to two
-> rules. The prefix form is the one in the tree, and citing the withdrawn form would send
-> a reader looking for a pattern no class declares.
+> nothing behind it yet, because `card-service` publishes no controller, so the exemption
+> is a bounded rule guarding an unimplemented route rather than a measured control over
+> live data.
+> Alternatives Considered: spelling the administrative route as an `/unmasked` suffix
+> inside the card subtree. Rejected because `CARD_SUBTREE_PATH_PATTERN` would also match
+> it, so one route would answer to two authorization rules. The prefix form gives the
+> exemption a pattern of its own, which is what lets it carry its own rule.
 
 
 ## Network isolation
@@ -977,12 +1254,6 @@ over the eight-service default set (`ecr.api`, `ecr.dkr`, `logs`, `secretsmanage
 endpoint, and the three security groups `alb`, `app` and `data`. Both environment
 roots instantiate the module. What remains true is only the deployment boundary: these
 are declared resources, not provisioned ones.
-
-Refactoring Rationale: this paragraph previously stated that the module contained no
-`main.tf` and that neither root composed one, and cited the variables file's header as
-the whole of the contract. Both halves are measurably false now, and the citation
-pointed a reader at an input surface instead of at the resource graph that answers the
-question.
 
 ```mermaid
 graph TB
@@ -1019,11 +1290,10 @@ graph TB
     TASK -->|"5432"| DB
     TASK -->|"443, never leaves the VPC"| VPCE
     TASK -->|"outbound egress"| NAT
-%% This is the connectivity contract the network module declares, not a picture of a
-%% provisioned VPC -- nothing here is applied to an account. The security statement is
-%% an intended ABSENCE -- no edge leaves the isolated data subnets. It is represented
-%% by omitting an edge rather than drawing a dashed "no route" arrow, because a
-%% rendered arrow would still read as a path that exists.
+%% This is the connectivity contract the network module declares. The security
+%% statement is an intended ABSENCE -- no edge leaves the isolated data subnets --
+%% represented by omitting an edge rather than drawing a dashed "no route" arrow,
+%% because a rendered arrow would still read as a path that exists.
 ```
 
 ### The target three tiers
@@ -1177,21 +1447,42 @@ mechanism rather than an observed outcome. Each is therefore stated with the exp
 does **not** cover, because a control credited with more than it does is worse than one
 credited with less.
 
-Refactoring Rationale: this paragraph previously named environment composition,
-deployment OIDC and a secret-scanning workflow as the absences. All three exist,
-and leaving them listed as missing would have understated the delivered posture while
-leaving the one real gap — that nothing has been applied — unstated.
+Assumptions: the gap is an APPLY, not a control. Listing an existing mechanism as
+missing understates the delivered posture and, worse, leaves the one real gap unstated,
+so each control below is credited with exactly what it covers and no more.
 
 **Control 1 — source configuration contains references, not operator-supplied
 credentials.** The Aurora master password is generated inside RDS and only its
 managed secret ARN is exposed. Per-service database credentials and seed-user
 passwords are generated by Terraform resources and written to Secrets Manager; the
 input objects carry identifiers and user types, not passwords. This prevents a human
-from typing those values into a committed variable file. It does **not** keep the
-generated per-service and seed values out of Terraform state:
-`random_password.result` is state-bearing, and saved plans may contain resolved
-sensitive values. State and plan storage therefore remain secret-bearing operational
-artifacts even though source files do not.
+from typing those values into a committed variable file.
+
+State and plan storage nonetheless remain secret-bearing operational artifacts, and
+which value makes them so has to be named precisely, because the generated credentials
+are **not** it. The per-service credentials come from an `ephemeral "random_password"`
+written through `secret_string_wo`, so Terraform records a version number and never the
+value; the Aurora master credential is created and held by RDS; and the seed-user
+passwords are produced by an apply-time bootstrap that writes them straight into Secrets
+Manager. The value that IS state-bearing is the internal HTTPS key: each root declares
+`tls_private_key.internal_service` as a managed resource, so its `private_key_pem` is
+recorded — and recorded three times over, on that resource, on
+`aws_acm_certificate.internal_service.private_key`, and on
+`aws_secretsmanager_secret_version.internal_tls_private_key.secret_string`, which is a
+plain `secret_string` because a version whose value Terraform cannot read cannot be
+reconciled against the certificate it must match. Marking an attribute sensitive redacts
+CLI output and does nothing to state. A committed state file or saved plan from either
+root therefore discloses the key terminating TLS on the internal load balancer, which is
+what makes the ignore rules and the encrypted remote backend a control rather than
+hygiene.
+
+Refactoring Rationale: this paragraph previously said "`random_password.result` is
+state-bearing", naming the one family of generated credentials that is not. That
+resource is declared with the `ephemeral` block type and consumed through a write-only
+argument, precisely so its result never lands in state. Naming it as the exposure both
+overstated the risk on the credentials and left the actual state-bearing secret — the
+generated TLS private key — unnamed, so a reader auditing state for the disclosure this
+paragraph warned about would have looked for the wrong value and found nothing.
 
 **Control 2 — authored application configuration uses unresolved references.** The
 service YAML files name environment variables or secret references rather than
@@ -1204,9 +1495,12 @@ backup-retention and window settings, task CPU, memory and desired count, log re
 a price class, a batch cron expression, the deletion-protection and final-snapshot flags,
 the secret recovery window and the alarm notification addresses. That narrowness is
 itself the control: a value file admitting only those may hold sizing and has nowhere to
-put a secret. No credential, key, certificate or password appears in either file: the
-certificate and private-key inputs the roots accept default to Terraform-generated
-material and are otherwise supplied at apply time, never from a committed value.
+put a secret. No credential, key, certificate or password appears in either file, and
+after the removal of the two PEM inputs there is no longer any input through which one
+could: the only certificate-related inputs a root still accepts are
+`alb_certificate_arn`, which is an ARN rather than key material, and
+`internal_service_domain_name`, which is a DNS name. The PEM pair itself is generated by
+the root, so there is no apply-time secret input to supply and none to omit.
 
 **Control 3 — deployment uses short-lived workload identity.** OIDC role assumption
 is the required deployment posture, because it removes a long-lived access key from
@@ -1215,9 +1509,9 @@ workflow configuration.
 grants `id-token: write` — the scope that lets the job mint an OIDC token at all — and
 exchanges it through the official `aws-actions/configure-aws-credentials` action pinned
 to a commit SHA, whose `role-to-assume` and `aws-region` both read repository VARIABLES
-rather than secrets. The evidence is therefore the mechanism itself and no longer only
-the absence of a committed deployment credential: no access key is configured anywhere
-in the workflow, because none can be used.
+rather than secrets. The evidence is therefore the mechanism itself rather than only the absence of a
+committed deployment credential: no access key is configured anywhere in the
+workflow, because none can be used.
 
 **Control 4 — ignore patterns and deterministic cleanup reduce accidental staging.**
 [`.gitignore`](../../.gitignore) matches `*.tfstate`, `*.tfstate.*`,
@@ -1386,33 +1680,95 @@ masker = services / "common-lib/src/main/java/com/carddemo/common/security/CardN
 masker_test = services / "common-lib/src/test/java/com/carddemo/common/security/CardNumberMaskerTest.java"
 assert masker.is_file() and masker_test.is_file()
 
-# Present: the ArchUnit rule class is executable, and it holds five rules.
+# Present: the ArchUnit rule class is executable, it holds five rules, and each rule
+# is guarded. Both totals are asserted because they move independently: a new rule
+# raises both, a new guard raises only the first.
 layering = services / "common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java"
 layering_source = layering.read_text(encoding="utf-8")
-assert len(re.findall(r"(?m)^\s*@Test\b", layering_source)) == 5
+assert len(re.findall(r"(?m)^\s*@Test\b", layering_source)) == 9
+assert len(re.findall(r'@DisplayName\("A\d+:', layering_source)) == 5
 
-# Absent: the API layer, the API-to-persistence rule, and the encryption writer.
-assert not list(services.glob("*/src/main/java/**/*Controller.java"))
-assert not list(services.glob("*/src/main/java/**/CognitoIdentityService.java"))
+# Present: the API layer, measured as an EXACT set rather than asserted absent. The
+# absence assertion this replaces was filled without the document noticing, which is the
+# staleness the block header warns about; equality fails in both directions instead.
+assert {
+    path.parts[1] + "/" + path.name
+    for path in services.glob("*/src/main/java/**/*Controller.java")
+} == {
+    "account-service/AccountController.java",
+    "account-service/CardXrefController.java",
+    "account-service/CustomerController.java",
+    "authorization-service/FraudController.java",
+    "authorization-service/PendingAuthController.java",
+    "reference-service/AddressLookupController.java",
+    "reference-service/DateEvaluationController.java",
+    "reference-service/DisclosureGroupController.java",
+    "reference-service/ReferenceMaintenanceController.java",
+    "reference-service/TransactionCategoryController.java",
+    "reference-service/TransactionTypeController.java",
+    "reporting-service/ReportController.java",
+    "reporting-service/StatementController.java",
+    "transaction-service/BillPaymentController.java",
+    "transaction-service/TransactionController.java",
+}, "fifteen handler classes across five services; auth and card publish contracts only"
+# The three internal addresses named by the machine-identity table are the three
+# account-context controllers, so that seam serves a response rather than only carrying
+# a credential to a 404. The set grew from five to fifteen as the reference, reporting
+# and transaction handlers landed, and it is re-stated in full rather than relaxed to a
+# count: a count would go on passing if one service's handler were replaced by another's.
+# auth-service and card-service remain the two that publish a contract and a filter chain
+# with no handler behind either, which is the delivery boundary ADR-006 records.
+assert {
+    path.parts[1] + "/" + path.name
+    for path in services.glob("*/src/main/java/**/Cognito*.java")
+} == {
+    "auth-service/CognitoUserProvisioningService.java",
+    "auth-service/CognitoIdentityConfig.java",
+    "common-lib/CognitoAccessTokenValidator.java",
+}, "provisioning is authored; no service performs a password comparison of its own"
+
+# Absent: the API-to-persistence layering rule.
 assert "..api.." not in layering_source, "no API-to-persistence rule is authored yet"
-assert not [
-    path
+# Assumptions: package-info.java files are excluded because they declare no members
+# and so cannot write a column; they name these columns only to describe the schema
+# their package maps. Including them would make this assertion measure prose rather
+# than the persistence code the paragraph above is about.
+assert {
+    path.name
     for path in services.glob("*/src/main/java/**/*.java")
-    if re.search(r"cvv_encrypted|ssn_encrypted|govt_issued_id_encrypted", path.read_text(encoding="utf-8"))
-]
+    if path.name != "package-info.java"
+    and re.search(r"ssn_encrypted|govt_issued_id_encrypted", path.read_text(encoding="utf-8"))
+} == {"Customer.java"}, (
+    "both encrypted identifier columns are written by exactly one entity, so the cipher"
+    " boundary is single for them as it is for the card verification value"
+)
 
-# Absent: a response-serialization masking test. Pinned to the exact set of tests
-# that touch the object mapper, so adding a card or customer one fails here.
+# The card verification value is written encrypted by exactly one mapped attribute too.
+# Asserted the same way so each fails in both directions -- once if a second writer of
+# either column appears, and once if a column stops being written at all.
+# Assumptions: matched on the COLUMN MAPPING, not on the column name, because the
+# value type, its converter and the cipher all NAME the column in their charters while
+# only the entity maps it -- and it is the single mapping that makes the write single.
+assert {
+    path.name
+    for path in services.glob("*/src/main/java/**/*.java")
+    if 'name = "cvv_encrypted"' in path.read_text(encoding="utf-8")
+} == {"Card.java"}
+
+# Present: a card response-serialization test, which this block previously asserted
+# absent. Still pinned to the exact set of tests that touch the object mapper, so a
+# customer one appearing -- or this one disappearing -- fails here either way.
 assert {
     path.name
     for path in services.glob("*/src/test/java/**/*Test.java")
     if "ObjectMapper" in path.read_text(encoding="utf-8")
 } == {
     "BatchErrorEventTest.java",
+    "CardDetailRenderingTest.java",
     "MoneyModuleTest.java",
     "MoneyTest.java",
     "ReportingDtoMapperTest.java",
-}
+}, "CardDetailRenderingTest asserts the serialised card body keeps the number masked"
 
 # Transport: the task-side listener, and the JDBC client properties.
 service_configs = {
@@ -1443,6 +1799,56 @@ auth_config = service_configs["auth-service"]
 assert "org.springframework.security: WARN" in auth_config
 assert "org.hibernate.orm.jdbc.bind: WARN" in auth_config
 assert "USER_PASSWORD_AUTH" in auth_config
+
+# Machine identity: the four halves of the internal-lookup seam. Asserted together
+# because each one alone is inert -- a credential nothing accepts, a rule nothing
+# satisfies, a route to nothing, or a name resolving to nothing -- and the omission of
+# any one of them presents to an operator as the same unavailable dependency.
+token = services / "common-lib/src/main/java/com/carddemo/common/security/InternalServiceToken.java"
+minter = services / "authorization-service/src/main/java/com/carddemo/authorization/config/InternalIdentityConfig.java"
+verifier = services / "account-service/src/main/java/com/carddemo/account/config/InternalApiSecurityConfig.java"
+client = services / "authorization-service/src/main/java/com/carddemo/authorization/service/RestAccountContextClient.java"
+assert all(path.is_file() for path in (token, minter, verifier, client))
+token_text = token.read_text(encoding="utf-8")
+assert 'ISSUER = "carddemo-internal"' in token_text
+assert 'AUDIENCE_ACCOUNT_CONTEXT = "carddemo-account-service"' in token_text
+assert "MAX_LIFETIME = Duration.ofMinutes(5)" in token_text
+assert "setBearerAuth" in client.read_text(encoding="utf-8"), (
+    "the credential IS a JWT, so it travels on Authorization and the resource server verifies it"
+)
+internal_chain = verifier.read_text(encoding="utf-8")
+assert "CHAIN_ORDER = 10" in internal_chain and "@Order(CHAIN_ORDER)" in internal_chain, (
+    "a separately-ordered chain is what lets the matcher name three exact addresses"
+)
+assert 'INTERNAL_READ_AUTHORITY =\n            "SCOPE_" + InternalServiceToken.SCOPE_ACCOUNT_CONTEXT_READ' in internal_chain
+assert internal_chain.count("matchers.matcher(") == 3, (
+    "exactly three internal addresses, all reads; a subtree pattern would admit future routes too"
+)
+assert "NimbusJwtDecoder" in internal_chain and "withSecretKey" in internal_chain
+# The user chain must NOT have been loosened to admit the machine token anywhere.
+account_chain = (
+    services / "account-service/src/main/java/com/carddemo/account/config/SecurityConfig.java"
+).read_text(encoding="utf-8")
+assert "Workload" not in account_chain, "the withdrawn mechanism leaves nothing behind in the user chain"
+assert "denyAll()" in account_chain, (
+    "the two internal-only subtrees are refused by the user chain rather than admitted either-or"
+)
+assert not any(
+    "Workload" in path.name
+    for path in services.rglob("*.java")
+), "no Workload* type survives anywhere under services/"
+ecs_service = (root / "infra/modules/ecs-service/main.tf").read_text(encoding="utf-8")
+assert "CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY" in ecs_service
+assert "CARDDEMO_SECURITY_WORKLOAD_CREDENTIAL_KEY" not in ecs_service
+for environment in ("dev", "prod"):
+    environment_root = (root / "infra/envs" / environment / "main.tf").read_text(encoding="utf-8")
+    assert 'contains(["authorization", "account", "transaction"], service) ?' \
+        ' local.internal_identity_secret_sources' in environment_root, (
+        "exactly three task roles may read the key, so no fourth party can mint or verify"
+    )
+    assert 'resource "aws_route53_record" "internal_service"' in environment_root, (
+        "the base URL the client resolves has to resolve to the internal load balancer"
+    )
 
 # Infrastructure: every module has a resource graph and both roots compose it.
 modules = sorted(path.name for path in (root / "infra/modules").iterdir() if path.is_dir())
@@ -1499,10 +1905,8 @@ grep -n 'plan_file=.*\.tfplan\|trap cleanup_plan EXIT' infra/README.md
 
 ### The deployment boundary
 
-**No live environment exists.** The infrastructure described above is **authored and
-statically validated only**, and applying it to an account is an **operator action
-outside this scope**. Three things follow, and all three are stated rather than left
-to be inferred:
+Applying this infrastructure to an account is an **operator action outside this
+scope**, and two things follow that are stated rather than left to be inferred:
 
 * **No penetration test, security audit, compliance assessment or certification has
   been performed on this design or on any deployment of it, and none is claimed.**
@@ -1515,13 +1919,10 @@ to be inferred:
   and architecture tests to the extent those rules are testable in isolation. They
   are **not** verified by an external assessment, and a passing test suite is
   evidence that the code implements the stated rule, not evidence that the rule is
-  sufficient.
-* **"Statically validated" has a measurable state.** All modules and both
-  environment roots have resource graphs. Formatting, backend-free initialized
-  validation, recursive lint, documentation drift, graph-cycle, and policy
-  checks pass; a live-account apply and external security assessment remain
-  outside scope. [`service-catalog.md`](service-catalog.md#the-deployment-boundary)
-  records that state check by check.
+  sufficient. The static gates that do run — formatting, backend-free initialized
+  validation, recursive lint, documentation drift, graph-cycle and policy checks —
+  are recorded check by check in
+  [`service-catalog.md`](service-catalog.md#the-deployment-boundary).
 
 ### Explicitly out of scope
 

@@ -63,7 +63,13 @@
  *       transaction {@code CT01}.</li>
  *   <li>{@code TransactionListServiceTest} pins {@code app/cbl/COTRN00C.cbl},
  *       699 lines, the "Transaction List" paged browse screen, transaction
- *       {@code CT00}.</li>
+ *       {@code CT00}. AUTHORED, and partially: it carries the cursor-binding
+ *       cases -- that a page's boundary tokens open for the subject they were
+ *       issued to and for no other, and that a subject-less binding is refused
+ *       at the entry of the method -- and does NOT yet carry the five boundary
+ *       messages, the eleventh-row probe or the display reversal. The class
+ *       records that split in its own header, so a reader meeting a green run
+ *       does not read it as full parity coverage of the paragraph.</li>
  *   <li>{@code TransactionAddServiceTest} pins {@code app/cbl/COTRN02C.cbl},
  *       783 lines, the "Transaction Add" capture screen, transaction
  *       {@code CT02}.</li>
@@ -74,15 +80,24 @@
  *
  * <p>Assumptions: that list is a TARGET CONTRACT and not a measurement of the
  * directory, and the distinction is declared rather than left to be inferred.
- * This charter is authored ahead of the classes it governs, for the reason the
+ * This charter was authored ahead of the classes it governs, for the reason the
  * file-set check further down gives: a charter has to be present before a
  * sibling class in this directory can clear the {@code validate} phase, so this
- * file lands first and the four test classes follow it. A class named above
+ * file landed first and the four test classes follow it. A class named above
  * that has no file is therefore PLANNED, not missing, and the property a reader
  * should check is a listing of this directory rather than a count quoted here.
  * The same holds for the four production classes named in the next section:
  * they are the production package's declared target, and its own charter is
  * where their status is recorded.
+ *
+ * <p>Assumptions: as this file stands, exactly ONE of the four is AUTHORED and
+ * it is marked so at its entry above; the remaining three are PLANNED. The
+ * per-entry marking is deliberate rather than a blanket sentence, because a
+ * blanket "all planned" preamble sitting above a directory that already holds a
+ * class is a false statement a reader cannot correct from the charter alone --
+ * and this charter's own {@code Refactoring Rationale} for single-sourcing
+ * applies to itself. Each marker is to be updated in the same change that lands
+ * or removes the class it describes.
  *
  * <p>Assumptions: the inventory citation is given at the line numbers the
  * repository root {@code README.md} carries as the tree stands, which are lines
@@ -157,6 +172,17 @@
  *   <li>{@code com.carddemo.transaction.mapper.BillPaymentMapper}, for the
  *       payment screen.</li>
  * </ul>
+ *
+ * <p>Assumptions: {@code com.carddemo.common.web.CursorToken} is NOT in that
+ * list and is used REAL. It is a per-call parameter of the paged listing rather
+ * than an injected collaborator, and the property the browse test asserts -- that
+ * a boundary token opens for the subject it was issued to and for no other -- is
+ * a property of that type's own authentication code. A mocked sealer would
+ * record that a method was called and would pass just as readily against a
+ * binding that omitted the subject, which is the defect the case exists to
+ * catch, so mocking it would invert the test's purpose. Its key is a literal
+ * declared inside the test class; nothing here resolves a key from
+ * configuration, which is why no module publishes a sealer bean.
  *
  * <p>Assumptions: the repository's identifier type is {@code String} and not a
  * numeric type. The entity's identity attribute is the {@code String} member

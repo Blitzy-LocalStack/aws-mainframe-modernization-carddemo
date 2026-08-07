@@ -13,11 +13,12 @@
  * packages is filed in the wrong layer, and the layering test named further down fails the build
  * for it rather than leaving the drift to a reviewer's memory.
  *
- * <h2>Four classes, one per migrated program, and no fifth type</h2>
+ * <h2>Four service classes, one per migrated program, plus the one outbound seam they share</h2>
  *
- * <p>Target contract: this package is to hold exactly four annotated service classes. The pairing
- * with the baseline is one to one, and every line count below was counted in the file itself
- * rather than carried over from a summary:
+ * <p>Target contract: this package holds exactly four annotated service classes, one per migrated
+ * program, together with the single outbound seam two of them need. The pairing with the baseline is
+ * one to one, and every line count below was counted in the file itself rather than carried over from
+ * a summary:
  *
  * <ul>
  *   <li>{@code TransactionViewService} transcribes {@code app/cbl/COTRN01C.cbl}, 330 lines, the
@@ -29,6 +30,22 @@
  *   <li>{@code BillPaymentService} transcribes {@code app/cbl/COBIL00C.cbl}, 572 lines, the
  *       balance-affecting payment screen.</li>
  * </ul>
+ *
+ * <p>Refactoring Rationale: two further types are here and are named rather than hidden --
+ * {@code AccountContextClient}, the outbound seam onto the account-owned cross-reference, account
+ * balance and balance change, and {@code RestAccountContextClient}, the one implementation that runs in
+ * a deployed environment. They transcribe no program and are not a fifth and sixth screen. They exist
+ * because two of the four programs read records this context does not own: {@code READ-CXACAIX-FILE}
+ * appears in {@code app/cbl/COTRN02C.cbl} at line 576 and in {@code app/cbl/COBIL00C.cbl} at line 408,
+ * and the payment program additionally reads the account master at line 355 and rewrites its balance at
+ * line 452. Under schema-per-service those three records belong to the account context, so a seam is
+ * the only way to reach them, and an earlier revision of this charter forbade an interface beside an
+ * implementation on the stated ground that "nothing in this context has a second implementation to swap
+ * in". That ground no longer holds: the seam has the REST implementation in production and a stubbed one
+ * in every unit test of the two screens that use it, which is what lets those screens' branches be
+ * asserted without an account service running. The rule the earlier revision was reaching for is kept in
+ * its stronger form -- there is no interface beside an implementation for any of the FOUR SERVICES, and
+ * the paragraph-to-method citation for each program remains unambiguous.</p>
  *
  * <p>Alternatives Considered: merging the four into one transaction service, and splitting each
  * into an interface beside an implementation, were both evaluated and both rejected. The migration
@@ -119,8 +136,10 @@
  * only when the page is constructed. Trade-offs: sealing costs a call at each boundary and key
  * material that the running service must be given; what it buys is that a primary account number
  * or an account identifier cannot leave in a response body, be held by a client and be replayed on
- * the next request. The key material reaches the service from configuration and is never a
- * committed value.
+ * the next request. The sealer is one bean per application context, published by
+ * {@code com.carddemo.common.CardDemoCommonAutoConfiguration} only when a deployment names key
+ * material in {@code carddemo.pagination.cursor.signing-key}, so the key reaches the service from
+ * configuration and is never a committed value.
  *
  * <p>Assumptions: the shared kernel supplies a constructor for the ordinary page that returned
  * rows and separate constructors for the empty page and for the page whose every row was filtered
@@ -402,8 +421,10 @@
  *   <li>No mapper, no masking, no width padding, no sign decoding and no packed-decimal decoding.
  *       Those belong to the mapper package and to the shared codecs.</li>
  *   <li>No controller and no request mapping. Those belong to the API package.</li>
- *   <li>No helper type, no utility type, no abstract base class and no interface beside an
- *       implementation. The inventory is the four classes named at the head of this charter.</li>
+ *   <li>No helper type, no utility type and no abstract base class, and no interface beside an
+ *       implementation for any of the four services. The one interface here is the outbound
+ *       {@code AccountContextClient} seam recorded at the head of this charter, whose second
+ *       implementation is the stub every unit test of the two cross-reading screens supplies.</li>
  * </ul>
  *
  * <p>Alternatives Considered: a declarative retry annotation on the cross-context read was evaluated

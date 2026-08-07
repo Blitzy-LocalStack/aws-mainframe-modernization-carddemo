@@ -29,19 +29,35 @@
 
 name: CardDemo UI CI
 
-# Assumptions: UI source, manifest, delivery config, and this workflow are the
-# complete owning surface. Service, infrastructure, and immutable baseline paths
-# have separate workflows and are intentionally excluded.
+# Assumptions: UI source, manifest, delivery config, the service-held OpenAPI
+# documents and this workflow are the complete owning surface. Infrastructure and
+# immutable baseline paths have separate workflows and are intentionally excluded.
+#
+# Refactoring Rationale: the third pattern, the openapi trees under services, was
+# ADDED and is not a UI path. Without it this workflow's own contract-agreement
+# gate could not do its job: `ui/src/api/contracts.test.ts` compares this SPA's
+# typed client layer with those six documents, and the drift it exists to catch is
+# most often introduced from the SERVICE side -- an operation renamed, moved or
+# withdrawn there. With the filter limited to ui/**, exactly that change ran no
+# job here at all, so the gate would have fired only on the pull request that
+# later touched the SPA, attributing the divergence to whoever noticed it rather
+# than to the change that caused it. Trade-offs: an OpenAPI edit now runs the full
+# SPA job, including the production build, which is more work than the comparison
+# strictly needs; a contracts-only job would be cheaper and was rejected because a
+# second job installing the same lock file is a second place for the Node version
+# and the install step to drift from this one.
 on:
   push:
     branches: [main]
     paths:
       - "ui/**"
+      - "services/*/src/main/resources/openapi/**"
       - ".github/workflows/ui-ci.yml"
   pull_request:
     branches: [main]
     paths:
       - "ui/**"
+      - "services/*/src/main/resources/openapi/**"
       - ".github/workflows/ui-ci.yml"
   workflow_dispatch:
     inputs:
@@ -92,12 +108,30 @@ jobs:
       - name: Check out the reviewed revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      # Assumptions: Node 22.23.1 matches the pinned UI build-stage line.
+      # Assumptions: Node 22.23.1 matches the pinned UI build-stage line. The ACTION
+      # major and the Node version it installs are independent: setup-node v7 runs
+      # its own code on node24 and still installs whatever `node-version` names, so
+      # the reviewed 22.23.1 line is unchanged by the move below.
       # Trade-offs: TypeScript remains 6.0.3 because typescript-eslint 8.65.0
       # accepts >=4.8.4 <6.1.0; raising the compiler alone disables the
       # type-aware lint/JSDoc gate while leaving installation apparently green.
+      # Refactoring Rationale: this pin was v4.4.0, and review did not flag it --
+      # it was found by applying the same measurement that condemned the four pins
+      # review DID flag. The lock committed at actions/setup-node@v4.4.0 resolves
+      # `form-data` 2.5.1 and 4.0.0, both below the 2.5.4/4.0.4 fix line of
+      # GHSA-fjxv-7rqg-78g4, reached through `@azure/core-http` behind
+      # `@actions/cache` -- the same path as setup-java and setup-python. The lock
+      # at v7.0.0 carries no `form-data` entry. Fixing only what was reported would
+      # have left the identical vulnerable bundle in this workflow and in deploy.yml.
+      # Assumptions: `node-version`, `cache` and `cache-dependency-path` are all
+      # still declared by v7; the removals in v6 and v7 -- `always-auth` handling
+      # and a dummy NODE_AUTH_TOKEN export -- concern npm publication, which no job
+      # in this file performs. v7 runs on node24 and therefore needs an Actions
+      # Runner of 2.327.1 or newer, which the GitHub-hosted ubuntu-24.04 image this
+      # job names has carried since 2025. Trade-offs: a self-hosted runner would
+      # have to be updated first, and would fail at startup rather than silently.
       - name: Configure the reviewed Node runtime
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22.23.1"
           cache: npm
@@ -124,6 +158,27 @@ jobs:
         shell: bash
         run: npm run format
 
+      # Refactoring Rationale: the contract-agreement gate runs as its own step
+      # AHEAD of the full suite, even though `npm test` below also collects the
+      # file it targets. Three reasons make the duplication worth its cost. It is
+      # the only step in this workflow that reads outside ui/ -- it compares this
+      # package's typed API client layer with the six OpenAPI documents held in
+      # services/*/src/main/resources/openapi -- so a failure here means a service
+      # contract and this SPA have diverged, which is a different diagnosis from
+      # any component-test failure and deserves its own title in the run log.
+      # docs/adr/ADR-006-api-and-ui.md cites this step by name as the delivered
+      # mechanism for that agreement, so a reader auditing that decision record
+      # finds a step rather than a claim. And it is fast -- it starts no jsdom
+      # environment and renders nothing -- so running it first surfaces the
+      # cheapest, most localised failure before the expensive suite begins.
+      # Trade-offs: the same file is executed twice per run, costing a few
+      # hundred milliseconds; that is accepted for a named gate, and it is not
+      # removed by excluding the file from the suite below, because a developer
+      # running `npm test` locally must still see it.
+      - name: Check API contract agreement
+        shell: bash
+        run: npm run contracts
+
       # Assumptions: Vitest's run mode exits after one pass; watch mode would
       # wait for input indefinitely on a non-interactive runner.
       - name: Run component tests once and emit JUnit XML
@@ -146,9 +201,13 @@ jobs:
         shell: bash
         run: npm run build
 
+      # Assumptions: advanced from upload-artifact v4.4.3, whose bundle carried the
+      # vulnerable `form-data` 4.0.0; the full measurement and the runner
+      # requirement are recorded once at the setup-java pin in services-ci.yml and
+      # deliberately not restated. The three inputs below are unchanged by the move.
       - name: Upload Vitest reports
         if: always()
-        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: carddemo-ui-reports
           path: ui-reports/**

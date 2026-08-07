@@ -3,6 +3,7 @@ package com.carddemo.authorization.fixtures;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.carddemo.common.codec.CopybookLayout;
+import com.carddemo.common.codec.CopybookLayout.FieldSpec;
 import com.carddemo.common.codec.CopybookLayout.RecordSpec;
 import com.carddemo.common.codec.CsvAuthCodec;
 import com.carddemo.common.codec.FixedWidthCodec;
@@ -44,7 +45,7 @@ class PendingAuthSummaryFixtureTest {
     private static final int SEGMENT_LENGTH = 100;
 
     /** Transmitted length of one comma-separated authorization request payload. */
-    private static final int REQUEST_WIRE_LENGTH = 169;
+    private static final int REQUEST_WIRE_LENGTH = 170;
 
     /**
      * The account identifier every single-record fixture in this directory carries.
@@ -280,16 +281,16 @@ class PendingAuthSummaryFixtureTest {
      *
      * <p>Assumptions: the three variants are the boundary values of the money field -- a negative
      * amount, the largest the picture can express, and zero -- and each is asserted through the codec
-     * rather than by reading the field as text. The negative case is the one that matters most: its
-     * sign occupies a character position, so a producer that emitted a leading plus for the others
-     * would push this one a character over its declared width.</p>
+     * rather than by reading the field as text. The negative case is the one that matters most: it is
+     * the only one whose forced sign position carries a minus, so a renderer that took the sign out of
+     * an integer position would show up here and nowhere else.</p>
      *
      * @param ordinal the zero-based line number within the fixture
      * @param expectedAmount the amount that line's money field carries
      */
     @ParameterizedTest(name = "line {0} carries {1}")
     @MethodSource("amountVariants")
-    @DisplayName("each amount variant is 169 characters and round-trips through the codec")
+    @DisplayName("each amount variant is 170 characters and round-trips through the codec")
     void eachAmountVariantIsTheDeclaredWireLengthAndRoundTrips(int ordinal, String expectedAmount) {
         List<String> lines = wireLines("auth-request-amount-variants.csv");
         assertThat(lines).hasSize(3);
@@ -336,10 +337,21 @@ class PendingAuthSummaryFixtureTest {
     /**
      * Confirms the locally built descriptor is the registry's geometry and differs only in identity.
      *
-     * <p>Assumptions: equality is asserted on the whole field list rather than on the record length,
+     * <p>Assumptions: equality is asserted over the field list rather than over the record length,
      * because two descriptors can tile a hundred bytes in different ways and both validate. Comparing
-     * the field lists compares every offset, width, kind, scale and sign flag at once, which is the
-     * whole of what a transcription can get wrong.</p>
+     * every offset, width, kind, scale and sign flag at once is the whole of what a transcription can
+     * get wrong.</p>
+     *
+     * <p>Refactoring Rationale: the comparison was whole-record equality and is now componentwise over
+     * the seven GEOMETRY components, with the diagnostic-disclosure flag deliberately excluded. The
+     * registered descriptor now resolves this segment through a fail-closed disclosure allowlist, so
+     * seven of its thirteen fields are marked sensitive; this transcription declares none, because it
+     * transcribes {@code CIPAUSMY.cpy} and a copybook has no notion of a field whose content may not be
+     * logged. Whole-record equality therefore compared a target POLICY against a baseline
+     * TRANSCRIPTION and would have to be satisfied by restating the policy here -- which would make this
+     * second reading a copy of the first and destroy the independence that is the entire reason it
+     * exists. Excluding the one non-geometry flag keeps the two readings independent about the only
+     * thing they both describe.</p>
      */
     @Test
     @DisplayName("the local descriptor agrees with the shared registry field for field")
@@ -349,7 +361,13 @@ class PendingAuthSummaryFixtureTest {
 
         assertThat(local.fields())
                 .as("a second transcription of CIPAUSMY must not disagree with the registered one")
-                .isEqualTo(registered.fields());
+                .extracting(FieldSpec::name, FieldSpec::start, FieldSpec::length, FieldSpec::kind,
+                        FieldSpec::intDigits, FieldSpec::decDigits, FieldSpec::signed)
+                .isEqualTo(registered.fields().stream()
+                        .map(field -> org.assertj.core.groups.Tuple.tuple(field.name(), field.start(),
+                                field.length(), field.kind(), field.intDigits(), field.decDigits(),
+                                field.signed()))
+                        .toList());
         assertThat(local.reclen()).isEqualTo(registered.reclen());
         assertThat(local.keyLength()).isEqualTo(registered.keyLength());
         assertThat(local)

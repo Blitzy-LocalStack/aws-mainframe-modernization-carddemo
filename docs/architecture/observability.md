@@ -78,28 +78,14 @@
 > `docs/runbooks/batch-operations.md`, which is where an operator acts on what this
 > document specifies.
 >
-> **Current state.** The observability, step-functions-batch, ecs-service, and
-> api-gateway-http modules have resource bodies and outputs; both environment
-> roots compose them; and the batch operations runbook exists. Every default
-> quoted below is read from authored configuration, not from a running system.
->
-> **Caveats.** Six, stated up front rather than buried, because in an
+> **Caveats.** Five, stated up front rather than buried, because in an
 > observability document the temptation to write as though the telemetry were
-> already flowing is unusually strong. First: **no dashboard has rendered, no alarm
-> has fired, no trace has been sampled, and no benchmark or load test has been
-> run** — nothing here is deployed, so nothing here has produced a datapoint. What IS
-> authored is the composition: **both environment roots provision the observability
-> module**
-> (`infra/envs/dev/main.tf:1343` and the corresponding block in
-> `infra/envs/prod/main.tf`), passing it the cluster name, the load-balancer ARN
-> suffix, the queue names, the state-machine ARN and the log-group names. The
-> caveat that matters is therefore about EXECUTION and not about authorship: the
-> resources exist as code and have never been applied. Every figure here is either
-> quoted from a cited baseline line or read from an authored configuration
-> default; none is a measurement of the target. Second:
-> **the repository defines no service-level objectives and none are invented
-> here** — there is no latency target, throughput target, availability percentage,
-> error budget or recovery-time objective anywhere in this document, and
+> already flowing is unusually strong. First: **every figure here is either quoted
+> from a cited baseline line or read from an authored configuration default**, and
+> none is a measurement of the target system. Second: **the repository defines no
+> service-level objectives and none are invented here** — there is no latency
+> target, throughput target, availability percentage, error budget or recovery-time
+> objective anywhere in this document, and
 > [Honest boundaries: structural properties, not service-level objectives](#honest-boundaries-structural-properties-not-service-level-objectives)
 > explains what is committed to instead. Third: the baseline is reference-only —
 > every line citation is a read, and nothing under [`app/`](../../app) is modified,
@@ -112,12 +98,19 @@
 > does not remove one. Fifth: the existing COBOL suite keeps its own workflow, its
 > own reporting and its own aggregate return code, and it remains the
 > functional-parity oracle. Sixth: **request metadata is classified rather than
-> declared anonymous.** Resolved paths are excluded because they carry PAN,
-> account and customer identifiers; the gateway retains only the route template.
-> CloudFront viewer logging and nginx document-request access logging are disabled.
-> The gateway deliberately retains `sourceIp`, which is personal data and therefore
-> makes that access-log group sensitive even though no resolved identifier is
-> stored.
+> declared anonymous.** Resolved paths are excluded at both edges. The gateway retains
+> only the route template, because a resolved gateway path carries account and customer
+> identifiers. No published path carries a PAN any longer -- the card contract addresses
+> a card by an opaque per-row selector and takes its one card-number criterion in a
+> request body -- and the CloudFront delivery nevertheless omits `cs-uri-stem` along with
+> the query string, cookies and the referrer, as defence in depth: the route contract and
+> that field list live in different trees and have already moved independently of each
+> other, and a field that cannot be redacted after delivery is worth keeping out on the
+> strength of that history rather than on the current route shape. Legacy CloudFront
+> viewer logging and nginx document-request access logging stay disabled. Both edges
+> deliberately retain a client address -- `sourceIp` on the gateway record and `c-ip` on
+> the CloudFront record -- which is personal data and therefore makes **both** those
+> destinations sensitive even though no resolved identifier is stored in either.
 
 ---
 
@@ -185,11 +178,11 @@ four justification categories and calls the requirement a hard review gate.
   form, so this is the established convention here rather than one invented for
   this file.
 - Refactoring Rationale: this document leads with what the baseline already
-  expresses and only then describes what the target does, which is the reverse of
-  the usual ordering for a migration document. The reason is that the opposite
-  ordering produces a specific, checkable error: it presents the correlation
-  identifier, the structured record, the level classifier and the subsystem
-  classifier as target inventions, when all four are declared in
+  expresses and only then describes the target, which is the reverse of the usual
+  ordering for a migration document. The opposite ordering produces a specific,
+  checkable error: it presents the correlation identifier, the structured record, the
+  level classifier and the subsystem classifier as target inventions, when all four
+  are declared in
   [`CCPAUERY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CCPAUERY.cpy) and
   three of them are populated on every emission path in
   [`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl). A
@@ -805,7 +798,7 @@ graph LR
     BLG --> D
     D --> T[["One notification topic per env"]]
 %% Solid edges carry the identifier; dotted edges are telemetry emission.
-%% The classes and some log-group resources exist; registration, composition, tracing and dashboards do not.
+%% Every solid and dotted edge above is authored: the shared classes, their auto-configuration registration, the log-group resources, the structured encoder and both roots' operations dashboards. Distributed tracing export is authored and switched OFF by default (see Correlation, below), so the trace hop is the one edge no default configuration exercises.
 ```
 
 Under the target contract, the identifier travels the solid edges and telemetry
@@ -839,7 +832,16 @@ describes.
   shared-kernel boundary this relies on is fixed by
   [`service-catalog.md`](service-catalog.md#the-eight-bounded-contexts), which
   records `common-lib` as a library dependency of the eight services rather than as
-  a ninth service. Runtime registration remains each service's responsibility.
+  a ninth service. Runtime registration is NOT each service's responsibility: the
+  shared module's own
+  `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`
+  entry names `CardDemoCommonAutoConfiguration`, which contributes the filter
+  registration, the common-tag meter filter, the money codec module and the single
+  error advice to every service that puts the module on its path. Refactoring
+  Rationale: this sentence previously left registration to each service, and that
+  arrangement was withdrawn deliberately -- a registration a service has to
+  remember is one a service can omit, and the symptom of omitting it is a log line
+  with no correlation identity rather than an error.
 - Assumptions: **the identifier is not a credential and must not be treated as
   one.** It is written to a response header and into log output, both of which are
   read by tooling that is not the caller, so it carries no authority and confers
@@ -888,14 +890,52 @@ hostname appears in any group name.**
 
 ### Format
 
-The **target application format** is structured JSON, one object per event, with
-the field set derived in
+The **application format is structured JSON**, one object per event, with the field
+set derived in
 [The baseline's own structured-logging schema](#the-baselines-own-structured-logging-schema).
-No application-side JSON encoder exists in the migrated tree: no module ships a
-`logback-spring.xml` and no `application.yml` sets `logging.structured.format`, so the
-services emit the framework's default console layout and the JSON contract above is an
-obligation on whoever configures the encoder. The one JSON log format that does exist
-is the API Gateway access-log object in `api-gateway-http/main.tf` L245-L259.
+It is **configured, not merely specified**, and in exactly one place:
+[`services/common-lib/src/main/resources/carddemo-common-defaults.yml`](../../services/common-lib/src/main/resources/carddemo-common-defaults.yml)
+sets `logging.structured.format.console` to `ecs` and binds
+`logging.structured.ecs.service.name`, `.environment` and `.version` to
+`spring.application.name` and the two `carddemo.*` keys the shared meter filter reads.
+All eight services already import that file through `spring.config.import`, so the
+encoder reaches every one of them without a per-service edit and without a
+`logback-spring.xml` in any module. A rendered record therefore carries `@timestamp`,
+a nested `log.level` and `log.logger`, `process.thread.name`, the nested
+`service.name`/`service.environment`/`service.version` block, `message`, and every
+mapped-diagnostic-context key as a field — `correlationId` and `requestId` from
+`CorrelationIdFilter`, plus `traceId` and `spanId` from Micrometer tracing.
+`StructuredLoggingDefaultsTest` in `common-lib` asserts all four properties: the
+format selection, the three dimensions resolving to the metric tag values, one JSON
+object per event, and the correlation key arriving as a field rather than as prose.
+The second JSON log format in the stack is the API Gateway access-log object in
+`api-gateway-http/main.tf` L245-L259.
+
+- Refactoring Rationale: **this section previously recorded the JSON contract as an
+  obligation on whoever configured an encoder later, and that gap is now closed
+  rather than restated.** The gap was real and it was invisible: prose lines still
+  arrived in the log group and still looked like logging, so nothing failed and no
+  dashboard was empty — only a field query was impossible. It is closed in the shared
+  defaults file rather than in eight `application.yml` documents for the same reason
+  the console pattern and the two metric tag values live there: the field names are a
+  cross-service contract, and eight copies of one contract is how two services come
+  to spell the same dimension differently with neither one failing.
+- Trade-offs: the format is indirected through `CARDDEMO_LOG_CONSOLE_FORMAT`, and
+  exporting that variable **empty** switches the structured encoder off and returns
+  the console to the bracketed human pattern in the same file. An empty value is what
+  the framework treats as "no structured format", so the switch needs no second key
+  and the two layouts cannot both claim the console. What this costs is that the
+  deployed format is overridable at all; what it buys is a developer reading a
+  terminal during startup, and the override is one named variable whose absence is
+  the structured default rather than a local edit to a committed file.
+- Alternatives Considered: `logstash` and `gelf`, the two other formats the pinned
+  framework recognises by identifier. Both were rejected on the same measurable
+  ground: ECS declares a service block carrying name, version and environment, which
+  are exactly the three common tags
+  [Metrics](#metrics-three-common-tags-and-what-each-answers) puts on every meter, so
+  one filter expression selects a service's log records and its metric series.
+  `logstash` has no service block at all and `gelf` carries only a version, so either
+  would have left two of the three dimensions expressible on metrics and not on logs.
 
 - Assumptions: **the format is JSON so that a field can be queried rather than
   pattern-matched out of prose**, and the concrete difference is a query an operator
@@ -927,7 +967,7 @@ that own a group.
 
 | Input | Declared in | Default | What it governs |
 |---|---|---|---|
-| `log_retention_in_days` | [`infra/modules/ecs-service/variables.tf`](../../infra/modules/ecs-service/variables.tf) L1657, applied at `main.tf` L820 | — | A service's own group |
+| `log_retention_in_days` | [`infra/modules/ecs-service/variables.tf`](../../infra/modules/ecs-service/variables.tf) L1657, applied at `main.tf` L1076 | — | A service's own group |
 | `log_retention_days` | `infra/modules/observability/variables.tf` L333 | **30** | The groups that module creates |
 | `log_retention_days` | `infra/modules/step-functions-batch/variables.tf` L651 | **30** | The nightly chain's execution history |
 | `log_level` | `infra/modules/step-functions-batch/variables.tf` L670 | **`ALL`** | Which execution events are recorded at all |
@@ -941,7 +981,7 @@ that own a group.
   trusted in the other. Both roots pass retention from a non-secret environment
   parameter in their own `terraform.tfvars`, which carries sizing and retention values
   and never a credential. The structural no-secret requirement is in
-  [`security-and-identity.md`](security-and-identity.md#zero-secrets-in-source-a-structural-property-not-a-review-outcome).
+  [`security-and-identity.md`](security-and-identity.md#no-secrets-in-source-the-controls-and-what-each-one-can-carry).
 - Assumptions: **`include_execution_data` is declared with a true default because
   the target payloads are job names, business dates and dataset prefixes rather
   than record data.** That is what makes recording them safe, and it is a property of this chain
@@ -950,7 +990,8 @@ that own a group.
   the difference between "the interest step failed" and "the interest step failed for
   the business date that was passed to it", and the second is what a redrive decision
   needs.
-- Assumptions: **customer-managed-key coverage is intentionally not universal.**
+- Assumptions: **customer-managed-key coverage is intentionally not universal, and
+  the exceptions are enumerated rather than generalised.**
   The `observability` and `step-functions-batch` modules require a CMK for every group
   they create. The `ecs-service` log
   group accepts `log_group_kms_key_arn = null` and documents the service-managed key
@@ -960,6 +1001,24 @@ that own a group.
   development API logs and every ECS service log may use CloudWatch Logs'
   service-managed encryption. Both roots compose these modules, so the split above is
   the one a plan will show.
+- Assumptions: **the CloudFront access-log destination is the one store in this
+  stack whose encryption is SSE-S3 rather than a customer-managed key, and it is a
+  service constraint rather than a choice.** CloudFront standard log delivery cannot
+  write to an S3 bucket whose default encryption is SSE-KMS, so
+  `aws_s3_bucket_server_side_encryption_configuration.logs` in `cloudfront-spa`
+  declares `AES256` while the SPA origin bucket beside it uses the supplied CMK. The
+  compensating controls on that one bucket are all four public-access-block controls,
+  `BucketOwnerEnforced` ownership, a deny on non-TLS requests, versioning, a
+  delivery-source-scoped bucket policy and a lifecycle expiry driven by
+  `log_retention_days`. Harmonising it up to `aws:kms` stops delivery outright, which
+  is why the constraint is recorded on the resource, on the delivery and in the
+  [module README](../../infra/modules/cloudfront-spa/README.md) rather than in one
+  place a reader might not open. The S3 customer-managed key's own grant to
+  `delivery.logs.amazonaws.com` remains scoped to this exact delivery source so the
+  ordering precondition can be satisfied and so a future destination that *can* be
+  CMK-encrypted needs no key-policy change; it is not exercised by an `AES256`
+  destination today, and the [KMS module README](../../infra/modules/kms/README.md)
+  says so at the row that publishes it.
 
 ### Sensitive-data logging contract and current controls
 
@@ -968,9 +1027,100 @@ card-verification values, national and government identifiers, passwords, tokens
 request/response bodies carrying credentials, and persistence bound values. It is
 held by a combination of controls rather than by one: `LogSafeText` and
 `CardNumberMasker` in the shared kernel decide what a rendered value may contain,
+`ThrowableDigest` decides what a caught failure may contribute to a log line,
 `GlobalExceptionHandler` decides what a failure body may carry, and per-service
 serialization tests assert the outcome. The prohibition is a contract every one of
 those has to satisfy, and no single one of them establishes it alone.
+
+**No appender configuration exists, and that is what `ThrowableDigest` answers.** This
+repository ships no `logback.xml`, `logback-spring.xml` or `log4j2.xml` anywhere, and the
+absence is deliberate — three environment profiles record that adding one would take over
+the appender chain wholesale — so the chain is Spring Boot's default and no
+repository-owned filter sits in it. A logging event that carries a throwable is therefore
+rendered in full by that default: the exception's message, then every cause's message.
+Those sentences are composed by drivers, parsers and validation libraries rather than by
+this project, so any of them can carry a full PAN, a national identifier or a whole
+request record. The generic 500 handler is by definition the one that fires for failures
+nobody anticipated, so its content was unbounded by construction. It now logs the reduced
+representation `ThrowableDigest` composes — the chain of type names and the frames each
+link was raised at, with every message dropped — and
+`GlobalExceptionHandlerTest.unexpectedFailureAttachesNoThrowableToItsEvent` asserts the
+logging event carries no throwable proxy at all, which makes the guarantee structural
+rather than dependent on the pattern a deployment happens to configure.
+
+Refactoring Rationale: an earlier revision of this section credited the appender
+configuration with that redaction, and the handler's own comment named it as the owner.
+No such owner existed. This is the same category error the edge-log item below records for
+the PAN in a route template: a control was credited with reach over a record it does not
+write. Naming a mechanism that does not exist is more expensive than naming none, because
+it reads as a control and removes the pressure to build one.
+
+#### What a `toString()` may render
+
+Refactoring Rationale: **this subsection states the rule for diagnostic renderings
+explicitly, and it was added because the prohibition above and the code disagreed.**
+The prohibition named the values; it did not say what a `toString()` should do
+instead, and in that gap ten entity, DTO and projection types each answered the
+question for themselves. Several answered it wrongly and argued the answer in their
+own Javadoc — one asserted that a running balance "is not itself protected", another
+that an account identifier is "not one of the identifiers the migration's disclosure
+rules name". Both readings are refuted by the paragraph above, which covers account
+identifiers by name and persistence-bound values as a class. A prohibition a
+reader has to infer the technique from is one that gets inferred differently in
+every file, so the technique is written down here once.
+
+The rule has three parts and they apply to **every** `toString()`, and to any other
+method whose declared purpose is to be read by an operator:
+
+1. **A prohibited value is OMITTED, not abbreviated.** No account identifier, no
+   customer identifier, no monetary amount, no credit limit or balance, no merchant
+   free text, and no card-verification value in any form — not its content, not its
+   length, and not a digest of it. Omission rather than abbreviation is the rule
+   because abbreviating a protected value is masking, and masking has exactly one
+   owner per bounded context, in that context's `mapper` package; a second and
+   slightly different rule inside an entity would give one value two renderings and
+   make neither authoritative.
+2. **A primary account number appears only through `CardNumberMasker`,** and only
+   where a rendering has no other way to say which row it describes. That is the one
+   sanctioned abbreviation, and it is sanctioned because it is the same function the
+   mapping layer applies at the API boundary rather than a second rule.
+3. **What remains is identity that discloses nothing:** a transaction identifier, a
+   type or category code, a status code, a date, a version counter, a bounded
+   response code. A rendering left with none of those omits the member rather than
+   substituting something.
+
+Alternatives Considered: **rendering a keyed opaque token in place of the omitted
+identifier, using `OpaqueIdentifier` from the shared kernel.** That is the right
+control for a queue group identity and for a correlation attribute, where the caller
+holds the tokeniser and passes it in — `CsvAuthCodec.correlationKey` is exactly that
+shape. It does not reach a `toString()`. The method takes no argument, and the
+objects that declare it are JPA entities the persistence provider instantiates and
+records the compiler generates, so neither can be handed a collaborator. Reaching
+one through static mutable state was the only way to close that gap and is rejected
+twice over: a diagnostic method must not depend on start-up ordering, and it must
+not throw, whereas a static holder read before configuration does both. Trade-offs:
+the cost is that a log line cannot be joined to a specific row by identifier at all,
+and it is a real cost. It is paid down by the correlation identifier that
+`CorrelationIdFilter` already puts on every request-scoped line and by the
+`batch.batch_run` step ledger for batch work, both of which locate an event without
+naming a protected value.
+
+Alternatives Considered: **an unkeyed digest of the identifier, so that a token would
+need no key material.** Rejected on the shared kernel's own analysis, recorded in
+`OpaqueIdentifier`: the inputs are low-entropy — eleven digits for an account,
+sixteen for a card — so an adversary who guesses a value can hash it and confirm the
+guess, and the space is small enough to enumerate exhaustively. A confirmable token
+discloses the value it was supposed to withhold, so it is worse than omission while
+looking better.
+
+**Where it is verified.** Each owning module carries a negative-disclosure test that
+asserts the forbidden value does not appear in the rendered string — for example
+`DiagnosticRenderingTest` in `batch-service`. Assumptions: those tests are per-module
+rather than shared, and that is a constraint rather than a preference:
+`services/common-lib/pom.xml` narrows its `test-jar` to
+`com/carddemo/common/architecture/**`, so no shared test utility outside that package
+is visible to a service module, and widening it would change a decision that file
+records deliberately.
 
 The controls that **are authored** are narrower and measurable:
 
@@ -984,9 +1134,37 @@ The controls that **are authored** are narrower and measurable:
    in request paths with opaque aliases was considered and rejected because AAP
    §0.7.1 requires selection context in the path; logging the route template rather
    than the resolved path preserves that API contract without persisting the value.
-2. **CloudFront viewer logging is disabled.** The legacy format cannot omit the
-   resolved viewer URI or source IP, and CardDemo's required paths carry PAN,
-   account and customer identifiers. Aggregate CloudFront metrics remain.
+2. **CloudFront access logging is enabled, as standard logging v2, under a field
+   allow-list.** `cloudfront-spa/main.tf` declares
+   `aws_cloudwatch_log_delivery_source.cloudfront_access`, its matching
+   `aws_cloudwatch_log_delivery_destination` and the `aws_cloudwatch_log_delivery`
+   that joins them, all pinned to `us-east-1` because CloudFront's delivery control
+   plane is fixed there. The delivery's `record_fields` list is the control: it
+   carries `date`, `time`, `x-edge-location`, `sc-bytes`, `c-ip`, `cs-method`,
+   `cs(Host)`, `sc-status`, `x-edge-request-id`, `cs-protocol`, `time-taken`,
+   `ssl-protocol` and `ssl-cipher`, and it **omits `cs-uri-stem`** along with the
+   query string, cookies and the referrer — because `ui/src/routes/cards.ts`
+   addresses a card by its sixteen-digit number, so a bookmark or hard refresh of
+   `/cards/:cardNumber` would otherwise write that number into a durable log object.
+   The retained `c-ip` is a client address and is classified as personal data, so the
+   destination bucket is a sensitive store. **That destination's default encryption is
+   SSE-S3 (`AES256`), not a customer-managed key**, because CloudFront standard log
+   delivery cannot write to a bucket whose default encryption is SSE-KMS; the
+   constraint, the compensating controls and the rejected alternatives are recorded on
+   the encryption configuration in `cloudfront-spa/main.tf` and summarised in that
+   [module's README](../../infra/modules/cloudfront-spa/README.md). The legacy
+   distribution `logging_config` block is deliberately absent: it accepts no field
+   list, so it could not express this allow-list at all.
+
+   - Refactoring Rationale: this item previously read "CloudFront viewer logging is
+     disabled", which described an earlier design and not the committed one. The two
+     are not interchangeable — a disabled log has no destination, no retained client
+     address and no encryption boundary to classify, so the earlier wording removed
+     three facts from the threat model at once rather than merely dating one. Dropping
+     the logging to make the old sentence true was the other way to close this and is
+     rejected where the resource is declared: it would leave the SPA delivery path
+     with no durable edge evidence of a 403 or a TLS negotiation failure, which is the
+     only record of a request that never reaches a service.
 3. **The nginx document route has `access_log off`.** Deep-link and refresh paths
    therefore do not enter the container access log. The `/assets/` location logs
    only content-hashed filenames, and `/health` is separately suppressed for
@@ -1000,8 +1178,10 @@ The controls that **are authored** are narrower and measurable:
    transaction development health body is `when-authorized`; the card profile
    inherits `never`.
 
-The source-level assertions for the three edge controls and the production-CMK
-precondition are published in
+The source-level assertions for the four edge controls — the gateway field boundary,
+the CloudFront delivery field allow-list, the CloudFront destination's `AES256`
+default and the nginx document-route suppression — together with the production-CMK
+precondition, are published in
 [Reproducing the measurements](#reproducing-the-measurements).
 
 - Refactoring Rationale: **pinning the statement logger alone was not enough and
@@ -1117,17 +1297,15 @@ that could not be given both is not listed.
   alongside `health` and `info`. Moving the base path or renaming the health
   endpoint would break target-group registration and container liveness in the same
   change.
-- Refactoring Rationale: this bullet previously closed by stating that no scraper,
-  dashboard data source or environment composition is authored. All three now are,
-  and the sentence is corrected rather than softened. `infra/modules/ecs-service`
-  runs an OpenTelemetry collector sidecar whose `prometheus` receiver scrapes
-  `/actuator/prometheus` (L154-L159) and whose `awsemf` exporter publishes the
-  scraped meters to the `CardDemo` namespace (L228); `infra/modules/observability`
-  declares `aws_cloudwatch_dashboard.operations` (L1057), which now includes a
-  widget reading that namespace; and both environment roots compose the two
-  modules. What endpoint configuration still is not, is evidence that metrics are
-  being COLLECTED — nothing is deployed, so no scrape has run. That narrower claim
-  is the one this document can make.
+- Assumptions: the collection path is composed end to end.
+  `infra/modules/ecs-service` runs an OpenTelemetry collector sidecar whose
+  `prometheus` receiver scrapes `/actuator/prometheus` and whose `awsemf` exporter
+  publishes the scraped meters to the `CardDemo` namespace;
+  `infra/modules/observability` declares `aws_cloudwatch_dashboard.operations` with a
+  widget reading that namespace; and both environment roots compose the two modules.
+  What endpoint configuration cannot be is evidence that metrics are being
+  COLLECTED — that requires a deployment, and this document claims only the
+  narrower thing.
 
 ---
 
@@ -1148,7 +1326,7 @@ The four pieces the contract rests on, and where each lives:
   collector that is not listening, and the deployed path re-enables it explicitly
   — see the environment mapping below.
 - **Collector.** `infra/modules/ecs-service` runs an `aws-otel-collector` sidecar
-  (L1211) with an `awsxray` exporter (L227) on its traces pipeline (L244).
+  (L1427) with an `awsxray` exporter (L227) on its traces pipeline (L244).
 - **Producer wiring.** The task definition sets the collector's OTLP endpoint and
   the exporter selection as `OTEL_*` environment variables, and Spring Boot 4.1's
   own `OpenTelemetryEnvironmentVariableEnvironmentPostProcessor` maps those onto
@@ -1158,11 +1336,20 @@ The four pieces the contract rests on, and where each lives:
 
 What is still outstanding is instrumentation of this project's own code — no
 custom span is created anywhere — and execution: nothing is deployed, so no trace
-has been sampled. The nightly module additionally declares a
-`tracing_enabled = true` input at
-`infra/modules/step-functions-batch/variables.tf` L704 and reads it at
-`main.tf` L884, L924 and L947, so X-Ray tracing is enabled on the state machine
-itself as well as on the services.
+has been sampled. The nightly module additionally asserts
+`tracing_configuration { enabled = true }` on both of its state machines —
+`infra/modules/step-functions-batch/main.tf` L1282 and L1457 — so X-Ray tracing is
+enabled on the state machines themselves as well as on the services.
+
+> Refactoring Rationale: this paragraph named a `tracing_enabled` input on that
+> module and cited a line in its `variables.tf`. No such input exists: the module
+> asserts tracing unconditionally, and the note beside each assertion states why —
+> the same reason the execution role's X-Ray statement is unconditional. The
+> tracing cost the input would have existed to opt out of is instead argued once, in
+> the `Trade-offs` note at `variables.tf` L610: this chain runs once a night and
+> records one trace per execution. A documented input that a reader cannot find in
+> the module is worse than no input at all, because it invites a `tfvars` entry that
+> Terraform will reject.
 
 - Assumptions: **the queue hop is asynchronous, so the producer's span and the
   consumer's span are linked by propagated context on a message attribute rather
@@ -1199,7 +1386,7 @@ action it triggers. The threshold column quotes the **authored input default** i
 **not** a target — see
 [Honest boundaries: structural properties, not service-level objectives](#honest-boundaries-structural-properties-not-service-level-objectives).
 
-Assumptions: eleven `aws_cloudwatch_metric_alarm` resources in
+Assumptions: thirteen `aws_cloudwatch_metric_alarm` resources in
 `infra/modules/observability/main.tf` back this catalog, and every quoted input has a
 consumer among them, which is why each row cites the line that reads it. The
 notification path is authored alongside them: every alarm below sends both its alarm
@@ -1209,18 +1396,21 @@ applied**, so no alarm has evaluated a datapoint or fired.
 
 | Alarm | Condition | Authored default | Question it answers | Action it triggers |
 |---|---|---|---|---|
-| Service unhealthy | Unhealthy target count above zero in the load-balancer target group (`main.tf` L1152) | — | Is this service's task failing its health check | Replace the task, or roll back the image the `version` tag names. The target group is the authority here rather than the service's own log, because a task too broken to log is exactly the case that matters |
-| **No healthy target** | Minimum healthy target count below one (`main.tf` L1214) | — | Is this service serving at all | Read the task's stopped reason and log stream, then correct the image, the configuration or the health-check contract. This is the row the one above cannot cover: an empty target group publishes zero and then stops publishing, so **absence is the signal** and this is the module's only alarm treating missing data as breaching |
-| Elevated server errors | Server-error responses per service within one evaluation period | `service_error_count_threshold` = **5** (L573) | Is one service failing requests | Investigate that service, then roll back or scale. The alarm watches the load balancer's own count (`main.tf` L1260), so it fires even when the service has stopped logging |
-| Edge server errors | Server-error responses returned by the HTTP API within one evaluation period (`main.tf` L1301) | `service_error_count_threshold` = **5** (L573) | Is the failure at the edge or integration boundary rather than in a service | Compare the API access log with the per-service and load-balancer alarms. The same input governs both counts deliberately: one number to tune, and a discrepancy between the two alarms is then attributable to the hop between them rather than to two different sensitivities |
-| **Dead-letter depth** | Visible messages in any dead-letter queue (`main.tf` L1349) | `dead_letter_depth_threshold` = **1** (L604) | Has any message failed its configured number of receives | Investigate that message. **This is the highest-signal messaging alarm**: a dead-letter queue is empty in normal operation, so any depth at all means a message has exhausted every retry, and the default is deliberately the smallest value that can be breached |
-| Stale replies | Oldest-message age on a reply queue (`main.tf` L1406) | `reply_queue_age_threshold_seconds` = **5** (L642) | Are replies being consumed before they can expire | Investigate the waiting consumer. This is the observable form of the expiry gap in [`messaging-contracts.md`](messaging-contracts.md#the-expiry-gap): the future consumer is to enforce expiry, so an unconsumed reply is the case the queue cannot discard for itself |
-| **Stale work** | Oldest-message age on a primary work queue -- the three request queues and the error queue (`main.tf` L1463) | `work_queue_age_threshold_seconds` = **300** (L675) | Is the consumer for this queue still taking work off it | Inspect that consumer's task and log stream, and check whether its service has a healthy target. This row is not covered by the dead-letter row above: a message reaches a dead-letter queue only after its source queue's redrive policy exhausts its receives, and exhausting receives requires a consumer to receive and fail -- so a stopped consumer leaves the dead-letter queue empty and its alarm OK while work piles up on the live queue |
-| Batch execution failure | Executions that failed, timed out **or were throttled**, within one evaluation period (`main.tf` L1576, one alarm per metric) | `batch_failure_threshold` = **1** (L622) | Did the nightly chain fail, or refuse to start at all | Redrive from the failed state. This replaces reading a job log for a non-zero condition code. `ExecutionThrottled` is watched because a throttled execution means the chain never ran while the other two metrics both stay at zero — the chain's absence would otherwise be invisible. `ExecutionsAborted` is deliberately NOT watched: an abort is ordinarily deliberate, so alarming on it would page whoever performed the stop |
+| Service unhealthy | Unhealthy target count above zero in the load-balancer target group (`main.tf` L1204) | — | Is this service's task failing its health check | Replace the task, or roll back the image the `version` tag names. The target group is the authority here rather than the service's own log, because a task too broken to log is exactly the case that matters |
+| **No healthy target** | Minimum healthy target count below one (`main.tf` L1262) | — | Is this service serving at all | Read the task's stopped reason and log stream, then correct the image, the configuration or the health-check contract. This is the row the one above cannot cover: an empty target group publishes zero and then stops publishing, so **absence is the signal** and this is the module's only alarm treating missing data as breaching |
+| Elevated server errors | Server-error responses per service within one evaluation period | `service_error_count_threshold` = **5** (L573) | Is one service failing requests | Investigate that service, then roll back or scale. The alarm watches the load balancer's own count (`main.tf` L1303), so it fires even when the service has stopped logging |
+| Edge server errors | Server-error responses returned by the HTTP API within one evaluation period (`main.tf` L1339) | `service_error_count_threshold` = **5** (L573) | Is the failure at the edge or integration boundary rather than in a service | Compare the API access log with the per-service and load-balancer alarms. The same input governs both counts deliberately: one number to tune, and a discrepancy between the two alarms is then attributable to the hop between them rather than to two different sensitivities |
+| **Dead-letter depth** | Visible messages in any dead-letter queue (`main.tf` L1384) | `dead_letter_depth_threshold` = **1** (L637) | Has any message failed its configured number of receives | Investigate that message. **This is the highest-signal messaging alarm**: a dead-letter queue is empty in normal operation, so any depth at all means a message has exhausted every retry, and the default is deliberately the smallest value that can be breached |
+| Stale replies | Oldest-message age on a reply queue (`main.tf` L1436) | `reply_queue_age_threshold_seconds` = **5** (L675) | Are replies being consumed before they can expire | Investigate the waiting consumer. This is the observable form of the expiry gap in [`messaging-contracts.md`](messaging-contracts.md#the-expiry-gap): the future consumer is to enforce expiry, so an unconsumed reply is the case the queue cannot discard for itself |
+| **Stale work** | Oldest-message age on a primary work queue -- the three request queues and the error queue (`main.tf` L1489) | `work_queue_age_threshold_seconds` = **300** (L708) | Is the consumer for this queue still taking work off it | Inspect that consumer's task and log stream, and check whether its service has a healthy target. This row is not covered by the dead-letter row above: a message reaches a dead-letter queue only after its source queue's redrive policy exhausts its receives, and exhausting receives requires a consumer to receive and fail -- so a stopped consumer leaves the dead-letter queue empty and its alarm OK while work piles up on the live queue |
+| Batch execution failure | Executions that failed, timed out **or were throttled**, within one evaluation period (`main.tf` L1593, one alarm per metric) | `batch_failure_threshold` = **1** (L655) | Did the nightly chain fail, or refuse to start at all | Redrive from the failed state. This replaces reading a job log for a non-zero condition code. `ExecutionThrottled` is watched because a throttled execution means the chain never ran while the other two metrics both stay at zero — the chain's absence would otherwise be invisible. `ExecutionsAborted` is deliberately NOT watched: an abort is ordinarily deliberate, so alarming on it would page whoever performed the stop |
 | Batch catch path entered — **no alarm resource** | Any state routed to its catch handler, including the states whose outcome is warn-level | — | Which state failed, and did the chain continue past it | Read that state's step ledger row and decide between redrive and investigation. No alarm resource exists for this row: the catch transition is not itself a CloudWatch metric, so alarming on it requires either a metric filter over the state-machine log group or an explicit metric published by the failure-notification state |
-| Datastore capacity ceiling | Cluster processor utilisation (`main.tf` L1630) and capacity against its configured maximum (`main.tf` L1671) | `database_cpu_threshold_percent` = **80** (L590) | Is the workload pressed against its configured maximum capacity | Raise the maximum capacity. On a serverless cluster this is a scaling signal as much as a saturation one |
-| Connection-pool exhaustion — **no alarm resource** | Acquisition failures or sustained wait on the pool | — | Is the pool the constraint rather than the cluster | Change the pool size, which is a service configuration change. No alarm resource exists for this row because the series it needs is an application meter: HikariCP publishes it through Micrometer under the pool name each service sets, so the alarm is authorable only against a namespace those meters actually reach, and the dashboard's application-meter widget is the first consumer of that series |
-| Rotation failure | Invocation errors reported by a credential-rotation function (`main.tf` L1512) | — | Did a scheduled rotation fail and leave the secret on its previous version | Inspect that function's log stream and re-run the rotation before a task placement presents a credential the database no longer accepts |
+| Datastore capacity ceiling | Cluster processor utilisation (`main.tf` L1642) and capacity against its configured maximum (`main.tf` L1679) | `database_cpu_threshold_percent` = **80** (L590) | Is the workload pressed against its configured maximum capacity | Raise the maximum capacity. On a serverless cluster this is a scaling signal as much as a saturation one |
+| **Cluster connection saturation** | Cluster connection count against the total every configured pool could open at full autoscale (`main.tf` L1734) | `database_connection_threshold` = **derived at the root**, not defaulted | Is the cluster running out of connections before it runs out of capacity | Reduce a service's pool size or bound its maximum task count. This row can breach while both datastore-capacity rows above stay OK, which is exactly the risk [`ADR-003`](../adr/ADR-003-datastore-targets.md#risk--connection-count-grows-with-task-count) names: connection count grows with task count, multiplicatively. The threshold is derived rather than chosen — each environment root multiplies every service's configured pool size by that workload's task ceiling, the autoscaling maximum for a service and one for the batch task, then sums the products — so no number in it originates here |
+| Connection-**pool acquisition** failure — **no alarm resource** | Acquisition failures or sustained wait inside a task's own pool | — | Is the pool the constraint rather than the cluster | Change the pool size, which is a service configuration change. No alarm resource exists for this row because the series it needs is an application meter: HikariCP publishes it through Micrometer under the pool name each service sets, so the alarm is authorable only against a namespace those meters actually reach, and the dashboard's application-meter widget is the first consumer of that series. Refactoring Rationale: this row and the one above it were **one row** until the two were separated. They are different saturations reported in different places, and merging them let the application-meter argument — true here — stand as the reason the cluster metric above was also unalarmed, which it never explained |
+| **Distribution server errors** | Server-error rate at the CloudFront distribution (`main.tf` L1786) | `cloudfront_5xx_error_rate_threshold_percent` = **5** (L621) | Is the static delivery path failing, as distinct from the API path | Compare the origin bucket's access log before redeploying the built assets. Created only when a distribution identifier is supplied **and** the provider region is us-east-1, because CloudFront publishes distribution metrics to us-east-1 alone; both environment roots pass `module.cloudfront_spa.distribution_id` and both set that region, so both create it. A rate rather than a count because a static application's request volume varies by orders of magnitude across the day |
+| Rotation failure — **no alarm instance in either shipped root** | Invocation errors reported by a credential-rotation function (`main.tf` L1533) | — | Did a scheduled rotation fail and leave the secret on its previous version | Inspect that function's log stream and re-run the rotation before a task placement presents a credential the database no longer accepts. This family is iterated over `rotation_lambda_function_names`, and both environment roots leave that input at its empty default because **no credential-rotation function is provisioned anywhere in this package** — `infra/modules/secrets` implements none and neither root supplies one, so the family creates zero alarms as delivered. It is authored so that a root which later brings a function alarms on it by extending a list rather than by editing a module; naming a function that does not exist would instead leave an alarm permanently in `INSUFFICIENT_DATA`. Database-credential replacement is operator-initiated and scripted — see the procedure in [`../runbooks/deploy.md`](../runbooks/deploy.md) |
+
 
 Two configuration inputs govern how quickly any of these speaks:
 `alarm_evaluation_periods` defaults to **2** (L520) and `alarm_period_seconds` to
@@ -1368,14 +1558,13 @@ quoted from a cited baseline line, and a detection default read from an authored
 Terraform input — and neither kind is a commitment about behaviour.
 
 What the architecture contract commits to are **target structural properties**.
-The table states implementation status with each mechanism so a design property is
-not mistaken for a deployed one. Each also names its cost, because a property
-presented without its cost reads as a free win.
+Each names its cost, because a property presented without its cost reads as a free
+win.
 
-| Target property | Mechanism and current status | Trade-off it carries |
+| Target property | Mechanism | Trade-off it carries |
 |---|---|---|
 | Every online service is **stateless** | Decomposition into client history, signed claims and request parameters — see [`service-catalog.md`](service-catalog.md#why-every-context-is-stateless) | Every request must carry its own identity and selection context, so a request is larger and a client holds navigation state it previously did not |
-| Services **scale horizontally** without sticky sessions | Consequence of statelessness; not runtime-tested, because that requires an applied stack | None beyond the above; this is the property statelessness exists to buy |
+| Services **scale horizontally** without sticky sessions | Consequence of statelessness | None beyond the above; this is the property statelessness exists to buy |
 | Database capacity is **elastic and can scale to zero in development** | Aurora module resource graph, composed by both environment roots | Trade-offs: a paused cluster has resume latency on the first connection, which is why the target production minimum is held above zero |
 | Authorization processing is **per-card ordered and duplicate-suppressed** | FIFO queue resources plus `AuthorizationRequestListener` in `authorization-service`; the external producer is not supplied by this repository — specified in [`messaging-contracts.md`](messaging-contracts.md#the-five-baseline-queues-and-six-target-primary-queues) | Trade-offs: ordering is guaranteed only *within* a card, and throughput across cards is what recovers the parallelism that a globally ordered queue would forfeit |
 | Batch has **per-state retry, redrive and a durable step ledger** | Ledger DDL and the `BatchRun` entity in `batch-service`, plus the state-machine resources in `infra/modules/step-functions-batch` — see [`batch-orchestration.md`](batch-orchestration.md#per-state-resilience-settings) | Trade-offs: this is an **addition**, not a port. The baseline has no checkpoint contract to preserve, and every redrivable step must be idempotent |
@@ -1525,13 +1714,25 @@ printf '%s programs, %s RESP/REAS sites\n' "$paired_programs" "$paired_sites"
 ```
 
 ```bash
-# WHAT: assert the authored edge-log field boundary, the absence of CloudFront
-#       viewer logging, nginx path suppression, the prod CMK gate and the two
-#       development-profile value/detail floors.
+# WHAT: assert the authored edge-log field boundary at BOTH edges, the CloudFront
+#       standard-logging-v2 field allow-list and its AES256 destination, nginx path
+#       suppression, the prod CMK gate, the shared structured-logging defaults and
+#       the two development-profile value/detail floors.
 # WHY : Refactoring Rationale: these are security properties defined by
 #       ABSENCE as much as presence. A prose review can see routeKey and miss
 #       that path was added two lines later; parsing the exact resource blocks
 #       makes a regression fail rather than merely contradict this document.
+# WHY : Refactoring Rationale: the CloudFront half of this script used to consist of
+#       one assertion -- that the distribution declares no legacy `logging_config`
+#       block -- and that single assertion was satisfied by two opposite designs. It
+#       passes when viewer logging is genuinely off, and it passes when logging is on
+#       through the three standard-logging-v2 resources, which is the design actually
+#       committed. So the check could not distinguish the state this document
+#       describes from its opposite, and it went on passing while the prose beside it
+#       said logging was disabled. The absence assertion is KEPT, because the legacy
+#       block really must not reappear -- it accepts no field list, so it could not
+#       express the allow-list below -- and the delivery resources, the field list and
+#       the destination's encryption default are now asserted positively beside it.
 python3 - <<'PY'
 from pathlib import Path
 import re
@@ -1583,6 +1784,37 @@ distribution = braced_block(
 )
 assert not re.search(r"(?m)^\s*logging_config\s*\{", distribution)
 
+for logging_v2_resource in (
+    'resource "aws_cloudwatch_log_delivery_source" "cloudfront_access"',
+    'resource "aws_cloudwatch_log_delivery_destination" "cloudfront_access"',
+    'resource "aws_cloudwatch_log_delivery" "cloudfront_access"',
+):
+    block = braced_block(cloudfront, logging_v2_resource)
+    assert re.search(r'(?m)^\s*region\s*=\s*"us-east-1"$', block)
+
+delivery = braced_block(
+    cloudfront, 'resource "aws_cloudwatch_log_delivery" "cloudfront_access"'
+)
+for retained in ("c-ip", "sc-status", "x-edge-request-id", "cs-method", "ssl-protocol"):
+    assert re.search(rf'(?m)^\s*"{re.escape(retained)}",$', delivery)
+for omitted in ("cs-uri-stem", "cs-uri-query", "cs(Cookie)", "cs(Referer)", "cs(User-Agent)"):
+    assert re.search(rf'(?m)^\s*"{re.escape(omitted)}",?$', delivery) is None
+
+log_bucket_encryption = braced_block(
+    cloudfront,
+    'resource "aws_s3_bucket_server_side_encryption_configuration" "logs"',
+)
+assert re.search(r'(?m)^\s*sse_algorithm\s*=\s*"AES256"$', log_bucket_encryption)
+assert re.search(r'(?m)^\s*sse_algorithm\s*=\s*"aws:kms"', log_bucket_encryption) is None
+
+shared_defaults = Path(
+    "services/common-lib/src/main/resources/carddemo-common-defaults.yml"
+).read_text()
+assert "console: ${CARDDEMO_LOG_CONSOLE_FORMAT:ecs}" in shared_defaults
+assert "name: ${spring.application.name:carddemo-unnamed-service}" in shared_defaults
+assert "environment: ${carddemo.environment}" in shared_defaults
+assert "version: ${carddemo.version}" in shared_defaults
+
 nginx = Path("ui/nginx.conf").read_text()
 history = braced_block(nginx, "    location / {")
 assert "access_log off;" in history
@@ -1610,25 +1842,14 @@ PY
 
 ### The deployment boundary
 
-**No dashboard has rendered. No alarm has fired. No trace has been sampled. No
-benchmark and no load test has been run.** Every resource this document describes is
-authored and statically validated — the dashboard, the eleven metric alarms, the
-notification topic, the ECS-service, API Gateway and state-machine log groups — and
-both environment roots compose them, but `terraform apply` against a live account is
-an operator action outside this repository's scope, so nothing here has been observed
-running. Every figure in this document is therefore one of
-exactly two things: a width, count or literal quoted from a cited baseline line, or
-a configuration default read from an authored Terraform input declaration.
-**Nothing here is a measurement of the target system**, and no sentence above
-should be read as reporting one.
+`terraform apply` against a live account is an operator action outside this
+repository's scope, so every figure in this document is one of exactly two things: a
+width, count or literal quoted from a cited baseline line, or a configuration
+default read from an authored Terraform input declaration. **Nothing here is a
+measurement of the target system**, and no sentence above should be read as
+reporting one.
 
-The two shared-kernel classes this document depends on exist and are cited by
-line. The ecs-service, api-gateway-http, sqs, observability, and
-step-functions-batch modules have resource bodies and outputs, and both
-environment roots compose them. This establishes a statically validated target;
-it does not assert that telemetry has flowed in a live account.
-
-### Explicitly out of scope, and none of it is delivered
+### Explicitly out of scope
 
 Named here so that no sentence above can be read as a claim to the contrary:
 
@@ -1685,16 +1906,12 @@ model — which is a complete and functioning one for the platform it runs on.
 Nothing under [`app/`](../../app), [`tests/`](../../tests), `scripts/` or
 `samples/` is modified by this document or by the work it specifies. The three known
 baseline defects are not subjects of this document: the baseline keeps the behaviour
-it has, `app/**` is untouched, and each divergence must be registered in the
-contracted
-`docs/architecture/cobol-to-service-traceability.md`, together with every
-documented behavioural divergence.
+it has, and each divergence is registered in
+`docs/architecture/cobol-to-service-traceability.md`.
 
 ---
 
 ## Related documents
-
-All related documents are present and linked.
 
 | Document | What it covers that this one does not |
 |---|---|

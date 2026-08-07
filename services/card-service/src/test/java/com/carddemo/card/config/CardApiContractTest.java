@@ -5,11 +5,14 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 
 import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.common.security.JwtRoleConverter;
+import com.carddemo.common.security.SealedSelector;
 import com.carddemo.common.web.CorrelationIdFilter;
+import com.carddemo.common.web.CursorToken;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.DisplayName;
@@ -65,6 +68,15 @@ class CardApiContractTest {
     private static final String SAMPLE_ACCOUNT_NUMBER = "4111111111110011";
 
     /**
+     * The declared width of a card number, which is the value the sealer's arithmetic is asserted over.
+     *
+     * <p>Assumptions: sixteen, from {@code CARD-NUM PIC X(16)} at {@code app/cpy/CVACT02Y.cpy} L5. It is
+     * named rather than written inline so the one assertion that binds the contract's selector length to
+     * the sealing envelope reads as being about a card number rather than about an arbitrary sixteen.</p>
+     */
+    private static final int CARD_NUMBER_LENGTH = 16;
+
+    /**
      * The masked rendering of {@link #SAMPLE_ACCOUNT_NUMBER}, used as a value a path must refuse.
      *
      * <p>Assumptions: a masked rendering is the value a client is most likely to send by mistake,
@@ -74,20 +86,57 @@ class CardApiContractTest {
     private static final String SAMPLE_MASKED_NUMBER = "************0011";
 
     /**
+     * A specimen selector of the published length and alphabet, used to make a path template concrete.
+     *
+     * <p>Assumptions: this is a synthetic string rather than a selector produced by the sealer, because
+     * this test asserts the contract's declared SHAPE and holds no deployment key. A value that seals
+     * nothing is exactly right for that: it satisfies the declared length and alphabet, so it exercises
+     * the shape check, and it opens to nothing, so it cannot be mistaken for a real address.</p>
+     *
+     * <p>Refactoring Rationale: an earlier revision minted this by calling the CURSOR sealer with a
+     * test-local key, on the ground that a real token cannot drift from the sealer's own output. The
+     * selector is no longer sealed by that primitive -- a cursor expires and a row selector must not --
+     * and the anti-drift property is kept a different way: {@link #theSelectorLengthMatchesTheSealer()}
+     * asserts the declared length against {@code SealedSelector.sealedLengthFor(16)} directly, which
+     * binds the literal to the arithmetic without this class holding a key at all.</p>
+     */
+    private static final String SAMPLE_SELECTOR =
+            "fake-selector-example-not-a-real-sealed-value-0000000000000";
+
+    /**
+     * The number of characters the contract declares a selector to occupy.
+     *
+     * <p>Assumptions: 59 is what {@code SealedSelector.sealedLengthFor(16)} returns for the
+     * sixteen-character card number. It is restated here so this test fails if the contract's declared
+     * bound and the sealer's arithmetic ever part company.</p>
+     */
+    private static final int SELECTOR_LENGTH = 59;
+
+
+    /**
      * The exact set of path templates and methods this contract is obliged to publish.
      *
      * <p>Assumptions: this is a CLOSED set, asserted as an equality rather than a containment, which
-     * is what makes it catch an operation being ADDED as well as one going missing. The four
+     * is what makes it catch an operation being ADDED as well as one going missing. The five
      * obligations are the three read-or-write actions of the baseline's three card programs --
      * app/cbl/COCRDLIC.cbl for the list, COCRDSLC.cbl for the detail and COCRDUPC.cbl for the update
      * -- plus the administrative reading of the detail, which is the one operation that renders a full
-     * account number and therefore sits on its own prefix.</p>
+     * account number and therefore sits on its own prefix, plus the lookup that resolves a card number
+     * supplied in a request body.</p>
+     *
+     * <p>Refactoring Rationale: the set was four entries keyed by {@code {cardNumber}} until a review
+     * established that a card number in a request line is written verbatim into the load balancer's
+     * access log, from inside the load balancer, before any application code runs -- so no masking this
+     * service performs can bound it and access logging is mandatory in this deployment. The single-card
+     * paths are now keyed by an opaque selector and the lookup is the operation that accepts the number
+     * a user typed, in a body, which neither access log records.</p>
      */
     private static final List<String> CONTRACTED_OPERATIONS = List.of(
             "get /api/v1/cards",
-            "get /api/v1/cards/{cardNumber}",
-            "put /api/v1/cards/{cardNumber}",
-            "get /api/v1/admin/cards/{cardNumber}");
+            "post /api/v1/cards/lookup",
+            "get /api/v1/cards/{cardKey}",
+            "put /api/v1/cards/{cardKey}",
+            "get /api/v1/admin/cards/{cardKey}");
 
     /** The parsed contract, loaded once per test instance. */
     private final Map<String, Object> contract = loadContract();
@@ -168,7 +217,7 @@ class CardApiContractTest {
      * @return a concrete request path the security rules can be evaluated against
      */
     private static String concretePath(String pathTemplate) {
-        return pathTemplate.replaceAll("\\{[^}]+}", SAMPLE_ACCOUNT_NUMBER);
+        return pathTemplate.replaceAll("\\{[^}]+}", SAMPLE_SELECTOR);
     }
 
     /**
@@ -236,12 +285,21 @@ class CardApiContractTest {
         assertThat(administrative)
                 .as("exactly one operation returns a full account number, so exactly one is"
                         + " administrative")
-                .containsExactly("get /api/v1/admin/cards/{cardNumber}");
+                .containsExactly("get /api/v1/admin/cards/{cardKey}");
         assertThat(SecurityConfig.requiredAuthorityFor(
-                        "/api/v1/admin/cards/" + SAMPLE_ACCOUNT_NUMBER))
+                        "/api/v1/admin/cards/" + SAMPLE_SELECTOR))
                 .isEqualTo(JwtRoleConverter.ADMIN_AUTHORITY);
-        assertThat(SecurityConfig.requiredAuthorityFor("/api/v1/cards/" + SAMPLE_ACCOUNT_NUMBER))
+        assertThat(SecurityConfig.requiredAuthorityFor("/api/v1/cards/" + SAMPLE_SELECTOR))
                 .as("the ordinary read must NOT require the administrator authority")
+                .isEqualTo(JwtRoleConverter.USER_AUTHORITY);
+        // WHY : Assumptions: the administrative widening is a property of the OPERATION and not of
+        //       the value addressing it. The same selector an ordinary list row hands out is what
+        //       reaches this path, so asserting both authorities against the SAME sample is what
+        //       shows the selector is an identifier and not a capability: holding one does not move
+        //       a caller across the authority boundary, and the boundary is the route.
+        assertThat(SecurityConfig.requiredAuthorityFor("/api/v1/cards/lookup"))
+                .as("resolving a typed number is an ordinary-user action: it discloses one masked"
+                        + " row, which a list already discloses for every card")
                 .isEqualTo(JwtRoleConverter.USER_AUTHORITY);
     }
 
@@ -275,16 +333,17 @@ class CardApiContractTest {
     }
 
     // WHY : Refactoring Rationale: the obligation asserted here is the SET of published operations, and
-    //       an intermediate revision of the contract drifted to five operations on three paths keyed by
-    //       an opaque token, which left the two card-number paths and the administrative path
-    //       unpublished while every individual operation still read correctly. A per-operation
-    //       assertion cannot see that; only an equality against the closed set can.
+    //       it is asserted as an equality because a per-operation assertion cannot see an operation
+    //       that was added or one that quietly disappeared. It has caught both directions: an
+    //       intermediate revision dropped the single-card paths while every remaining operation still
+    //       read correctly, and the revision before this one carried a card-number query filter that no
+    //       individual assertion objected to.
     /**
-     * Asserts that the contract publishes exactly the four contracted operations and no others.
+     * Asserts that the contract publishes exactly the five contracted operations and no others.
      */
     @Test
-    @DisplayName("the contract publishes exactly the four contracted operations")
-    void theContractPublishesExactlyTheFourContractedOperations() {
+    @DisplayName("the contract publishes exactly the five contracted operations")
+    void theContractPublishesExactlyTheFiveContractedOperations() {
         assertThat(operationsByPathAndMethod().keySet())
                 .as("the published operation set is closed: an addition is as much a divergence as an"
                         + " omission, because each one is a route a client may be typed against")
@@ -292,56 +351,231 @@ class CardApiContractTest {
     }
 
     /**
-     * Asserts that a single card is addressed by its sixteen-digit number and that a masked rendering
-     * is refused by the parameter's own shape before any handler runs.
+     * Asserts that a single card is addressed by an opaque sealed selector and that neither a card
+     * number nor a masked rendering satisfies the parameter's own shape.
      */
     @Test
-    @DisplayName("a single card is addressed by its sixteen-digit number")
-    void aSingleCardIsAddressedByItsNumber() {
+    @DisplayName("a single card is addressed by an opaque sealed selector")
+    void aSingleCardIsAddressedByASealedSelector() {
         Map<String, Object> parameters = mapping(mapping(contract, "components"), "parameters");
-        Map<String, Object> pathParameter = mapping(parameters, "CardNumberPath");
-        assertThat(pathParameter.get("name")).isEqualTo("cardNumber");
+        assertThat(parameters)
+                .as("no parameter may carry a card number: a path segment and a query string are both"
+                        + " written verbatim into the load balancer's access log")
+                .doesNotContainKeys("CardNumberPath", "CardNumberFilter");
+
+        Map<String, Object> pathParameter = mapping(parameters, "CardKeyPath");
+        assertThat(pathParameter.get("name")).isEqualTo("cardKey");
         assertThat(pathParameter.get("in")).isEqualTo("path");
         assertThat(pathParameter.get("required")).isEqualTo(true);
+        assertThat(mapping(pathParameter, "schema").get("$ref"))
+                .as("the selector's shape is declared once as a schema and referenced, so the path"
+                        + " parameter and the response members cannot describe different shapes")
+                .isEqualTo("#/components/schemas/CardSelector");
 
-        Map<String, Object> schema = mapping(pathParameter, "schema");
-        assertThat(schema.get("minLength")).isEqualTo(16);
-        assertThat(schema.get("maxLength")).isEqualTo(16);
+        Map<String, Object> selector =
+                mapping(mapping(mapping(contract, "components"), "schemas"), "CardSelector");
+        assertThat(selector.get("minLength"))
+                .as("the bound is an EXACT length, because a run of sixteen digits is itself valid"
+                        + " URL-safe base64 and only the length separates the two")
+                .isEqualTo(SELECTOR_LENGTH);
+        assertThat(selector.get("maxLength")).isEqualTo(SELECTOR_LENGTH);
 
-        Pattern declared = Pattern.compile(String.valueOf(schema.get("pattern")));
-        assertThat(declared.matcher(SAMPLE_ACCOUNT_NUMBER).matches())
-                .as("the primary key of card.cards is what addresses a card, so it must be accepted")
+        Pattern declared = Pattern.compile(String.valueOf(selector.get("pattern")));
+        assertThat(declared.matcher(SAMPLE_SELECTOR).matches())
+                .as("a selector of the published length and alphabet is what addresses a card, so it"
+                        + " must be accepted")
                 .isTrue();
         assertThat(declared.matcher(SAMPLE_MASKED_NUMBER).matches())
                 .as("a masked rendering identifies no row, and it is the value a client is most likely"
                         + " to send by mistake, so the shape check must refuse it")
                 .isFalse();
+        assertThat(declared.matcher(SAMPLE_ACCOUNT_NUMBER).matches())
+                .as("a card number must not satisfy the selector shape, or the value this change"
+                        + " removed from the request line could be put back by a client")
+                .isFalse();
+
+        // WHY : Refactoring Rationale: an uppercased selector is asserted STILL SHAPE-VALID, where an
+        //       earlier revision asserted it refused on the ground that exactly one rendering of a
+        //       selector may address a row. The conclusion is right and the mechanism named was wrong.
+        //       The alphabet is URL-safe base64, which contains both cases, so no shape check can tell
+        //       an uppercased token from a legitimate one that happens to carry capitals -- and a shape
+        //       check that tried would refuse most genuine selectors. What actually makes exactly one
+        //       rendering valid is the sealer: the token carries an authentication tag over its own
+        //       bytes, so altering a single character makes it fail to OPEN and the request is refused
+        //       with 400. Asserting the false claim here would have let the pattern be narrowed to one
+        //       case, which would have broken every selector containing a capital.
+        assertThat(declared.matcher(SAMPLE_SELECTOR.toUpperCase(Locale.ROOT)).matches())
+                .as("the sealed alphabet carries both cases, so an altered token is refused by the"
+                        + " sealer's authentication rather than by this shape")
+                .isTrue();
+        assertThat(declared.matcher(SAMPLE_SELECTOR.substring(1) + "+").matches())
+                .as("a character outside the URL-safe alphabet is refused by the shape, which is what"
+                        + " the shape is for")
+                .isFalse();
+
+        // WHY : Refactoring Rationale: the two schemas are asserted to publish DIFFERENT shapes, where
+        //       an earlier revision required them to publish one. They are sealed by two different
+        //       primitives on purpose. A row selector addresses a row that does not move and appears in
+        //       a bookmarkable route, so it carries no lifetime and is a fixed-width sealing of the
+        //       card's own key; a paging cursor names a POSITION, is bound to the query, the direction
+        //       and the caller, and is deliberately short-lived. Sealing a selector with the cursor's
+        //       expiring primitive would make a card URL stop resolving for a reason arising from
+        //       nothing about the card, so the two shapes are declared separately and this assertion is
+        //       what stops them being merged back together.
+        assertThat(String.valueOf(selector.get("pattern")))
+                .as("the selector and the cursor are minted by two different sealers, so one shape"
+                        + " must not be published for both")
+                .isNotEqualTo(String.valueOf(
+                        mapping(mapping(mapping(contract, "components"), "schemas"), "CursorToken")
+                                .get("pattern")));
     }
 
-    // WHY : Refactoring Rationale: a card number in a request line is written into access logs, browser
-    //       history and referrer headers, and an intermediate revision of the contract answered that by
-    //       removing the number from the URL entirely -- which cost the contract its two card-number
-    //       paths and added a POST whose only purpose was to accept in a body what the URL could not
-    //       carry. The exposure is answered instead by REDACTION, and this assertion is what holds the
-    //       redaction to the paths the contract actually publishes: it builds a concrete URL from every
-    //       published template and requires that the shared masker leaves no full number in it.
     /**
-     * Asserts that the shared masker redacts a card number embedded in any published card path.
+     * Asserts that the one place a caller supplies a full card number is a request body, and that the
+     * body carrying it admits nothing else.
      */
     @Test
-    @DisplayName("the shared masker redacts a card number in every published card path")
-    void theSharedMaskerRedactsACardNumberInEveryPublishedPath() {
-        List<String> unredacted = new ArrayList<>();
+    @DisplayName("a full card number is accepted only in the lookup request body")
+    void aFullCardNumberIsAcceptedOnlyInABody() {
+        Map<String, Object> schemas = mapping(mapping(contract, "components"), "schemas");
+        Map<String, Object> lookup = mapping(schemas, "CardLookupRequest");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> properties = (Map<String, Object>) lookup.get("properties");
+        assertThat(properties.keySet())
+                .as("the lookup body resolves one number and admits nothing beside it")
+                .containsExactly("cardNumber");
+        assertThat(lookup.get("additionalProperties")).isEqualTo(false);
+
+        Pattern number = Pattern.compile(
+                String.valueOf(mapping(properties, "cardNumber").get("pattern")));
+        assertThat(number.matcher(SAMPLE_ACCOUNT_NUMBER).matches()).isTrue();
+        assertThat(number.matcher(SAMPLE_MASKED_NUMBER).matches())
+                .as("a masked rendering identifies no row here either")
+                .isFalse();
+
+        assertThat(mapping(mapping(contract, "paths"), "/api/v1/cards/lookup").keySet())
+                .as("the lookup is a POST, because a GET body has no defined semantics for caches and"
+                        + " intermediaries and the number would end up back in the request line")
+                .containsExactly("post");
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> operation = (Map<String, Object>)
+                mapping(mapping(contract, "paths"), "/api/v1/cards/lookup").get("post");
+        assertThat(operation.get("operationId")).isEqualTo("lookupCard");
+        assertThat(operation.containsKey("requestBody"))
+                .as("a card number a user entered must travel in a body, because a body reaches no"
+                        + " access log while a request line reaches every one of them")
+                .isTrue();
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> declaredParameters =
+                (List<Map<String, Object>>) operation.get("parameters");
+        assertThat(declaredParameters)
+                .as("the only parameter is the correlation header; a query or path parameter here would"
+                        + " defeat the reason this operation is a POST")
+                .allSatisfy(parameter -> assertThat(String.valueOf(parameter.get("$ref")))
+                        .isEqualTo("#/components/parameters/CorrelationIdHeader"));
+    }
+
+    /**
+     * Asserts that no published path template and no declared query parameter can carry a card number.
+     *
+     * <p>Refactoring Rationale: this replaces an assertion that built a concrete URL from every
+     * template and required the shared masker to redact it. That assertion held the wrong thing to
+     * account: the masker bounds this service's own log lines and error bodies, and the record this
+     * finding is about is the load balancer's, written from the request line before any application
+     * code runs. The property that actually closes it is that no template and no query parameter has a
+     * place to put a card number at all, which is what is asserted here.</p>
+     */
+    @Test
+    @DisplayName("no path template and no query parameter can carry a card number")
+    void noRequestLineCanCarryACardNumber() {
+        List<String> offending = new ArrayList<>();
         for (String template : mapping(contract, "paths").keySet()) {
-            String concrete = template.replace("{cardNumber}", SAMPLE_ACCOUNT_NUMBER);
-            if (CardNumberMasker.maskEmbeddedCardNumbers(concrete).contains(SAMPLE_ACCOUNT_NUMBER)) {
-                unredacted.add(concrete);
+            if (template.toLowerCase(Locale.ROOT).contains("cardnumber")) {
+                offending.add("path " + template);
             }
         }
-        assertThat(unredacted)
-                .as("a path this contract publishes reaches the operational record through the shared"
-                        + " advice, so none of them may still carry a full account number afterwards")
+        mapping(mapping(contract, "components"), "parameters").forEach((name, declared) -> {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> parameter = (Map<String, Object>) declared;
+            if (!"path".equals(parameter.get("in")) && !"query".equals(parameter.get("in"))) {
+                return;
+            }
+            if ("cardNumber".equals(parameter.get("name"))) {
+                offending.add(parameter.get("in") + " parameter " + name);
+            }
+        });
+        assertThat(offending)
+                .as("a path segment and a query string are both persisted verbatim by the load"
+                        + " balancer's mandatory access log, which no downstream masking can redact")
+
                 .isEmpty();
+
+        // WHY : Assumptions: the redaction is asserted as well as the absence, because the two protect
+        //       different things. The absence keeps a number out of the routes this contract publishes;
+        //       the redaction covers a number that reaches a request line some OTHER way -- a stale
+        //       client typed against a withdrawn route, or a query parameter no longer declared -- and
+        //       this service's own records still have to be safe when one does.
+        // WHY : Refactoring Rationale: the specimen below was described as "the optional list filter",
+        //       which this contract no longer has: the cardNumber query parameter was withdrawn in the
+        //       same change that removed the number from every path, and the assertion above is what
+        //       keeps it withdrawn. The specimen is retained as a WITHDRAWN-ROUTE probe rather than
+        //       renamed away, because a stale client is exactly the caller that would still send it.
+        assertThat(CardNumberMasker.maskEmbeddedCardNumbers(
+                        "/api/v1/cards?cardNumber=" + SAMPLE_ACCOUNT_NUMBER))
+                .as("a card number reaching a request line through a withdrawn route must not be"
+                        + " retained by this service's own records")
+                .doesNotContain(SAMPLE_ACCOUNT_NUMBER);
+    }
+
+    // WHY : Refactoring Rationale: a second test asserted the lookup operation separately, naming
+    //       an operationId and a response schema -- lookupCardSelector and
+    //       CardSelectorLookupResponse -- that this contract does not publish: the lookup answers
+    //       with the whole CardDetail rather than a bare handle. Its two assertions that
+    //       aFullCardNumberIsAcceptedOnlyInABody did not already make -- that the operation is
+    //       named lookupCard and declares no parameter but the correlation header -- were folded
+    //       into that test rather than kept in a second one, so the one operation has one test.
+    /**
+     * Asserts that every response shape carrying a card publishes the selector a client needs to
+     * address it again.
+     */
+    @Test
+    @DisplayName("every card response carries the selector that addresses it")
+    void everyCardResponseCarriesItsSelector() {
+        Map<String, Object> schemas = mapping(mapping(contract, "components"), "schemas");
+        for (String name : List.of("CardSummary", "CardDetailCore")) {
+            Map<String, Object> schema = mapping(schemas, name);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> properties = (Map<String, Object>) schema.get("properties");
+            assertThat(mapping(properties, "key").get("$ref"))
+                    .as(name + " must address its card through the one declared selector schema")
+                    .isEqualTo("#/components/schemas/CardSelector");
+            @SuppressWarnings("unchecked")
+            List<String> required = (List<String>) schema.get("required");
+            assertThat(required)
+                    .as("an optional selector would be an absence every client had to handle, on a"
+                            + " value every response can produce")
+                    .contains("key");
+        }
+    }
+
+    // WHY : Refactoring Rationale: the shared masker is retained as DEFENCE IN DEPTH and is asserted
+    //       here on the value it can actually bound -- a card number that reaches this service's own
+    //       error body or log line, from a request body or from a stale client. It is deliberately no
+    //       longer asserted against the published path templates, because none of them has anywhere to
+    //       put a number and because the record that mattered was never one this service writes.
+    /**
+     * Asserts that the shared masker still redacts a card number reaching a diagnostic string.
+     */
+    @Test
+    @DisplayName("the shared masker still redacts a card number reaching a diagnostic string")
+    void theSharedMaskerStillRedactsACardNumberInADiagnosticString() {
+        String diagnostic = "lookup refused for " + SAMPLE_ACCOUNT_NUMBER;
+        assertThat(CardNumberMasker.maskEmbeddedCardNumbers(diagnostic))
+                .as("a number supplied in a lookup body can still reach a log line or an error body,"
+                        + " which is the exposure this masker does bound")
+                .doesNotContain(SAMPLE_ACCOUNT_NUMBER);
     }
 
     /**
@@ -467,10 +701,82 @@ class CardApiContractTest {
         Map<String, Object> summary = mapping(schemas, "CardSummary");
         @SuppressWarnings("unchecked")
         Map<String, Object> summaryProperties = (Map<String, Object>) summary.get("properties");
+        // WHY : Refactoring Rationale: this assertion once read "and nothing that addresses a card",
+        //       excluding a selector member from the row. It now REQUIRES one. What the exclusion was
+        //       protecting -- that a list response discloses no card number -- is unaffected, because
+        //       the selector is a random value generated at insert and not derived from the number,
+        //       so no function takes a page of selectors back to a single digit of any card. What the
+        //       exclusion cost was real: with no address on the row, every single-card operation had
+        //       to be addressed by the number itself, which put that number into a path the load
+        //       balancer's access log retains in full.
         assertThat(summaryProperties.keySet())
-                .as("a list row is the widest exposure in this context, so it carries the three values"
-                        + " the baseline row displayed and nothing that addresses a card")
-                .containsExactlyInAnyOrder("displayCardNumber", "accountId", "activeStatus");
+                .as("a list row carries the three values the baseline row displayed plus the opaque"
+                        + " selector that addresses the card, and no card number in any form")
+                .containsExactlyInAnyOrder("key", "displayCardNumber", "accountId", "activeStatus");
+        assertThat(coreProperties.keySet())
+                .as("a detail shape carries the selector too, so a caller that read one card can build"
+                        + " its update route without returning to the list")
+                .contains("key");
+    }
+
+    /**
+     * Asserts the declared selector length is the length the sealer actually produces.
+     *
+     * <p>Assumptions: this is the anti-drift assertion the minted specimen used to provide, expressed
+     * against the arithmetic rather than against a token. It needs no key, so it holds in a unit test,
+     * and it fails if either the contract bound or the sealing envelope changes without the other.</p>
+     */
+    @Test
+    @DisplayName("the declared selector length is the length the sealer produces")
+    void theSelectorLengthMatchesTheSealer() {
+        assertThat(SealedSelector.sealedLengthFor(CARD_NUMBER_LENGTH))
+                .as("the contract declares %d characters; a change to the sealing envelope must be"
+                        + " reflected in the contract and in the record constraint together",
+                        SELECTOR_LENGTH)
+                .isEqualTo(SELECTOR_LENGTH);
+        assertThat(SAMPLE_SELECTOR).hasSize(SELECTOR_LENGTH);
+    }
+
+    /**
+     * Asserts that every schema carrying a masked rendering constrains the masked FORM, so that a raw
+     * sixteen-digit account number cannot satisfy one.
+     *
+     * <p>Refactoring Rationale: an earlier revision bounded those members by LENGTH alone, on the
+     * reasoning that a sixteen-digit pattern would refuse the very value the member holds. The reasoning
+     * was sound and the conclusion was not: a raw account number is itself exactly sixteen characters
+     * wide, so it satisfied the bound and no part of the contract said otherwise. This assertion is what
+     * keeps the corrected bound from being loosened back.</p>
+     */
+    @Test
+    @DisplayName("every masked rendering constrains the masked form, not merely the width")
+    void everyMaskedRenderingConstrainsTheMaskedForm() {
+        Map<String, Object> schemas = mapping(mapping(contract, "components"), "schemas");
+        List<String> permittingARawNumber = new ArrayList<>();
+        for (String schemaName : List.of("CardSummary", "CardDetailCore")) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> properties =
+                    (Map<String, Object>) mapping(schemas, schemaName).get("properties");
+            Object declared = mapping(properties, "displayCardNumber").get("pattern");
+            if (declared == null
+                    || Pattern.compile(String.valueOf(declared))
+                            .matcher(SAMPLE_ACCOUNT_NUMBER).matches()) {
+                permittingARawNumber.add(schemaName);
+            }
+        }
+        assertThat(permittingARawNumber)
+                .as("a schema whose masked member admits an unmasked number is one mapper mistake away"
+                        + " from disclosing a primary account number on a non-administrative response")
+                .isEmpty();
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> summaryProperties =
+                (Map<String, Object>) mapping(schemas, "CardSummary").get("properties");
+        assertThat(Pattern.compile(String.valueOf(
+                        mapping(summaryProperties, "displayCardNumber").get("pattern")))
+                        .matcher(SAMPLE_MASKED_NUMBER).matches())
+                .as("and the masked rendering the mapper actually produces must still be accepted")
+                .isTrue();
+
     }
 
     /**

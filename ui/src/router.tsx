@@ -4,7 +4,9 @@ import type { ReactElement } from 'react';
 import { BrowserRouter, Navigate, Route, Routes, useNavigate } from 'react-router';
 
 import { CARD_DETAIL_ROUTE, CARD_EDIT_ROUTE } from './routes/cards';
+import { RequireSignOn, SIGN_ON_ROUTE } from './routes/guards';
 import { navigateSafely } from './routes/navigation';
+import { SignOnScreen } from './screens/signon';
 
 /** Loads the browse screen only when a card route needs it. */
 const CardListScreen = lazy(
@@ -49,6 +51,20 @@ const CardUpdateScreen = lazy(
 );
 
 /**
+ * Wraps one screen element in the authentication guard.
+ *
+ * Assumptions: a helper rather than repeating the guard element three times. Every card route needs
+ * the same protection, and a route added later that forgets it is the failure this collapses into one
+ * place — the guard is applied where the route is declared, so a new route cannot be added without
+ * choosing whether to wrap it.
+ * @param {ReactElement} screen - The screen to protect.
+ * @returns {ReactElement} The screen wrapped in the sign-on guard.
+ */
+function guarded(screen: ReactElement): ReactElement {
+  return <RequireSignOn>{screen}</RequireSignOn>;
+}
+
+/**
  * Renders a bounded not-found result without reflecting the rejected path.
  * @returns {ReactElement} The not-found result.
  */
@@ -77,8 +93,11 @@ function NotFoundScreen(): ReactElement {
 
 /**
  * Declares the browser routes currently backed by authored screen modules.
+ *
+ * Assumptions: the sign-on route is the only one outside the guard, because it is the route that
+ * establishes the credential the others require. Guarding it would make the application unreachable.
  * @returns {ReactElement} Browser router with opaque card selectors on every card detail
- *   path.
+ *   path, and every screen except sign-on behind the authentication guard.
  */
 export function CardDemoRouter(): ReactElement {
   return (
@@ -86,9 +105,10 @@ export function CardDemoRouter(): ReactElement {
       <Suspense fallback={<Spin size="large" />}>
         <Routes>
           <Route path="/" element={<Navigate to="/cards" replace />} />
-          <Route path="/cards" element={<CardListScreen />} />
-          <Route path={CARD_DETAIL_ROUTE} element={<CardDetailScreen />} />
-          <Route path={CARD_EDIT_ROUTE} element={<CardUpdateScreen />} />
+          <Route path={SIGN_ON_ROUTE} element={<SignOnScreen />} />
+          <Route path="/cards" element={guarded(<CardListScreen />)} />
+          <Route path={CARD_DETAIL_ROUTE} element={guarded(<CardDetailScreen />)} />
+          <Route path={CARD_EDIT_ROUTE} element={guarded(<CardUpdateScreen />)} />
           <Route path="*" element={<NotFoundScreen />} />
         </Routes>
       </Suspense>

@@ -1,24 +1,18 @@
 # boundary_exact_limit -- an amount landing exactly on the credit limit
 
-Scenario README for `fixtures/boundary_exact_limit/`, and the only file in this
-folder able to hold prose. The three record files beside it are fixed-width
-positional data with no comment construct, so the reasoning behind their bytes has
-nowhere else to live: this document carries it for all three, and the folder is
-incomplete as a unit if it stays silent about any choice a reader could reasonably
-have made differently -- even when every byte in the three files is right. That
-obligation is Rule 1, Explainability, whose text is available through
-`review_rules`; the specification anchors the rule at sections 0.8 and 0.8.1 and
-lists the artifacts it forces into scope at section 0.2.1.6.
+Scenario README for `fixtures/boundary_exact_limit/`, and the only file in this folder
+able to hold prose. The three record files beside it are fixed-width positional data
+with no comment construct, so the reasoning behind their bytes has nowhere else to
+live: this document carries it for all three.
 
 Reasoning shared by all ten scenarios lives in the folder index at
-[`../README.md`](../README.md), and the byte-encoding contract lives in the
-master at
-[`tests/fixtures/README.md`](../../../../../../../tests/fixtures/README.md). Both
-are cited below by section number and neither is restated, because a second
-copy of a convention is a second thing able to drift out of agreement with the
-first. Section 1 through section 4 supply the four items master section 9.1
-requires of every scenario README; section 5 through section 7 carry the
-per-decision rationale; section 8 records what reads these bytes.
+[`../README.md`](../README.md), and the byte-encoding contract lives in the master at
+[`tests/fixtures/README.md`](../../../../../../../tests/fixtures/README.md). Both are
+cited below by section number and neither is restated, because a second copy of a
+convention is a second thing able to drift out of agreement with the first. Sections 1
+to 4 supply the four items master section 9.1 requires of every scenario README;
+sections 5 to 7 carry the per-decision rationale; section 8 records what reads these
+bytes.
 
 Three record files sit beside this one, and each has a distinct job:
 
@@ -59,10 +53,21 @@ and the pair is the mechanism rather than a coincidence of naming. Folder sectio
 position, 143** -- the amount field's low-order byte. All 349 remaining bytes are
 identical.
 
-| Scenario | `DALYTRAN-AMT` bytes | Decoded | Trial balance | `>=` limit? | Result |
+| Scenario | `DALYTRAN-AMT` bytes | Decoded | Trial balance | `limit >= trial balance?` | Result |
 |---|---|---|---|---|---|
 | `boundary_exact_limit` (this folder) | `0000020650{` | +2065.00 | 2065.00 | TRUE | POST |
 | `reject_102_overlimit` (sibling) | `0000020650A` | +2065.01 | 2065.01 | FALSE | reject 102 |
+
+Assumptions: the column names the predicate in the direction the reference evaluates
+it. `app/cbl/CBTRN02C.cbl` L403 to L405 forms the trial balance and L407 then tests
+`IF ACCT-CREDIT-LIMIT >= WS-TEMP-BAL`, so the operand on the left of `>=` is the limit
+and the operand on the right is the trial balance -- which is why a trial balance
+landing exactly on the limit is TRUE and posts, and why one cent above it is FALSE and
+reaches the reject at L410. An earlier revision of this heading read `` `>=` limit? ``, which
+reverses the operands: read in that direction a trial balance of 2065.00 is not
+greater than or equal to *more* than itself, so the TRUE in row one contradicted the
+label above it and the one comparison this whole folder exists to pin down was
+described backwards.
 
 The single byte is legible only through the overpunch: `{` is the positive
 low-order digit **0**, making the digit string `00000206500`, and `A` is the
@@ -242,7 +247,7 @@ name a field. In both 350-byte records:
 | `DALYTRAN-ID` / `TRAN-ID` | 1-16 | `0000000000683580` |
 | type code, category code | 17-18, 19-22 | `01`, `0001` |
 | `DALYTRAN-AMT` / `TRAN-AMT` | 133-143 | `0000020650{` = +2065.00 |
-| `CARD-NUM` | 263-278 | `4859452612877065` |
+| `CARD-NUM` | 263-278 | `************7065` -- masked to its last four digits; read positions 263-278 of `dailytran.txt` for the 16 bytes themselves, and section 4.3 item 2 for the digest |
 | `ORIG-TS` | 279-304 | `2022-06-10 19:27:53.000000` |
 | `PROC-TS` | 305-330 | 26 spaces in `dailytran.txt`; the pinned literal in `transact.txt` |
 | `FILLER` | 331-350 | 20 spaces in both |
@@ -264,10 +269,12 @@ account number or identity-shaped bytes. This one does, so all three follow.
    **record 1** of
    [`app/data/ASCII/dailytran.txt`](../../../../../../../app/data/ASCII/dailytran.txt),
    which supplies the transaction id `0000000000683580`, the primary account number
-   `4859452612877065` and the merchant identity bytes -- merchant id `800000000`,
-   merchant name `Abshire-Lowe`, merchant city `North Enoshaven` and merchant
-   postal code `72112` -- together with the source, description and originating
-   timestamp. `tcatbal.txt` is **row 7** of
+   at positions 263-278 and the four merchant identity fields at positions 144-262,
+   together with the source, description and originating timestamp. Those fields are
+   cited by position rather than reproduced, because the seed record and the
+   [`app/cpy/CVTRA06Y.cpy`](../../../../../../../app/cpy/CVTRA06Y.cpy) layout are
+   already the authority for their bytes and a second copy in prose is one more place
+   an identity-shaped value has to be redacted from. `tcatbal.txt` is **row 7** of
    [`app/data/ASCII/tcatbal.txt`](../../../../../../../app/data/ASCII/tcatbal.txt),
    the seed row whose account, type and category key is `00000000007` / `01` /
    `0001`, and it is byte-identical to that row once its carriage return is dropped
@@ -275,12 +282,14 @@ account number or identity-shaped bytes. This one does, so all three follow.
    the reason at section 6.3, so its bytes come from the
    [`app/cpy/CVTRA05Y.cpy`](../../../../../../../app/cpy/CVTRA05Y.cpy) layout with
    its first 304 positions taken from this scenario's own `dailytran.txt`.
-2. **No real person and no real account.** These are demonstration values. The
-   account number, the primary account number and the merchant identity bytes
-   identify no real person and no real account, and none of them is a credential.
-   The primary account number is not masked in these files because a fixed-width
-   record image is the artifact being described; masking is applied where such a
-   value is exposed through an interface, not in the stored record contract.
+2. **No real person and no real account.** The account number, the primary account
+   number and the merchant identity bytes identify no real person and no real
+   account, and none of them is a credential. The fixture files carry those bytes
+   unmasked because a fixed-width record image is the artifact under test and a
+   masked image would not load. This document masks the primary account number and
+   cites the merchant fields by position instead, so that provenance can be attested
+   without a second, un-redactable copy of identity-shaped bytes outside the record
+   the test actually reads.
 3. **Which bytes were reshaped away from the seed value.** Exactly one field, in
    two files. `DALYTRAN-AMT` at positions 133-143 moves from the seed's
    `0000005047G`, which is +504.77, to `0000020650{`, which is +2065.00 -- so it is
@@ -352,14 +361,12 @@ covering exactly those 304 positions with nothing reformatted, rounded or recomp
 in transit. Positions 1-304 of the two files are byte-identical, measured, and the
 only span in which they differ is 305-330.
 
-Refactoring Rationale: this file was derived from the `happy_path` template, which
-carries the seed amount, and leaving that value in place was the defect worth
-naming. A `transact.txt` still reading +504.77 would describe a posted row 1560.23
-lighter than the record that actually drove the gate at line 407, so the pass this
-folder exists to demonstrate would be asserted against a row the run never produced
--- and the assertion would succeed, because nothing in the file itself is malformed.
-Carrying the amount across is therefore a correctness requirement and not a
-tidiness one. The two `transact.txt` files here and in `happy_path` differ at
+Assumptions: carrying the amount across is a correctness requirement and not a tidiness
+one, which is worth naming because the seed amount is what a template would leave in
+place. A `transact.txt` reading +504.77 would describe a posted row 1560.23 lighter than
+the record that actually drove the gate at line 407, so the pass this folder exists to
+demonstrate would be asserted against a row the run never produced -- and the assertion
+would succeed, because nothing in the file itself is malformed. The two `transact.txt` files here and in `happy_path` differ at
 exactly positions 138-143, measured, which is the same six bytes section 4.3 records
 for the daily record.
 
@@ -494,59 +501,45 @@ is cited rather than restated here.
 
 ## 8. What consumes this scenario
 
-Availability is annotated with the `[present]` and `[planned]` convention of master
-section 9.3, which folder section 5 applies across the tree. The point of the
-annotation is that a document never describes an absent artifact as though it
-existed -- and, read the other way, never describes a committed one as though it
-did not.
+Assumptions: this is written as a consumer contract rather than as a roster of the
+classes presently in the module. A roster answers "what reads this today", which a
+reader can settle with one search and which is wrong the moment a test is added; the
+contract answers "what must a reader supply to use these bytes", which does not change
+unless the bytes do.
 
-- [`TransactionFixtureContractTest`](../../../java/com/carddemo/transaction/fixtures/TransactionFixtureContractTest.java)
-  -- **[present]**, and it reads these bytes. It resolves each file as a classpath
-  resource under the fixture prefix and asserts three things about this scenario
-  specifically: that all three files are present at their declared widths, that the
-  amount field forms the one-cent pair with the sibling, and that the category
-  balance is the zero its reference row declares. Measured on this branch, the class
-  reports 21 tests with no failures, errors or skips. Assumptions: this is what makes
-  the byte facts in section 1.1, section 4.1 and section 7.1 checkable by a build
-  rather than by a reading -- so a drift in position 143, in a record width, or in
-  the balance field fails the module instead of quietly invalidating this document.
-  Folder section 5 states its own consumer inventory as a measurement and names the
-  single condition that revises it: a test class loading a record file. This class
-  loads three, so the mark above is that condition met at the scenario level rather
-  than a disagreement with the index -- and it is recorded as a measurement here for
-  the same reason, because a reader can re-run a measurement and cannot re-run an
-  intention.
-- A **fixture-loading repository integration test** over `ledger.transactions`,
-  `ledger.daily_transactions` and `ledger.transaction_category_balances` --
-  **[planned]**. This is the consumer that would load the three record images into
-  the tables section 4.1 names and assert the posted row, the balance movement and
-  the absence of a reject row. Assumptions: it runs against a real PostgreSQL
-  instance through Testcontainers, as folder section 5 records for the integration
-  tests already in this module. The engine matters rather than being incidental: the
-  non-unique index on the processing timestamp and the key-ordered read paths these
-  records feed are properties of the real engine, so a test passing against an
-  in-memory substitute would prove nothing about the behaviour being claimed. Where
-  these records feed a list path, that path pages by **key** and not by ordinal
-  position, so record ordering is part of the fixture's meaning.
-- A **service-level test asserting the inclusive boundary** -- **[planned]**. This
-  is the consumer that would exercise the transcribed credit-limit comparison
-  directly, pairing this scenario against `reject_102_overlimit` so that the two
-  amounts separate `>=` from `>`. Assumptions: it needs the account tier seeded as
-  section 5 describes, because the limit it compares against is not in this folder.
+- **The byte contract is machine-checked.**
+  [`TransactionFixtureContractTest`](../../../java/com/carddemo/transaction/fixtures/TransactionFixtureContractTest.java)
+  resolves each file as a classpath resource under the fixture prefix and asserts, for
+  this scenario specifically, that all three files are present at their declared widths,
+  that the amount field forms the one-cent pair with its sibling, and that the category
+  balance is the zero its reference row declares. That is what makes the byte facts in
+  sections 1.1, 4.1 and 7.1 checkable by a build rather than by a reading, so a drift in
+  position 143, in a record width or in the balance field fails the module instead of
+  quietly invalidating this document.
+- **The row expectations are for a fixture-loading integration test** over
+  `ledger.transactions`, `ledger.daily_transactions` and
+  `ledger.transaction_category_balances`, which loads the three record images as a
+  starting state and asserts the posted row, the balance movement and the absence of a
+  reject row. Assumptions: it runs against a real PostgreSQL instance through
+  Testcontainers. The engine matters rather than being incidental -- the non-unique index
+  on the processing timestamp and the key-ordered read paths these records feed are
+  properties of the real engine, so a test passing against an in-memory substitute would
+  prove nothing about the behaviour being claimed. Where these records feed a list path,
+  that path pages by **key** and not by ordinal position, so record ordering is part of
+  the fixture's meaning.
+- **The inclusive comparison is asserted at service level**, pairing this scenario
+  against `reject_102_overlimit` so the two amounts separate `>=` from `>`. Assumptions:
+  that consumer needs the account tier seeded as section 5 describes, because the limit
+  it compares against is not in this folder.
 
-Two siblings are load-bearing for anything that consumes these bytes, and both are
-**[present]**:
-[`V1__ledger.sql`](../../../../main/resources/db/migration/V1__ledger.sql), which
-creates the three tables above with the nullability asymmetry section 6.2 depends
-on, and
-[`../../application-test.yml`](../../application-test.yml), which pins schema
-resolution and the clock so that an assertion on a 26-character timestamp is
-reproducible at all.
+Two siblings are load-bearing for anything that consumes these bytes:
+[`V1__ledger.sql`](../../../../main/resources/db/migration/V1__ledger.sql), which creates
+the three tables above with the nullability asymmetry section 6.2 depends on, and
+[`../../application-test.yml`](../../application-test.yml), which pins schema resolution
+and the migration location. That profile sets no clock property: determinism for a
+26-character timestamp is supplied as a fixed clock passed to the shared formatter.
 
-One limitation belongs here rather than in a reader's assumptions. Folder section 9
-records that the documentation gate configures itself for `.java` files only, so
-**no linter inspects this document or the three records beside it**. Rule 1
-compliance in this folder rests on authoring discipline and human review, which is
-where the rule's own validation gate places it, and the suppression entry matching
-this path is defensive rather than load-bearing -- it exempts a path, it authors no
-content and it licenses no omission.
+One limitation belongs here rather than in a reader's assumptions. The documentation gate
+configures itself for `.java` files only, so **no linter inspects this document or the
+three records beside it**. Rule 1 compliance in this folder rests on authoring discipline
+and human review, which is where the rule's own validation gate places it.

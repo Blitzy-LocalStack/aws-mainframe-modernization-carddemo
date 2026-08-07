@@ -2,7 +2,16 @@
  * Tests for the batch-service persistence entities, covering the properties that no compiler or
  * schema check can assert.
  *
- * <p>The one property covered here is diagnostic rendering. Every entity in
+ * <p>Two properties are covered here. The first is the money-column invariant: every monetary member
+ * of {@code com.carddemo.batch.domain} is backed by a {@code NUMERIC(11,2) NOT NULL} column, and the
+ * three values that column cannot hold -- an absent one, a magnitude needing ten integer digits, and a
+ * scale finer than two -- must be refused at the assignment that introduced them rather than at the
+ * provider. That needs a test because none of the three is a compile error and only one of them is
+ * even a runtime failure without the guard: an over-scale value is silently coerced by the driver, and
+ * a ten-integer-digit magnitude is admitted by the general money contract because that contract's own
+ * bound is the widest reference picture rather than the picture of the column being written.
+ *
+ * <p>The second property covered here is diagnostic rendering. Every entity in
  * {@code com.carddemo.batch.domain} may end up in a log line -- through a wrapped exception message,
  * a framework's own reporting, or a deliberate log statement -- and what a rendering carries is a
  * disclosure decision rather than a formatting preference. A log is retained, aggregated, and

@@ -22,15 +22,17 @@ import org.springframework.data.jpa.repository.JpaRepository;
  * declined; spelling one as though it were applied would misdescribe the file to a reader skimming
  * for what is actually in force.
  *
- * <p>Assumptions: no method below carries an exception at-clause, and the omission is uniform and
- * deliberate rather than an oversight. The project's Explainability rule attaches that element
- * where an exception is genuinely raisable, and the house convention reproduced at
+ * <p>Assumptions: no method DECLARED below carries an exception at-clause, and the omission is
+ * uniform and deliberate rather than an oversight. The project's Explainability rule attaches that
+ * element where an exception is genuinely raisable, and the house convention reproduced at
  * {@code tests/README.md} lines 545 and 546 lists it beside purpose, parameters and returns on the
- * same condition. Every member here is a query. A query declares no checked exception, and the
- * unchecked data-access failures the framework translates -- a lost connection, a statement the
- * caller cannot influence -- are not conditions a caller handles per call site; they surface
- * through this module's shared web error contract. A speculative at-clause would add an
- * unverifiable claim rather than a fact.
+ * same condition. Every member declared in this file is a query. A query declares no checked
+ * exception, and the unchecked data-access failures the framework translates -- a lost connection, a
+ * statement the caller cannot influence -- are not conditions a caller handles per call site; they
+ * surface through this module's shared web error contract. A speculative at-clause would add an
+ * unverifiable claim rather than a fact. The two WRITE members this interface composes in are
+ * declared on {@link TransactionCategoryBalanceWriter} and do carry at-clauses, because each of them
+ * raises a refusal a caller is expected to act on.
  *
  * <h2>The identifier is a real composite, taken from the reference file's own record key</h2>
  *
@@ -66,7 +68,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
  * independent artifacts, so the ordering this interface requests is a transcription and not a
  * preference. The copybook order is account, then type code, then category code, at lines 6, 7 and
  * 8. The migration declares {@code pk_transaction_category_balances} over
- * {@code (account_id, type_cd, category_cd)} at lines 594 and 595 of
+ * {@code (account_id, type_cd, category_cd)} at lines 805 and 806 of
  * {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql}. The
  * reference report job sorts the same dataset on
  * {@code (TRANCAT-ACCT-ID,A,TRANCAT-TYPE-CD,A,TRANCAT-CD,A)} at {@code app/jcl/PRTCATBL.jcl} line
@@ -98,10 +100,11 @@ import org.springframework.data.jpa.repository.JpaRepository;
  * the single read has no equivalent of.
  *
  * <p>Assumptions: the account-scoped ordered read declared below maps onto the sequential mode, and
- * it is the ONLY member this interface declares. The keyed read, the insert and the update all
- * arrive inherited.
+ * it is the only member this FILE declares. The keyed read arrives inherited from the framework's
+ * repository type; the insert and the update arrive from {@link TransactionCategoryBalanceWriter},
+ * which this interface composes in for the reason the next section records.
  *
- * <h2>The create-versus-update branch stays observable, so no merge is declared</h2>
+ * <h2>The create-versus-update branch stays observable, so two write members are declared</h2>
  *
  * <p>Alternatives Considered: the branch between creating a row and updating one is expressed
  * through the schema and the calling service, and NO conflict-resolving merge is declared on this
@@ -120,13 +123,30 @@ import org.springframework.data.jpa.repository.JpaRepository;
  * to 542, adding the amount at line 527 and {@code REWRITE} at line 528. The ensemble therefore
  * runs from line 467 to line 542 as three paragraphs, not one.
  *
- * <p>Assumptions: the inherited {@code save} covers both paths, which is precisely why no third
- * member is needed to express them. An empty {@code Optional} from {@code findById} leads to a
- * save that inserts, mirroring line 510; a present one leads to a save that updates, mirroring line
- * 528. The migration reaches the same conclusion from the other side and records it at its own
- * lines 598 to 611: the composite natural key is the sole constraint, it carries no default and no
- * generated value, and nothing conflict-shaped is provided, expressly so that a caller can still
- * tell an insert from an update.
+ * <p>Refactoring Rationale: this block previously asserted that the inherited {@code save} covered
+ * both paths -- an empty {@code Optional} from {@code findById} leading to a save that inserts,
+ * mirroring line 510, and a present one to a save that updates, mirroring line 528 -- and that no
+ * third member was therefore needed. That was measurably wrong, and wrong in the direction that
+ * silently corrupts a money column. This entity's identifier is an embedded value that EVERY
+ * constructor assigns, and the entity declares no version attribute, so the framework's newness test
+ * reads a non-null identifier, concludes the instance is not new, and routes BOTH branches through
+ * the provider's merge operation. One code path served two outcomes, and the provider decided insert
+ * against update internally from a select it issued itself -- which is the same opacity this section
+ * declines at the schema level, arriving through the framework instead. Worse, merge loses both
+ * races: on the create path it finds a row a competing writer inserted and UPDATES it, discarding
+ * that writer's amount instead of accumulating onto it, where the reference {@code WRITE} at line
+ * 510 would have been refused; on the update path it finds the row gone and INSERTS it, recreating a
+ * row a competing writer deleted, where the reference {@code REWRITE} at line 528 would have failed
+ * its key check. Both leave a plausible row behind and raise nothing.
+ *
+ * <p>Assumptions: the two paths are therefore declared as two named members on
+ * {@link TransactionCategoryBalanceWriter}, which this interface composes in, and {@code save} is
+ * not the mechanism for either. That fragment's own documentation carries the full comparison,
+ * including the two alternatives weighed against it -- making the entity answer the newness test
+ * itself, and a single upsert statement. The migration reaches the same conclusion from the other
+ * side and records it at its own lines 809 to 822: the composite natural key is the sole constraint,
+ * it carries no default and no generated value, and nothing conflict-shaped is provided, expressly
+ * so that a caller can still tell an insert from an update.
  *
  * <p>Assumptions: which path runs, and the arithmetic that decides the value written, belong to the
  * calling service and not here. Both reference paths add an amount to a base and differ only in
@@ -188,7 +208,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
  *
  * <p>Assumptions: the balance is an exact scaled decimal at two places and never an approximate
  * type. {@code app/cpy/CVTRA01Y.cpy} line 9 declares {@code TRAN-CAT-BAL PIC S9(09)V99}, which the
- * migration maps to {@code balance NUMERIC(11,2)} at its line 580 -- the picture's nine integral
+ * migration maps to {@code balance NUMERIC(11,2)} at its line 791 -- the picture's nine integral
  * and two fractional digits, and not one digit more. The entity holds it as a decimal whose scale
  * the shared {@code com.carddemo.common.money.Money} contract pins, and this interface neither
  * widens nor narrows that: it returns entities. An approximate binary type cannot
@@ -245,9 +265,17 @@ import org.springframework.data.jpa.repository.JpaRepository;
  * in the account-update and card-update programs whose records belong to other bounded contexts.
  * A second check settles it mechanically: with generation off, a version attribute would map to a
  * column {@code V1__ledger.sql} does not create, so it would fail when a query ran rather than
- * degrade to unversioned behaviour. It follows that no HTTP conflict response originates from this
- * interface; the charter's note on surfacing a stale-state conflict as HTTP 409 describes the
- * records that do carry a version attribute.
+ * degrade to unversioned behaviour.
+ *
+ * <p>Refactoring Rationale: this paragraph used to close by concluding that "no HTTP conflict
+ * response originates from this interface", and that no longer follows. What the absent version
+ * attribute rules out is the LOST-UPDATE guarantee -- two callers reading one balance and both
+ * writing it -- and that limitation stands unchanged. It never ruled out the two conflicts the write
+ * members do report, because neither of those compares a version: one refuses an insert whose key is
+ * already taken and the other refuses an update whose row is gone. Both surface as HTTP 409 through
+ * the shared advice, and the fragment's own documentation names each condition and the caller's
+ * remedy for it. The charter's note on surfacing a stale-state conflict as 409 still describes the
+ * records that carry a version attribute; it is simply no longer the only route to that status.
  *
  * <p>Alternatives Considered: no stereotype annotation is applied to this interface. Declaring one
  * is the alternative and is redundant here, because the repository infrastructure already creates a
@@ -255,10 +283,14 @@ import org.springframework.data.jpa.repository.JpaRepository;
  * configuration enables that scanning. An annotation would add a second, weaker reason for the bean
  * to exist and would suggest to a reader that its absence elsewhere in this package is meaningful.
  * The landed sibling in this package omits it on the same ground.
+ *
+ * @see TransactionCategoryBalanceWriter for the two write members this interface composes in, and for
+ *     the measurement that shows why the inherited save method cannot express them
  */
 public interface TransactionCategoryBalanceRepository
         extends JpaRepository<TransactionCategoryBalance,
-                TransactionCategoryBalance.TransactionCategoryBalanceId> {
+                TransactionCategoryBalance.TransactionCategoryBalanceId>,
+                TransactionCategoryBalanceWriter {
 
     /**
      * Reads every category balance one account holds, ordered by the remaining key components.
@@ -273,8 +305,11 @@ public interface TransactionCategoryBalanceRepository
      *
      * @param accountId the account whose balances are wanted, of type {@code Long}; this is the
      *     LEADING component of the composite key, {@code TRANCAT-ACCT-ID PIC 9(11)} at
-     *     {@code app/cpy/CVTRA01Y.cpy} line 6, carried as {@code account_id BIGINT NOT NULL} at
-     *     line 557 of the ledger migration, and it is the same value the reference dispatcher moves
+     *     {@code app/cpy/CVTRA01Y.cpy} line 6, carried as {@code account_id BIGINT NOT NULL} on
+     *     {@code ledger.transaction_category_balances} in {@code db/migration/V1__ledger.sql} --
+     *     cited by table and column rather than by line, because a line number in a migration moves
+     *     whenever a statement above it is edited -- and it is the same value the reference dispatcher
+     *     moves
      *     into the key from the cross-reference row at {@code app/cbl/CBTRN02C.cbl} line 469 rather
      *     than from the incoming record; must not be {@code null}
      * @return that account's rows as a {@code List<TransactionCategoryBalance>}, ordered by type
@@ -293,11 +328,13 @@ public interface TransactionCategoryBalanceRepository
     //       does not depend on a storage engine returning rows in key order when nothing obliges it
     //       to. Were the ordering omitted, the grouping would still be right and the sequence
     //       within each group would be arbitrary, which is the half a control break relies on.
-    // WHY : Assumptions: the two ordering components are named in the key's declared order, type
-    //       code before category code, which is the order asserted alike by lines 7 and 8 of
-    //       app/cpy/CVTRA01Y.cpy, by the primary key at lines 594 and 595 of the ledger migration
-    //       and by the reference sort at line 52 of app/jcl/PRTCATBL.jcl. Reversing the two would
-    //       leave every row present and every citation above wrong.
+    // Assumptions: the two ordering components are named in the key's declared order, type code
+    //   before category code, which is the order asserted alike by lines 7 and 8 of
+    //   app/cpy/CVTRA01Y.cpy, by constraint pk_transaction_category_balances in
+    //   db/migration/V1__ledger.sql -- cited by constraint name rather than by line, because a line
+    //   number in a migration moves whenever a statement above it is edited -- and by the reference
+    //   sort at line 52 of app/jcl/PRTCATBL.jcl. Reversing the two would leave every row present and
+    //   every citation above wrong.
     // WHY : Alternatives Considered: no row cap is taken, so the whole of one account's group is
     //       returned in one call. Capping the rows was the alternative and is declined because the
     //       reference program consumes a complete group between two control breaks and never a part

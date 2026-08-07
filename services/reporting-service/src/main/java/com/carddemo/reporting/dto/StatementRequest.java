@@ -218,10 +218,32 @@ public record StatementRequest(
      * <p>Alternatives Considered: withholding the card number entirely, rendering only its length.
      * Rejected because the length is fixed at the 16 positions {@code app/cpy/COSTM01.CPY} L22
      * declares, so it distinguishes nothing, and a diagnostic that cannot tell two statement runs apart
-     * is of no use in the one situation it exists for. Alternatives Considered: masking the account
-     * identifier too. Rejected because that identifier is a system key rather than protected data: it
-     * addresses the resource in a request path and in the correlation of a run, so masking it would
-     * make a log unusable while withholding nothing the path had not already carried.</p>
+     * is of no use in the one situation it exists for.</p>
+     *
+     * <p>Refactoring Rationale: THE ACCOUNT IDENTIFIER IS NOW OMITTED, and an earlier revision rendered
+     * it and argued against masking it, on the grounds that "that identifier is a system key rather than
+     * protected data" because "it addresses the resource in a request path and in the correlation of a
+     * run", so withholding it would "make a log unusable while withholding nothing the path had not
+     * already carried". Both halves fail. The sensitive-data logging contract in
+     * {@code docs/architecture/observability.md} names account and customer identifiers in a clause of
+     * their own, so the value was protected however it is used; and the appeal to what the path already
+     * carried compares two different surfaces -- a request path is seen by the one authenticated caller
+     * making the request and is not retained, whereas a log line is retained, aggregated and readable by
+     * every holder of log access.</p>
+     *
+     * <p>Assumptions: this record's two components are the two alternative selectors of one statement
+     * run, so exactly one of them is supplied on any given request, and OMITTING the identifier rather
+     * than masking it is what keeps the rule honest. Masking is not available for it: masking a
+     * card-number-shaped value has one owner, {@code com.carddemo.common.security.CardNumberMasker},
+     * and nothing owns a masking rule for an eleven-digit account identifier in this context -- so a
+     * mask invented here would be a second, unreviewed rule of exactly the kind the paragraph below
+     * describes having already gone wrong once in this very file.</p>
+     *
+     * <p>Trade-offs: on an account-selected run the rendering now names no selector at all, and that is
+     * accepted. It is not silent about the run: {@code com.carddemo.common.web.CorrelationIdFilter}
+     * publishes a correlation identifier on every request-scoped line, which ties a statement request to
+     * its own log entries without naming the account. What is bought is that no log line written from
+     * this type can carry either identifier of a statement run in a usable form.</p>
      *
      * <p>Refactoring Rationale: the masking arithmetic used to live in a private method here and now
      * comes from the shared kernel. It was moved because a second site needed the same rule -- the
@@ -233,13 +255,12 @@ public record StatementRequest(
      * and this rendering changes with it. Nothing parses this string, so the change of width is
      * confined to what an operator reads.</p>
      *
-     * @return the request with its card number reduced to a mask and its last four digits, and its
-     *     account identifier unchanged; an absent component renders as {@code null}
+     * @return the request with its card number reduced to a mask and its last four digits, and no
+     *     account identifier; an absent card number renders as {@code null}
      */
     @Override
     public String toString() {
-        return "StatementRequest[cardNumber=" + CardNumberMasker.mask(cardNumber)
-                + ", accountId=" + accountId + ']';
+        return "StatementRequest[cardNumber=" + CardNumberMasker.mask(cardNumber) + ']';
     }
 
     /**

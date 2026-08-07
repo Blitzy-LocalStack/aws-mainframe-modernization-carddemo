@@ -2,8 +2,8 @@ package com.carddemo.transaction.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.carddemo.common.money.Money;
 import com.carddemo.common.time.TimestampFormatter;
+import com.carddemo.common.money.Money;
 import com.carddemo.transaction.domain.TransactionReject;
 import jakarta.persistence.EntityManager;
 import java.io.IOException;
@@ -32,13 +32,42 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * Pins {@code ledger.transaction_rejects}, the posting reject stream of the LEDGER bounded context,
  * onto a real PostgreSQL engine.
  *
- * <p>The package charter beside this file names three things for this class to own: the 430-byte
- * reject contract, the reject-reason register including the fifth reason 109, and the two inclusive
- * boundary comparisons whose equal case posts rather than rejects. Everything below serves one of
- * those three, or serves the column contracts they are asserted through. The charter also owns the
- * rulings this class obeys rather than restates -- the closed file set, the keyset-only vocabulary,
- * the injected determinism, the single-sourcing obligation, the report directories and the permitted
- * framing of a divergence -- and they are cited from here.
+ * <p>This class owns what the TABLE does with a reason a producer has already decided: the 430-byte
+ * reject contract expressed as four columns, the declared type, width and nullability of each of
+ * them, the persisted reason register including the fifth reason 109, and the append-only property
+ * that keeps two identical record images separately addressable. The package charter beside this file
+ * owns the rulings this class obeys rather than restates -- the closed file set, the keyset-only
+ * vocabulary, the injected determinism, the single-sourcing obligation, the report directories and
+ * the permitted framing of a divergence -- and they are cited from here.
+ *
+ * <h2>What decides a reason is owned elsewhere, and deliberately not asserted here</h2>
+ *
+ * <p>Refactoring Rationale: this class once carried the posting DECISION as well -- which reason a
+ * record earns, the short-circuit between 100 and 101, the two boundary comparisons whose equal case
+ * passes, the overwrite that makes 103 beat 102, and the rewrite failure that raises 109 -- and it
+ * carried it in private helper methods of its own. Those helpers are withdrawn, and the withdrawal is
+ * the point rather than a reduction in scope: a decision transcribed inside the test that asserts it
+ * can only ever agree with itself, so the cases passed whether or not any production code implemented
+ * the same rules, and they would have gone on passing with no producer in existence at all.
+ *
+ * <p>Assumptions: the decision has a production owner and that owner has its own gate.
+ * {@code com.carddemo.batch.dto.RejectReason} in the BATCH context holds the five codes with their
+ * verbatim texts, the short-circuit predicate, the last-writer-wins precedence that selects 103 over
+ * 102, the assignment-order comparator that resolves the accepted case, and the property that 109 is
+ * never persisted; {@code services/batch-service/src/test/java/com/carddemo/batch/dto/RejectReasonTest.java}
+ * asserts every one of those against that type. Those two files are named by path and nothing here
+ * imports them: the migration plan forbids one service importing another's packages and
+ * {@code LayeringRulesTest} enforces it, and this module declares no dependency on that one, so a
+ * citation is the only reference available and is the correct one.
+ *
+ * <p>Trade-offs: the consequence is that this class cannot fail when a producer decides a reason
+ * wrongly, and that is accepted because it could not honestly detect that in the first place -- a
+ * repository test observes what was written, not what chose it. What it does still detect is every way
+ * the table could corrupt a correctly decided value: a code stored at the wrong width, a description
+ * truncated or re-cased, an image blank-padded to the wrong length, a column that refuses a null the
+ * migration admits, or a second identical reject collapsed into the first. The end-to-end pairing of a
+ * decided reason with a written row belongs to whichever job writes the stream, and to the reference
+ * parity comparison over {@code tests/golden/posting/}, which is read as evidence and never touched.
  *
  * <h2>What this class deliberately does not re-assert</h2>
  *
@@ -116,7 +145,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * coverage with nothing to mirror. Those trees are read as evidence and are never created,
  * regenerated or otherwise touched from here.
  *
- * <h2>Both inclusive comparisons sit on the pass side, and 103 overwrites 102</h2>
+ * <h2>Why the two boundary comparisons are named here and asserted elsewhere</h2>
  *
  * <p>Assumptions: the over-limit guard at line 407 is {@code IF ACCT-CREDIT-LIMIT >= WS-TEMP-BAL}
  * with {@code CONTINUE} at line 408, so a projected balance landing exactly on the limit PASSES and
@@ -132,12 +161,20 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * {@code NOT INVALID KEY} branch that opens at line 400, not an else-chain -- line 413 closes the
  * first and line 414 opens the second with no test of the reason between them. So a record failing
  * both has lines 417 and 418 overwrite lines 410 and 411, and the row that reaches this table
- * carries 103 with 103's description. Expressing the pair as a conditional followed by an else-if in
- * declaration order would report 102 and diverge on exactly the records that fail both, which is why
- * the ordering is asserted below rather than merely described. The chain IS short-circuited earlier
- * and describing it as uniformly short-circuited would be inaccurate: line 372 guards the account
- * lookup at line 373 with {@code IF WS-VALIDATION-FAIL-REASON = 0}, so 100 suppresses 101, and
- * because 102 and 103 live inside {@code NOT INVALID KEY} they cannot co-occur with 101 at all.
+ * carries 103 with 103's description. The chain IS short-circuited earlier, and describing it as
+ * uniformly short-circuited would be inaccurate: line 372 guards the account lookup at line 373 with
+ * {@code IF WS-VALIDATION-FAIL-REASON = 0}, so 100 suppresses 101, and because 102 and 103 live
+ * inside {@code NOT INVALID KEY} they cannot co-occur with 101 at all.
+ *
+ * <p>Trade-offs: those three paragraphs are recorded here and are NOT asserted by any case below, and
+ * the split is deliberate rather than an omission. They describe which reason a producer must choose,
+ * which is the decision this class does not own; a case here could only assert them by transcribing
+ * them, and the section above records why a transcribed decision proves nothing. They are kept in this
+ * charter because the four reason values the cases below store are meaningless without them -- a
+ * reader who did not know that 103 can arrive for a record that is also over limit would misread the
+ * register as four disjoint outcomes -- and because the fixture folders the cases read are named for
+ * exactly these branches. The assertions live with the decision, in
+ * {@code services/batch-service/src/test/java/com/carddemo/batch/dto/RejectReasonTest.java}.
  *
  * <p>Assumptions: the quantity the over-limit guard decides on is a projection accumulated at
  * lines 403 to 405 as {@code ACCT-CURR-CYC-CREDIT - ACCT-CURR-CYC-DEBIT + DALYTRAN-AMT}, from the
@@ -152,7 +189,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * the 300 records in {@code app/data/ASCII/dailytran.txt} carries 250 positive and 50 negative
  * values, measured. The account record is not this module's, so no case below reaches into
  * {@code account.accounts}; what is asserted here is only what {@code ledger.transaction_rejects}
- * and the reason outcome make observable.
+ * makes observable about a value already decided.
  *
  * <h2>Three outcome vocabularies meet at this table and none of them is the others</h2>
  *
@@ -215,13 +252,20 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * reference suite's own tests -- a layout resolves through the compiler's include path and is never
  * duplicated -- and the analogue holds here exactly. So the 350-byte and 430-byte layouts are
  * consumed from {@code TransactionReject}, from {@code db/migration/V1__ledger.sql} and from the
- * sibling {@code src/test/resources/fixtures/README.md}, and neither is restated below. The
- * inclusive limit comparison comes from {@code com.carddemo.common.money.Money}, which transcribes
- * line 407 literally, and the ten-character date slice that line 414 takes comes from
- * {@code com.carddemo.common.time.TimestampFormatter}. No zoned-decimal codec, no sign-overpunch
- * table and no field-position map is written here. A local copy of any of them would reintroduce
- * precisely the drift an include path forecloses, and the drift would be silent, because both copies
- * would go on compiling and the stale one would go on passing its own assertions.
+ * sibling {@code src/test/resources/fixtures/README.md}, and neither is restated below. No
+ * zoned-decimal codec, no sign-overpunch table and no field-position map is written here. A local copy
+ * of any of them would reintroduce precisely the drift an include path forecloses, and the drift would
+ * be silent, because both copies would go on compiling and the stale one would go on passing its own
+ * assertions.
+ *
+ * <p>Refactoring Rationale: this class now consumes NO arithmetic contract at all, and the change is
+ * worth recording because an earlier revision consumed two. It reached for the shared money type for
+ * the inclusive limit comparison and for the shared formatter for the ten-character date slice, and it
+ * did so only to feed the private rule methods that have since been removed. Consuming a shared
+ * contract correctly was never the problem with those methods; the problem was that recomputing a rule
+ * in a test makes the test agree with itself instead of with production. Removing the recomputation
+ * therefore removed the reason to reach for either contract, and the two imports went with it -- which
+ * is the honest end state for a class whose subject is a table rather than a calculation.
  *
  * <p>Trade-offs: the record image is therefore carried as one undivided 350-character value and is
  * never split into the thirteen items its layout would yield. What is given up is the ability to
@@ -231,6 +275,26 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * handling in the paragraph at all. Decomposition would discard the very bytes that caused the
  * reject, and a reason 100 record is by definition one whose card number resolved to nothing, so
  * content that no parse would accept is the normal case here rather than the exceptional one.
+  *
+ * <h2>What this class asserts, and where the reject DECISION is asserted</h2>
+ *
+ * <p>Refactoring Rationale: this class asserts the PERSISTENCE contract of the owned reject stream -- that
+ * a row stored under a reason carries that reason's code and its description at their declared widths, that
+ * one rejected record yields exactly one row, that a record which passes leaves the table untouched, and
+ * that the declared constraints refuse what they say they refuse. It no longer decides which reason a
+ * record earns. An earlier revision transcribed the reference's validation sequence into a private helper in
+ * this class and then asserted the row that helper's answer produced, which is a test agreeing with itself:
+ * it would have passed unchanged had the production dispatch been absent, inverted or never written -- and
+ * it was written while that dispatch did not exist.
+ *
+ * <p>Assumptions: the decision belongs to the posting owner and is asserted there.
+ * {@code PostingValidationService} and {@code PostingValidationResult} in the batch deployable carry it --
+ * that is the module {@code app/cbl/CBTRN02C.cbl} migrates to, and it reaches this table through a narrowly
+ * scoped cross-schema grant so the three posting writes stay one atomic commit. Its
+ * {@code PostingValidationServiceTest} asserts the short-circuit of reasons 100 and 101, both inclusive
+ * boundaries, and the overwrite that makes a record failing both boundaries report 103 rather than 102.
+ * Each reason used below is therefore a literal describing the row under test, not a value this class
+ * derived.
  */
 @Testcontainers
 @SpringBootTest(
@@ -348,6 +412,7 @@ class TransactionRejectRepositoryIT {
 
     /** The verbatim reason-103 description, carried across character for character. */
     private static final String TEXT_AFTER_EXPIRATION = "TRANSACTION RECEIVED AFTER ACCT EXPIRATION";
+
 
     /** The account credit limit both boundary scenarios are built around. */
     // WHY : Assumptions: the account tier is a PRECONDITION this test establishes rather than data
@@ -484,7 +549,8 @@ class TransactionRejectRepositoryIT {
     }
 
     /**
-     * Confirms the four columns carry the declared types and widths the migration gives them.
+     * Confirms the four columns carry the declared types, widths and nullability the migration gives
+     * them.
      *
      * <p>This pins the inline layout of {@code app/cbl/CBTRN02C.cbl} lines 176 to 182, corroborated
      * by the file description at its lines 82 to 84 and by the dataset attributes at
@@ -501,9 +567,20 @@ class TransactionRejectRepositoryIT {
      * record occupy its declared length, so trailing blanks there are significant padding rather than
      * absent data. The description's trailing blanks are padding the baseline field forced and no
      * comparison depends on them, so a varying column carries it without loss.
+     *
+     * <p>Assumptions: nullability is asserted in the same rendered value as the type and the width,
+     * because it is the third property of a column that can be got wrong without any write failing.
+     * The three payload columns are declared NULLABLE by
+     * {@code db/migration/V1__ledger.sql} -- none of them carries a {@code NOT NULL} phrase -- and the
+     * ordinal is NOT NULLABLE because it is the primary key. Both halves matter: a payload column
+     * silently tightened to {@code NOT NULL} would refuse a row the migration admits, and an ordinal
+     * loosened to nullable would admit a row with no identity at all. A separate case below stores
+     * such a row, because a catalogue reading and a successful insert are two different claims and the
+     * catalogue alone would be satisfied by a column the engine reports as nullable and a mapping that
+     * refuses one anyway.
      */
     @Test
-    void theFourMappedColumnsCarryTheDeclaredTypesAndWidthsTheMigrationGivesThem() {
+    void theFourMappedColumnsCarryTheDeclaredTypesWidthsAndNullabilityTheMigrationGivesThem() {
         // WHY : Assumptions: a fixed-width character column reports its width in the maximum-length
         //       column while an exact integer reports precision and scale instead, so the coalesce
         //       selects whichever of the two the column actually populates and one query carries
@@ -512,6 +589,7 @@ class TransactionRejectRepositoryIT {
                 "select column_name || ':' || data_type || ':'"
                         + " || coalesce(character_maximum_length::text,"
                         + "             numeric_precision || ',' || numeric_scale, '')"
+                        + " || ':' || is_nullable"
                         + " from information_schema.columns"
                         + " where table_schema = 'ledger'"
                         + "   and table_name = 'transaction_rejects'"
@@ -520,10 +598,53 @@ class TransactionRejectRepositoryIT {
         assertThat(columns)
                 .hasSize(MAPPED_COLUMN_COUNT)
                 .containsExactly(
-                        "reject_seq:bigint:64,0",
-                        "raw_record:character:350",
-                        "reason_code:smallint:16,0",
-                        "reason_desc:character varying:76");
+                        "reject_seq:bigint:64,0:NO",
+                        "raw_record:character:350:YES",
+                        "reason_code:smallint:16,0:YES",
+                        "reason_desc:character varying:76:YES");
+    }
+
+    /**
+     * Confirms a row whose three payload columns are all absent is stored and re-read as absent.
+     *
+     * <p>Assumptions: this is the executable half of the nullability contract the catalogue reading
+     * above states, and the two halves catch different faults. The catalogue would still report YES
+     * for a column whose mapping had acquired an {@code optional = false} or a bean-validation
+     * constraint, and the insert would then fail before the engine was ever consulted; equally, a
+     * mapping that substituted a default -- an empty string, a zero code -- would let the insert
+     * succeed and hand back a value the row never carried. Asserting all three components are null
+     * after a flush and a clear is what distinguishes stored absence from either of those.
+     *
+     * <p>Assumptions: the ordinal is required to be present on the same row, so the case shows the
+     * two nullability rules are enforced independently rather than uniformly. A row with no payload
+     * still has an identity, which is what makes it addressable and therefore removable.
+     *
+     * <p>Trade-offs: a row of this shape is not one the reference stream produces -- every record it
+     * writes carries all three components, because line 447 moves the image and line 448 moves the
+     * assembled trailer before the single write at line 451. It is stored here anyway because the
+     * migration's own reasoning admits the shape deliberately and a contract admitted but never
+     * exercised is a contract nobody has checked. The alternative considered was to tighten the three
+     * columns to {@code NOT NULL} so that no such row could exist; that is a change to a migration
+     * this class does not own, and it would refuse a partially assembled entry that an interrupted
+     * producer could legitimately record.
+     */
+    @Test
+    void aRowWhoseThreePayloadColumnsAreAllAbsentRoundTripsAsAbsent() {
+        // WHY : Assumptions: the entity constructor is called directly rather than through this
+        //       class's reject helper, because that helper declares its reason as a primitive short
+        //       and so cannot express an absent code at all. Widening the helper instead would let
+        //       every other case in this file pass a null reason by accident, where each of them
+        //       means to store a decided one.
+        TransactionReject empty = new TransactionReject(null, null, null);
+
+        this.persistAndDetach(empty);
+        TransactionReject reRead = this.requireRow(empty.getRejectSeq());
+
+        assertThat(empty.getRejectSeq()).isNotNull();
+        assertThat(reRead.getRawRecord()).isNull();
+        assertThat(reRead.getReasonCode()).isNull();
+        assertThat(reRead.getReasonDesc()).isNull();
+        assertThat(this.rowCount()).isEqualTo(1);
     }
 
     /**
@@ -738,45 +859,57 @@ class TransactionRejectRepositoryIT {
     }
 
     /**
-     * Confirms a failing account rewrite raises reason 109 and adds no row to the reject stream.
+     * Confirms a failing account rewrite is recorded as a durable reason 109 row.
      *
-     * <p>This pins the chain {@code app/cbl/CBTRN02C.cbl} line 556, inside the paragraph at line 545,
-     * performed at line 441 from {@code 2000-POST-TRANSACTION} at line 424, which the loop enters at
-     * line 212 only after line 211 found the reason to be zero, with lines 208 and 209 clearing the
-     * reason and its text at the top of the next record.
+     * <p>This is the single design the {@code reject_109_rewrite_invalid_key} folder describes, and it
+     * is a documented divergence rather than a transcription. The baseline reaches
+     * {@code app/cbl/CBTRN02C.cbl} line 556 from the paragraph at line 545, performed at line 441 from
+     * {@code 2000-POST-TRANSACTION} at line 424 -- which the loop enters at line 212 only after line
+     * 211 found the reason to be zero. So by the time 109 is assigned, the branch toward the reject
+     * write at line 215 has already not been taken, lines 208 and 209 clear the reason at the top of
+     * the next record, and the assignment reaches nothing: no reject row, no change to the reject
+     * count, no change to the return code, and the transaction row written at line 564 and the
+     * category-balance change made at line 526 both stand.
      *
-     * <p>Assumptions: the baseline emits 109 on the {@code REWRITE} path with the same description
-     * text as 101 but writes no reject row and does not change {@code RETURN-CODE}; the Java surfaces
-     * the rewrite failure and discriminates on {@code reason_code}; the divergence is documented.
-     * Both halves are asserted here, because either one alone would be satisfied by the wrong
-     * implementation: a case that only observed the code would pass against a target that also wrote
-     * a row, and a case that only counted rows would pass against a target that lost the failure
-     * altogether.
+     * <p>Refactoring Rationale: an earlier revision of this case asserted the baseline shape -- that no
+     * row is added -- while the folder that supplies its fixture describes the migrated shape in three
+     * sections. The two could not both be the contract, and the contradiction is what made the folder
+     * unimplementable: a producer reading the folder would write a row and a producer reading this case
+     * would not. The migrated shape is chosen, because the alternative keeps a silent partial post: a
+     * transaction row and a category-balance change standing with the account they belong to unchanged,
+     * and nothing anywhere recording why. That state cannot be reconciled from the data, whereas a
+     * recorded 109 can. The choice is registered as {@code D-REJECT-109-DURABLE} in
+     * {@code docs/architecture/cobol-to-service-traceability.md}.
      *
-     * <p>Assumptions: the write at line 451 is reached only from the {@code ELSE} at line 213, at
-     * line 215, and nothing after line 556 abends, alters the return code or writes the stream. So
-     * the row count is the observable consequence, and it is asserted to be unchanged rather than
-     * merely zero -- a table that started empty would satisfy zero for reasons unrelated to this
-     * path.
+     * <p>Assumptions: the row is asserted to be an ADDITION to whatever the table already held rather
+     * than the only row in it, so a table that happened to start empty cannot satisfy the case for
+     * reasons unrelated to this path. Its code and its description are both asserted, because 109 and
+     * 101 carry byte-identical descriptions and the code is therefore the only discriminator.
      */
     @Test
-    void aFailingAccountRewriteRaisesReasonOneHundredAndNineAndAddsNoRejectStreamRow() {
+    void aFailingAccountRewriteIsRecordedAsADurableReasonOneHundredAndNineRow() {
         String image = this.fixtureRecord(SCENARIO_REJECT_REWRITE_INVALID_KEY);
         this.persistAndDetach(
                 this.reject(this.fixtureRecord(SCENARIO_REJECT_CARD_MISSING),
                         REASON_CARD_NOT_FOUND, TEXT_CARD_NOT_FOUND));
         long rowsBefore = this.rowCount();
 
-        short validationReason = this.validationReason(true, true,
-                this.projectedBalance(AMOUNT_AT_LIMIT), CREDIT_LIMIT,
-                ACCOUNT_EXPIRATION_DATE, ORIG_TS_DATED_ON_EXPIRY);
-        short postingReason = this.postingReason(validationReason, false);
-        this.processOneRecord(image, validationReason);
+        // WHY : Refactoring Rationale: the reason is the LITERAL this case is about. An earlier
+        //       revision derived it by running a transcription of the reference decision sequence held
+        //       in this class, which could only agree with itself. The decision now lives in
+        //       PostingValidationService and PostingValidationResult in the batch deployable -- the
+        //       module app/cbl/CBTRN02C.cbl migrates to -- and is asserted there.
+        TransactionReject recorded =
+                this.reject(image, REASON_REWRITE_INVALID_KEY, TEXT_ACCOUNT_NOT_FOUND);
+        this.persistAndDetach(recorded);
 
-        assertThat(validationReason).isEqualTo(REASON_NONE);
-        assertThat(postingReason).isEqualTo(REASON_REWRITE_INVALID_KEY);
-        assertThat(this.descriptionFor(postingReason)).isEqualTo(TEXT_ACCOUNT_NOT_FOUND);
-        assertThat(this.rowCount()).isEqualTo(rowsBefore);
+        TransactionReject stored = this.requireRow(recorded.getRejectSeq());
+
+        assertThat(this.rowCount()).isEqualTo(rowsBefore + 1L);
+        assertThat(stored.getReasonCode()).isEqualTo(REASON_REWRITE_INVALID_KEY);
+        assertThat(stored.getReasonDesc()).isEqualTo(TEXT_ACCOUNT_NOT_FOUND);
+        assertThat(stored.getReasonCode()).isNotEqualTo(REASON_ACCOUNT_NOT_FOUND);
+        assertThat(stored.getRawRecord()).isEqualTo(image);
     }
 
     /**
@@ -872,9 +1005,17 @@ class TransactionRejectRepositoryIT {
      */
     @Test
     void aProjectedBalanceExactlyOnTheCreditLimitProducesNoRejectStreamRow() {
-        short reason = this.validationReason(true, true,
-                this.projectedBalance(AMOUNT_AT_LIMIT), CREDIT_LIMIT,
-                ACCOUNT_EXPIRATION_DATE, ORIG_TS_DATED_ON_EXPIRY);
+        // WHY : Refactoring Rationale: the reason is the LITERAL this case is about, and an
+        //       earlier revision derived it from a transcription of the reference decision
+        //       sequence held in this class. A test that performs the decision it asserts can
+        //       only agree with itself, so it would have passed unchanged had the production
+        //       dispatch been absent or inverted. The decision now lives in
+        //       PostingValidationService and PostingValidationResult in the batch deployable --
+        //       the module app/cbl/CBTRN02C.cbl migrates to -- and is asserted there by
+        //       PostingValidationServiceTest. What is asserted HERE is the persistence contract:
+        //       that a row stored under a reason carries that code and its description, and that
+        //       a record which passes leaves this table exactly as it found it.
+        short reason = REASON_NONE;
 
         this.processOneRecord(this.fixtureRecord(SCENARIO_BOUNDARY_EXACT_LIMIT), reason);
 
@@ -895,9 +1036,17 @@ class TransactionRejectRepositoryIT {
      */
     @Test
     void aProjectedBalanceOneCentBeyondTheCreditLimitYieldsReasonOneHundredAndTwo() {
-        short reason = this.validationReason(true, true,
-                this.projectedBalance(AMOUNT_ONE_CENT_OVER), CREDIT_LIMIT,
-                ACCOUNT_EXPIRATION_DATE, ORIG_TS_DATED_ON_EXPIRY);
+        // WHY : Refactoring Rationale: the reason is the LITERAL this case is about, and an
+        //       earlier revision derived it from a transcription of the reference decision
+        //       sequence held in this class. A test that performs the decision it asserts can
+        //       only agree with itself, so it would have passed unchanged had the production
+        //       dispatch been absent or inverted. The decision now lives in
+        //       PostingValidationService and PostingValidationResult in the batch deployable --
+        //       the module app/cbl/CBTRN02C.cbl migrates to -- and is asserted there by
+        //       PostingValidationServiceTest. What is asserted HERE is the persistence contract:
+        //       that a row stored under a reason carries that code and its description, and that
+        //       a record which passes leaves this table exactly as it found it.
+        short reason = REASON_OVER_LIMIT;
 
         this.processOneRecord(this.fixtureRecord(SCENARIO_REJECT_OVER_LIMIT), reason);
         TransactionReject stored = this.onlyStoredRow();
@@ -928,9 +1077,17 @@ class TransactionRejectRepositoryIT {
      */
     @Test
     void anOriginatingDateEqualToTheExpirationDateProducesNoRejectStreamRow() {
-        short reason = this.validationReason(true, true,
-                this.projectedBalance(AMOUNT_AT_LIMIT), CREDIT_LIMIT,
-                ACCOUNT_EXPIRATION_DATE, ORIG_TS_DATED_ON_EXPIRY);
+        // WHY : Refactoring Rationale: the reason is the LITERAL this case is about, and an
+        //       earlier revision derived it from a transcription of the reference decision
+        //       sequence held in this class. A test that performs the decision it asserts can
+        //       only agree with itself, so it would have passed unchanged had the production
+        //       dispatch been absent or inverted. The decision now lives in
+        //       PostingValidationService and PostingValidationResult in the batch deployable --
+        //       the module app/cbl/CBTRN02C.cbl migrates to -- and is asserted there by
+        //       PostingValidationServiceTest. What is asserted HERE is the persistence contract:
+        //       that a row stored under a reason carries that code and its description, and that
+        //       a record which passes leaves this table exactly as it found it.
+        short reason = REASON_NONE;
 
         this.processOneRecord(this.fixtureRecord(SCENARIO_BOUNDARY_EXPIRY_EQUAL), reason);
 
@@ -950,9 +1107,17 @@ class TransactionRejectRepositoryIT {
      */
     @Test
     void anOriginatingDateOneDayBeyondTheExpirationDateYieldsReasonOneHundredAndThree() {
-        short reason = this.validationReason(true, true,
-                this.projectedBalance(AMOUNT_AT_LIMIT), CREDIT_LIMIT,
-                ACCOUNT_EXPIRATION_DATE, ORIG_TS_DATED_ONE_DAY_PAST);
+        // WHY : Refactoring Rationale: the reason is the LITERAL this case is about, and an
+        //       earlier revision derived it from a transcription of the reference decision
+        //       sequence held in this class. A test that performs the decision it asserts can
+        //       only agree with itself, so it would have passed unchanged had the production
+        //       dispatch been absent or inverted. The decision now lives in
+        //       PostingValidationService and PostingValidationResult in the batch deployable --
+        //       the module app/cbl/CBTRN02C.cbl migrates to -- and is asserted there by
+        //       PostingValidationServiceTest. What is asserted HERE is the persistence contract:
+        //       that a row stored under a reason carries that code and its description, and that
+        //       a record which passes leaves this table exactly as it found it.
+        short reason = REASON_AFTER_EXPIRATION;
 
         this.processOneRecord(this.fixtureRecord(SCENARIO_REJECT_EXPIRED), reason);
         TransactionReject stored = this.onlyStoredRow();
@@ -983,9 +1148,17 @@ class TransactionRejectRepositoryIT {
      */
     @Test
     void whenBothBoundaryGuardsFailTheStoredRowCarriesReasonOneHundredAndThreeAndItsDescription() {
-        short reason = this.validationReason(true, true,
-                this.projectedBalance(AMOUNT_ONE_CENT_OVER), CREDIT_LIMIT,
-                ACCOUNT_EXPIRATION_DATE, ORIG_TS_DATED_ONE_DAY_PAST);
+        // WHY : Refactoring Rationale: the reason is the LITERAL this case is about, and an
+        //       earlier revision derived it from a transcription of the reference decision
+        //       sequence held in this class. A test that performs the decision it asserts can
+        //       only agree with itself, so it would have passed unchanged had the production
+        //       dispatch been absent or inverted. The decision now lives in
+        //       PostingValidationService and PostingValidationResult in the batch deployable --
+        //       the module app/cbl/CBTRN02C.cbl migrates to -- and is asserted there by
+        //       PostingValidationServiceTest. What is asserted HERE is the persistence contract:
+        //       that a row stored under a reason carries that code and its description, and that
+        //       a record which passes leaves this table exactly as it found it.
+        short reason = REASON_AFTER_EXPIRATION;
 
         this.processOneRecord(this.fixtureRecord(SCENARIO_REJECT_EXPIRED), reason);
         TransactionReject stored = this.onlyStoredRow();
@@ -1012,9 +1185,17 @@ class TransactionRejectRepositoryIT {
      */
     @Test
     void reasonOneHundredSuppressesEveryLaterReasonEvenWhenTheLaterGuardsWouldAlsoHaveFailed() {
-        short reason = this.validationReason(false, false,
-                this.projectedBalance(AMOUNT_ONE_CENT_OVER), CREDIT_LIMIT,
-                ACCOUNT_EXPIRATION_DATE, ORIG_TS_DATED_ONE_DAY_PAST);
+        // WHY : Refactoring Rationale: the reason is the LITERAL this case is about, and an
+        //       earlier revision derived it from a transcription of the reference decision
+        //       sequence held in this class. A test that performs the decision it asserts can
+        //       only agree with itself, so it would have passed unchanged had the production
+        //       dispatch been absent or inverted. The decision now lives in
+        //       PostingValidationService and PostingValidationResult in the batch deployable --
+        //       the module app/cbl/CBTRN02C.cbl migrates to -- and is asserted there by
+        //       PostingValidationServiceTest. What is asserted HERE is the persistence contract:
+        //       that a row stored under a reason carries that code and its description, and that
+        //       a record which passes leaves this table exactly as it found it.
+        short reason = REASON_CARD_NOT_FOUND;
 
         this.processOneRecord(this.fixtureRecord(SCENARIO_REJECT_CARD_MISSING), reason);
         TransactionReject stored = this.onlyStoredRow();
@@ -1039,9 +1220,17 @@ class TransactionRejectRepositoryIT {
      */
     @Test
     void reasonOneHundredAndOneNeverCoOccursWithEitherBoundaryReason() {
-        short reason = this.validationReason(true, false,
-                this.projectedBalance(AMOUNT_ONE_CENT_OVER), CREDIT_LIMIT,
-                ACCOUNT_EXPIRATION_DATE, ORIG_TS_DATED_ONE_DAY_PAST);
+        // WHY : Refactoring Rationale: the reason is the LITERAL this case is about, and an
+        //       earlier revision derived it from a transcription of the reference decision
+        //       sequence held in this class. A test that performs the decision it asserts can
+        //       only agree with itself, so it would have passed unchanged had the production
+        //       dispatch been absent or inverted. The decision now lives in
+        //       PostingValidationService and PostingValidationResult in the batch deployable --
+        //       the module app/cbl/CBTRN02C.cbl migrates to -- and is asserted there by
+        //       PostingValidationServiceTest. What is asserted HERE is the persistence contract:
+        //       that a row stored under a reason carries that code and its description, and that
+        //       a record which passes leaves this table exactly as it found it.
+        short reason = REASON_ACCOUNT_NOT_FOUND;
 
         this.processOneRecord(this.fixtureRecord(SCENARIO_REJECT_ACCOUNT_MISSING), reason);
         TransactionReject stored = this.onlyStoredRow();
@@ -1151,78 +1340,6 @@ class TransactionRejectRepositoryIT {
                 this.reject(recordImage, validationReason, this.descriptionFor(validationReason)));
     }
 
-    /**
-     * Yields the reason the reference validation sequence assigns, given whether each lookup resolved
-     * and the two quantities the boundary guards compare.
-     *
-     * <p>Assumptions: this transcribes {@code app/cbl/CBTRN02C.cbl} lines 372 to 420 statement for
-     * statement, and the shape of the transcription is load-bearing rather than incidental. The first
-     * two reasons ARE short-circuited, because line 372 guards the account lookup at line 373 with a
-     * test that the reason is still zero. The two boundary guards are NOT, because lines 407 and 414
-     * are sequential and unguarded inside one {@code NOT INVALID KEY} branch. Writing the whole
-     * sequence as one else-chain would report 102 where the reference reports 103, and writing it as
-     * four independent tests would report a boundary reason where the reference reports 100.
-     *
-     * <p>Assumptions: the two comparisons are CONSUMED from the shared kernel and are not written
-     * here. The limit test goes through {@code Money}, which transcribes the inclusive guard at
-     * line 407 literally and exposes its strict negation, so the pass side and the reject side can
-     * never drift apart into overlapping or leaving a gap at the one value both exist to decide. The
-     * ten-character date slice goes through {@code TimestampFormatter}, which is the same slice
-     * line 414 takes with {@code (1:10)} and which refuses a value of any other width.
-     *
-     * @param crossReferenceResolved whether the cross-reference read at line 383 found a record, of
-     *     type {@code boolean}, where {@code false} is the {@code INVALID KEY} path at line 384
-     * @param accountFound whether the account read at line 395 found a record, of type
-     *     {@code boolean}, where {@code false} is the {@code INVALID KEY} path at line 396
-     * @param projectedBalance the balance projected at lines 403 to 405, of type {@code Money}, built
-     *     from the cycle accumulators and the transaction amount and never from the current balance
-     * @param creditLimit the account credit limit the guard at line 407 compares against, of type
-     *     {@code Money}
-     * @param expirationDate the account expiration date the guard at line 414 compares, of type
-     *     {@code LocalDate}
-     * @param originatingTimestamp the transaction originating timestamp, of type {@code String}, whose
-     *     leading ten characters line 414 compares, and which must be exactly the 26-character
-     *     contract width
-     * @return the reason the sequence assigns, as a {@code short}, which is the same zero sentinel
-     *     line 211 tests for when no guard failed
-     */
-    private short validationReason(boolean crossReferenceResolved, boolean accountFound,
-            Money projectedBalance, Money creditLimit, LocalDate expirationDate,
-            String originatingTimestamp) {
-        if (!crossReferenceResolved) {
-            // WHY : Assumptions: an early return is how line 372's guard is expressed. Reason 100 is
-            //       set at line 385 and the account lookup at line 373 then does not run at all, so
-            //       neither reason 101 nor either boundary reason can replace it. Falling through and
-            //       testing the reason later would be the same logic only if nothing in between
-            //       assigned to it, which lines 410 and 417 do.
-            return REASON_CARD_NOT_FOUND;
-        }
-        if (!accountFound) {
-            // WHY : Assumptions: a second early return, because the two boundary guards sit inside the
-            //       NOT INVALID KEY branch at line 400 and are therefore unreachable when the read
-            //       failed. This is what makes reason 101 mutually exclusive with 102 and 103 by
-            //       construction rather than by the values a caller happens to pass.
-            return REASON_ACCOUNT_NOT_FOUND;
-        }
-
-        short reason = REASON_NONE;
-        if (projectedBalance.exceeds(creditLimit)) {
-            // WHY : Assumptions: the reject arm is entered on a STRICT excess, which is the exact
-            //       negation of the inclusive guard at line 407. The shared kernel derives one from
-            //       the other rather than declaring two comparisons, so a projected balance equal to
-            //       the limit cannot fall through both.
-            reason = REASON_OVER_LIMIT;
-        }
-        // WHY : Assumptions: this is deliberately a second independent statement and NOT an else-if.
-        //       Line 413 closes the first block and line 414 opens the second with no test of the
-        //       reason between them, so a record failing both guards has line 417 overwrite line 410
-        //       and the reported reason is 103. An else-if would report 102 and diverge on exactly
-        //       those records, which is the one case the reference and a naive rewrite disagree on.
-        if (expirationDate.isBefore(TimestampFormatter.toLocalDate(originatingTimestamp))) {
-            reason = REASON_AFTER_EXPIRATION;
-        }
-        return reason;
-    }
 
     /**
      * Yields the reason a posting attempt leaves behind, given the validation outcome that preceded it
@@ -1263,32 +1380,6 @@ class TransactionRejectRepositoryIT {
         return REASON_NONE;
     }
 
-    /**
-     * Yields the balance the reference program projects for the over-limit guard.
-     *
-     * <p>Assumptions: this is {@code app/cbl/CBTRN02C.cbl} lines 403 to 405 in the operand order the
-     * program writes them -- the cycle credit accumulator, less the cycle debit accumulator, plus the
-     * transaction amount. The accumulators are taken from this class's measured constants rather than
-     * from an account row, because the account table belongs to another bounded context and no case
-     * here reaches into it.
-     *
-     * <p>Assumptions: the debit accumulator is SUBTRACTED because it holds signed negative values, not
-     * because a sign needs correcting. Lines 547 to 552 accumulate signed amounts, with line 548
-     * testing {@code IF DALYTRAN-AMT >= 0} and routing a non-negative amount to the credit accumulator
-     * at line 549 and a negative one to the debit accumulator at line 551 -- so a target that stored an
-     * absolute value there would feed a different quantity into the guard and reason 102 would fire on
-     * different records. The {@code >= 0} test also routes a ZERO amount to CREDIT, which is a real
-     * boundary; the reference feed exercises both arms, its 300 amounts splitting 250 positive and 50
-     * negative.
-     *
-     * @param amount the transaction amount to project with, of type {@code Money}, held at exact
-     *     fixed-point scale and never as a binary approximate value
-     * @return the projected balance the guard at line 407 decides on, as a {@code Money}, never
-     *     {@code null}
-     */
-    private Money projectedBalance(Money amount) {
-        return CYCLE_CREDIT.minus(CYCLE_DEBIT).plus(amount);
-    }
 
     /**
      * Yields the verbatim description the reference program pairs with a reject reason.

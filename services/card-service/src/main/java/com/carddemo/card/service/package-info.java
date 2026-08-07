@@ -5,27 +5,6 @@
  * validate and shape HTTP, the repositories below it read and write rows,
  * and the classes here hold the rules that neither of those layers may own.
  *
- * <h2>Target contract, not a directory listing</h2>
- *
- * <p>Assumptions: every inventory, file name, class name and count in this charter states the
- * package's <b>target contract</b> as the migration plan assigns it. It is a specification of what
- * this package owns and of what it may never hold, so it is read against the plan rather than against
- * a listing of the directory beside it.</p>
- *
- * <p>Alternatives Considered: deriving the inventory from the directory instead of from the plan.
- * Rejected, because a charter that describes whatever happens to be present cannot say what may
- * <em>not</em> be added, and that is the half of a package contract a reader cannot reconstruct from
- * the files. Stating the closed set costs a charter that has to be revised when the contract itself
- * changes, and buys a boundary a reviewer can enforce against a proposed addition.</p>
- *
- * <p>Each significant COBOL paragraph becomes one named method, so the
- * traceability matrix at
- * {@code docs/architecture/cobol-to-service-traceability.md} can cite a
- * paragraph-to-method pair for every migrated rule instead of naming a class
- * and leaving a reader to search it. Every class added to this package is
- * written to keep that citation possible, and every collaborator arrives
- * through constructor injection.
- *
  * <h2>Service classes and their baseline provenance</h2>
  *
  * <p>The line counts below are the physical lengths of the reference
@@ -207,19 +186,5 @@
  * phase, so it is audited before a single class in this module is compiled.
  * Each class Javadoc therefore documents its own methods and cites its own
  * paragraphs, and defers to this file for the package-wide contract.
- *
- * <h2>What a passing build here does and does not establish</h2>
- *
- * <p>Assumptions: no golden-master oracle exists for the three online
- * programs named above. {@code tests/README.md} records at lines 83 to 85
- * that the online CICS programs cannot run end-to-end without a CICS
- * runtime, which the test runner does not provide, and that only their
- * extractable field-validation logic is unit-tested. Parity for this package
- * therefore rests on transcription fidelity against the cited paragraphs
- * plus the tests in the sibling {@code src/test} tree, and no stronger claim
- * should be read into a green build. The outcome of that build is binary, as
- * {@code services/pom.xml} states at lines 55 to 57; the graded return-code
- * rubric belongs to the COBOL suite under {@code tests} and has no meaning
- * for this module.
  */
 package com.carddemo.card.service;

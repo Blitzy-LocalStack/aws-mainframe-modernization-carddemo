@@ -149,32 +149,30 @@
  * audits this file against, which is why the three real authorities are named
  * instead.</p>
  *
- * <h2>The roster: eleven types, of which NINE are landed</h2>
+ * <h2>The roster: eleven types, all eleven landed</h2>
  *
  * <p>Eleven types, and no twelfth. The list is closed, so the question "which
  * type owns this contract" keeps a definite answer as the package fills.</p>
  *
- * <p>Refactoring Rationale: each entry below states whether it is LANDED or PLANNED. Nine
- * are authored at this checkpoint -- {@code BatchJobName}, {@code BusinessDate},
+ * <p>Refactoring Rationale: each entry below states whether it is LANDED or PLANNED, and at this
+ * revision ALL ELEVEN are landed -- {@code BatchJobName}, {@code BusinessDate},
  * {@code BatchJobParameters}, {@code BatchReturnCode}, {@code BatchRunSummary},
- * {@code DisclosureGroupKey}, {@code DatasetGeneration}, {@code BatchErrorEvent} and
- * {@code InterestRateLookup} -- and two are not: {@code RejectReason} and
- * {@code PostingValidationResult}. Earlier revisions of this paragraph were each wrong in the
- * opposite direction. The first stated all eleven in the present tense before they existed;
- * the second over-corrected to FOUR landed and left four authored types marked PLANNED; the
- * third counted eight and was accurate until {@code InterestRateLookup} landed beside it. All
- * three failures have the same cost in opposite directions: a reader routing a question to a
- * type either looks for a file that is not there, or writes one that already is. The roster is
- * still closed and still answers "which type owns this contract"; it now also answers "does
- * it exist yet" against the directory beside it, which is a claim that has to be re-checked
- * whenever a file is added to that directory.</p>
+ * {@code DisclosureGroupKey}, {@code DatasetGeneration}, {@code BatchErrorEvent},
+ * {@code InterestRateLookup}, {@code RejectReason} and {@code PostingValidationResult}. Four earlier
+ * revisions of this paragraph were each wrong, and in alternating directions: the first stated all
+ * eleven in the present tense before any existed; the second over-corrected to four landed while four
+ * more were authored; the third counted eight and was accurate only until a ninth landed beside it;
+ * the fourth counted nine and named {@code RejectReason} planned when its file was already present.
+ * Every one of those failures costs a reader the same way in one of two directions -- routing a
+ * question to a type that is not there, or writing a type that already is -- which is why the count
+ * is now stated as a measurement against the directory rather than as a plan, and has to be
+ * re-measured whenever a file is added to it.</p>
  *
- * <p>Assumptions: the two planned entries are NOT authored here as empty types to make the
- * roster true. A type with no consumer cannot have its contract exercised, so it would be a
- * placeholder standing where a reviewed contract is supposed to be, and the migration
- * forbids exactly that. Each arrives with the job or service that consumes it -- which is
- * equally the reason the nine that are here were correct to author: each has a landed
- * consumer or is itself the argument contract a landed entry point decodes.</p>
+ * <p>Assumptions: no entry here was authored as an empty type to make the roster true. Each arrived
+ * with the job or service that consumes it: {@code RejectReason} with the posting validation that
+ * assigns its codes, and {@code PostingValidationResult} with the service that returns it and the
+ * precedence factory it owns. A type with no consumer cannot have its contract exercised, so it would
+ * be a placeholder standing where a reviewed contract is supposed to be.</p>
  *
  * <dl>
  *   <dt>{@code BatchJobName}</dt>
@@ -220,7 +218,7 @@
  *       disagree about the same run.</dd>
  *
  *   <dt>{@code RejectReason}</dt>
- *   <dd>PLANNED, not yet authored. The four posting reject codes paired with their descriptions, carried
+ *   <dd>LANDED. The posting reject codes paired with their descriptions, carried
  *       across character for character: {@code INVALID CARD NUMBER FOUND} with
  *       reason 100 at {@code app/cbl/CBTRN02C.cbl:385-386},
  *       {@code ACCOUNT RECORD NOT FOUND} with reason 101 at lines 397 to 398,
@@ -229,7 +227,7 @@
  *       lines 417 to 418.</dd>
  *
  *   <dt>{@code PostingValidationResult}</dt>
- *   <dd>PLANNED, not yet authored. The outcome of validating one daily transaction: whether it may post,
+ *   <dd>LANDED. The outcome of validating one daily transaction: whether it may post,
  *       and if not, which {@code RejectReason} explains why. The baseline
  *       expresses the same decision as a numeric test,
  *       {@code IF WS-VALIDATION-FAIL-REASON = 0} at

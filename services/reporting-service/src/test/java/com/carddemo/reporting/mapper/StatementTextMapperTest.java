@@ -1658,20 +1658,35 @@ class StatementTextMapperTest {
     }
 
     /**
-     * Asserts that the header rendering withholds every personal and monetary component.
+     * Asserts that the header rendering withholds all seven components, the account identifier
+     * included.
+     *
+     * <p>Refactoring Rationale: this case previously asserted the account identifier PRESENT, on the
+     * inline argument that it "is retained because it locates the statement and is already the route
+     * key of the account reads". Being a route key is not what settles whether a value may reach a log:
+     * the sensitive-data logging contract in {@code docs/architecture/observability.md} names account
+     * and customer identifiers in a clause of their own. Withholding a name, an address, a balance and
+     * a credit score and then emitting the identifier that ties all four to one account defeats most of
+     * what those four omissions bought, because a log holding the identifier per statement is the index
+     * into whatever else names it. The assertion is inverted here and the rendering now emits the same
+     * withheld marker its trailer sibling uses.</p>
      */
     @Test
-    @DisplayName("the header rendering withholds every personal and monetary component")
+    @DisplayName("the header rendering withholds all seven components including the account")
     void theHeaderRenderingWithholdsEveryPersonalAndMonetaryComponent() {
         String rendered = representativeHeader().toString();
 
         // WHY : Assumptions: the withheld values are asserted absent one by one rather than by
         //       checking the rendering's length, because the generated record rendering this
         //       replaces printed all seven components and a length check would pass for any
-        //       rendering that merely abbreviated them. The account identifier is retained because
-        //       it locates the statement and is already the route key of the account reads.
-        assertThat(rendered).contains("00000000001");
-        assertThat(rendered).doesNotContain("John")
+        //       rendering that merely abbreviated them.
+        // WHY : Assumptions: the marker is asserted present alongside the seven absences, so this
+        //       case cannot pass against a rendering reduced to nothing at all. It also pins the
+        //       marker to the same wording the trailer rendering uses, which is what keeps one
+        //       withheld form in this file rather than two.
+        assertThat(rendered).contains("accountId").contains("withheld");
+        assertThat(rendered).doesNotContain("00000000001")
+                .doesNotContain("John")
                 .doesNotContain("Public")
                 .doesNotContain("1 Main St")
                 .doesNotContain("Apt 2")

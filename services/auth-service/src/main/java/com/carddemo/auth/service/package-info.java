@@ -2,29 +2,6 @@
  * COBOL paragraph-to-method business behaviour, identity exchange, transaction boundaries, keyset
  * orchestration.
  *
- * <h2>Target contract, not a directory listing</h2>
- *
- * <p>Assumptions: every inventory, file name, class name and count in this charter states the
- * package's <b>target contract</b> as the migration plan assigns it. It is a specification of what
- * this package owns and of what it may never hold, so it is read against the plan rather than against
- * a listing of the directory beside it.</p>
- *
- * <p>Alternatives Considered: deriving the inventory from the directory instead of from the plan.
- * Rejected, because a charter that describes whatever happens to be present cannot say what may
- * <em>not</em> be added, and that is the half of a package contract a reader cannot reconstruct from
- * the files. Stating the closed set costs a charter that has to be revised when the contract itself
- * changes, and buys a boundary a reviewer can enforce against a proposed addition.</p>
- *
- * <p>Those four responsibilities occupy one package because each of them is a decision, and this is
- * the only layer of {@code auth-service} allowed to hold a decision. The controllers above it
- * translate HTTP and shape payloads, the repositories below it move rows, and neither settles a
- * question. A reader looking for the rule that governs a sign-on attempt or a user maintenance
- * request therefore has one place to look, and the register at
- * {@code docs/architecture/cobol-to-service-traceability.md} can cite a paragraph-to-method pair for
- * each migrated rule instead of naming a class and leaving the paragraph to be hunted for. A
- * paragraph that carries a rule is never folded into its caller here, even where folding would read
- * more naturally in Java, because the register has to be able to name the method that stands for it.
- *
  * <h2>Baseline provenance</h2>
  *
  * <p>Everything beneath {@code app/} is reference material: it is the behavioural specification for
@@ -126,30 +103,5 @@
  * fall back on. Here the caller's identity arrives in a validated token and the browse position
  * arrives in the request, which is what lets these classes run as several interchangeable instances
  * with nothing session-scoped behind them.
- *
- * <h2>Documentation contract</h2>
- *
- * <p>This file exists because the Explainability rule requires a docstring on every module entry
- * point at its line 15, and in Java a package declaration is that entry point, with
- * {@code package-info.java} the only construct able to carry Javadoc for one. Two Checkstyle checks
- * act on this file and they are not duplicates: {@code JavadocPackage} runs at checker level and
- * requires the file to be present in a package that holds Java sources, while
- * {@code MissingJavadocPackage} runs inside the tree walker and requires the file to carry Javadoc.
- * A {@code package-info.java} holding nothing but a package statement satisfies the first and fails
- * the second, so both are needed to express the actual obligation. Both fire from the
- * {@code maven-checkstyle-plugin} execution that {@code services/pom.xml} binds to the
- * {@code validate} phase, which precedes compilation on every build, and no in-code suppression
- * filter is configured, so a finding here cannot be waived from inside this file.
- *
- * <p>Of the four docstring elements that rule enumerates at its lines 18 to 21, only Purpose
- * applies. A package declaration accepts no parameter, yields no value and raises nothing, so the
- * Parameters, Return values and Exceptions elements are inapplicable here rather than omitted, and
- * no at-clause is written to stand in for one of them. The inapplicability is declared instead of
- * left silent because that rule's line 39 forbids a docstring that omits parameters, return values
- * or purpose, and a reader has to be able to tell a declared inapplicability from an oversight. An
- * invented empty at-clause would also assert something untrue and be reported by the
- * non-empty-at-clause check. The prose convention these paragraphs follow is
- * {@code docs/CODE_DOCUMENTATION_STANDARD.md}, and the mechanical gate is
- * {@code config/checkstyle/checkstyle.xml}.
  */
 package com.carddemo.auth.service;

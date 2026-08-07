@@ -185,8 +185,8 @@ part of the label" and then wrote every one of its fifteen rationales in bold
 anyway. The argument was right and the practice contradicted it, which is worse
 than either alone: a reviewer auditing the tree for Rule 1 compliance finds every
 rationale by literal string search across seven languages, and an emphasised
-label is a rationale that search does not return. All fifteen are now written in
-the one form, so a single search for `Assumptions:` finds this file's rationales
+label is a rationale that search does not return. All fifteen were converted, and
+every rationale added to this file since is written the same way, so a single search for `Assumptions:` finds this file's rationales
 and the `.sql`, `.tf`, `.java` and `.ts` rationales in the same pass.
 
 The fourth label, `Refactoring Rationale`, is **factually unavailable in this
@@ -497,10 +497,24 @@ Five properties of this declaration matter:
    produced unchanged regardless of those bytes. It cannot assert a rejection,
    because there is no branch to reject on -- `CODATE01` validates nothing and
    has no error path for a malformed request. Assumptions: this is the reason
-   the scenario here is named `request_payload_ignored` rather than for a
+   the **envelope** scenario is named `request_payload_ignored` rather than for a
    rejection it cannot reach; a name promising a refusal would describe a
    branch this program does not contain, which is the naming failure section
    8.3 warns against for `batch_reference_update`.
+
+   Assumptions: this prohibition is scoped to a scenario whose SUBJECT is
+   `CODATE01`, and the domain also carries one whose subject is not. A directory
+   named `invalid_date_rejected` exists alongside `request_payload_ignored`, and
+   the refusal in its name belongs to `DateEditValidator` -- invoked with the
+   ten-character date and ten-character mask that `CSUTLDTC` declares as
+   parameters, travelling BESIDE the envelope rather than inside it. Its bytes
+   are a carrier and its own README section 4.3 records that no date lives in
+   them. The two names are therefore both correct for what they describe, and
+   the boundary is stated here rather than left to be inferred, because the
+   paragraph above otherwise reads as forbidding a directory name the tree
+   contains. What a scenario in this domain still may **not** claim is a refusal
+   performed **by the envelope**: that would name a `CODATE01` branch which,
+   measured across all 524 lines of the program, does not exist.
 
 Note the contrast with section 3.6: here `PIC` and `VALUE` share one line, while
 `COBTUPDT` splits them across two. Neither style is wrong, and a derivation
@@ -611,7 +625,7 @@ decoding into shifted fields.
 > error, producing a fixture that loads cleanly and asserts the wrong values.
 > A loud failure at load is the only outcome that surfaces the mistake.
 
-This is not hypothetical in this tree. **Five** of the fifteen record files here
+This is not hypothetical in this tree. **Five** of the eighteen record files here
 are genuinely zero-byte -- one per `empty_input` scenario, of which
 `reference_list/empty_input` carries two because the list screen reads both
 reference datasets -- and each is 0 bytes with 0 carriage returns and 0 line
@@ -1280,13 +1294,13 @@ indistinguishable from oversight:
 | `disclosure_group` | not required | `DIS-ACCT-GROUP-ID` is a **disclosure-group classifier** - `A000000000`, `DEFAULT`, `ZEROAPR` - and **not an account number** |
 | `date_conversion` | **required** | `WS-KEY PIC 9(11)` is an 11-digit ACCTDAT key, and therefore identity-shaped (section 3.7) |
 
-All three `date_conversion` scenario READMEs carry the attestation obligation
-explicitly, and they discharge it in the two places it attaches: the `happy_path`
-and `request_payload_ignored` READMEs each carry the full three-part statement in
-their own section 4.2, and the `empty_input` README records positively that a
-zero-byte file holds no identity data and so has nothing to attest to. The other
-four domains hold no PAN and no identity data at all, so the obligation does not
-attach to them and its absence there is deliberate.
+All four `date_conversion` scenario READMEs carry the attestation obligation
+explicitly, and they discharge it in the three places it attaches: the `happy_path`,
+`request_payload_ignored` and `invalid_date_rejected` READMEs each carry the full
+three-part statement in their own section 4.2, and the `empty_input` README records
+positively that a zero-byte file holds no identity data and so has nothing to attest
+to. The other four domains hold no PAN and no identity data at all, so the obligation
+does not attach to them and its absence there is deliberate.
 
 ---
 
@@ -1304,7 +1318,7 @@ these bytes, and what they assert with them.
   integration tests. **See section 10: the directory now exists, but none of
   those three test kinds is present in it yet.**
 - **`com.carddemo.reference.fixtures`** - the executable consumers of this tree, both
-  run by Surefire. `ReferenceFixtureContractTest` resolves all fifteen record files
+  run by Surefire. `ReferenceFixtureContractTest` resolves all eighteen record files
   from the test classpath and asserts the geometry section 10 measures;
   `ReferenceFixtureTest` asserts the field-level claims this document makes about
   them - that an empty file is zero bytes and raises `RecordLengthException`, that
@@ -1329,7 +1343,7 @@ these bytes, and what they assert with them.
 Fixtures reach those consumers from the **test classpath**, not by filesystem
 path: Maven copies `src/test/resources/` into `target/test-classes/`, so a record
 file resolves as `fixtures/<domain>/<scenario>/<file>.txt`. This is verified twice
-over: every one of the fifteen record files appears under
+over: every one of the eighteen record files appears under
 `services/reference-service/target/test-classes/fixtures/` after a build -- for
 example the zero-byte
 `services/reference-service/target/test-classes/fixtures/date_conversion/empty_input/date-request.txt`,
@@ -1365,14 +1379,14 @@ not aspirational"*. Everything below was checked directly rather than assumed.
 plan:
 
 - this file, at tree scope;
-- **15 record files** across **13 scenario directories** in **5 domains**, being
-  `batch_reference_update` (3 scenarios, 3 files), `date_conversion` (3, 3),
-  `disclosure_group` (3, 3), `reference_list` (2, 3 -- `empty_input` carries both
-  reference files) and `reference_update` (2, 3 -- `happy_path` carries both);
-- **13 scenario READMEs**, one per scenario directory, each carrying the four-element
+- **18 record files** across **14 scenario directories** in **5 domains**, being
+  `batch_reference_update` (3 scenarios, 3 files), `date_conversion` (4, 4),
+  `disclosure_group` (3, 3), `reference_list` (2, 4 -- **both** scenarios carry both
+  reference files) and `reference_update` (2, 4 -- both carry both);
+- **14 scenario READMEs**, one per scenario directory, each carrying the four-element
   contract of section 8.4. The obligation that section records is discharged, not
   outstanding;
-- **5 of the 15 record files are genuinely zero-byte**, which is the correct encoding
+- **5 of the 18 record files are genuinely zero-byte**, which is the correct encoding
   of an empty fixed-width input (section 5.2): the two in
   `reference_list/empty_input`, which is the one `empty_input` scenario carrying two
   files, and one each in `batch_reference_update/empty_input`,
@@ -1382,10 +1396,10 @@ plan:
 
 | Domain | Scenario | Record files | Bytes | Rows x width |
 |---|---|---|---:|---|
-| `reference_list` | `happy_path` | `trantype.txt` | 427 | 7 x 60 |
+| `reference_list` | `happy_path` | `trantype.txt`, `trancatg.txt` | 427, 1098 | 7 x 60, 18 x 60 |
 | `reference_list` | `empty_input` | `trantype.txt`, `trancatg.txt` | 0, 0 | zero-byte |
 | `reference_update` | `happy_path` | `trantype.txt`, `trancatg.txt` | 488, 1098 | 8 x 60, 18 x 60 |
-| `reference_update` | `delete_restricted_by_category` | `trantype.txt` | 122 | 2 x 60 |
+| `reference_update` | `delete_restricted_by_category` | `trantype.txt`, `trancatg.txt` | 122, 122 | 2 x 60, 2 x 60 |
 | `disclosure_group` | `happy_path` | `discgrp.txt` | 51 | 1 x 50 |
 | `disclosure_group` | `default_fallback` | `discgrp.txt` | 1734 | 34 x 50 |
 | `disclosure_group` | `empty_input` | `discgrp.txt` | 0 | zero-byte |
@@ -1394,7 +1408,25 @@ plan:
 | `batch_reference_update` | `empty_input` | `trtype-update.txt` | 0 | zero-byte |
 | `date_conversion` | `happy_path` | `date-request.txt` | 1001 | 1 x 1000 |
 | `date_conversion` | `request_payload_ignored` | `date-request.txt` | 1001 | 1 x 1000 |
+| `date_conversion` | `invalid_date_rejected` | `date-request.txt` | 1001 | 1 x 1000 |
 | `date_conversion` | `empty_input` | `date-request.txt` | 0 | zero-byte |
+
+Refactoring Rationale: two rows of this table gained a second record file. An earlier
+revision listed `reference_list/happy_path` as carrying `trantype.txt` alone and
+`reference_update/delete_restricted_by_category` likewise, while both directories held a
+`trancatg.txt` that this table did not name -- and neither file was enrolled in any
+consumer inventory, so nothing read it and nothing noticed. Both are now tabled with the
+byte counts they actually have, both are enrolled in the geometry, keyed-fixture and
+populated-fixture inventories of the two consumers, and both are asserted semantically:
+the list scenario's eighteen rows for ordering, uniqueness, referential closure over its
+seven types and byte-identity with the update scenario's copy, and the restrict
+scenario's two rows for referring to exactly the one type whose delete must be refused.
+
+Assumptions: `reference_list/happy_path/trancatg.txt` and
+`reference_update/happy_path/trancatg.txt` are the SAME 1098 bytes, which is why the two
+rows above report one figure twice rather than two derivations of one seed. Section 6.4
+of this charter derives that figure as `18 x 60 + 18`, and a consumer asserts the two
+files equal so the shared extract cannot be edited apart.
 
 Every non-empty file is LF only with exactly one trailing newline and zero CR bytes,
 and every byte count above is `rows x (width + 1)`, which is the section 5.7
@@ -1403,11 +1435,43 @@ acceptance arithmetic.
 Refactoring Rationale: this list previously named exactly two present artifacts --
 this file and `date_conversion/empty_input/date-request.txt` -- and recorded that that
 one scenario directory carried no `README.md`, so the section 8.4 obligation was
-outstanding. Both halves of that statement are now false: thirteen more record files
-landed, and all thirteen scenario READMEs were authored. A status section that
+outstanding. Both halves of that statement are now false: seventeen more record files
+landed, and all fourteen scenario READMEs were authored. A status section that
 under-reports what exists is worse than one that is merely incomplete, because a
 reader trusts it and stops looking -- and in this tree that reader is the one deciding
 whether a fixture already covers the case they were about to add.
+
+Assumptions: the counts above are **measured from the directory on every revision**,
+and three files this list previously omitted are the reason they moved from fifteen to
+eighteen. One is `date_conversion/invalid_date_rejected/date-request.txt`, described in
+the next paragraph. The other two are `reference_list/happy_path/trancatg.txt` and
+`reference_update/delete_restricted_by_category/trancatg.txt`, each an 18-row and a
+2-row category file respectively, which landed in their scenario directories without
+being entered here. **Both are still undescribed by their own scenario README**, and
+that gap is named rather than closed by a count: `reference_list/happy_path/README.md`
+does not mention its category file at all, and
+`reference_update/delete_restricted_by_category/README.md` carries a `Trade-offs:` at
+its own item arguing that the directory deliberately holds no category rows -- which
+the present file contradicts. Their geometry is asserted by both test classes so the
+bytes cannot drift unnoticed, but a reader deciding whether either file is intended
+must resolve that with the author of the scenario, not from this list. Trade-offs:
+recording the discrepancy is preferred over silently deleting either file or inventing
+a derivation rationale for it; what is given up is a tidy status section, and what is
+kept is that no number in it is wrong and no gap in it is invisible.
+
+Assumptions: `date_conversion` carries **four** scenarios rather than the three the
+counts above previously gave, and the fourth is the one whose subject is not
+`CODATE01` at all. `invalid_date_rejected` holds a carrier envelope for the date-edit
+rule, whose refusal happens to a ten-character date passed as a parameter beside these
+bytes; the naming discussion at section 3.7 governs the envelope scenario and is not
+contradicted by it, and that scenario's own README section 4.3 records that no date
+lives in the bytes. Its envelope is **byte-identical** to `request_payload_ignored`'s,
+because both are derived from the same `REQUEST-MSG-COPY` declaration and reach the
+same three field values; the fixture contract test pins the identity so that
+"differentiating" one of them cannot silently invalidate the other's derivation table.
+The count is stated here because a reader comparing this list against the directory
+would otherwise find one more scenario than the list admits and have no way to know
+which is right.
 
 Refactoring Rationale: the `batch_reference_update` scenario in the table above was
 named `invalid_type_abend` and is now `invalid_type_soft_reject`. The rename is not
@@ -1451,7 +1515,7 @@ rather than silently testing nothing.
   `fixtures/<domain>/<scenario>/<file>.txt` from the test classpath and asserts
   the geometry section 10 measures, raising rather than skipping on an absent
   name; `ReferenceFixtureTest` asserts the field-level and cross-file claims this
-  document makes, and contributes thirty-four executed assertions over the fifteen
+  document makes, and contributes thirty-nine executed assertions over the eighteen
   files. **The consumers named in section 9.1 remain a contract for when they
   land** -- no `*RepositoryIT`, `*ServiceTest` or `*ControllerTest` exists yet --
   but the classpath contract itself is no longer unexercised.
@@ -1460,7 +1524,7 @@ Refactoring Rationale: this block used to say the test tree held ONE package,
 that it was named `com.carddemo.reference.dto`, and that nothing read these
 payloads. All three statements have been overtaken: there are three packages, the
 contract test that the sentence described actually lives in `config`, and the two
-classes in `fixtures` read all fifteen files between them. A "not yet a consumer" note that
+classes in `fixtures` read all eighteen files between them. A "not yet a consumer" note that
 outlives its own subject is the kind a reader believes, and believing it here
 means authoring a second fixture reader beside one that already exists.
 
@@ -1609,7 +1673,7 @@ eighth apply to documents including this one; the tenth applies to the module.
    with both groups present exercises type `07` category `0001`; any scenario
    claiming to prove the no-rate path exercises type `01` category `0005`.
 7. **README completeness audit.** A `README.md` exists at tree scope and in every
-   scenario directory - measured at thirteen of thirteen. Each states its purpose, the byte-level contract with
+   scenario directory - measured at fourteen of fourteen. Each states its purpose, the byte-level contract with
    copybook line citations, the consumer and what it asserts, and the failure
    modes. Each non-obvious derivation carries one of the three available
    canonical labels, spelled plural, in ASCII, unbolded and unparenthesised.

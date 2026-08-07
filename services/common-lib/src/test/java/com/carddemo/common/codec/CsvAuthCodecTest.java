@@ -148,13 +148,11 @@ class CsvAuthCodecTest {
             "approvedAmount");
 
     /**
-     * The eighteen widths the request copybook DECLARES, with its ordinal-nine field at fourteen.
+     * The eighteen widths the request copybook declares, with its ordinal-nine field at fourteen.
      *
-     * <p>Assumptions: this table is the copybook's own reading of {@code CCPAURQY.cpy} lines 19 to 36,
-     * including {@code PA-RQ-TRANSACTION-AMT PIC +9(10).99} at line 27 as fourteen characters. It is
-     * NOT what the codec emits, and holding both tables side by side is the point: the declared table
-     * sums to 153 and the emitted table to 152, and a reader who met only one of them would conclude
-     * the other was a defect.</p>
+     * <p>Assumptions: this table is read independently from {@code CCPAURQY.cpy} lines 19 to 36,
+     * including {@code PA-RQ-TRANSACTION-AMT PIC +9(10).99} at line 27 as fourteen characters, so that
+     * the codec's own table is compared against the copybook rather than against itself.</p>
      */
     private static final List<Integer> COPYBOOK_REQUEST_WIDTHS =
             List.of(6, 6, 16, 4, 4, 6, 6, 6, 14, 4, 3, 2, 15, 22, 13, 2, 9, 15);
@@ -162,13 +160,12 @@ class CsvAuthCodecTest {
     /**
      * The zero-based position of each of the seventeen delimiters in an emitted request payload.
      *
-     * <p>Assumptions: these are derived from the emitted width table, so the ninth entry onward each
-     * sit one position earlier than the copybook's declared table would put them. The list is written
-     * out rather than computed so that a change to any width fails against a fixed expectation
-     * instead of against a formula that moved with it.</p>
+     * <p>Assumptions: the list is written out rather than computed from the width table, so that a
+     * change to any width fails against a fixed expectation instead of against a formula that moved
+     * with it.</p>
      */
     private static final List<Integer> REQUEST_DELIMITER_POSITIONS =
-            List.of(6, 13, 30, 35, 40, 47, 54, 61, 75, 80, 84, 87, 103, 126, 140, 143, 153);
+            List.of(6, 13, 30, 35, 40, 47, 54, 61, 76, 81, 85, 88, 104, 127, 141, 144, 154);
 
     /**
      * The zero-based position of each of the six delimiters in an emitted reply payload.
@@ -186,14 +183,13 @@ class CsvAuthCodecTest {
      * <p>Assumptions: each field is filled to exactly its declared width with a letter unique to its
      * ordinal, except the two digit-picture fields and the money field, which carry digit text because
      * that is what their pictures declare. Ordinal nine carries its forced {@code +} because
-     * {@code PIC +9(10).99} spends its first position on a sign in every case, so a token without one
-     * would be thirteen characters and the payload would be 169. A payload of realistic values could not
+     * {@code PIC +9(10).99} spends its first position on a sign in every case. A payload of realistic values could not
      * prove order at all: two six-character fields holding a date and a time are interchangeable to an
      * assertion that only checks widths, whereas {@code AAAAAA} in ordinal one and {@code BBBBBB} in
      * ordinal two cannot be swapped without the slice assertions failing.</p>
      */
     private static final String ORDERED_REQUEST_PAYLOAD =
-            "AAAAAA,BBBBBB,CCCCCCCCCCCCCCCC,DDDD,EEEE,FFFFFF,GGGGGG,000008,0000000100.99,JJJJ,KKK,"
+            "AAAAAA,BBBBBB,CCCCCCCCCCCCCCCC,DDDD,EEEE,FFFFFF,GGGGGG,000008,+0000000100.99,JJJJ,KKK,"
                     + "07,MMMMMMMMMMMMMMM,NNNNNNNNNNNNNNNNNNNNNN,OOOOOOOOOOOOO,PP,QQQQQQQQQ,"
                     + "RRRRRRRRRRRRRRR";
 
@@ -642,70 +638,56 @@ class CsvAuthCodecTest {
     }
 
     /**
-     * The eighteen declared widths sum to 153 while the eighteen emitted widths sum to 152.
+     * The eighteen emitted widths are the eighteen the copybook declares, and they sum to 153.
      *
      * <p>Assumptions: 153 is {@code 6+6+16+4+4+6+6+6+14+4+3+2+15+22+13+2+9+15}, the arithmetic over
      * the pictures {@code CCPAURQY.cpy} declares at lines 19 to 36 with
-     * {@code PA-RQ-TRANSACTION-AMT PIC +9(10).99} at line 27 counted as fourteen. 152 is the same
-     * arithmetic with that one field counted as thirteen, which is the width of the RECEIVER the
-     * reference program reads it into: {@code WS-TRANSACTION-AMT-AN PIC X(13)} at line 63 of
-     * {@code COPAUA0C.cbl}. An alphanumeric receiver truncates on the right, so a fourteen-character
-     * token loses its final cent digit before {@code FUNCTION NUMVAL} runs at line 377 and 100.99
-     * arrives as 100.9. Both sums are asserted so that neither figure can be mistaken for the
-     * other's defect.</p>
+     * {@code PA-RQ-TRANSACTION-AMT PIC +9(10).99} at line 27 counted as the fourteen characters it
+     * declares.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("the request width tables sum to 153 declared and 152 emitted")
+    @DisplayName("the request width table is the copybook's own and sums to 153")
     void requestWidthTablesSumToTheDeclaredAndEmittedTotals() {
         assertEquals(153, COPYBOOK_REQUEST_WIDTHS.stream().mapToInt(Integer::intValue).sum());
-        assertEquals(152, CsvAuthCodec.REQUEST_FIELD_WIDTHS.stream().mapToInt(Integer::intValue).sum());
+        assertEquals(153, CsvAuthCodec.REQUEST_FIELD_WIDTHS.stream().mapToInt(Integer::intValue).sum());
         assertEquals(CsvAuthCodec.REQUEST_DECLARED_WIDTH_SUM,
                 CsvAuthCodec.REQUEST_FIELD_WIDTHS.stream().mapToInt(Integer::intValue).sum());
 
-        // WHY : Assumptions: the two tables are compared POSITION BY POSITION and not only by their
-        //       totals, because the failure this guards against is one width borrowing a character
-        //       from its neighbour. Equal sums would report such a pair as correct, and every field
-        //       after the first of them would sit at the wrong offset on the wire.
-        for (int ordinal = 0; ordinal < COPYBOOK_REQUEST_WIDTHS.size(); ordinal++) {
-            if (ordinal == 8) {
-                continue;
-            }
-            assertEquals(COPYBOOK_REQUEST_WIDTHS.get(ordinal),
-                    CsvAuthCodec.REQUEST_FIELD_WIDTHS.get(ordinal),
-                    "the emitted widths must agree with the copybook at ordinal " + ordinal);
-        }
+        // Assumptions: the two tables are compared position by position and not only by their totals,
+        //   because the failure this guards against is one width borrowing a character from its
+        //   neighbour. Equal sums would report such a pair as correct, and every field after the first
+        //   of them would sit at the wrong offset on the wire.
+        assertEquals(COPYBOOK_REQUEST_WIDTHS, CsvAuthCodec.REQUEST_FIELD_WIDTHS);
         assertEquals(CsvAuthCodec.MONEY_EDITED_WIDTH, COPYBOOK_REQUEST_WIDTHS.get(8));
         assertEquals(CsvAuthCodec.REQUEST_MONEY_WIDTH, CsvAuthCodec.REQUEST_FIELD_WIDTHS.get(8));
-        assertEquals(1, CsvAuthCodec.MONEY_EDITED_WIDTH - CsvAuthCodec.REQUEST_MONEY_WIDTH,
-                "ordinal nine is the only position the two tables may differ at, and by one");
     }
 
     /**
      * The request payload is its emitted width sum plus seventeen interior delimiters.
      *
-     * <p>Assumptions: 169 is {@code 152 + 17}, and 170 would be {@code 153 + 17} -- the length the
-     * copybook's declared widths predict. The request carries seventeen delimiters and no trailing one
-     * because the {@code UNSTRING} at line 354 of {@code COPAUA0C.cbl} names eighteen receiving fields
-     * and therefore consumes only interior separators, which is the respect in which the request
-     * differs from the reply.</p>
+     * <p>Assumptions: 170 is {@code 153 + 17}. The request carries seventeen delimiters and no
+     * trailing one because the {@code UNSTRING} at line 354 of {@code COPAUA0C.cbl} names eighteen
+     * receiving fields and therefore consumes only interior separators, which is the respect in which
+     * the request differs from the reply.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("the request payload is 169 characters with seventeen interior delimiters")
+    @DisplayName("the request payload is 170 characters with seventeen interior delimiters")
     void requestPayloadLengthMatchesTheEmittedWidths() {
         String payload = CsvAuthCodec.encodeRequest(requestWith(Money.of("100.99")));
 
-        assertEquals(169, CsvAuthCodec.REQUEST_WIRE_LENGTH);
-        assertEquals(152, CsvAuthCodec.REQUEST_DECLARED_WIDTH_SUM);
+        assertEquals(170, CsvAuthCodec.REQUEST_WIRE_LENGTH);
+        assertEquals(153, CsvAuthCodec.REQUEST_DECLARED_WIDTH_SUM);
         assertEquals(CsvAuthCodec.REQUEST_DECLARED_WIDTH_SUM + 17, CsvAuthCodec.REQUEST_WIRE_LENGTH);
         assertEquals(CsvAuthCodec.REQUEST_WIRE_LENGTH, payload.length());
         assertEquals(17, delimiterPositionsOf(payload).size());
         assertFalse(payload.charAt(payload.length() - 1) == CsvAuthCodec.DELIMITER,
                 "the request carries no trailing delimiter");
-        assertEquals(170, COPYBOOK_REQUEST_WIDTHS.stream().mapToInt(Integer::intValue).sum() + 17);
+        assertEquals(CsvAuthCodec.REQUEST_WIRE_LENGTH,
+                COPYBOOK_REQUEST_WIDTHS.stream().mapToInt(Integer::intValue).sum() + 17);
     }
 
     /**
@@ -725,7 +707,7 @@ class CsvAuthCodecTest {
 
         assertEquals(REQUEST_DELIMITER_POSITIONS, delimiterPositionsOf(payload));
         assertEquals(17, REQUEST_DELIMITER_POSITIONS.size());
-        assertEquals(153, REQUEST_DELIMITER_POSITIONS.get(16));
+        assertEquals(154, REQUEST_DELIMITER_POSITIONS.get(16));
     }
 
     /**
@@ -753,7 +735,7 @@ class CsvAuthCodecTest {
         assertEquals("FFFFFF", fields[5]);
         assertEquals("GGGGGG", fields[6]);
         assertEquals("000008", fields[7]);
-        assertEquals("0000000100.99", fields[8]);
+        assertEquals("+0000000100.99", fields[8]);
         assertEquals("JJJJ", fields[9]);
         assertEquals("KKK", fields[10]);
         assertEquals("07", fields[11]);
@@ -794,7 +776,7 @@ class CsvAuthCodecTest {
      * comparing the codec with itself, which is the only form of assertion that can fail when encode
      * and decode share one mistaken width. The literal is the eighteen values of
      * {@link #orderedRequest()} joined by seventeen commas, with the ordinal-nine value rendered by
-     * the thirteen-character request renderer.</p>
+     * the fourteen-character request renderer.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
@@ -802,7 +784,7 @@ class CsvAuthCodecTest {
     @DisplayName("the ordered request payload matches its golden vector byte for byte")
     void requestCanonicalPayloadIsTheGoldenVector() {
         assertEquals(ORDERED_REQUEST_PAYLOAD, CsvAuthCodec.encodeRequest(orderedRequest()));
-        assertEquals(169, ORDERED_REQUEST_PAYLOAD.length());
+        assertEquals(170, ORDERED_REQUEST_PAYLOAD.length());
         assertEquals(17, delimiterPositionsOf(ORDERED_REQUEST_PAYLOAD).size());
     }
 
@@ -905,15 +887,25 @@ class CsvAuthCodecTest {
      * the amount, or that carried the card number in a different position, would pass a difference check
      * and still disclose the value.</p>
      *
-     * <p>Trade-offs: the transaction identifier and the reply's three decision fields ARE rendered,
-     * because they are the values that make a log line diagnostically useful and none of them is
-     * cardholder data. Withholding everything would have produced a rendering nobody could correlate,
-     * which is the pressure that leads an author to log the raw payload instead.</p>
+     * <p>Refactoring Rationale: the transaction identifier is now asserted ABSENT from both renderings,
+     * where this case previously asserted it PRESENT "for correlation". The earlier assertion encoded a
+     * position the class under test contradicted in the same file: its sensitive-field set lists
+     * {@code PA-RQ-TRANSACTION-ID} and {@code PA-RL-TRANSACTION-ID} and states the reason -- the
+     * identifier is the deduplication key of the ordered queue, so it appears in operational tooling
+     * beside the card number it was grouped by, and quoting it while masking the card number still
+     * narrows a search to one cardholder. A test asserting the opposite of the type's own stated
+     * contract pins the defect rather than the behaviour, so it is the test that moves.</p>
+     *
+     * <p>Trade-offs: the reply's three decision fields are still rendered, because they are the values
+     * that make a log line diagnostically useful and none of them is cardholder data. Correlation is
+     * served by {@code correlationKey}, which answers a keyed token over the same identity -- so the
+     * pressure that leads an author to log the raw payload instead is answered by a safe accessor
+     * rather than by an unsafe rendering.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("carrier renderings mask the card number and withhold monetary detail")
+    @DisplayName("carrier renderings mask the card number and withhold identifier and monetary detail")
     void carrierRenderingsDoNotDiscloseCardNumbersOrAmounts() {
         AuthRequest request = requestWith(Money.of("100.99"));
         AuthReply reply = replyWith(Money.of("100.99"));
@@ -927,14 +919,27 @@ class CsvAuthCodecTest {
                     "a carrier rendering must not disclose a monetary amount");
             assertTrue(rendered.contains(CardNumberMasker.mask(CARD_NUM)),
                     "a carrier rendering must carry the masked card number");
-            assertTrue(rendered.contains("TRN000000000001"),
-                    "a carrier rendering must carry the transaction identifier for correlation");
+            assertFalse(rendered.contains("TRN000000000001"),
+                    "a carrier rendering must not disclose the transaction identifier");
+            assertTrue(rendered.contains("transactionId=<withheld>"),
+                    "a carrier rendering must state that the transaction identifier is withheld");
         }
+
+        // Assumptions: the tokenised correlation key is asserted to be USABLE in the identifier's place,
+        //   because withholding a value without providing a substitute is what drives an author to log
+        //   the payload instead. The token is stable for one identity and discloses neither half of it.
+        OpaqueIdentifier tokeniser = new OpaqueIdentifier(KEY);
+        assertEquals(request.correlationKey(tokeniser), request.correlationKey(tokeniser),
+                "the correlation token must be stable for one request");
+        assertFalse(request.correlationKey(tokeniser).contains("TRN000000000001"),
+                "the correlation token must not disclose the transaction identifier");
+        assertFalse(request.correlationKey(tokeniser).contains(CARD_NUM),
+                "the correlation token must not disclose the card number");
 
         // WHY : Assumptions: the request withholds its merchant and acquirer detail as a group rather
         //       than field by field, because those fields identify where a cardholder transacted and
-        //       are jointly re-identifying even when the card number is masked. The reply withholds
-        //       only its amount, since its other five fields are the decision itself.
+        //       are jointly re-identifying even when the card number is masked. The reply withholds its
+        //       amount and its identifier, since its other four fields are the decision itself.
         assertTrue(requestText.contains("<withheld>"),
                 "the request rendering must state that components are withheld");
         assertFalse(requestText.contains("ACME SUPERMARKET NO 12"),
@@ -971,7 +976,7 @@ class CsvAuthCodecTest {
 
         String payload = CsvAuthCodec.encodeRequest(orderedRequest());
         assertEquals("JJJJ", fieldAt(payload, 9));
-        assertEquals(80, REQUEST_DELIMITER_POSITIONS.get(9));
+        assertEquals(81, REQUEST_DELIMITER_POSITIONS.get(9));
         assertEquals("JJJJ", CsvAuthCodec.decodeRequest(payload).merchantCategoryCode());
     }
 
@@ -1229,12 +1234,12 @@ class CsvAuthCodecTest {
     /**
      * The money renderings expose the exact display positions their two baseline receivers use.
      *
-     * <p>Assumptions: edited numeric TEXT is a separate wire regime from a byte-encoded decimal
+     * <p>Assumptions: edited numeric text is a separate wire regime from a byte-encoded decimal
      * representation. The reply reaches the wire through {@code PIC -zzzzzzzzz9.99} at line 66 of
-     * {@code COPAUA0C.cbl}, so its fourteen positions are one sign-control position, ten integer
-     * positions, one literal point and two fraction positions. The request reaches
-     * {@code WS-TRANSACTION-AMT-AN PIC X(13)} at line 63, so its emitted positive form has ten
-     * integer digits, the point and two fraction digits but no sign position.</p>
+     * {@code COPAUA0C.cbl}, whose fourteen positions are one sign-control position, ten integer
+     * positions, one literal point and two fraction positions. The request is
+     * {@code PA-RQ-TRANSACTION-AMT PIC +9(10).99} at line 27 of {@code CCPAURQY.cpy}, the same width
+     * spent on a forced sign character, ten zero-padded digits, the point and two fraction digits.</p>
      *
      * <p>Assumptions: the final period in the source declaration {@code PIC +9(10).99.} terminates
      * the COBOL clause; it is not a second punctuation character in the field. Only the point between
@@ -1250,7 +1255,7 @@ class CsvAuthCodecTest {
         String request = CsvAuthCodec.formatRequestMoney(Money.of("100.99"), REQUEST_AMOUNT_FIELD);
 
         assertEquals(14, CsvAuthCodec.MONEY_EDITED_WIDTH);
-        assertEquals(13, CsvAuthCodec.REQUEST_MONEY_WIDTH);
+        assertEquals(14, CsvAuthCodec.REQUEST_MONEY_WIDTH);
         assertEquals(10, CsvAuthCodec.MONEY_INTEGER_DIGITS);
         assertEquals(2, CsvAuthCodec.MONEY_SCALE);
 
@@ -1261,24 +1266,24 @@ class CsvAuthCodecTest {
         assertEquals('.', reply.charAt(11));
         assertEquals("99", reply.substring(12));
 
-        assertEquals(13, request.length());
-        assertEquals("0000000100", request.substring(0, 10));
-        assertEquals('.', request.charAt(10));
-        assertEquals("99", request.substring(11));
+        assertEquals(14, request.length());
+        assertEquals('+', request.charAt(0));
+        assertEquals("0000000100", request.substring(1, 11));
+        assertEquals('.', request.charAt(11));
+        assertEquals("99", request.substring(12));
 
-        // WHY : Assumptions: the two renderings are compared to each other rather than only against
-        //       their own literals, because they are easy to confuse -- both end in the same six
-        //       characters. They differ in two ways and both are asserted: the reply is one position
-        //       wider, spending it on the sign-control character the request has no room for, and the
-        //       reply SUPPRESSES its leading zeros to blanks where the request forces them to digits.
-        //       Asserting only the width would let a renderer emit the other's padding at the right
-        //       length, and asserting only the padding would let it emit the wrong width.
-        assertEquals(1, reply.length() - request.length());
+        // Assumptions: the two renderings are compared to each other rather than only against their
+        //   own literals, because they are easy to confuse -- they share a width and end in the same
+        //   six characters. They differ in their sign position and in their padding, and both are
+        //   asserted: the reply blanks its sign control for a non-negative value and suppresses its
+        //   leading zeros to blanks, while the request forces a sign character and forces every
+        //   leading position to a digit.
+        assertEquals(reply.length(), request.length());
         assertEquals(' ', reply.charAt(0));
         assertEquals("100.99", reply.substring(8));
-        assertEquals("100.99", request.substring(7));
+        assertEquals("100.99", request.substring(8));
         assertEquals(' ', reply.charAt(7));
-        assertEquals('0', request.charAt(6));
+        assertEquals('0', request.charAt(7));
     }
 
     /**
@@ -1289,16 +1294,11 @@ class CsvAuthCodecTest {
      * space. The ten integer positions are separate from it, which is why the full ten-digit domain
      * survives alongside the sign rather than competing with it for a position.</p>
      *
-     * <p>Assumptions: the request's thirteen-character receiver has no room for a positive sign if
-     * the full ten-digit integer domain is to survive. An unsigned token remains positive under
-     * {@code FUNCTION NUMVAL}, so dropping the sign rather than an integer position preserves every
-     * non-negative value the copybook picture can express.</p>
-     *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("positive request money is plus-signed, zero-padded and two-place exact")
-    void positiveRequestMoneyUsesTheThirteenCharacterGoldenVectors() {
+    void positiveRequestMoneyUsesTheFourteenCharacterGoldenVectors() {
         String withCents =
                 CsvAuthCodec.formatRequestMoney(Money.of("100.99"), REQUEST_AMOUNT_FIELD);
         String whole =
@@ -1306,24 +1306,16 @@ class CsvAuthCodecTest {
         String maximum =
                 CsvAuthCodec.formatRequestMoney(Money.of("9999999999.99"), REQUEST_AMOUNT_FIELD);
 
-        assertEquals("0000000100.99", withCents);
-        assertEquals("0000000100.00", whole);
-        assertEquals("9999999999.99", maximum);
-        assertEquals(13, withCents.length());
-        assertEquals(13, whole.length());
-        assertEquals(13, maximum.length());
-        assertNoPlusSign(withCents);
-        assertNoPlusSign(whole);
-        assertNoPlusSign(maximum);
+        assertEquals("+0000000100.99", withCents);
+        assertEquals("+0000000100.00", whole);
+        assertEquals("+9999999999.99", maximum);
+        assertEquals(14, withCents.length());
+        assertEquals(14, whole.length());
+        assertEquals(14, maximum.length());
     }
 
     /**
-     * A negative request amount spends one receiver position on {@code -} and nine on integer digits.
-     *
-     * <p>Assumptions: negative amounts are not present in the repository's request producer
-     * contract, but the copybook sign permits them. The production renderer therefore carries values
-     * that fit without truncation and raises for a tenth integer digit; this vector proves the
-     * accepted shape remains exactly thirteen characters.</p>
+     * A negative request amount spends its forced sign position on {@code -} and keeps ten digits.
      *
      * <p>Assumptions: this case asserts what the WIRE admits and not what the system accepts, and the
      * distinction is worth stating because the two differ deliberately.
@@ -1343,15 +1335,15 @@ class CsvAuthCodecTest {
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("negative request money uses a minus and nine integer positions")
+    @DisplayName("negative request money uses a minus and ten integer positions")
     void negativeRequestMoneyUsesOneSignAndTenIntegerPositions() {
         String rendered =
                 CsvAuthCodec.formatRequestMoney(Money.of("-100.99"), REQUEST_AMOUNT_FIELD);
 
-        assertEquals("-000000100.99", rendered);
+        assertEquals("-0000000100.99", rendered);
         assertEquals(CsvAuthCodec.REQUEST_MONEY_WIDTH, rendered.length());
         assertEquals('-', rendered.charAt(0));
-        assertEquals('.', rendered.charAt(10));
+        assertEquals('.', rendered.charAt(11));
         assertEquals(Money.of("-100.99"),
                 CsvAuthCodec.parseMoney(rendered, REQUEST_AMOUNT_FIELD));
     }
@@ -1374,9 +1366,8 @@ class CsvAuthCodecTest {
         String rendered =
                 CsvAuthCodec.formatRequestMoney(Money.ofCents(0L), REQUEST_AMOUNT_FIELD);
 
-        assertEquals("0000000000.00", rendered);
-        assertEquals(13, rendered.length());
-        assertNoPlusSign(rendered);
+        assertEquals("+0000000000.00", rendered);
+        assertEquals(14, rendered.length());
         assertFalse(rendered.startsWith("-"), "canonical zero must not retain a negative sign");
         assertEquals(Money.ofCents(0L), CsvAuthCodec.parseMoney(rendered, REQUEST_AMOUNT_FIELD));
     }
@@ -1465,24 +1456,24 @@ class CsvAuthCodecTest {
     }
 
     /**
-     * Neither production money rendering emits a plus sign for a non-negative value.
+     * The two money renderings disagree about the plus sign, each following its own picture.
      *
-     * <p>Assumptions: the request has no positive sign position and the reply's leading
-     * {@code -} picture emits a space when no minus is needed. The intuitive
-     * {@code +0000000000.00} form belongs to the value-holding copybook picture, not to either text
-     * form that reaches or leaves the production codec.</p>
+     * <p>Assumptions: a leading {@code +} in {@code PIC +9(10).99} is a forced sign that emits its
+     * character for every value, while the leading {@code -} of {@code PIC -zzzzzzzzz9.99} is a sign
+     * control that emits a blank when no minus is needed. Asserting both from one value is what keeps
+     * the two pictures from being collapsed into one renderer.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("request and reply money never emit a plus sign")
+    @DisplayName("request money forces a plus where reply money blanks its sign position")
     void neitherMoneyRenderingEmitsAPlusSign() {
-        assertNoPlusSign(
-                CsvAuthCodec.formatRequestMoney(Money.of("1.00"), REQUEST_AMOUNT_FIELD));
+        assertEquals('+',
+                CsvAuthCodec.formatRequestMoney(Money.of("1.00"), REQUEST_AMOUNT_FIELD).charAt(0));
         assertNoPlusSign(
                 CsvAuthCodec.formatReplyMoney(Money.of("1.00"), REPLY_AMOUNT_FIELD));
-        assertNoPlusSign(
-                CsvAuthCodec.formatRequestMoney(Money.ofCents(0L), REQUEST_AMOUNT_FIELD));
+        assertEquals('+',
+                CsvAuthCodec.formatRequestMoney(Money.ofCents(0L), REQUEST_AMOUNT_FIELD).charAt(0));
         assertNoPlusSign(
                 CsvAuthCodec.formatReplyMoney(Money.ofCents(0L), REPLY_AMOUNT_FIELD));
     }
@@ -1576,8 +1567,8 @@ class CsvAuthCodecTest {
         String tenthsReply = CsvAuthCodec.formatReplyMoney(
                 new BigDecimal("12.3"), REPLY_AMOUNT_FIELD);
 
-        assertEquals("0000000012.00", wholeRequest);
-        assertEquals("0000000012.30", tenthsRequest);
+        assertEquals("+0000000012.00", wholeRequest);
+        assertEquals("+0000000012.30", tenthsRequest);
         assertTrue(wholeReply.endsWith("12.00"));
         assertTrue(tenthsReply.endsWith("12.30"));
         assertEquals(Money.of("12.00"),
@@ -1617,26 +1608,25 @@ class CsvAuthCodecTest {
     }
 
     /**
-     * A negative request amount with all ten integer digits renders, round-trips and is not truncated.
+     * A negative request amount with all ten integer digits renders and round-trips intact.
      *
-     * <p>Assumptions: the minus consumes one of the receiver's thirteen positions, leaving only nine
-     * integer positions beside the point and cents. Raising is the lossless behavior; emitting a
-     * fourteenth character would let the baseline receiver truncate the final cent digit silently.</p>
+     * <p>Assumptions: the sign position of {@code PIC +9(10).99} is additional to its ten integer
+     * digits rather than carved out of them, so the widest negative amount the picture admits renders
+     * without losing a digit. This is the vector that would fail if the sign were ever taken out of an
+     * integer position again.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
-     * exception escapes the test.</p>
+     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("a negative ten-digit request amount is rejected rather than truncated")
+    @DisplayName("a negative ten-digit request amount renders in full and round-trips")
     void negativeTenDigitRequestMoneyIsRejectedRatherThanTruncated() {
-        AuthMessageFormatException failure = assertThrows(
-                AuthMessageFormatException.class,
-                () -> CsvAuthCodec.formatRequestMoney(
-                        new BigDecimal("-1000000000.00"), REQUEST_AMOUNT_FIELD));
+        String rendered = CsvAuthCodec.formatRequestMoney(
+                new BigDecimal("-1000000000.00"), REQUEST_AMOUNT_FIELD);
 
-        assertTrue(failure.getMessage().contains(REQUEST_AMOUNT_FIELD));
-        assertTrue(failure.getMessage().contains("10 integer digits"));
-        assertTrue(failure.getMessage().contains("9 available"));
+        assertEquals("-1000000000.00", rendered);
+        assertEquals(CsvAuthCodec.REQUEST_MONEY_WIDTH, rendered.length());
+        assertEquals(Money.of("-1000000000.00"),
+                CsvAuthCodec.parseMoney(rendered, REQUEST_AMOUNT_FIELD));
     }
 
     /**
@@ -1658,7 +1648,7 @@ class CsvAuthCodecTest {
         String reply = CsvAuthCodec.formatReplyMoney(parsed, REPLY_AMOUNT_FIELD);
 
         assertEquals(Money.of("100.99"), parsed);
-        assertEquals("0000000100.99", request);
+        assertEquals("+0000000100.99", request);
         assertEquals("        100.99", reply);
         assertNoPlusSign(reply);
     }
@@ -1668,9 +1658,8 @@ class CsvAuthCodecTest {
      *
      * <p>Assumptions: the production value type has one zero, not distinct signed zero values. The
      * parser therefore accepts {@code -0000000000.00} as numerically well formed and neither renderer
-     * reproduces its minus: the request has no sign position at all for a non-negative value and the
-     * reply emits a blank sign-control position. Treating that text as malformed would contradict the real public
-     * parser, so this test records normalization rather than inventing a rejection.</p>
+     * reproduces its minus: the request emits its forced non-negative sign and the reply emits a blank
+     * sign-control position.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
@@ -1680,7 +1669,7 @@ class CsvAuthCodecTest {
         Money parsed = CsvAuthCodec.parseMoney("-0000000000.00", REPLY_AMOUNT_FIELD);
 
         assertEquals(Money.ofCents(0L), parsed);
-        assertEquals("0000000000.00",
+        assertEquals("+0000000000.00",
                 CsvAuthCodec.formatRequestMoney(parsed, REQUEST_AMOUNT_FIELD));
         assertEquals("          0.00",
                 CsvAuthCodec.formatReplyMoney(parsed, REPLY_AMOUNT_FIELD));
@@ -3293,7 +3282,7 @@ class CsvAuthCodecTest {
         String requestPayload = CsvAuthCodec.encodeRequest(request);
         String replyPayload = CsvAuthCodec.encodeReply(reply);
 
-        assertEquals("0000000000.00", fieldAt(requestPayload, 8));
+        assertEquals("+0000000000.00", fieldAt(requestPayload, 8));
         assertEquals("          0.00", fieldAt(replyPayload, 5));
         assertNoPlusSign(fieldAt(replyPayload, 5));
         assertEquals(request, CsvAuthCodec.decodeRequest(requestPayload));

@@ -177,21 +177,68 @@ class CopybookLayoutTest {
     }
 
     /**
-     * Confirms the detail segment marks the primary account number sensitive and nothing else.
+     * Confirms the detail segment withholds the nine fields the disclosure policy does not name.
      *
-     * <p>Assumptions: the assertion is exhaustive rather than positive-only. A test that merely checked
-     * the card number is marked would pass equally well on a layout that marked every field, and
-     * over-marking is a real failure here: the merchant name, city, state and postal code are the fields
-     * a fraud reviewer reads to recognise a merchant, so redacting them would defeat the very screen
-     * this segment feeds.</p>
+     * <p>Refactoring Rationale: this test used to assert the segment marked "exactly the primary account
+     * number" sensitive and nothing else, and its rationale defended that as deliberate under-marking:
+     * "the merchant name, city, state and postal code are the fields a fraud reviewer reads to recognise
+     * a merchant, so redacting them would defeat the very screen this segment feeds". The argument
+     * conflates two channels. The flag governs only what a decode FAILURE may quote; it masks nothing in
+     * a response body, as this class's own subject states explicitly, so a fraud reviewer's screen is
+     * unaffected by it either way. What the old expectation actually pinned was that a malformed byte
+     * could put the transaction amount, the approved amount and the whole merchant identity into an
+     * exception message -- while {@link CsvAuthCodec} withheld those same values over the wire. One
+     * record cannot be two sensitivities, so the expectation was corrected to the wider policy rather
+     * than the policy narrowed to the expectation.</p>
+     *
+     * <p>Assumptions: the assertion stays exhaustive rather than positive-only, for the reason the old
+     * one gave and which still holds -- a test that merely checked nine names were present would pass on
+     * a layout that marked every field, and over-marking would leave an operator with a diagnostic
+     * naming no readable value at all. The classification's own reasoning and its cross-language parity
+     * are asserted separately, by {@code AuthorizationDisclosurePolicyTest}; what this one pins is that
+     * the registry entry a reader of THIS file consults reflects it.</p>
      */
     @Test
-    @DisplayName("the detail segment marks exactly the primary account number as sensitive")
-    void detailSegmentMarksOnlyTheCardNumberSensitive() {
+    @DisplayName("the detail segment withholds the nine fields the disclosure policy does not name")
+    void detailSegmentWithholdsTheNineUndisclosableFields() {
         assertThat(CopybookLayout.layout("PAUTDTL").fields())
             .filteredOn(FieldSpec::sensitive)
             .extracting(FieldSpec::name)
-            .containsExactly("PA-CARD-NUM");
+            .containsExactly(
+                "PA-CARD-NUM",
+                "PA-CARD-EXPIRY-DATE",
+                "PA-TRANSACTION-AMT",
+                "PA-APPROVED-AMT",
+                "PA-MERCHANT-ID",
+                "PA-MERCHANT-NAME",
+                "PA-MERCHANT-CITY",
+                "PA-MERCHANT-ZIP",
+                "PA-TRANSACTION-ID");
+    }
+
+    /**
+     * Confirms the summary segment withholds the customer identifier, both limits, both balances and
+     * both authorization amounts.
+     *
+     * <p>Refactoring Rationale: no assertion covered this segment's classification at all, which is why
+     * the segment carried NO sensitive marking for as long as it did -- there was nothing to fail. It is
+     * added as the summary counterpart of the detail assertion above, in declaration order, so the two
+     * segments are pinned symmetrically.</p>
+     */
+    @Test
+    @DisplayName("the summary segment withholds its customer identifier, limits, balances and amounts")
+    void summarySegmentWithholdsItsFinancialAndCustomerFields() {
+        assertThat(CopybookLayout.layout("PAUTSUM0").fields())
+            .filteredOn(FieldSpec::sensitive)
+            .extracting(FieldSpec::name)
+            .containsExactly(
+                "PA-CUST-ID",
+                "PA-CREDIT-LIMIT",
+                "PA-CASH-LIMIT",
+                "PA-CREDIT-BALANCE",
+                "PA-CASH-BALANCE",
+                "PA-APPROVED-AUTH-AMT",
+                "PA-DECLINED-AUTH-AMT");
     }
 
     /**

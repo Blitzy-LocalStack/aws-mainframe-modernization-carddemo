@@ -41,6 +41,19 @@ import jakarta.validation.constraints.Size;
  * insert-or-update attempt reported as one outcome, which is why a single flag suffices for both
  * shapes of success.
  *
+ * <p>Refactoring Rationale: only the TWO SUCCESS paths of those four are carried by this record.
+ * The two failure paths are answered with a non-2xx {@code com.carddemo.common.error.ApiError}
+ * instead, so this body's flag has a single-value domain and its message never carries database
+ * code, state or vendor text. Two independent reasons decide it. A 2xx envelope carrying a body
+ * that says the write failed is a contradiction a client cannot resolve, and the reference has no
+ * such ambiguity to preserve because it has no status code at all -- {@code cbl/COPAUS1C.cbl} L255
+ * to L258 tests the success condition and, when it does not hold, moves the failure sentence into
+ * the message line and performs {@code ROLL-BACK}, so a failed write reaches the operator as an
+ * error screen. And the database code-and-state text is vendor diagnostic detail about this
+ * service's own store, so publishing it to an API caller would disclose internals that
+ * {@code GlobalExceptionHandler} withholds everywhere else; it is retained for the operator in the
+ * failure log instead, which is the channel scoped to the people who may read it.
+ *
  * <h2>One area in the baseline, two records in the target</h2>
  *
  * <p>Assumptions: the area is 272 bytes and serves both directions at once, which is a shape HTTP
@@ -49,9 +62,9 @@ import jakarta.validation.constraints.Size;
  * contributes 200, computed from the 28 elementary items of
  * {@code app/app-authorization-ims-db2-mq/cpy/CIPAUDTY.cpy} whose fields begin at L19; and the
  * group item opened at L79 contributes 1, 1 and 50. HTTP separates a request from a response, so
- * the one area becomes two records. This record is the L83 and L86 half of it. The L75, L76 and L80
- * fields are the request half and are carried by {@code FraudMarkRequest}: the account and customer
- * identifiers say which authorization is being marked, and the action says which way to mark it.
+ * the one area becomes two records. This record is the L83 and L86 half of it. Of the request half,
+ * only the L80 action is carried by {@code FraudMarkRequest}; the L75 and L76 identifiers are not
+ * accepted from a caller, the row being named by the operation's sealed path selector.
  *
  * <p>Assumptions: the two single-character flags sit immediately after one another inside the one
  * group item opened at L79 -- {@code WS-FRD-ACTION} at L80 then {@code WS-FRD-UPDATE-STATUS} at L83
@@ -96,12 +109,11 @@ import jakarta.validation.constraints.Size;
  * this type being an outcome rather than a request. An instance of this record is built after the
  * state change has already been attempted and, on the success paths, after it has been committed.
  * A throw at that point does not prevent anything; it replaces a legible outcome with an
- * unstructured server failure, and it does so at the two moments the outcome matters most. On a
- * failure path it would discard the Db2 code-and-state text the baseline assembled at L211 to L213
- * expressly so that an operator could act on it. On a success path it would report a failure for a
- * mark that was applied, which inverts the one fact the caller asked for. Declaring the bounds
- * instead keeps every outcome deliverable, and a value that breaches one is then visible as a
- * constraint violation naming the component rather than as a request that appears to have failed.
+ * unstructured server failure, and it does so at the moment the outcome matters most: it would
+ * report a failure for a mark that was applied, which inverts the one fact the caller asked for.
+ * Declaring the bounds instead keeps every outcome deliverable, and a value that breaches one is
+ * then visible as a constraint violation naming the component rather than as a request that appears
+ * to have failed.
  *
  * <p>Assumptions: what a declared bound does on a response is narrower than what it does on a
  * request, and it is stated plainly here rather than left to be assumed. The framework evaluates a
@@ -155,30 +167,36 @@ import jakarta.validation.constraints.Size;
  * lowercase {@code 's'} and the two characters together are each rejected. Second, that a message
  * of exactly 50 characters is accepted while one of 51 is rejected, which pins the bound at the
  * width L86 declares rather than one position either side of it. Third, that an
- * {@code updateStatus} of {@code 'F'} is not interchangeable with a {@code FraudMarkRequest} action
- * of {@code 'F'} -- the two are separate components of separate types with separate domains, and a
+ * {@code updateStatus} of {@code 'F'} is not interchangeable with a {@code FraudMarkRequest}
+ * {@code action} of {@code 'F'} -- the two are separate components of separate types with separate domains, and a
  * test that can pass either one where the other belongs has compiled the distinction away.
  *
- * @param updateStatus whether the attempt succeeded, as the one character
+ * @param updateStatus that the attempt SUCCEEDED, as the one character
  *     {@code WS-FRD-UPDATE-STATUS PIC X(01)} declares at
- *     {@code app/app-authorization-ims-db2-mq/cbl/COPAUS2C.cbl} L83. It is {@code 'S'} for the
- *     success condition {@code WS-FRD-UPDT-SUCCESS} declared at L84, or {@code 'F'} for the failure
- *     condition {@code WS-FRD-UPDT-FAILED} declared at L85, and it is required because a response
- *     stating no outcome answers nothing. Read the {@code 'F'} carefully: here it means the update
- *     failed, whereas the same character in the adjacent request field means report this
- *     authorization as fraudulent, which {@code WS-REPORT-FRAUD} declares at L81 alongside
- *     {@code WS-REMOVE-FRAUD} for {@code 'R'} at L82. This component consequently never shares a
- *     type with the action component of {@code FraudMarkRequest}; if either were ever expressed as
- *     an enum they would have to be two distinct enums, because one type spanning both domains
- *     would let a request to report fraud be read as a failed update and the reverse
+ *     {@code app/app-authorization-ims-db2-mq/cbl/COPAUS2C.cbl} L83. The only admitted value is
+ *     {@link #UPDATE_STATUS_SUCCESS}, the success condition {@code WS-FRD-UPDT-SUCCESS} declared at
+ *     L84, and it is required because a response stating no outcome answers nothing. The reference
+ *     program's failure value {@code 'F'} -- {@code WS-FRD-UPDT-FAILED} at L85 -- is deliberately NOT
+ *     admitted here; a failed write is answered with a non-2xx {@code ApiError} instead, for the
+ *     reason argued in the section above. Read the reference {@code 'F'} carefully wherever it does
+ *     appear: on the response side it means the update failed, whereas the same character in the
+ *     adjacent request field means report this authorization as fraudulent, which
+ *     {@code WS-REPORT-FRAUD} declares at L81 alongside {@code WS-REMOVE-FRAUD} for {@code 'R'} at
+ *     L82. This component consequently never shares a type with the action component of
+ *     {@code FraudMarkRequest}; if either were ever expressed as an enum they would have to be two
+ *     distinct enums, because one type spanning both domains would let a request to report fraud be
+ *     read as a failed update and the reverse
  * @param message the operator-facing text accompanying the outcome, as
  *     {@code WS-FRD-ACT-MSG PIC X(50)} declares at L86, of at most 50 characters, or {@code null}
  *     when no text accompanies the outcome. 50 is the width that governs this component, and
  *     neither the 78-character screen-message regime of the two authorization maps nor the
- *     75-character house message contract of {@code app/cpy/CVCRD01Y.cpy} reaches it. The baseline
- *     populates it with {@code 'ADD SUCCESS'} at L201, {@code 'UPDT SUCCESS'} at L232, or a Db2
- *     code-and-state string at L211 to L213 or L239 to L241, the longest of which occupies all 50
- *     positions
+ *     75-character house message contract of {@code app/cpy/CVCRD01Y.cpy} reaches it. Only the two
+ *     SUCCESS wordings reach it -- {@code 'ADD SUCCESS'} at L201 when the fraud row was inserted and
+ *     {@code 'UPDT SUCCESS'} at L232 when an existing row was updated -- and the database
+ *     code-and-state strings the reference program assembles on its failure paths at L211 to L213
+ *     and L239 to L241 never do, because this body is not the failure carrier. The 50-character
+ *     bound is nonetheless taken from the declared width rather than from the longer of the two
+ *     admitted wordings, so that the component still describes the field it migrates
  */
 public record FraudMarkResponse(
         @NotNull @Pattern(regexp = UPDATE_STATUS_DOMAIN) String updateStatus,
@@ -204,28 +222,97 @@ public record FraudMarkResponse(
     private static final int ACTION_MESSAGE_WIDTH = 50;
 
     /**
+     * The one value this response's outcome flag may carry: the write succeeded.
+     *
+     * <p>Assumptions: {@code 'S'} is the success condition {@code WS-FRD-UPDT-SUCCESS} declared at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUS2C.cbl} L84. It is published as a named
+     * constant rather than as a literal inside the expression below so that the accompanying test and
+     * the published contract's {@code const} can be compared against one symbol.</p>
+     */
+    public static final String UPDATE_STATUS_SUCCESS = "S";
+
+    /**
      * The expression the outcome flag has to match in full.
      *
-     * <p>Assumptions: the two admitted characters are written as an explicit character class rather
-     * than as a shorthand or a wider alternation, so the domain this constant describes is the
-     * domain the baseline declares at L84 and L85 and cannot quietly widen. The expression carries
-     * no anchors because it does not need them: a constraint of this kind is satisfied only when
-     * the whole value matches, so a one-character class admits one character and refuses
-     * {@code "SF"} without an anchor being written.
+     * <p>Refactoring Rationale: the domain is ONE character and previously it was two. Admitting the
+     * reference program's failure value {@code 'F'} on this body described a response that says the
+     * write FAILED inside a status that says the request SUCCEEDED, which is a contradiction no client
+     * can resolve: a caller branching on the status code would record a fraud report that was never
+     * persisted, and a caller branching on this member would ignore a 2xx. The reference has no such
+     * ambiguity to preserve because it has no status code -- {@code cbl/COPAUS1C.cbl} L255 to L258
+     * tests {@code WS-FRD-UPDT-SUCCESS} and, when it does not hold, moves the failure sentence into
+     * the message line and performs {@code ROLL-BACK}, so a failed write reaches the operator as an
+     * error screen and never as a confirmation. The migrated form of that error screen is a non-2xx
+     * {@code com.carddemo.common.error.ApiError}, which is where the failure value went. The
+     * published contract states the same narrowing as a {@code const}, so the two now agree.</p>
      *
-     * <p>Assumptions: the expression is case-sensitive, which is deliberate and load-bearing. A
-     * COBOL condition name compares the bytes of its field against the literal it was declared
-     * with, so {@code WS-FRD-UPDT-SUCCESS} at L84 is satisfied by {@code 'S'} and not by
-     * {@code 's'}. Admitting the lowercase form would let this type accept a value the baseline
-     * condition would have rejected, which is a widening of the domain rather than a leniency.
+     * <p>Trade-offs: the member is KEPT rather than deleted even though its domain is now a single
+     * value. It is the migrated face of a reference field a client may already read, and its
+     * {@code 'S'} is what distinguishes this body from a body of some future shape that reports a
+     * partial write. Alternatives Considered: deleting it and letting the 200 alone carry the meaning.
+     * Rejected because a body read away from its envelope -- in a log, in a replayed capture, in a
+     * client that stored it -- has to remain self-describing.</p>
+     *
+     * <p>Assumptions: the admitted character is written as an explicit one-character class rather than
+     * as a shorthand or an alternation, so the domain cannot quietly widen. The expression carries no
+     * anchors because it does not need them: a constraint of this kind is satisfied only when the
+     * whole value matches, so a one-character class refuses {@code "SS"} without an anchor.</p>
+     *
+     * <p>Assumptions: the expression is case-sensitive, which is deliberate and load-bearing. A COBOL
+     * condition name compares the bytes of its field against the literal it was declared with, so
+     * {@code WS-FRD-UPDT-SUCCESS} at L84 is satisfied by {@code 'S'} and not by {@code 's'}. Admitting
+     * the lowercase form would let this type accept a value the baseline condition would have
+     * rejected, which is a widening of the domain rather than a leniency.</p>
      *
      * <p>Alternatives Considered: pairing this expression with a not-blank constraint instead of a
      * not-null one. Rejected because it would report one invalid value twice. A blank flag already
-     * fails this expression, since a blank is not one of the two admitted characters, so a
-     * not-blank constraint would add a second violation naming the same component for it. A
-     * not-null constraint covers the one case this expression cannot see at all: constraint
-     * evaluation treats an absent value as satisfied, so without it a null flag would pass and the
-     * domain would have a third state the baseline field does not have.
+     * fails this expression, since a blank is not the admitted character, so a not-blank constraint
+     * would add a second violation naming the same component for it. A not-null constraint covers the
+     * one case this expression cannot see at all: constraint evaluation treats an absent value as
+     * satisfied, so without it a null flag would pass and the domain would have a second state.</p>
      */
-    private static final String UPDATE_STATUS_DOMAIN = "[SF]";
+    private static final String UPDATE_STATUS_DOMAIN = "[S]";
+
+    /**
+     * The sentence the reference program reports when the fraud row was CREATED.
+     *
+     * <p>Assumptions: carried character for character from {@code MOVE 'ADD SUCCESS'} at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUS2C.cbl} L201, which transformation rule T8
+     * requires of every user-visible string. It is published here rather than restated at the write
+     * site because a literal typed twice is a literal that can differ in one place.
+     */
+    public static final String MESSAGE_ADD_SUCCESS = "ADD SUCCESS";
+
+    /**
+     * The sentence the reference program reports when an existing fraud row was REPLACED.
+     *
+     * <p>Assumptions: carried character for character from {@code MOVE 'UPDT SUCCESS'} at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUS2C.cbl} L232, reached only on the
+     * duplicate-key branch that program tests at L203. The abbreviation is the baseline's own and is
+     * not expanded: expanding it would be a change to a user-visible string.
+     */
+    public static final String MESSAGE_UPDATE_SUCCESS = "UPDT SUCCESS";
+
+    /**
+     * Builds the body for the path that created a fraud row.
+     *
+     * <p>Assumptions: a factory rather than a constructor call at the write site, because both
+     * components are fixed for this outcome and a two-argument call would let one of them be paired
+     * with the other outcome's value. There is no state to pass, so there is nothing for a caller to
+     * get wrong.
+     *
+     * @return the success body carrying the reference insert sentence, never {@code null}
+     */
+    public static FraudMarkResponse added() {
+        return new FraudMarkResponse(UPDATE_STATUS_SUCCESS, MESSAGE_ADD_SUCCESS);
+    }
+
+    /**
+     * Builds the body for the path that replaced the state on an existing fraud row.
+     *
+     * @return the success body carrying the reference update sentence, never {@code null}
+     */
+    public static FraudMarkResponse updated() {
+        return new FraudMarkResponse(UPDATE_STATUS_SUCCESS, MESSAGE_UPDATE_SUCCESS);
+    }
 }

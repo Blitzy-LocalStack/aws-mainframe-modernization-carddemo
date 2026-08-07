@@ -1,0 +1,27 @@
+# =============================================================================
+# ui/.dockerignore
+# -----------------------------------------------------------------------------
+# Purpose:
+#   Excludes from the ui/ build context everything ui/Dockerfile does not COPY,
+#   so the daemon never receives it.
+#
+# Governing convention:
+#   docs/CODE_DOCUMENTATION_STANDARD.md
+#
+# Assumptions: this file is required rather than tidy-minded. node_modules is a
+#   283 MB tree of host-resolved, possibly host-native packages, and dist is a
+#   previous local build; either one sent into the context would be uploaded on
+#   every build and, worse, dist would be shadowed by a stale copy if a future
+#   instruction ever copied the whole directory. The Dockerfile names its inputs
+#   explicitly, so nothing here is load-bearing for correctness today -- it is the
+#   guard that keeps that true when an instruction is added.
+# Trade-offs: the list names paths rather than using a deny-all-then-allow shape.
+#   A deny-all list is stricter but makes every new source directory an invisible
+#   omission at build time, whereas an over-broad context is merely slower.
+# =============================================================================
+
+node_modules
+dist
+.env
+.env.*
+!.env.example

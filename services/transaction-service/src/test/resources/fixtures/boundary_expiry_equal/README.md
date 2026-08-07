@@ -349,10 +349,23 @@ assertions would become inexpressible at any price. Two files cost roughly 330
 duplicated bytes per scenario and the diligence of editing both; that is the
 cheaper side of the trade.
 
-### 6.5 The posted record's processing timestamp is the boundary date at midnight
+### 6.5 The posted record's processing timestamp is the boundary date's last second
 
-Alternatives Considered: `transact.txt` carries `2024-12-13 00:00:00.000000` in
-positions 305-330. The alternative was to carry the `happy_path` template's
+Alternatives Considered: `transact.txt` carries `2024-12-13 23:59:59.000000` in
+positions 305-330, and the originating timestamp at positions 274-304 carries
+`2024-12-13 19:27:53.000000`, so the processing stamp falls **after** the instant it
+processes. Refactoring Rationale: an earlier revision of this file carried
+`2024-12-13 00:00:00.000000` here, which is midnight at the head of the same day and is
+therefore roughly seven and a half hours **before** the originating instant on that day.
+That is the very incoherence the rest of this subsection argues against, one paragraph
+below, so the file contradicted its own reasoning: a row cannot be processed before it
+originated, and the processing timestamp is a real access path rather than decoration.
+The last second of the boundary date is chosen instead of the following midnight because
+the business date is the single axis this directory turns on -- moving the stamp into
+`2024-12-14` would move a second value and stop the directory being single-axis -- and it
+is chosen over reusing the originating instant exactly because equality would make the
+two stamps indistinguishable and hide which one an assertion is reading. It remains an
+injected literal with six zero microseconds and is never a clock reading. The alternative was to carry the `happy_path` template's
 `2022-07-18 00:00:00.000000` across verbatim, which would keep that literal uniform
 across scenario directories and leave this file byte-identical to the template; the
 partner directory `reject_103_expired` does exactly that, measured. It is declined
@@ -367,8 +380,8 @@ for the same reason the target index is non-unique. A row whose processing stamp
 preceded its own originating stamp would sort nonsensically against its own
 business date on that path.
 
-What the template establishes is the **form** rather than the year: an injected
-literal at midnight with six zero microseconds, never a clock reading. Folder
+What the template establishes is the **form** rather than the instant: an injected
+literal with six zero microseconds, never a clock reading. Folder
 section 6 quotes the template's literal when it states that requirement -- this
 field must be filled and must be an injected literal rather than a clock reading --
 and the same section delegates the provenance of each scenario's own literal to that
@@ -378,10 +391,10 @@ on. That discipline is the baseline's own -- `app/jcl/INTCALC.jcl` line 22 passe
 business date as `PARM='2022071800'` rather than letting the program read a clock.
 Taking the date from this scenario's own boundary value is
 also what keeps the directory single-axis: `2024-12-13` is the one value that
-moves, and both timestamps here follow from it. Measured, this file differs from
-the template at eight bytes -- 282, 284, 285 and 288 in the originating timestamp
-and 308, 310, 311 and 314 in the processing timestamp -- all inside those two
-windows and nowhere else. Because the partner keeps the template literal, the two
+moves, and both timestamps here follow from it. Measured, this file differs from the template inside those two
+windows and nowhere else: in the originating timestamp at the four date bytes, and in the
+processing timestamp at the four date bytes together with the six time bytes that carry
+the last second of the day rather than midnight. Because the partner keeps the template literal, the two
 directories' posted images differ in both windows, which is why the pairing claim
 in section 5 is scoped to `dailytran.txt`: that is the record line 414 reads.
 
@@ -505,7 +518,14 @@ Annotated per master section 9.3, and measured on this branch.
   non-unique index on the processing timestamp and the key-ordered read paths --
   are properties of the real engine, so such a test belongs on a container and not
   on an in-memory substitute.
-- [`../application-test.yml`](../application-test.yml) -- **[present]** sibling. It
+- [`../../application-test.yml`](../../application-test.yml) -- **[present]**, one
+  directory above `fixtures/` rather than beside this file. Both halves of this
+  reference were previously written as `../application-test.yml`, which resolves to
+  `fixtures/application-test.yml` and matches nothing, so the link did not open; the
+  word "sibling" was wrong for the same reason, since the profile is a sibling of the
+  `fixtures/` directory and not of this README. Every other scenario README in this
+  directory family already cites it with two levels, so the corrected form is the one
+  the family uses rather than a new convention. It
   pins schema resolution to `ledger` for the connection at its line 283 and for the
   migration tool at its line 338, and points the migration tool at this module's own
   migration at its line 325. It deliberately sets no clock property, and its lines

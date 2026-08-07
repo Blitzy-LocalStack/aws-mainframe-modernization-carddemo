@@ -146,7 +146,17 @@ export default mergeConfig(
 
       // Trade-offs: collection is restricted to TypeScript tests under src so
       // package-root scratch files cannot join the suite accidentally.
-      include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+      // Refactoring Rationale: one package-root file is named EXPLICITLY beside
+      // those two globs rather than admitted by widening either of them.
+      // `documentationGate.test.ts` is the negative-probe suite for the JSDoc gate
+      // in `eslint.config.js`, and it lives at the root because it needs `node:fs`
+      // and `ui/tsconfig.json` withholds Node types from the project covering
+      // `src` on purpose -- see the include list in `ui/tsconfig.node.json`, which
+      // owns it. Naming the single file keeps the stated property above intact: a
+      // root-level glob such as `*.test.ts` would readmit exactly the scratch
+      // files that restriction exists to exclude, whereas a literal entry admits
+      // one known suite and nothing else.
+      include: ['src/**/*.test.ts', 'src/**/*.test.tsx', 'documentationGate.test.ts'],
 
       // Trade-offs: jsdom has no layout engine, so tests assert semantics and
       // attributes rather than computed styling or the retired 24x80 geometry.

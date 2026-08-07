@@ -433,17 +433,38 @@ result. The full scan still records the wider result set.
 ### 9.2 What the access log necessarily retains
 
 Assumptions: an access-log record carries the full request line, so any value a
-caller places in a URI **path** is persisted to the bucket verbatim, and this
-module can neither filter nor redact a delivered field. The bound is therefore
-applied upstream rather than here: the migrated services carry no unmasked
-primary account number into a path they log, which is enforced in
+caller places in a URI **path** or **query string** is persisted to the bucket
+verbatim, and this module can neither filter nor redact a delivered field. The
+bound therefore has to be that the value never enters the request line at all,
+which is a property of the published contracts rather than of any logging
+configuration: **no contract in this system puts a primary account number in a
+path or a query string.** `card-service` is the contract that could — its
+single-card operations are keyed by an opaque sealed selector, it declares no
+card-number query parameter, and the one operation that accepts a card number
+accepts it in a request **body**, which this log does not record. Its own
+contract test fails the build if any published path template or declared query
+parameter carries a card number.
+
+Refactoring Rationale: this section previously placed that bound on
 [`GlobalExceptionHandler`](../../../services/common-lib/src/main/java/com/carddemo/common/error/GlobalExceptionHandler.java),
-where the request path is narrowed before it reaches either a log line or a
-response body. Two further bounds hold at this end: the destination is the
-purpose-built bucket described in §9.1 rather than a general log bucket, so the
-records are reachable only by an operator identity; and the header set ALB
-records does not include `Authorization` or `Cookie`, so no bearer credential
-reaches this destination at all.
+stating that the request path is narrowed there "before it reaches either a log
+line or a response body". The masking is real and is retained, but it **cannot**
+bound this record, and the claim was wrong on a matter of fact rather than merely
+optimistic: ELB composes and delivers this log itself, from the request line,
+inside the process that terminates the connection and before any application code
+runs. Nothing behind the load balancer can filter it, redact it or unwrite it.
+What that masker does bound is what the **service** writes — its own log lines and
+its own error bodies — which is a different and also worthwhile exposure.
+
+Trade-offs: other selectors **are** retained here in the clear — an account
+identifier, a customer identifier, a transaction identifier, a user identifier.
+That is accepted and named rather than argued away: none of them is cardholder
+data, each is an internal identifier conferring no access on its own, and the
+destination bounds who can read them. Two further bounds hold at this end: the
+destination is the purpose-built bucket described in §9.1 rather than a general
+log bucket, so the records are reachable only by an operator identity; and the
+header set ALB records does not include `Authorization` or `Cookie`, so no bearer
+credential reaches this destination at all.
 
 Alternatives Considered: disabling access logging to remove the residue
 outright. Rejected — the baseline already had that property and it is the defect

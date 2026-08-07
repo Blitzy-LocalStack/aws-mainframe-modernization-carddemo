@@ -11,7 +11,7 @@
  * one directly. No repository, mapper, transfer or configuration type is declared here, and this
  * package has no nested subpackage.
  *
- * <p><strong>The four shapes, and the reference layout each one carries.</strong> All of
+ * <p><strong>The six shapes, and the reference layout each one carries.</strong> All of
  * {@code app/**} is reference material: it is read as the specification for this package and is
  * never modified, which is why every entry below is a path and a line number rather than an edit.
  * Except where another root is named, each citation is relative to
@@ -38,27 +38,51 @@
  *       keyed at L994. It has no reference counterpart at all, and it exists to close the reply
  *       window recorded as divergence D-5 in
  *       {@code docs/architecture/cobol-to-service-traceability.md}.</li>
+ *   <li>{@code AuthFraud} maps table {@code auth_fraud}, created at migration L678 and keyed at
+ *       L773. Its layout is the reference RELATIONAL table {@code CARDDEMO.AUTHFRDS}, whose 26
+ *       columns are declared at {@code ddl/AUTHFRDS.ddl} L2 to L27 under the primary key at L28.
+ *       Note when checking that figure that the file has no licence header, so its line 1 is
+ *       already content. Two further readings agree with the count: the generated declaration
+ *       comment at {@code dcl/AUTHFRDS.dcl} L88, and the migration's own derivation at L633 to
+ *       L641.</li>
+ *   <li>{@code AuthFraudKey} carries the embeddable identity of that fraud row: the card number
+ *       and the composed authorization timestamp, which is the pair {@code ddl/AUTHFRDS.ddl} L28
+ *       names. The timestamp exists in neither IMS segment and is assembled by the write, from the
+ *       acquirer-supplied original date at {@code cbl/COPAUS2C.cbl} L103 to L105 and the decoded
+ *       nines complement at L107 to L111.</li>
  * </ul>
  *
- * <p>Three of those four types carry the JPA {@code Entity} annotation and the fourth is the
- * embeddable key of the second, so this directory holds exactly five {@code .java} files: the four
- * types plus this charter, and no sixth. A reader counting entities and a reader counting files
- * therefore arrive at four and five respectively, which is why both counts are stated.
+ * <p>Four of those six types carry the JPA {@code Entity} annotation and two are embeddable keys --
+ * of the second and of the fifth -- so this directory holds exactly seven {@code .java} files: the
+ * six types plus this charter, and no eighth. A reader counting entities and a reader counting
+ * files therefore arrive at four and seven respectively, which is why both counts are stated.
  *
- * <p>Assumptions: the {@code authorization} schema has a fourth table, {@code auth_fraud}, and no
- * type in this package maps it. That table is created by the migration at L678, keyed on the card
- * number and the authorization timestamp at L773, and it carries the 26 columns of the reference
- * relational table {@code CARDDEMO.AUTHFRDS}. Note when checking that figure that
- * {@code ddl/AUTHFRDS.ddl} has no licence header, so its line 1 is already content: the columns run
- * L2 to L27 and the primary key follows at L28. Two further readings agree with the count, the
- * generated declaration comment at {@code dcl/AUTHFRDS.dcl} L88 and the migration's own derivation
- * at L633 to L641. What this package does carry is the fraud STATE the reference system keeps in
- * that relational table, because the reference child segment keeps it too, at
- * {@code cpy/CIPAUDTY.cpy} L50 and L53; those two items become columns on
- * {@code PendingAuthDetail}. The absence is recorded so that a reader does not read it as an
- * oversight and add a fifth type: the fraud table is card-scoped while these segments are
- * account-scoped, the migration states that differing key space and its reason at L650 to L657, and
- * an entity for it belongs with the access path that reads it rather than with the segment shapes.
+ * <p>Refactoring Rationale: an earlier revision of this charter asserted that the
+ * {@code authorization} schema's fraud table was deliberately UNMAPPED here, and instructed a
+ * reader not to "add a fifth type" for it -- on the ground that the fraud table is card-scoped
+ * while the two segments are account-scoped, and that an entity for it belonged "with the access
+ * path that reads it". That assertion is withdrawn, and it is withdrawn rather than deleted because
+ * a reader who saw the earlier wording needs to know which statement to trust. It was
+ * unimplementable on its own terms, for three compounding reasons. The sibling charter at
+ * {@code com.carddemo.authorization.repository} names {@code AuthFraudRepository} in its closed
+ * four-interface set and states that a caller reaches this schema through no other route, and a
+ * Spring Data repository is declared over a MAPPED type, so the interface that charter mandates
+ * cannot exist without the entity this one refused. The charter at
+ * {@code com.carddemo.authorization.api} forbids a controller from handling an entity at all, so
+ * there is no layer above this one the type could have been placed in. And this charter's own
+ * opening sentence says this package holds the JPA entities of this context and nothing else, which
+ * makes {@code domain} the only package a mapped type may be declared in -- the differing key space
+ * is a property of the ACCESS PATH, which lives in the repository, and not of where the storage
+ * shape is declared.
+ *
+ * <p>Assumptions: what the earlier wording got right is kept. The fraud STATE the reference system
+ * writes to its relational table is ALSO kept on the child segment, at {@code cpy/CIPAUDTY.cpy} L50
+ * and L53, so those two items remain columns on {@code PendingAuthDetail} as well. The duplication
+ * is the baseline's own: {@code cbl/COPAUS1C.cbl} L525 to L528 replaces the segment while
+ * {@code cbl/COPAUS2C.cbl} writes the relational row, and both now commit in one local transaction.
+ * A reader meeting the same two items in two types is therefore reading a faithful transcription
+ * rather than a normalisation failure, and the migration states the differing key space and its
+ * reason at L650 to L657.
  *
  * <p><strong>Why this file exists at all.</strong> No file-by-file row of the migration plan names
  * it. It is in scope because a rule forces it, and that provenance is worth recording because it is
@@ -235,19 +259,34 @@
  * eleven-digit account identifier as its root key and {@code PendingAuthDetailKey} holds it again as
  * the first half of the child key, both decoded from the packed items at {@code cpy/CIPAUSMY.cpy}
  * L19 and {@code cpy/CIPAUDTY.cpy} L20; {@code PendingAuthDetail} holds all sixteen characters of
- * {@code PA-CARD-NUM} at {@code cpy/CIPAUDTY.cpy} L24; and {@code AuthReplyOutbox} holds the card
+ * {@code PA-CARD-NUM} at {@code cpy/CIPAUDTY.cpy} L24; {@code AuthReplyOutbox} holds the card
  * number a third time as its ordering group and the acquirer's transaction identifier as its
- * deduplication key. Every one of those is unmasked because every one is a KEY -- a masked key
+ * deduplication key; and {@code AuthFraudKey} holds it a fourth time as the first half of the fraud
+ * row's own key, which {@code ddl/AUTHFRDS.ddl} L28 declares. Every one of those is unmasked
+ * because every one is a KEY -- a masked key
  * selects nothing, groups nothing and deduplicates nothing. The rule that follows is therefore about
  * egress rather than storage: a CARD NUMBER leaves this package only through
  * {@code com.carddemo.authorization.mapper}, which masks it to its last four digits on every path
- * but the administrative card-detail endpoint, and no type holding one declares a serialiser or a
- * rendering of its own that could bypass that mapper.
+ * but the administrative card-detail endpoint, and no type holding one declares a serialiser that
+ * could bypass that mapper.
+ *
+ * <p>Assumptions: exactly THREE types here declare a {@code toString}, and no type declares any
+ * other rendering, so the set is small enough to enumerate and is enumerated rather than
+ * characterised. {@code PendingAuthDetailKey} renders its account identifier and its two clock
+ * values in full, which the paragraph below argues is correct because none of them is a value the
+ * masking rule names. {@code AuthFraudKey} and {@code AuthFraud} render a CARD number, so both mask
+ * it to its last four digits, and {@code AuthFraud} obtains its rendering by delegating to its key
+ * so that one masking decision exists rather than two that could drift apart. Neither masks by
+ * calling the shared masker in {@code com.carddemo.common.security}: this package's layering
+ * contract below refuses a dependency on any package outside the domain layer, so the two-line
+ * arithmetic is repeated locally in preference to breaking the rule the ArchUnit gate enforces. That
+ * is the trade accepted -- a duplicated expression against an unenforceable import -- and it is
+ * recorded here so a reader does not read the local arithmetic as ignorance of the shared type.
  *
  * <p>Assumptions: the ACCOUNT identifier is treated differently from the card number, and the
  * difference is deliberate rather than an oversight. {@code PendingAuthDetailKey} declares a
- * {@code toString} that renders it in full beside the two clock values of the key, which is the
- * one rendering this package has; the migration's masking rule names the primary account number,
+ * {@code toString} that renders it in full beside the two clock values of the key; the migration's
+ * masking rule names the primary account number,
  * the card verification value, the national identifier and the government-issued identifier, and
  * an account identifier is none of those -- it selects a row in this deployment's own schema and
  * discloses nothing outside it. Note that the batch context applies a STRICTER rule to its

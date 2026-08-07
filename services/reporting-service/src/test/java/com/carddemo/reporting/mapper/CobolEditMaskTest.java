@@ -59,7 +59,12 @@ class CobolEditMaskTest {
      */
     @Test
     void reportDetailRegimeUsesBlankOrMinusLeadingSign() {
-        // WHY: app/cpy/CVTRA07Y.cpy L30 declares the signed-negative detail picture.
+        // WHY : Assumptions: the expected bytes asserted below are read from the signed-negative
+        //       detail picture declared at app/cpy/CVTRA07Y.cpy L30, not from the mask this case
+        //       exercises. Deriving them from the implementation is the alternative, and it yields a
+        //       test that agrees with whatever the mapper happens to emit -- including a leading plus
+        //       where the picture calls for a blank, which is the exact one-byte difference this case
+        //       exists to catch and the reason it is kept separate from the totals regime.
         // WHY : Assumptions: services/common-lib/src/main/java/com/carddemo/common/money/Money.java
         //       L390 keeps this test inside the exact money contract; a binary fraction primitive
         //       could reach a neighboring cent before the mapper sees it.

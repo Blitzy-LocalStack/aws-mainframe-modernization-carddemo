@@ -3,12 +3,20 @@
  *
  * <p><b>Purpose.</b> A common tag is a dimension the registry applies to each meter it publishes,
  * without the emitting code naming it at the call site. This package declares exactly three of them
- * -- {@code service}, {@code environment} and {@code version} -- and nothing else. Those three are
- * the whole of the contract: every question this package answers is a question about how a series is
- * labelled, and every question about what a series measures belongs to whichever bounded context
- * emits it. One production class, {@code MetricsConfig}, contributes the set to the registry through
- * a {@code MeterRegistryCustomizer}, which is why the eight service modules inherit the labelling by
- * depending on this library rather than by restating it apiece.</p>
+ * -- {@code service}, {@code environment} and {@code version} -- and no fourth. Every question about
+ * how a series is LABELLED is answered here, and every question about what a series MEASURES belongs
+ * to whichever bounded context emits it. One production class, {@code MetricsConfig}, contributes the
+ * set to the registry through a {@code MeterRegistryCustomizer}, which is why the eight service
+ * modules inherit the labelling by depending on this library rather than by restating it apiece.</p>
+ *
+ * <p><b>The package's subject is wider than its tag set.</b> Refactoring Rationale: this heading used
+ * to say the three tags were "the whole of the contract" of this package, which stopped being true
+ * once the two rendering classes named under Contents below landed here. The tag set is still closed
+ * at three; what was too narrow was equating the package with it. The subject this package actually
+ * owns is <em>what a telemetry record may contain</em> -- which dimensions label it, and which text a
+ * record may carry at all. Both are decided once, for every service, in one place, and the second
+ * question is not a metrics question, which is why phrasing the contract as the tag set alone left
+ * two classes with no charter that admitted them.</p>
  *
  * <p><b>Parameters, return values, exceptions or errors.</b> A package declaration accepts no
  * parameter, returns no value and raises nothing, so this descriptor carries no parameter, return or
@@ -177,25 +185,38 @@
  *
  * <h2>Contents of this package</h2>
  *
- * <p>This package holds exactly one production class, {@code MetricsConfig}, which contributes the
- * three tags named above to the meter registry. With this descriptor beside it the directory holds
- * exactly two {@code .java} files and no subdirectory, and that pair is the closed set: a second
- * production class here would mean either a fourth tag or a concern that is not tag labelling, and
- * both are excluded by the contract above. Across {@code com.carddemo.common} as a whole the
- * contract admits twenty-one production classes, distributed as two in {@code money}, five in
- * {@code codec}, three in {@code error}, three in {@code web}, three in {@code security}, one here in
- * {@code observability}, one in {@code time} and two in {@code validation}, which is
- * 1 + 2 + 5 + 3 + 3 + 3 + 1 + 1 + 2 = 21. Adding the nine package descriptors, one for the package root
- * and one for each of its eight subpackages, gives thirty {@code .java} files in total.</p>
+ * <p>This package holds <b>three</b> production classes. {@code MetricsConfig} contributes the three
+ * tags named above to the meter registry. {@code LogSafeText} neutralises the control characters that
+ * would let a value of external provenance forge a second log record, which is the concern named
+ * CWE-117. {@code ThrowableDigest} reduces a caught failure to its chain of type names and originating
+ * frames so that no library-composed message text reaches a log line. With this descriptor beside them
+ * the directory holds four {@code .java} files and no subdirectory.</p>
  *
- * <p>Assumptions: that canon is arithmetic, and it is restated per package on purpose so that a
- * class which is missing stays distinguishable from a class that was never planned. The
- * authoritative figures are <strong>twenty-one production classes, nine package descriptors and
- * thirty compilation units</strong>; a production-class figure that does not reproduce the sum
- * above is wrong on its face. Note also that no package descriptor exists at
- * {@code com} or at {@code com/carddemo}: the canon counts nine, and the Checkstyle module that
- * requires a descriptor fires only for a directory holding an audited source file, which neither of
- * those two directories does.</p>
+ * <p>Refactoring Rationale: this paragraph read "exactly one production class, {@code MetricsConfig}"
+ * and declared that pair "the closed set: a second production class here would mean either a fourth tag
+ * or a concern that is not tag labelling, and both are excluded by the contract above". That statement
+ * was already false when {@code LogSafeText} landed beside it, and it would have read as a prohibition
+ * on {@code ThrowableDigest}. The premise was too narrow rather than the additions being wrong: this
+ * package's subject is <em>what a telemetry record may contain</em>, of which tag labelling is one
+ * question and safe rendering of externally-supplied text is another. Both new classes answer that
+ * subject, and neither belongs anywhere else -- a rendering rule placed in {@code error} would be
+ * unavailable to the messaging and batch paths that also emit records.</p>
+ *
+ * <p>Assumptions: the whole-library arithmetic this charter used to restate -- twenty-one production
+ * classes in thirty compilation units -- is a PLAN figure and is stated as such by the {@code money}
+ * charter, which records that "every figure above is a TARGET total and none of them is a measurement of
+ * what the tree holds". The delivered tree now exceeds that plan, because review remediation added
+ * classes the plan never named: an HTML text encoder, an opaque-identifier minter, an internal service
+ * token, a keyset cursor token, a message-expiry rule, an inquiry request codec, a record-conflict
+ * signal and the two named above. The measured tree holds <strong>thirty-two production classes, ten
+ * package descriptors and forty-two compilation units</strong>. Five sibling charters still restate the
+ * superseded plan sum; correcting a target figure is not the same act as correcting a false claim about
+ * this package's own contents, so only the latter is done here, and the drift in the former is reported
+ * rather than edited silently.</p>
+ *
+ * <p>Assumptions: no package descriptor exists at {@code com} or at {@code com/carddemo}, which is why
+ * the descriptor count is ten and not twelve. The Checkstyle module that requires a descriptor fires
+ * only for a directory holding an audited source file, and neither of those two directories does.</p>
  *
  * <h2>Why this descriptor exists</h2>
  *

@@ -12,511 +12,213 @@ import java.util.Set;
  * Applies the migrated CardDemo date edit rules to one supplied century-year-month-day value and
  * reports the verdict for each of its three components.
  *
- * <h2>What this type is, and what it is not</h2>
+ * <h2>What this type migrates</h2>
  *
- * <p>Two artifacts of the reference baseline are migrated here and nowhere else. The first is a
- * procedure-only copybook, {@code app/cpy/CSUTLDPY.cpy}, 375 lines holding no data item at all: it
- * is a chain of five validation gates over an eight-character date, plus a separate reasonableness
- * test for a date of birth. The second is that chain's working storage, {@code app/cpy/CSUTLDWY.cpy},
- * 89 lines holding the domain constants, the three per-component markers and an 80-character result
- * structure. The gates read and write a Language Environment date service through a third artifact,
- * the wrapper program {@code app/cbl/CSUTLDTC.cbl}, whose behaviour this type reproduces in
- * {@link #evaluateWithLanguageEnvironment(String, String)}.</p>
+ * <p>Two baseline artifacts are migrated here and nowhere else: {@code app/cpy/CSUTLDPY.cpy}, a
+ * procedure-only copybook holding a chain of five validation gates plus a separate date-of-birth
+ * reasonableness test, and {@code app/cpy/CSUTLDWY.cpy}, that chain's working storage. The gates
+ * reach a Language Environment date service through {@code app/cbl/CSUTLDTC.cbl}, whose behaviour
+ * {@link #evaluateWithLanguageEnvironment(String, String)} reproduces.</p>
  *
  * <p>This type is not a single-field predicate. It reports three markers, an aggregate switch, one
- * latched message and a list of per-field errors, because the baseline it migrates writes all five
- * of those and a caller reads all five.</p>
+ * latched message and a list of per-field errors, because the baseline writes all five and a caller
+ * reads all five.</p>
  *
- * <h2>The algorithm and its working storage become one type</h2>
+ * <p>Refactoring Rationale: the algorithm and its working storage are held together here although the
+ * baseline holds them 4066 lines apart, because the separation is unworkable rather than merely
+ * inconvenient. The algorithm has one includer in the whole repository and the working storage has
+ * two, and the second includer supplies the storage to a program that includes no date algorithm and
+ * runs no date edit — so the two can be, and are, supplied independently.</p>
  *
- * <p>Refactoring Rationale: the baseline holds the algorithm and the data it operates on 4066 lines
- * apart, and that distance is the reason they are held together here. The algorithm has exactly one
- * includer in the whole repository, at line 4232 of {@code app/cbl/COACTUPC.cbl}; its working storage
- * arrives in that same program at line 166; the program is 4236 lines long. A reader who opens the
- * algorithm therefore has no local indication of what any of its names mean, and a reader who opens
- * the working storage has no local indication of what reads them. Worse, the two can be supplied
- * independently and are: the working storage has a second includer, at line 76 of
- * {@code app/app-transaction-type-db2/cbl/COTRTUPC.cbl}, in a program that includes no date
- * algorithm at all and runs no date edit. This type holds the gate sequence as its methods and the
- * domain constants, the markers and the result structure as its own members, so neither half can be
- * supplied without the other and neither can drift from the other.</p>
+ * <h2>Control flow: five gates that accumulate taint, one true early exit</h2>
  *
- * <p>Assumptions: the two inclusion statements are spelled differently and both are left exactly as
- * they stand. Line 4232 names the algorithm without quotation marks and without a terminating
- * period; line 166 names the working storage in quotation marks and with one. Both spellings are
- * accepted by the compiler. They are recorded so that a reader comparing the two lines does not take
- * either one for a defect.</p>
+ * <p>Assumptions: a failing gate does NOT stop the gates after it, and reading the baseline's fifteen
+ * unconditional branches as early returns inverts the behaviour of the whole chain. Each of the first
+ * three gates branches to its own local exit paragraph, and each of those holds nothing but an empty
+ * exit statement, so control falls straight into the gate below. A date whose year is unusable still
+ * has its month and day examined. Every gate runs here too, each writes its own marker, and the
+ * aggregate verdict is derived from all three afterwards.</p>
  *
- * <h2>Five gates, two entry points</h2>
+ * <p>Assumptions: exactly one construct decides whether the Language Environment gate runs, and it
+ * sits at the FOOT of gate four rather than at its head ({@code CSUTLDPY.cpy} L274-L279). Only an
+ * all-clear reaches gate five, which is why {@link DateEditResult#languageEnvironment()} is empty
+ * exactly when that branch would have been taken.</p>
  *
- * <p>Assumptions: the chain is five gates enclosed in one fall-through range, and a separate range
- * carries the date-of-birth test. The gates are the paragraphs at {@code app/cpy/CSUTLDPY.cpy} lines
- * 25, 91, 150, 209 and 284, all enclosed in the range that opens at line 18 and terminates at line
- * 329. The date-of-birth paragraph at line 341 terminates at line 370 and is a separate range that
- * is separately invoked.</p>
+ * <p>Assumptions: the two published entry points are the two the sole includer invokes.
+ * {@link #validate(String, String)} is the general chain; {@link #validateDateOfBirth(String, String,
+ * java.time.LocalDate)} is the separate range, and its contract states it is applied only after the
+ * first has passed, exactly as {@code app/cbl/COACTUPC.cbl} L1539 requires.</p>
  *
- * <p>Assumptions: the two entry points this type publishes are the two the sole includer invokes,
- * and the arithmetic is exact. {@code app/cbl/COACTUPC.cbl} performs the general range four times,
- * once per date field, at lines 1478 to 1482 for an open date, 1490 to 1494 for an expiry date, 1503
- * to 1507 for a reissue date and 1533 to 1538 for a date of birth. It then performs the
- * date-of-birth range once, at lines 1540 and 1541, nested inside a test at line 1539 that the
- * general edit had already passed. {@link #validate(String, String)} is the first of those;
- * {@link #validateDateOfBirth(String, String, LocalDate)} is the second, and its contract states
- * that it is applied only after the first has passed, exactly as line 1539 requires.</p>
+ * <h2>The leap-year rule keeps the baseline's shape</h2>
  *
- * <p>Assumptions: control flow in the baseline is fall-through and unconditional branching only.
- * There is no executable performing statement anywhere in the 375 lines; the single textual match is
- * a comment at line 7. Fifteen unconditional branches carry the whole of the short-circuit
- * behaviour, distributed three, three, three, four, one and one across six targets.</p>
+ * <p>Alternatives Considered: writing the canonical
+ * {@code (y % 4 == 0 && y % 100 != 0) || y % 400 == 0} directly. Rejected because this method is what
+ * a reader compares against the baseline when checking parity, so {@link #isLeapYear(int)} keeps the
+ * baseline's own two-branch divisor selection ({@code CSUTLDPY.cpy} L243-L272): divisor 400 when the
+ * year-within-century component is zero and 4 otherwise, accepting on a zero remainder. The two forms
+ * agree on every year — the branch on {@code yy == 0} partitions the years so that each case reduces
+ * to the same test the canonical rule reduces to — and this module's tests assert the agreement over a
+ * wide span rather than over a handful of samples.</p>
  *
- * <h2>The gates accumulate taint; they do not return early</h2>
+ * <p>Assumptions: the remainder is taken in integer arithmetic. The baseline's scratch variables are
+ * packed signed integers, so its division is exact, and an approximate division would give a
+ * leap-year verdict that is wrong on some years and right on others.</p>
  *
- * <p>Assumptions: a failing gate does not stop the gates after it, and reading the branches as early
- * returns would invert the behaviour of the whole chain. Gate one branches to its own local exit
- * paragraph at line 88 from lines 42, 58 and 83; gate two branches to line 145 from lines 105, 123
- * and 140; gate three branches to line 205 from lines 165, 184 and 199. Every one of those three
- * targets holds nothing but an empty exit statement and a terminating period, so control falls
- * straight out of it into the paragraph below: line 88 falls into gate two at line 91, line 145 falls
- * into gate three at line 150, and line 205 falls into gate four at line 209. A date whose year is
- * unusable therefore still has its month and its day examined, and each gate records its own verdict
- * independently. This type reproduces that: every gate runs, each writes its own marker, and the
- * aggregate verdict is derived from all three markers afterwards.</p>
+ * <h2>Fan-out, polarity and the accumulator</h2>
  *
- * <h2>The aggregate checkpoint is the only true early exit</h2>
+ * <p>Assumptions: the number of components a failure marks VARIES by failure mode, and marking a
+ * uniform three would diverge on two of the five modes. Thirty-one days in a thirty-day month marks
+ * two components ({@code CSUTLDPY.cpy} L213-L217) and thirty days in February marks two as well
+ * (L228-L241) — that second arm is easily missed and is not a variant of the first. The remaining
+ * three modes mark three each.</p>
  *
- * <p>Assumptions: exactly one construct decides whether the Language Environment gate runs at all,
- * and it sits at the foot of gate four rather than at its head. Lines 274 to 279 test the aggregate
- * condition and branch to the outer terminus at line 329 when it does not hold. That aggregate is
- * declared on the marker group itself, at {@code app/cpy/CSUTLDWY.cpy} line 44 with a value of the
- * lowest character in the collating sequence, alongside its negation at line 45 with a value of three
- * digit-zero characters; a value clause on a group item spans its subordinates, so the first means
- * all three markers hold the acceptable byte and the second means all three hold the unacceptable
- * one. The entry paragraph pre-sets the negation at line 19, gates one to three then run
- * unconditionally and accumulate whatever taint they find, and line 277 is where an accumulated
- * taint stops the chain. Only an all-clear reaches gate five. {@link DateEditResult} records which
- * of the two happened, because {@link DateEditResult#languageEnvironment()} is empty exactly when
- * line 277 would have branched.</p>
+ * <p>Trade-offs: the gates are modelled against an explicit mutable accumulator, {@link EditContext},
+ * rather than as pure predicates. A pure single-component predicate would be simpler to write and to
+ * test, and it cannot express what the baseline writes: it could produce neither the two-component
+ * fan-out nor the first-error-wins message latch, which is a single slot written across the whole
+ * chain rather than per component.</p>
  *
- * <h2>The leap-year rule, and the proof that the baseline form is the canonical form</h2>
+ * <p>Trade-offs: three of the four initialisations assume failure and the fourth assumes success, and
+ * the asymmetry is carried as it stands rather than made uniform. Every arm of every gate terminates
+ * with an explicit marking, so no reachable path observes the difference — but the initialiser is the
+ * contract any arm ADDED to a gate would inherit, and substituting one polarity for the other is a
+ * behavioural change with no stated reason.</p>
  *
- * <p>Assumptions: the baseline selects one of two divisors and takes a single remainder, at
- * {@code app/cpy/CSUTLDPY.cpy} lines 243 to 272. Lines 245 to 249 choose 400 when the
- * year-within-century component is zero and 4 otherwise; lines 251 to 254 divide the four-digit year
- * by that divisor and keep the remainder; line 256 accepts the date when the remainder is zero. That
- * looks like an incomplete leap-year rule and it is not, so the equivalence is proved here rather
- * than left to be rediscovered by someone who would otherwise change it.</p>
- *
- * <p>Write the four-digit year as {@code y} and the year-within-century component as
- * {@code yy = y % 100}. The canonical rule is
- * {@code (y % 4 == 0 && y % 100 != 0) || y % 400 == 0}. The two cases the baseline branches on
- * partition every year exactly once, and on each of them the two forms reduce to the same test:</p>
- *
- * <ul>
- *   <li>Case {@code yy == 0}. The year is a multiple of 100, so the first conjunct of the canonical
- *       rule is false and the canonical rule reduces to {@code y % 400 == 0}. The baseline picks the
- *       divisor 400 and tests {@code y % 400 == 0}. The two are the same test.</li>
- *   <li>Case {@code yy != 0}. The year is not a multiple of 100, so the canonical rule's second
- *       conjunct holds. Its disjunct {@code y % 400 == 0} cannot hold either, because a multiple of
- *       400 is a multiple of 100 and this case excludes those, so the canonical rule reduces to
- *       {@code y % 4 == 0}. The baseline picks the divisor 4 and tests {@code y % 4 == 0}. The two
- *       are the same test.</li>
- * </ul>
- *
- * <p>The two forms therefore agree on every year without exception. {@link #isLeapYear(int)}
- * implements the baseline's own two-branch selection, and this module's test tree asserts the
- * agreement over a wide span of years rather than over a handful of samples.</p>
- *
- * <p>Alternatives Considered: three implementations of this one predicate exist in this repository
- * and a fourth was available. The baseline's two-branch selection is one. The parity oracle suite's
- * embedded date-service stand-in is another, at {@code tests/integration/test_csutldtc_date.py} lines
- * 165 to 243, which takes three unconditional remainders against 4, 100 and 400 at its lines 219 to
- * 222 and then evaluates the canonical three-clause expression. The platform library's own calendar
- * class is the third. Writing the canonical expression directly was the fourth option and was
- * rejected: this method is what a reader compares against the baseline when checking parity, so it
- * keeps the baseline's shape, and the proof above is what licenses the two to be treated as
- * interchangeable. The platform library's calendar class is used only inside
- * {@link #evaluateWithLanguageEnvironment(String, String)}, where the subject is a whole calendar
- * date rather than the leap-year predicate.</p>
- *
- * <p>Assumptions: the remainder is taken in integer arithmetic and never in an approximate binary
- * representation. The baseline's three scratch variables are declared by its includer at
- * {@code app/cbl/COACTUPC.cbl} lines 152, 154 and 157 as packed four-digit signed integers, so the
- * division is exact there, and an approximate division would produce a leap-year verdict that is
- * wrong on some years and right on others. The migration's arithmetic rule forbids the approximate
- * numeric primitives outright in any computed path, and this file uses none of them.</p>
- *
- * <h2>The fan-out census: how many components each failure marks</h2>
- *
- * <p>Assumptions: the number of components a failure marks varies by failure mode, and marking a
- * uniform three everywhere would diverge from the baseline on two of the five modes. The census was
- * read from the source rather than inferred, and it has five rows:</p>
- *
- * <ul>
- *   <li>31 days in a month that has 30: TWO components, day and month, at
- *       {@code app/cpy/CSUTLDPY.cpy} lines 213 to 217. The year is not marked.</li>
- *   <li>30 days in February: TWO components, day and month, at lines 228 to 241. The year is not
- *       marked. This arm is easily missed and is a second two-component fan-out, not a variant of
- *       the first.</li>
- *   <li>29 days in a February of a non-leap year: THREE components, at lines 259 to 262, which issue
- *       four marking statements in all -- the caller-owned error switch plus day, month and year.</li>
- *   <li>A Language Environment rejection: THREE components, at lines 300 to 304, again with the
- *       error switch making four statements.</li>
- *   <li>A date of birth that is not in the past: THREE components, at lines 356 to 359.</li>
- * </ul>
- *
- * <h2>Initialisation polarity is reproduced rather than made uniform</h2>
- *
- * <p>Trade-offs: three of the four initialisations assume failure and the fourth assumes success,
- * and the asymmetry is carried across as it stands. The entry paragraph pre-sets the aggregate
- * negation at line 19; gate one pre-sets its marker unacceptable at line 27; gate two pre-sets its
- * marker unacceptable at line 92; gate three pre-sets its marker ACCEPTABLE at line 152. The
- * compromise accepted is that this type's four initialisations do not read alike and a reader will
- * pause at the third one. Making them uniform was the alternative and was rejected, because the
- * migration's structural rule permits structure to change while behaviour does not, and the
- * initialisers are not interchangeable: on the optimistic gate a path that reaches the end of the
- * gate without an explicit failure leaves the marker acceptable, whereas on the pessimistic gates
- * the same path leaves it unacceptable. Substituting one for the other is a behavioural change with
- * no stated reason, which is precisely what the rule forbids.</p>
- *
- * <p>Refactoring Rationale: what a uniform initialiser would have improved is readability, and what
- * it would have cost is the guarantee that any arm added to a gate inherits that gate's own default.
- * Every arm of every gate terminates with an explicit marking, so no reachable path observes the
- * difference; the initialiser is the contract an added arm would inherit, and that inheritance is the
- * only thing it protects.</p>
- *
- * <h2>A context object, and why it is nested</h2>
- *
- * <p>Trade-offs: the gates are modelled against an explicit mutable accumulator rather than as pure
- * predicates, and the accumulator is what {@link EditContext} is. A pure single-component predicate
- * would have been simpler to write and simpler to test, and it was rejected because it cannot express
- * what the baseline writes. The baseline issues 45 marking statements across the 375 lines, and three
- * of its five failure modes mark more than one component at once, so a predicate returning one
- * verdict per component could not produce the two-component fan-out at lines 213 to 217 nor the
- * three-component fan-out at lines 259 to 262. Nor could it carry the first-error-wins message latch,
- * which is a single slot written across the whole chain rather than per component.</p>
- *
- * <p>Trade-offs: every type this file needs is nested inside this one, and the alternative of
- * separate files was rejected on the package's own charter. That charter names two production classes
- * for this package and states there will be no third. The accumulator, the outcome and the
- * Language Environment result are therefore members here. The cost is a longer file; the benefit is
- * that the package inventory stays closed, and a reader looking for the date contract finds all of
- * it in one place rather than following a chain of small files.</p>
+ * <p>Trade-offs: the accumulator, the outcome and the Language Environment result are nested types
+ * rather than separate files, because the package charter names two production classes and states
+ * there will be no third. The cost is a longer file; the benefit is that a reader looking for the date
+ * contract finds all of it in one place.</p>
  *
  * <h2>Three separate conventions in which a zero means success</h2>
  *
- * <p>Assumptions: one call chain carries three independent conventions under which an all-zero value
- * means acceptance, and they are stated together here so that the pattern surprises a reader once
- * rather than three times:</p>
+ * <p>Assumptions: one call chain carries three independent all-zero-means-acceptance conventions,
+ * stated together so the pattern surprises a reader once rather than three times. The date service's
+ * feedback token named for an INVALID date carries eight zero bytes and selects the text reporting
+ * that the date IS valid ({@code CSUTLDTC.cbl} L62, L129-L130) — the condition name means the opposite
+ * of what it says, and anyone who trusts the name inverts every date verdict in the system, which is
+ * why {@link FeedbackCode#INVALID_DATE} keeps the baseline's name and a severity of zero. A severity
+ * of zero is the success arm ({@code CSUTLDPY.cpy} L298). And the acceptable aggregate marker is the
+ * lowest character in the collating sequence ({@code CSUTLDWY.cpy} L44).</p>
  *
- * <ul>
- *   <li>The date service's feedback token. At {@code app/cbl/CSUTLDTC.cbl} line 62 the condition
- *       named for an invalid date carries a value of eight zero bytes, and at lines 129 and 130 that
- *       same condition selects the text reporting that the date IS VALID. The condition name means
- *       the opposite of what it says. Anyone who trusts the name inverts every date verdict in the
- *       system, which is why {@link FeedbackCode#INVALID_DATE} keeps the baseline's name and carries
- *       a severity of zero.</li>
- *   <li>The severity test. At {@code app/cpy/CSUTLDPY.cpy} line 298 a severity of zero is the
- *       success arm and everything else is the failure arm.</li>
- *   <li>The aggregate marker condition. At {@code app/cpy/CSUTLDWY.cpy} line 44 the acceptable
- *       aggregate is the lowest character in the collating sequence, so all-zero bytes across the
- *       three markers means all three components are acceptable.</li>
- * </ul>
+ * <h2>Documented divergences</h2>
  *
- * <h2>One tolerance this type deliberately does not implement</h2>
+ * <p>Refactoring Rationale: this type standardises on the TEN-character mask at the service leaf,
+ * although the chain migrated here supplies eight ({@code CSUTLDPY.cpy} L291) across a call boundary
+ * whose callee declares ten ({@code CSUTLDTC.cbl} L84-L85). Five of the six sites in the repository
+ * use the ten-character form, the callee's own linkage declares it, and the eight-character form is
+ * still published as {@link #BASELINE_DATE_FORMAT_MASK} and still accepted, so a caller reproducing
+ * the baseline call exactly can still do so. The divergence is recorded in
+ * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
  *
- * <p>Assumptions: two other callers of the date service forgive one specific feedback code that the
- * chain migrated here does not forgive, and the two behaviours are kept apart rather than unified.
- * {@code app/cbl/COTRN02C.cbl} declares the service's parameter block at lines 62 to 69 and calls it
- * twice, at lines 389 to 400 and 409 to 420; {@code app/cbl/CORPT00C.cbl} declares the same block at
- * lines 129 to 136 and calls it twice, at lines 388 to 399 and 408 to 419. Every one of those four
- * call sites tests the severity for the four-character acceptable value and, on the failure arm,
- * rejects the date only when the message number is not 2513 -- so a non-zero severity carrying that
- * message number produces no rejection at all. The value 2513 decodes to exactly the unsupported-range
- * feedback: its token at {@code app/cbl/CSUTLDTC.cbl} line 66 carries a message-number field whose
- * two bytes are 0x09D1, which is 2513, and the oracle suite corroborates the pairing at
- * {@code tests/cobol-unit/CSUTLDTC_test.cbl} lines 50, 205 and 405.</p>
+ * <p>Trade-offs: a date rejected by the Language Environment gate is reported here as unacceptable
+ * AND RETAINS its three per-component errors, whereas the baseline clears those markers on the way
+ * out ({@code CSUTLDPY.cpy} L327, reached on both routes out of the gate). Clearing them to match
+ * would strand the migration's per-field error contract empty for this one rejection mode — a response
+ * body announcing a failure with no field attached, and a client with nothing to render. The
+ * divergence is unreachable through {@link #validate(String, String)} today, and that is measured
+ * rather than hoped: the four gates ahead close the set totally, admitting exactly the well-formed
+ * calendar dates of 1900 through 2099, every one of which the service gate accepts. It is carried so
+ * the per-field contract stays whole should a future gate arm open the route, and the covering test is
+ * named for the geometry so nobody restores the clearing by mistake.</p>
  *
- * <p>The chain migrated here tests the severity and nothing else, at
- * {@code app/cpy/CSUTLDPY.cpy} line 298, so {@link #validate(String, String)} rejects an
- * unsupported-range date. That is the behaviour of the artifact this type migrates and it is not
- * altered to match the other two callers. Those callers are served instead:
+ * <p>Assumptions: this type rejects an unsupported-range date, because the artifact it migrates tests
+ * the severity and nothing else ({@code CSUTLDPY.cpy} L298). Two OTHER callers of the date service
+ * forgive message number 2513, and they are served rather than unified with:
  * {@link #evaluateWithLanguageEnvironment(String, String)} publishes the severity and the message
  * number separately and {@link LanguageEnvironmentResult#unsupportedRange()} names the tolerance
- * point, so a caller that forgives the code decides that for itself rather than having the decision
- * made for it here.</p>
+ * point, so a caller that forgives the code decides that for itself.</p>
  *
- * <h2>The mask: eight characters in the baseline, ten everywhere else</h2>
+ * <p>Trade-offs: the message latch is scoped to ONE CALL here, whereas the baseline arms its guard
+ * once for an entire edit pass so the first failure among all its validated fields is the one whose
+ * text survives. Reproducing that scope would require state between calls, which would make this type
+ * unsafe to share and contradict the stateless-service requirement. A caller validating several date
+ * fields composes screen scope itself by keeping the first non-blank {@link DateEditResult#message()}
+ * across its results.</p>
  *
- * <p>Assumptions: five independent sites use a ten-character mask and one uses an eight-character
- * one, and the single outlier is the chain migrated here. The service's own linkage declares both its
- * date argument and its mask argument as ten characters, at {@code app/cbl/CSUTLDTC.cbl} lines 84 and
- * 85. {@code app/cbl/COTRN02C.cbl} holds the ten-character mask as a literal at line 60 and passes
- * ten-character fields from lines 62 to 69; {@code app/cbl/CORPT00C.cbl} does the same from lines 129
- * to 136; {@code app/app-transaction-type-db2/cbl/COTRTUPC.cbl} declares a ten-character edit field
- * at line 108; and the parity oracle uses the ten-character form for every date literal in both of
- * its truth tables, with the mask itself at
- * {@code tests/integration/test_csutldtc_date.py} line 405. Against those five,
- * {@code app/cpy/CSUTLDPY.cpy} line 291 moves an eight-character mask and supplies eight-character
- * fields across a call boundary whose callee declares ten.</p>
+ * <h2>Message text and constants</h2>
  *
- * <p>Refactoring Rationale: this type standardises on the ten-character form when it reaches the
- * service leaf, because five of the six sites use it and the callee's own linkage declares it. The
- * width difference across the call boundary is a characteristic of the baseline that this type does
- * not reproduce, and that non-reproduction is a documented divergence under the migration's
- * structural rule. The eight-character form is still published as
- * {@link #BASELINE_DATE_FORMAT_MASK} and still accepted by
- * {@link #evaluateWithLanguageEnvironment(String, String)}, so a caller reproducing the baseline
- * call exactly can still do so. The baseline does one thing here, this type implements another, and
- * the divergence is recorded.</p>
+ * <p>Assumptions: thirteen message texts are carried character for character under Transformation Rule
+ * T8, including five separate punctuation conventions that are preserved rather than made consistent —
+ * a month out of range opens with a colon, a space and a capitalised component name while a day out of
+ * range opens with a colon, no space and a lower-case one. Two structurally identical failures, two
+ * spellings, both carried. Two texts run past the 75-character message field once a long enough field
+ * label is prefixed, so {@link #AGGREGATE_MESSAGE_LENGTH} is applied.</p>
  *
- * <h2>Severity tiers, and the grading scheme they are not</h2>
+ * <p>Assumptions: the texts are compiled-in constants and are not externalised, because this module
+ * has no resource directory and a bundle would need a lookup path and a locale policy the baseline has
+ * no counterpart for.</p>
  *
- * <p>Assumptions: three severity values appear across the two oracles and they belong to the date
- * service alone. Severity 0 is acceptance. Severity 3 is every failure mode the real token set
- * models, and {@code tests/cobol-unit/CSUTLDTC_test.cbl} pins that across its scenario table from
- * line 83 onward, including the unsupported-range case it documents at lines 202 to 210. Severity 12
- * arises where a coarser stand-in returns a token that matches none of the service's nine named
- * conditions, so the service falls to its final arm at {@code app/cbl/CSUTLDTC.cbl} lines 147 and
- * 148; the oracle's integration layer does exactly that, and its two truth tables at
- * {@code tests/integration/test_csutldtc_date.py} lines 342 to 349 and 390 to 399 are graded on that
- * coarser pair. {@link FeedbackCode} carries all three tiers so that both oracles can be read against
- * it.</p>
- *
- * <p>Assumptions: those severities are not the parity oracle suite's graded condition-code scheme and
- * the two are kept textually apart. That scheme belongs to the oracle suite alone, and this module's
- * build is binary: the compiler, the documentation gate and the test runner each pass or fail
- * outright, and no outcome here is ever a partial pass.</p>
- *
- * <h2>The message texts, and the inconsistencies preserved in them</h2>
- *
- * <p>Assumptions: thirteen message texts are carried across character for character, and among them
- * they use five separate punctuation conventions that are preserved rather than made consistent. The
- * migration's string rule requires user-visible text to be reproduced exactly. Some texts open with a
- * space, a colon and a space; some open with a colon and a space; some open with a colon and no
- * space; one opens with a space and carries no colon at all, at
- * {@code app/cpy/CSUTLDPY.cpy} line 54; and one is assembled from fragments carrying their own
- * embedded spaces, at lines 306 to 313. Two of the texts run past the 75-character message field
- * their includer declares at {@code app/cbl/COACTUPC.cbl} line 479 once a long enough field label is
- * prefixed, so {@link #AGGREGATE_MESSAGE_LENGTH} is applied and the reasoning is on
- * {@link EditContext#latch(String)}.</p>
- *
- * <p>Assumptions: a month out of range and a day out of range are reported in different terms, and
- * the difference is preserved. The month text at lines 119 and 136 opens with a colon, then a space,
- * then a capitalised component name; the day text at lines 180 and 195 opens with a colon, then no
- * space, then a lower-case component name. Two structurally identical failures, two spellings. They
- * are carried as they are.</p>
- *
- * <p>Assumptions: these texts are compiled-in constants of this class and are not externalised into a
- * resource bundle. This Maven module is a library with no resource directory of its own, so a bundle
- * would have to be introduced along with a lookup path and a locale policy that the baseline has no
- * counterpart for.</p>
- *
- * <h2>The gate-five bypass, and the one divergence it forces</h2>
- *
- * <p>Assumptions: the baseline's fifth gate marks three components on rejection and then has those
- * marks cleared on the way out, and the geometry that does it is worth stating byte by byte because
- * both routes out of the gate pass through the same statement. Line 298 tests the severity. Its
- * failure arm opens at line 300 and marks the caller-owned error switch and all three components at
- * lines 301 to 304, latches the assembled message at lines 305 to 314, and branches at line 315 to
- * the gate's exit paragraph at line 323. Its success arm falls off the closing conditional at line
- * 316 into lines 318 to 320 and then falls through into that same exit paragraph. The exit paragraph
- * holds an empty exit statement and a terminating period, and then line 327 sets the aggregate
- * acceptable condition -- which writes the acceptable byte across the whole three-byte marker group,
- * clearing the three marks made at lines 302 to 304. The branch at line 315 is therefore not what
- * causes this: it only skips lines 318 to 320, which would have evaluated false anyway because the
- * error switch was set at line 301, so the clearing happens on both routes.</p>
- *
- * <p>The caller-owned error switch is outside that marker group -- its includer declares it
- * separately, at {@code app/cbl/COACTUPC.cbl} line 173 -- so it survives, and the latched message
- * survives with it. The observable residue of a rejection by that gate is therefore a set error
- * switch and a populated message, an aggregate condition that reads acceptable, and no per-component
- * highlight at all, because the presentation template tests the two error conditions on each marker
- * at {@code app/cpy/CSSETATY.cpy} lines 18 and 19 and both are back to the acceptable byte.</p>
- *
- * <p>Trade-offs: this type reports such a date as unacceptable AND RETAINS the three per-component
- * errors. The compromise accepted is that the aggregate verdict here can never contradict the
- * per-component markers, whereas in the baseline it can, so a caller cannot observe the contradiction
- * and cannot write code that depends on it. Clearing the markers to match the baseline was the
- * alternative and was rejected, because it strands the migration's per-field error contract empty for
- * this one rejection mode: the response body would announce a failure with no field attached to it, and
- * a client rendering per-field help text would have nothing to render. The baseline clears the markers
- * at line 327, this type keeps them, and the divergence is recorded.</p>
- *
- * <p>Assumptions: the divergence is unreachable through {@link #validate(String, String)}, and that is
- * measured rather than hoped. The gate's own banner at {@code app/cpy/CSUTLDPY.cpy} lines 286 and 287
- * calls it a backstop, in the baseline's own words and its own spelling: "In case some one managed to
- * enter a bad date that passsed all the edits above". The four gates ahead of it close the set totally.
- * Gate one admits only the two century values, so the admissible years are 1900 through 2099; gate two
- * admits only months 1 through 12; gate three admits only days 1 through 31; and gate four removes
- * exactly the three remaining impossibilities -- 31 days in a 30-day month, 30 days in February, and 29
- * days in a February of a non-leap year. What is left is precisely the set of well-formed calendar dates
- * in that span, every one of which lies above the supported calendar's floor, so the service gate accepts
- * every date that reaches it. This module's test tree sweeps that whole space exhaustively and records
- * zero rejections by the service gate. The retention above therefore changes nothing a caller of this
- * type can observe today; it is carried so that the per-field contract stays whole should a future gate
- * arm ever open the route, and the covering test is named for the geometry so that nobody restores the
- * clearing by mistake.</p>
- *
- * <p>Assumptions: neither oracle pins the clearing, so the decision above rests on the reasoning given
- * and not on a golden comparison. Both {@code tests/cobol-unit/CSUTLDTC_test.cbl} and
- * {@code tests/integration/test_csutldtc_date.py} exercise the service wrapper directly rather than
- * through the gate chain, so neither reaches line 327.</p>
- *
- * <h2>One aggregate message, many field errors</h2>
- *
- * <p>Assumptions: the aggregate message is latched on first write while the per-component markers are
- * overwritten on every write, and the two behaviours come from two different constructs. Each message
- * assembly in the baseline is guarded by a condition that holds only while the message field is still
- * blank -- at {@code app/cpy/CSUTLDPY.cpy} line 305 and at the equivalent line in every other arm --
- * so across the whole chain the field keeps the FIRST failure's text. The markings themselves carry
- * no such guard, so a later gate overwrites an earlier gate's marker without hesitation. This type
- * reproduces both: {@link EditContext#latch(String)} writes once and
- * {@link EditContext#mark(String, FieldValidationFlag, String)} writes every time.</p>
- *
- * <p>Trade-offs: the latch here is scoped to one call, whereas the baseline's is scoped to a whole
- * screen. Its includer arms the guard once for an entire edit pass, at
- * {@code app/cbl/COACTUPC.cbl} line 876, before any field is examined, so the first failure anywhere
- * among that program's 39 validated fields is the one whose text survives. Reproducing that scope
- * would require this type to hold state between calls, which would make it unsafe to share and would
- * contradict the migration's stateless-service requirement. The compromise is that a caller
- * validating several date fields composes screen scope itself by keeping the first non-blank message
- * across its results, and {@link DateEditResult#message()} is the value it keeps.</p>
+ * <p>Trade-offs: {@link #MAX_VALID_FEBRUARY_DAY} is referenced by nothing anywhere in the baseline —
+ * the February arms test the individual day constants instead — and is published regardless, because
+ * the copybook is the normative source and a reader comparing the two files would otherwise find a
+ * constant present there and absent here with no explanation. Its documentation says plainly that it is
+ * unused, and it is not represented as live.</p>
  *
  * <h2>Two date comparisons in one system, with opposite polarities</h2>
  *
- * <p>Assumptions: the date-of-birth test is strict and the account-expiry test is inclusive, and both
- * are recorded so that neither is brought into line with the other. A date of birth must be strictly
- * in the past: {@code app/cpy/CSUTLDPY.cpy} line 350 compares the current date greater than the
- * edited date, so a date of birth equal to the current date is rejected. An account expiry boundary
- * is inclusive: {@code app/cbl/CBTRN02C.cbl} line 414 compares the expiry date greater than or equal
- * to the transaction's originating timestamp prefix, so a transaction dated exactly on the expiry
- * date posts. The over-limit boundary beside it is inclusive too, at line 407, where a balance
- * exactly at the limit posts. The oracle suite's own guide states the inclusive expiry boundary
- * independently in its business-rules section. This type implements the strict comparison, in
- * {@link #validateDateOfBirth(String, String, LocalDate)}, and it does not touch the expiry
- * boundary, which belongs to the posting job.</p>
+ * <p>Assumptions: the date-of-birth test is STRICT and the account-expiry test is INCLUSIVE, and both
+ * are recorded so neither is brought into line with the other. A date of birth equal to the current
+ * date is rejected ({@code CSUTLDPY.cpy} L350); a transaction dated exactly on the expiry date posts
+ * ({@code app/cbl/CBTRN02C.cbl} L414). This type implements the strict comparison and does not touch
+ * the expiry boundary, which belongs to the posting job.</p>
  *
- * <h2>The alternative the baseline author evaluated and left in place</h2>
+ * <p>Alternatives Considered: computing an elapsed duration for the date-of-birth test. The baseline
+ * author evaluated exactly that and chose otherwise — the rejected form survives commented out at
+ * {@code CSUTLDPY.cpy} L351-L353 beneath the comparison that was kept. This type keeps the comparison,
+ * expressed against the platform's date class, because that class compares calendar dates directly and
+ * the baseline's day-number conversion exists only to give it something an ordinary relational
+ * operator can compare.</p>
  *
- * <p>Alternatives Considered: the date-of-birth test could compute an elapsed duration instead of
- * comparing two day numbers, and the baseline author evaluated exactly that and chose otherwise. The
- * rejected form survives commented out at {@code app/cpy/CSUTLDPY.cpy} lines 351 to 353, calling an
- * intrinsic duration function and testing the result greater than zero, directly beneath the
- * comparison at line 350 that was kept. This type keeps the comparison, expressed against the
- * platform's date class rather than against a day number, because the platform class compares
- * calendar dates directly and the day-number conversion at lines 345 to 348 exists only to give the
- * baseline something it can compare with an ordinary relational operator.</p>
+ * <h2>Structural decisions</h2>
  *
- * <h2>Scratch variables become locals</h2>
+ * <p>Refactoring Rationale: the leap-year scratch variables are LOCALS here. In the baseline they
+ * cannot be — a procedure-only copybook has no data division, so its sole includer hoists three values
+ * with no lifetime beyond one computation into storage shared by an entire program. Only the genuinely
+ * caller-owned state — the error switch, the message field, its guard and the field label — became
+ * members of {@link EditContext}.</p>
  *
- * <p>Refactoring Rationale: the three arithmetic scratch variables the leap-year computation uses are
- * locals here and are not members of any context. In the baseline they cannot be: a procedure-only
- * copybook has no data division of its own, so the divisor, the quotient and the remainder used at
- * {@code app/cpy/CSUTLDPY.cpy} lines 246, 248, 252, 253, 254 and 256 are declared nowhere under
- * {@code app/cpy/} and have to be supplied by whichever program includes the copybook -- which its
- * sole includer does, at {@code app/cbl/COACTUPC.cbl} lines 152, 154 and 157. That hoisting put three
- * values with no lifetime beyond one computation into storage shared by an entire program. A Java
- * method declares its own locals, so they live in {@link #isLeapYear(int)} and nowhere else. The
- * externals that genuinely are caller-owned state -- the error switch, the message field, the message
- * guard and the field label -- are the ones that became members of {@link EditContext}.</p>
+ * <p>Refactoring Rationale: {@link LanguageEnvironmentResult} is the ONE type replacing four separate
+ * declarations of the same 80-character result structure, none of which keeps the others in step and
+ * all of which would have to be edited together for the layout to change.
+ * {@link LanguageEnvironmentResult#render()} emits the layout so the single declaration is verifiable
+ * rather than merely asserted.</p>
  *
- * <h2>One result type replaces four declarations of one contract</h2>
+ * <p>Assumptions: blank detection belongs in the gates, not at the service leaf, because the leaf
+ * cannot tell a blank date from a malformed one and the gates can. Each gate tests for absence against
+ * both the lowest character in the collating sequence and the space, which is what
+ * {@link FieldValidationFlag#isNeverSupplied(String)} reproduces.</p>
  *
- * <p>Refactoring Rationale: the 80-character result structure is declared four times in the baseline,
- * once per participant, with nothing keeping the four in step. The service declares it as its own
- * working message at {@code app/cbl/CSUTLDTC.cbl} lines 42 to 57 and again as a linkage item at line
- * 86; the chain migrated here declares it at {@code app/cpy/CSUTLDWY.cpy} lines 60 to 85, field for
- * field; {@code app/cbl/COTRN02C.cbl} declares a third form at lines 62 to 69 and
- * {@code app/cbl/CORPT00C.cbl} a fourth at lines 129 to 136, both of which collapse the interior into
- * a single filler and a trailing text field. All four sum to 80 characters and all four would have to
- * be edited together for the layout to change. {@link LanguageEnvironmentResult} is the one type that
- * replaces them, and {@link LanguageEnvironmentResult#render()} emits the layout so that the single
- * declaration is verifiable rather than merely asserted. This is the same single-sourcing argument the
- * oracle suite's own guide makes for record layouts when it says never to duplicate a layout, and it
- * is the argument this shared module exists to serve.</p>
+ * <p>Alternatives Considered: an annotation processor generating accessors and constructors. Rejected
+ * because generated members have nowhere to hold the docstring the Explainability rule requires, so the
+ * gate enforcing that rule would have nothing to read. A Java 21 record with an explicit compact
+ * constructor gives the same brevity while leaving every member documentable.</p>
  *
- * <h2>Blank detection belongs in the gates, not in the service leaf</h2>
- *
- * <p>Assumptions: the service leaf cannot tell a blank date from a malformed one and the gates can, so
- * the distinction is drawn here. The leaf receives bytes and returns a feedback token; a wholly blank
- * date reaches its final arm exactly as a malformed one does, which the oracle's integration layer
- * confirms by grading an empty date and an all-blank date identically at
- * {@code tests/integration/test_csutldtc_date.py} lines 390 to 399. The gates test for absence
- * explicitly before anything else -- at {@code app/cpy/CSUTLDPY.cpy} lines 30 and 31 for the year,
- * lines 94 and 95 for the month, lines 154 and 155 for the day -- comparing against both the lowest
- * character in the collating sequence and the space character, and they record the never-supplied
- * marker state with their own text saying the component must be supplied. That test is
- * {@link FieldValidationFlag#isNeverSupplied(String)}, which reproduces the same two-armed comparison
- * over the same two characters, and it is applied per component at the head of each gate.</p>
- *
- * <h2>The dead constant, carried</h2>
- *
- * <p>Trade-offs: one domain constant of the baseline's working storage is referenced by nothing
- * anywhere and it is published here regardless, as {@link #MAX_VALID_FEBRUARY_DAY}. The declaration
- * is at {@code app/cpy/CSUTLDWY.cpy} lines 33 and 34, giving the acceptable February days as 1
- * through 28, and it has no reference in the whole baseline tree -- the February arms of gate four
- * test the individual day constants at lines 31 and 32 instead. Omitting it was the alternative. It
- * is carried because the copybook is the normative source for this contract and a reader comparing
- * the two files would otherwise find a constant present there and absent here with no explanation,
- * whereas the cost of carrying it is one unused constant whose documentation says plainly that it is
- * unused. It is not represented as live.</p>
- *
- * <h2>Shape decisions</h2>
- *
- * <p>Alternatives Considered: an annotation processor generating the accessors and constructors was
- * evaluated and rejected, and the parent build omits one deliberately. Generated members carry no
- * documentation, and this project's single rule requires a docstring on every method stating its
- * purpose, its parameters and its return value; a generated accessor has no place to hold one, so the
- * documentation gate that enforces the rule would have nothing to read. A Java 21 record with an
- * explicit compact constructor gives the same brevity while leaving every member somewhere to be
- * documented, which is why {@link DateEditResult} and {@link LanguageEnvironmentResult} are written
- * that way.</p>
- *
- * <p>Alternatives Considered: the gates could each have been published so that a caller can run one
- * on its own, which the baseline's own header comment invites at {@code app/cpy/CSUTLDPY.cpy} lines 10
- * to 13 by describing the first three as reusable. They are private here. Publishing them would
- * expose the fall-through geometry as an API and let a caller run gate four against components that
- * gates one to three had never examined, which is a state the chain never reaches. The two published
- * entry points run the whole chain, and the two published primitives -- {@link #isLeapYear(int)} and
- * {@link #evaluateWithLanguageEnvironment(String, String)} -- are the two pieces that genuinely have
- * callers of their own outside the chain.</p>
- *
- * <h2>Hand maintenance in the baseline, noted and left alone</h2>
- *
- * <p>Assumptions: several traces of hand editing are visible in the two source artifacts. None is
- * propagated into this type and none is altered where it stands, because the baseline is the
- * behavioural oracle this migration is verified against. The exit paragraph at
- * {@code app/cpy/CSUTLDPY.cpy} line 280 is targeted by no branch at all; the exit paragraphs at lines
- * 88, 145, 205 and 280 hold nothing but an empty exit statement while the one at line 323 has a
- * further statement after it; line 293 carries a stray six-character sequence number in the columns
- * that every other line of the file leaves blank; the assembly statement at line 306 is indented level
- * with the conditional that encloses it and its destination clause at line 313 sits one column left of
- * its other operands; the header comment at lines 14 and 15 lists the same paragraph name twice, as
- * both the fourth and the fifth reusable paragraph; and line 5 of that header names an accompanying
- * working-storage artifact that does not exist under any directory of this repository, the artifact
- * its sole includer actually supplies being {@code app/cpy/CSUTLDWY.cpy}. In the service wrapper, the
- * feedback-code declaration at {@code app/cbl/CSUTLDTC.cbl} line 60 is indented one column deeper than
- * every other declaration at its level. All of these are recorded so that a reader is not left
- * guessing, and all of them stay exactly as they are.</p>
+ * <p>Alternatives Considered: publishing the individual gates, which the baseline's own header comment
+ * invites by describing the first three as reusable. They are private because publishing them would
+ * expose the fall-through geometry as an API and let a caller run gate four against components gates
+ * one to three had never examined — a state the chain never reaches. The two published primitives,
+ * {@link #isLeapYear(int)} and {@link #evaluateWithLanguageEnvironment(String, String)}, are the two
+ * pieces that genuinely have callers of their own outside the chain.</p>
  *
  * <h2>Verification</h2>
  *
  * <p>Assumptions: no golden-master comparison covers the routes through this type, and the limit is
- * recorded rather than glossed over. The parity oracle suite covers batch flows; its own guide records
- * in its known-limitations section that the online programs cannot be run end to end without a
- * terminal-monitor runtime and that only their extractable field-validation logic is unit-tested. The
- * gate chain migrated here is reached only through such a program. The service leaf is separately and
- * directly covered by two dedicated oracles, and the leap-year and boundary rules are exercised
- * indirectly by the batch date boundaries, but the screen-oriented routes through the gate chain are
- * not covered at all and neither oracle reaches the clearing at line 327. Correctness therefore rests
- * on this module's own tests under {@code src/test/java/com/carddemo/common/validation} together with
- * the citations above. Claiming golden-master backing for the whole of this type would overstate the
- * evidence behind it.</p>
+ * recorded rather than glossed over. The parity oracle covers batch flows and cannot run the online
+ * programs end to end without a terminal-monitor runtime; the gate chain is reached only through such a
+ * program. The service leaf IS directly covered by two dedicated oracles and the boundary rules are
+ * exercised indirectly by the batch date boundaries, but the screen-oriented routes are not covered at
+ * all. Correctness therefore rests on this module's own tests together with the citations above;
+ * claiming golden-master backing for the whole of this type would overstate the evidence.</p>
+ *
+ * <p>Assumptions: several traces of hand editing are visible in the two source artifacts — an exit
+ * paragraph targeted by no branch, a stray sequence number, a header comment listing one paragraph
+ * name twice and naming a working-storage artifact that does not exist. None is propagated here and
+ * none is altered where it stands, because the baseline is the behavioural oracle.</p>
  *
  * <p>This type holds no mutable static state, so every published method is safe to call concurrently:
  * each call allocates its own {@link EditContext} and returns an immutable {@link DateEditResult}. Its
- * whole import list is drawn from the platform library and from one type in its own package, so a
- * batch job, a message consumer and a request handler can share one date contract without any of them
+ * whole import list is drawn from the platform library and from one type in its own package, so a batch
+ * job, a message consumer and a request handler can share one date contract without any of them
  * acquiring the others' dependencies.</p>
  */
 public final class DateEditValidator {
@@ -850,17 +552,6 @@ public final class DateEditValidator {
      * token's first two bytes are its severity and its next two are its message number, both declared as
      * signed binary halfwords at lines 72 and 73, and its last four bytes are a severity-control byte and
      * the three-character facility identifier that every one of the nine shares.</p>
-     *
-     * <p>Assumptions: the constants keep the baseline's own abbreviated names rather than being spelled
-     * out, so that a search for a condition name in the COBOL finds the Java constant that carries it.
-     * That is why {@link #UNSUPP_RANGE} and {@link #BAD_PIC_STRING} are not written as full words.</p>
-     *
-     * <p>Assumptions: the verdict texts are carried exactly as the baseline writes them, and the baseline
-     * writes them at two different widths. Eight of the ten are written at exactly the 15 characters the
-     * verdict field declares; two are written shorter, at 13 and 12 characters, and are padded by the
-     * move that stores them. {@link #verdict()} returns the source text at its source width and
-     * {@link LanguageEnvironmentResult#render()} applies the declared width, so both forms are
-     * reachable and neither is invented.</p>
      */
     public enum FeedbackCode {
 
@@ -1016,11 +707,6 @@ public final class DateEditValidator {
      * The outcome of one call to the Language Environment date service, in the shape the baseline's
      * 80-character result structure carries.
      *
-     * <p>Refactoring Rationale: this one type replaces four independent declarations of that structure.
-     * The reasoning and the four citations are on {@link DateEditValidator}. {@link #render()} emits the
-     * layout so that the single declaration is testable against the declared width rather than asserted
-     * to match it.</p>
-     *
      * <p>Assumptions: the structure's interior carries three literal labels that no participant ever
      * changes, declared as filler items at {@code app/cbl/CSUTLDTC.cbl} lines 45, 51 and 54. They are not
      * components of this record because no caller supplies them and none may vary them; they are applied
@@ -1070,12 +756,12 @@ public final class DateEditValidator {
             Objects.requireNonNull(date, "date must not be null");
             Objects.requireNonNull(mask, "mask must not be null");
 
-            // WHY : Assumptions: the severity and the message number are held as components as well as
-            //       being derivable from the outcome, because the baseline transports them as two
-            //       separate four-character text fields and its callers read those fields rather than any
-            //       token. Holding them makes the transported shape explicit; checking them here is what
-            //       stops the two representations from ever disagreeing, which is the one hazard that
-            //       holding a derivable value twice introduces.
+            // Assumptions: the severity and the message number are held as components as well as
+            //     being derivable from the outcome, because the baseline transports them as two
+            //     separate four-character text fields and its callers read those fields rather than any
+            //     token. Holding them makes the transported shape explicit; checking them here is what
+            //     stops the two representations from ever disagreeing, which is the one hazard that
+            //     holding a derivable value twice introduces.
             if (severity != feedbackCode.severity()) {
                 throw new IllegalArgumentException(
                         "severity " + severity + " contradicts " + feedbackCode
@@ -1100,15 +786,6 @@ public final class DateEditValidator {
 
         /**
          * Renders this outcome for a log or a diagnostic without reproducing the date it echoed.
-         *
-         * <p>Refactoring Rationale: a record's generated rendering names every component, and two of
-         * this record's components are the submitted date and mask, echoed because the baseline result
-         * layout echoes them at {@code app/cbl/CSUTLDTC.cbl} lines 107 to 113. That echo belongs in
-         * {@link #render()}, which produces the 80-character result a caller asked for and hands it
-         * back to that caller. It does not belong in the rendering a logging framework reaches for
-         * automatically, because a date submitted to this service is frequently a date of birth -- the
-         * range test at {@code app/cbl/COACTUPC.cbl} line 1539 is exactly that -- and one interpolated
-         * result object would put it in a log with nobody having decided to.</p>
          *
          * <p>Alternatives Considered: dropping the two echoed components from the record so that the
          * generated rendering is safe by construction. Rejected because the echo is part of the
@@ -1177,11 +854,11 @@ public final class DateEditValidator {
             rendered.append(' ');
             rendered.append(" ".repeat(TRAILING_FILLER_WIDTH));
 
-            // WHY : Assumptions: the declared width is asserted rather than trusted. The layout is the
-            //       one contract four baseline declarations agree on, and an arithmetic slip in the
-            //       sequence above would produce a result that still reads correctly field by field while
-            //       being unusable to any caller that indexes into it -- which is exactly how the two
-            //       tolerant callers read it, by offset, at app/cbl/COTRN02C.cbl lines 65 to 69.
+            // Assumptions: the declared width is asserted rather than trusted. The layout is the
+            //     one contract four baseline declarations agree on, and an arithmetic slip in the
+            //     sequence above would produce a result that still reads correctly field by field while
+            //     being unusable to any caller that indexes into it -- which is exactly how the two
+            //     tolerant callers read it, by offset, at app/cbl/COTRN02C.cbl lines 65 to 69.
             if (rendered.length() != RESULT_LENGTH) {
                 throw new IllegalStateException(
                         "rendered result is " + rendered.length() + " characters, but the layout declares "
@@ -1203,15 +880,6 @@ public final class DateEditValidator {
      * field declared at line 479 of that program. The per-field error array is the migrated form of the
      * highlight the baseline's presentation template writes onto a screen, which is the transformation
      * rule this package's charter names.</p>
-     *
-     * <p>Trade-offs: {@link #languageEnvironment()} is an optional rather than a value that is always
-     * present, and always populating it was the alternative. It is optional because the fifth gate
-     * genuinely may not run: the checkpoint at {@code app/cpy/CSUTLDPY.cpy} lines 274 to 279 branches
-     * past it whenever any of the three markers is already in error. Modelling that as an empty optional
-     * records the skip as data, so a caller can observe which of the two routes a date took; modelling it
-     * as a value would require inventing an outcome the service never produced, and modelling it as a
-     * bare reference would leave every caller to remember a check that the type would not require of
-     * them. The cost accepted is that a caller reading it always unwraps.</p>
      *
      * @param fieldLabel the label the messages were composed against, already reduced to the width the
      *     baseline's label field declares and then trimmed, exactly as the assembly at
@@ -1267,11 +935,11 @@ public final class DateEditValidator {
             Objects.requireNonNull(fieldErrors, "fieldErrors must not be null");
             Objects.requireNonNull(languageEnvironment, "languageEnvironment must not be null");
 
-            // WHY : Trade-offs: the list is copied and sealed rather than stored as supplied. The copy
-            //       costs one allocation per edit. It is accepted because a record component is only as
-            //       immutable as the object it references, and this list is the migrated form of a screen
-            //       highlight that the baseline writes once and never revises; a caller able to append to
-            //       it could report a field in error that no gate examined.
+            // Trade-offs: the list is copied and sealed rather than stored as supplied. The copy
+            //     costs one allocation per edit. It is accepted because a record component is only as
+            //     immutable as the object it references, and this list is the migrated form of a screen
+            //     highlight that the baseline writes once and never revises; a caller able to append to
+            //     it could report a field in error that no gate examined.
             fieldErrors = List.copyOf(fieldErrors);
         }
 
@@ -1312,11 +980,6 @@ public final class DateEditValidator {
     /**
      * The mutable state one edit accumulates: the three markers, the caller-owned switch, the latched
      * message and the component text the gates read.
-     *
-     * <p>Trade-offs: this exists because the gates are not side-effect-free and pretending otherwise
-     * would lose behaviour. The reasoning, and why it is nested rather than a file of its own, is on
-     * {@link DateEditValidator}. One instance belongs to one call and is never shared, which is what makes
-     * the published entry points safe to call concurrently.</p>
      *
      * <p>Assumptions: the members here are exactly the externals the baseline copybook uses without
      * declaring, and no more. Its includer supplies the error switch at {@code app/cbl/COACTUPC.cbl} line
@@ -1396,13 +1059,13 @@ public final class DateEditValidator {
             String centuryText =
                     rawYear.length() == YEAR_WIDTH ? rawYear.substring(0, COMPONENT_WIDTH) : "";
 
-            // WHY : Assumptions: the numeric values are resolved once here rather than at each reading,
-            //       because the baseline reads them through numeric redefinitions laid over the very same
-            //       bytes, so a component's value is whatever its bytes already are and cannot change
-            //       between gates. Resolving per reading would let two gates disagree about one component.
-            //       The century is resolved separately from the whole year because the baseline redefines it
-            //       independently, at app/cpy/CSUTLDWY.cpy line 7, and gate one tests that component alone
-            //       rather than a range over the whole year.
+            // Assumptions: the numeric values are resolved once here rather than at each reading,
+            //     because the baseline reads them through numeric redefinitions laid over the very same
+            //     bytes, so a component's value is whatever its bytes already are and cannot change
+            //     between gates. Resolving per reading would let two gates disagree about one component.
+            //     The century is resolved separately from the whole year because the baseline redefines it
+            //     independently, at app/cpy/CSUTLDWY.cpy line 7, and gate one tests that component alone
+            //     rather than a range over the whole year.
             this.yearValue = digitsToValue(rawYear, YEAR_WIDTH);
             this.centuryValue = digitsToValue(centuryText, COMPONENT_WIDTH);
             this.monthValue = digitsToValue(rawMonth, COMPONENT_WIDTH);
@@ -1440,12 +1103,6 @@ public final class DateEditValidator {
         /**
          * Records one component's marker and the text reported against it.
          *
-         * <p>Assumptions: a marker is overwritten on every write while the aggregate message is written
-         * once, and the two behaviours come from two different baseline constructs. A marking statement
-         * carries no guard, so a later gate overwrites an earlier gate's marker; the message assembly is
-         * guarded on the message field still being blank. The per-component text follows the marker rather
-         * than the message, because it describes whatever the marker currently says.</p>
-         *
          * <p>Assumptions: that overwrite is reachable and its effect is worth stating, because it looks
          * like a lost verdict. A date whose year component is absent while its month and day read 02 and 29
          * has its year marked never-supplied by gate one, at {@code app/cpy/CSUTLDPY.cpy} line 33, and then
@@ -1454,13 +1111,6 @@ public final class DateEditValidator {
          * unacceptable one while the latched aggregate message still reports the absence, because the
          * message was latched first. Both halves of that are the baseline's, and neither is smoothed
          * over.</p>
-         *
-         * <p>Trade-offs: the per-component text is stored at whatever length it assembled to, without the
-         * reduction {@link #latch(String)} applies. The two are treated differently because the aggregate
-         * message reproduces a field of declared width while the per-component text has no baseline
-         * counterpart at all -- the presentation template writes only a colour and a marker character, never
-         * text -- so reducing it would impose a width the baseline never declared for it. The cost is that
-         * a caller comparing the two can find the per-component text longer than the aggregate one.</p>
          *
          * @param field the component identity to mark
          * @param state the marker state to record
@@ -1495,22 +1145,6 @@ public final class DateEditValidator {
          * line of every other failing arm. Across the whole chain the field therefore keeps the FIRST
          * failure's text rather than the last, which is the opposite of what an unguarded assignment would
          * do.</p>
-         *
-         * <p>Assumptions: the text is reduced to the width its includer declares for the message field, at
-         * {@code app/cbl/COACTUPC.cbl} line 479. Two of the thirteen texts run past that width once a long
-         * enough label is prefixed -- the leap-year text and the assembled service-leaf text both reach 76
-         * characters against a label at its full declared width -- so the reduction is reachable rather
-         * than theoretical, and a move into a shorter field is what the baseline does with them.</p>
-         *
-         * <p>Trade-offs: the reduction is carried but the field's PADDING is not, so this returns text of
-         * whatever length it assembled to rather than always 75 characters. The two halves of a move into a
-         * character field are treated differently on purpose: losing a character to the declared width is
-         * observable, whereas the spaces that pad the remainder of the field are not data and a caller
-         * rendering them would show a message band of trailing blanks. Stripping trailing whitespace
-         * instead was tried and rejected outright, because one of the thirteen texts ENDS in a space of its
-         * own -- the one at {@code app/cpy/CSUTLDPY.cpy} line 363 -- and stripping would have silently
-         * altered a user-visible string that the migration's string rule requires to be carried character
-         * for character.</p>
          *
          * @param composed the already-assembled text to latch
          */
@@ -1626,21 +1260,21 @@ public final class DateEditValidator {
     public static DateEditResult validate(String fieldLabel, String date) {
         EditContext context = newContext(fieldLabel, date);
 
-        // WHY : Assumptions: the first three gates are invoked unconditionally and in sequence because the
-        //       baseline's short-circuit branches target each gate's own empty exit paragraph, and every
-        //       one of those paragraphs falls straight through into the gate below it -- line 88 into line
-        //       91, line 145 into line 150, line 205 into line 209. Guarding a gate on its predecessor's
-        //       verdict would turn taint accumulation into early return and lose two of the three markers
-        //       whenever the first component failed.
+        // Assumptions: the first three gates are invoked unconditionally and in sequence because the
+        //     baseline's short-circuit branches target each gate's own empty exit paragraph, and every
+        //     one of those paragraphs falls straight through into the gate below it -- line 88 into line
+        //     91, line 145 into line 150, line 205 into line 209. Guarding a gate on its predecessor's
+        //     verdict would turn taint accumulation into early return and lose two of the three markers
+        //     whenever the first component failed.
         editYearCcyy(context);
         editMonth(context);
         editDay(context);
 
-        // WHY : Assumptions: gate four reports whether the chain continues, and it is the only gate that
-        //       can stop it. Three of its arms branch to the outer terminus at line 329 directly, at lines
-        //       225, 240 and 270, and its closing checkpoint at lines 274 to 279 branches there too
-        //       whenever any marker is already in error. All four routes skip the fifth gate entirely,
-        //       which is why an outcome's fifth-gate result is empty rather than absent.
+        // Assumptions: gate four reports whether the chain continues, and it is the only gate that
+        //     can stop it. Three of its arms branch to the outer terminus at line 329 directly, at lines
+        //     225, 240 and 270, and its closing checkpoint at lines 274 to 279 branches there too
+        //     whenever any marker is already in error. All four routes skip the fifth gate entirely,
+        //     which is why an outcome's fifth-gate result is empty rather than absent.
         if (editDayMonthYear(context)) {
             editDateLanguageEnvironment(context);
         }
@@ -1661,12 +1295,6 @@ public final class DateEditValidator {
      * current date is rejected. That is the opposite polarity from the account-expiry boundary at
      * {@code app/cbl/CBTRN02C.cbl} line 414, which is inclusive. Both are recorded on
      * {@link DateEditValidator} so that neither is brought into line with the other.</p>
-     *
-     * <p>Refactoring Rationale: the current date arrives as an argument where the baseline reads it from
-     * the clock, at line 343. Reading a clock inside a validation rule makes the rule's outcome depend on
-     * when it runs, so the same input cannot be replayed to the same verdict; the migration's batch design
-     * requires a business date to be supplied as a parameter for exactly that reason. Passing it in also
-     * lets this method be tested against a boundary rather than only near one.</p>
      *
      * @param fieldLabel the human-readable name of the field being edited, reduced and trimmed exactly as
      *     {@link #validate(String, String)} reduces and trims it
@@ -1689,18 +1317,18 @@ public final class DateEditValidator {
         EditContext context = newContext(fieldLabel, date);
         LocalDate suppliedDate = toCalendarDate(context, date);
 
-        // WHY : Assumptions: the comparison is strictly greater rather than greater-or-equal, reproducing
-        //       line 350, so a date of birth equal to today fails. The baseline compares two day numbers it
-        //       derives at lines 345 to 348 purely so that an ordinary relational operator can be used on
-        //       them; the platform's date class compares calendar dates directly, so the derivation has no
-        //       counterpart here and its absence changes no outcome.
+        // Assumptions: the comparison is strictly greater rather than greater-or-equal, reproducing
+        //     line 350, so a date of birth equal to today fails. The baseline compares two day numbers it
+        //     derives at lines 345 to 348 purely so that an ordinary relational operator can be used on
+        //     them; the platform's date class compares calendar dates directly, so the derivation has no
+        //     counterpart here and its absence changes no outcome.
         if (today.isAfter(suppliedDate)) {
             return context.toResult();
         }
 
-        // WHY : Assumptions: this failure marks all three components, in the order lines 357 to 359 mark
-        //       them, and it is a three-component fan-out rather than a day-only one. Narrowing it would
-        //       leave the month and year unhighlighted where the baseline highlights them.
+        // Assumptions: this failure marks all three components, in the order lines 357 to 359 mark
+        //     them, and it is a three-component fan-out rather than a day-only one. Narrowing it would
+        //     leave the month and year unhighlighted where the baseline highlights them.
         context.fail(
                 FieldValidationFlag.NOT_OK, MSG_FUTURE_DATE, FIELD_DAY, FIELD_MONTH, FIELD_YEAR);
         return context.toResult();
@@ -1729,18 +1357,18 @@ public final class DateEditValidator {
                     "year " + year + " is outside the four-digit domain " + MIN_YEAR + " to " + MAX_YEAR);
         }
 
-        // WHY : Refactoring Rationale: the divisor, the quotient and the remainder are locals here. The
-        //       baseline had no choice but to hoist all three into its includer's storage, at
-        //       app/cbl/COACTUPC.cbl lines 152, 154 and 157, because a procedure-only copybook has no data
-        //       division of its own -- so three values with no lifetime beyond this computation became
-        //       program-wide state that any other paragraph could read or overwrite.
+        // Refactoring Rationale: the divisor, the quotient and the remainder are locals here. The
+        //     baseline had no choice but to hoist all three into its includer's storage, at
+        //     app/cbl/COACTUPC.cbl lines 152, 154 and 157, because a procedure-only copybook has no data
+        //     division of its own -- so three values with no lifetime beyond this computation became
+        //     program-wide state that any other paragraph could read or overwrite.
         int yearWithinCentury = year % CENTURY_MODULUS;
         int divisor = yearWithinCentury == 0 ? LEAP_CENTURY_DIVISOR : LEAP_ORDINARY_DIVISOR;
 
-        // WHY : Assumptions: the remainder is taken in integer arithmetic. The baseline's three scratch
-        //       variables are packed four-digit signed integers, so its division is exact, and an
-        //       approximate division would place the leap-year boundary wrong on some years and right on
-        //       others -- a failure that shows up only on the years it happens to hit.
+        // Assumptions: the remainder is taken in integer arithmetic. The baseline's three scratch
+        //     variables are packed four-digit signed integers, so its division is exact, and an
+        //     approximate division would place the leap-year boundary wrong on some years and right on
+        //     others -- a failure that shows up only on the years it happens to hit.
         int remainder = year % divisor;
         return remainder == 0;
     }
@@ -1759,20 +1387,6 @@ public final class DateEditValidator {
      * models, so every rejection it reports carries {@link #SEVERITY_ERROR}. It never reports
      * {@link FeedbackCode#OTHER}; that outcome arises only where a coarser stand-in returns a token
      * matching none of the nine, which the oracle's integration layer does deliberately.</p>
-     *
-     * <p>Assumptions: one ordering here is this type's own rather than the baseline's. A year of zero is
-     * reported as a year-within-era fault before the month is examined, because neither oracle covers a
-     * year of zero and the baseline service offers no evidence of which fault it would report first. The
-     * gate chain never reaches it in any case, since a century of zero is neither of the two centuries gate
-     * one accepts.</p>
-     *
-     * <p>Assumptions: a mask carrying literal separators is matched against them before any component
-     * is read, so a value of the right width whose separator positions hold anything else -- a slash,
-     * a letter, a digit -- is reported as {@link FeedbackCode#BAD_DATE_VALUE} rather than being
-     * sliced around as though the separators were present. That keeps this entry point and the
-     * gate-chain entry point at {@link #validate(String, String)}, whose accumulator applies the
-     * same rule, in agreement about which values
-     * match the mask, which they were not while the check was absent.</p>
      *
      * @param date the date text to evaluate, whose width must match the mask: eight characters for
      *     {@link #BASELINE_DATE_FORMAT_MASK} and ten for {@link #DATE_FORMAT_MASK}, and whose
@@ -1797,31 +1411,14 @@ public final class DateEditValidator {
         if (DATE_FORMAT_MASK.equals(mask)) {
             requireWidth(date, MASKED_DATE_LENGTH, mask);
 
-            // WHY : Refactoring Rationale: this check was missing, and its absence made the two public
-            //       entry points of this class disagree about the same value. The components below are
-            //       sliced AROUND positions four and seven because the mask declares a hyphen at each,
-            //       and nothing established that either position actually held one -- so
-            //       "2024/02/29", and even "2024x02y29", were accepted here and reported as valid
-            //       dates, while newContext rejects exactly those values for lacking their
-            //       separators. One class cannot hold two answers about whether a value matches a
-            //       mask; a caller choosing between the two entry points would be choosing a verdict.
-            // WHY : Assumptions: the outcome is BAD_DATE_VALUE rather than BAD_PIC_STRING or
-            //       NON_NUMERIC_DATA, and the choice is between three plausible codes.
-            //       BAD_PIC_STRING is what an unrecognised MASK yields, and the mask here is one of
-            //       the two this method recognises -- attributing the fault to the mask would send a
-            //       reader to the wrong side of the pairing. NON_NUMERIC_DATA describes a component
-            //       holding something other than digits, and "2024/02/29" has three components that
-            //       are entirely digits, so that verdict would misdescribe the commonest instance of
-            //       this fault. What is wrong is the submitted VALUE measured against a valid mask,
-            //       which is precisely what BAD_DATE_VALUE reports, and its verdict text
-            //       "Datevalue error" reads correctly for a caller.
-            // WHY : Trade-offs: reported as feedback rather than raised, unlike the width check
-            //       immediately above. The width is a structural contract -- the service reads
-            //       components by offset, so a shorter text has no components to read at all -- while
-            //       a separator is content at a position that exists. Feedback is also what keeps
-            //       this method's contract intact: every judgement it makes about a recognised mask
-            //       is returned as an outcome, so a caller never has to catch an exception for one
-            //       kind of unacceptable date and read a return value for another.
+            // Refactoring Rationale: this check was missing, and its absence made the two public
+            //     entry points of this class disagree about the same value. The components below are
+            //     sliced AROUND positions four and seven because the mask declares a hyphen at each,
+            //     and nothing established that either position actually held one -- so
+            //     "2024/02/29", and even "2024x02y29", were accepted here and reported as valid
+            //     dates, while newContext rejects exactly those values for lacking their
+            //     separators. One class cannot hold two answers about whether a value matches a
+            //     mask; a caller choosing between the two entry points would be choosing a verdict.
             if (date.charAt(MASK_FIRST_SEPARATOR_INDEX) != MASK_SEPARATOR
                     || date.charAt(MASK_SECOND_SEPARATOR_INDEX) != MASK_SEPARATOR) {
                 return feedback(FeedbackCode.BAD_DATE_VALUE, date, mask);
@@ -1836,10 +1433,10 @@ public final class DateEditValidator {
             monthText = date.substring(PACKED_MONTH_START, PACKED_MONTH_END);
             dayText = date.substring(PACKED_DAY_START, PACKED_DAY_END);
         } else {
-            // WHY : Assumptions: an unrecognised mask is reported as feedback rather than raised, because
-            //       the baseline service declares a condition for a mask it cannot interpret at
-            //       app/cbl/CSUTLDTC.cbl line 68 and selects a verdict for it at lines 141 and 142. Raising
-            //       instead would deny a caller the one outcome the baseline gives it for this case.
+            // Assumptions: an unrecognised mask is reported as feedback rather than raised, because
+            //     the baseline service declares a condition for a mask it cannot interpret at
+            //     app/cbl/CSUTLDTC.cbl line 68 and selects a verdict for it at lines 141 and 142. Raising
+            //     instead would deny a caller the one outcome the baseline gives it for this case.
             return feedback(FeedbackCode.BAD_PIC_STRING, date, mask);
         }
 
@@ -1859,11 +1456,11 @@ public final class DateEditValidator {
             return feedback(FeedbackCode.BAD_DATE_VALUE, date, mask);
         }
 
-        // WHY : Assumptions: the supported calendar has an inclusive lower bound and a date below it is
-        //       reported as out of range rather than as malformed. The oracle suite pins the boundary from
-        //       both sides -- its unit layer accepts the floor date and reports the day below it as an
-        //       out-of-range feedback at tests/cobol-unit/CSUTLDTC_test.cbl lines 178 to 210 -- so the day
-        //       below the floor is a well-formed calendar date that the service still declines.
+        // Assumptions: the supported calendar has an inclusive lower bound and a date below it is
+        //     reported as out of range rather than as malformed. The oracle suite pins the boundary from
+        //     both sides -- its unit layer accepts the floor date and reports the day below it as an
+        //     out-of-range feedback at tests/cobol-unit/CSUTLDTC_test.cbl lines 178 to 210 -- so the day
+        //     below the floor is a well-formed calendar date that the service still declines.
         if (LocalDate.of(year, month, day).isBefore(GREGORIAN_FLOOR)) {
             return feedback(FeedbackCode.UNSUPP_RANGE, date, mask);
         }
@@ -1882,10 +1479,10 @@ public final class DateEditValidator {
      * @param context the accumulator to record this gate's verdict into
      */
     private static void editYearCcyy(EditContext context) {
-        // WHY : Trade-offs: this gate assumes failure until proven otherwise, reproducing line 27, while
-        //       gate three assumes success. The asymmetry is carried rather than made uniform because the
-        //       two initialisers are not interchangeable; the reasoning is on DateEditValidator. The text
-        //       is null because a pre-set marker has nothing to report yet.
+        // Trade-offs: this gate assumes failure until proven otherwise, reproducing line 27, while
+        //     gate three assumes success. The asymmetry is carried rather than made uniform because the
+        //     two initialisers are not interchangeable; the reasoning is on DateEditValidator. The text
+        //     is null because a pre-set marker has nothing to report yet.
         context.mark(FIELD_YEAR, FieldValidationFlag.NOT_OK, null);
 
         if (FieldValidationFlag.isNeverSupplied(context.rawYear)) {
@@ -1898,10 +1495,10 @@ public final class DateEditValidator {
             return;
         }
 
-        // WHY : Assumptions: only two century values are accepted, and the baseline says why in its own
-        //       comment at lines 66 to 68 -- that it codes only these two, having been unable to imagine
-        //       the language still running in the century after them. Widening the domain would accept
-        //       dates the baseline rejects, so the pair is carried exactly.
+        // Assumptions: only two century values are accepted, and the baseline says why in its own
+        //     comment at lines 66 to 68 -- that it codes only these two, having been unable to imagine
+        //     the language still running in the century after them. Widening the domain would accept
+        //     dates the baseline rejects, so the pair is carried exactly.
         if (context.centuryValue != THIS_CENTURY && context.centuryValue != LAST_CENTURY) {
             context.fail(FieldValidationFlag.NOT_OK, MSG_CENTURY_INVALID, FIELD_YEAR);
             return;
@@ -1928,14 +1525,14 @@ public final class DateEditValidator {
             return;
         }
 
-        // WHY : Assumptions: the baseline's two remaining arms are collapsed into one test here, and the
-        //       collapse changes nothing a caller can observe. The baseline tests the domain first, at line
-        //       111, against a condition declared over a numeric redefinition of two characters, and tests
-        //       numerically second, at line 126; a non-numeric pair of characters equals none of the twelve
-        //       values that condition enumerates, so the domain arm is the one that fires for it. Both arms
-        //       assemble the identical text, at lines 119 and 136, so which one fired is invisible. Gate
-        //       three orders the same two arms the other way round, and that asymmetry is likewise
-        //       unobservable for the same reason.
+        // Assumptions: the baseline's two remaining arms are collapsed into one test here, and the
+        //     collapse changes nothing a caller can observe. The baseline tests the domain first, at line
+        //     111, against a condition declared over a numeric redefinition of two characters, and tests
+        //     numerically second, at line 126; a non-numeric pair of characters equals none of the twelve
+        //     values that condition enumerates, so the domain arm is the one that fires for it. Both arms
+        //     assemble the identical text, at lines 119 and 136, so which one fired is invisible. Gate
+        //     three orders the same two arms the other way round, and that asymmetry is likewise
+        //     unobservable for the same reason.
         if (context.monthValue < MIN_VALID_MONTH || context.monthValue > MAX_VALID_MONTH) {
             context.fail(FieldValidationFlag.NOT_OK, MSG_MONTH_RANGE, FIELD_MONTH);
             return;
@@ -1956,12 +1553,12 @@ public final class DateEditValidator {
      * @param context the accumulator to record this gate's verdict into
      */
     private static void editDay(EditContext context) {
-        // WHY : Trade-offs: this pre-set assumes SUCCESS where gates one and two assume failure, and the
-        //       opposite polarity is reproduced rather than aligned with them. No route through this gate
-        //       observes the difference today, because every arm below ends in an explicit marking; the
-        //       initialiser is the contract for a route that does not yet exist, and substituting the
-        //       pessimistic form would hand such a route the opposite verdict. The reasoning is on
-        //       DateEditValidator.
+        // Trade-offs: this pre-set assumes SUCCESS where gates one and two assume failure, and the
+        //     opposite polarity is reproduced rather than aligned with them. No route through this gate
+        //     observes the difference today, because every arm below ends in an explicit marking; the
+        //     initialiser is the contract for a route that does not yet exist, and substituting the
+        //     pessimistic form would hand such a route the opposite verdict. The reasoning is on
+        //     DateEditValidator.
         context.mark(FIELD_DAY, FieldValidationFlag.VALID, null);
 
         if (FieldValidationFlag.isNeverSupplied(context.rawDay)) {
@@ -1999,18 +1596,18 @@ public final class DateEditValidator {
      *     gate's four exit routes has been taken
      */
     private static boolean editDayMonthYear(EditContext context) {
-        // WHY : Assumptions: this arm marks TWO components, the day and the month, reproducing lines 215 to
-        //       217. It does not mark the year. Marking three here would highlight a year the baseline
-        //       leaves untouched, and the census of widths on DateEditValidator is what records that three
-        //       of the five failure modes mark three components while two mark only two.
+        // Assumptions: this arm marks TWO components, the day and the month, reproducing lines 215 to
+        //     217. It does not mark the year. Marking three here would highlight a year the baseline
+        //     leaves untouched, and the census of widths on DateEditValidator is what records that three
+        //     of the five failure modes mark three components while two mark only two.
         if (!THIRTY_ONE_DAY_MONTHS.contains(context.monthValue) && context.dayValue == DAY_31) {
             context.fail(FieldValidationFlag.NOT_OK, MSG_NO_31_DAYS, FIELD_DAY, FIELD_MONTH);
             return false;
         }
 
-        // WHY : Assumptions: this second two-component arm is easy to overlook and is not a variant of the
-        //       one above it. It has its own condition pair at lines 228 and 229, its own markings at lines
-        //       231 and 232 and its own message text at line 236, and it too leaves the year untouched.
+        // Assumptions: this second two-component arm is easy to overlook and is not a variant of the
+        //     one above it. It has its own condition pair at lines 228 and 229, its own markings at lines
+        //     231 and 232 and its own message text at line 236, and it too leaves the year untouched.
         if (context.monthValue == FEBRUARY && context.dayValue == DAY_30) {
             context.fail(FieldValidationFlag.NOT_OK, MSG_NO_30_DAYS, FIELD_DAY, FIELD_MONTH);
             return false;
@@ -2018,11 +1615,11 @@ public final class DateEditValidator {
 
         if (context.monthValue == FEBRUARY && context.dayValue == DAY_29) {
             if (!isLeapYearOfSuppliedComponents(context)) {
-                // WHY : Assumptions: this arm marks THREE components, reproducing the four marking
-                //       statements at lines 259 to 262 -- the error switch plus the day, the month AND the
-                //       year. A 29 February in a non-leap year is a fault of the year as much as of the day,
-                //       and narrowing this to the day alone would leave two of the three components
-                //       unhighlighted where the baseline highlights all three.
+                // Assumptions: this arm marks THREE components, reproducing the four marking
+                //     statements at lines 259 to 262 -- the error switch plus the day, the month AND the
+                //     year. A 29 February in a non-leap year is a fault of the year as much as of the day,
+                //     and narrowing this to the day alone would leave two of the three components
+                //     unhighlighted where the baseline highlights all three.
                 context.fail(
                         FieldValidationFlag.NOT_OK,
                         MSG_NOT_LEAP_YEAR,
@@ -2033,10 +1630,10 @@ public final class DateEditValidator {
             }
         }
 
-        // WHY : Assumptions: this is the checkpoint at lines 274 to 279 and it is the only true early exit
-        //       in the whole chain. It tests the group-level aggregate condition, so it consults the three
-        //       markers and deliberately not the caller-owned error switch, which the baseline declares
-        //       outside that group. Only an all-clear reaches the fifth gate.
+        // Assumptions: this is the checkpoint at lines 274 to 279 and it is the only true early exit
+        //     in the whole chain. It tests the group-level aggregate condition, so it consults the three
+        //     markers and deliberately not the caller-owned error switch, which the baseline declares
+        //     outside that group. Only an all-clear reaches the fifth gate.
         return context.aggregateValid();
     }
 
@@ -2061,48 +1658,48 @@ public final class DateEditValidator {
      * @param context the accumulator to record this gate's verdict into
      */
     private static void editDateLanguageEnvironment(EditContext context) {
-        // WHY : Refactoring Rationale: the ten-character mask is used here where the baseline moves an
-        //       eight-character one at line 291. Five of the six baseline call sites use ten characters and
-        //       the service's own linkage declares ten, at app/cbl/CSUTLDTC.cbl lines 84 and 85, so the
-        //       eight-character move supplies narrower fields than its callee declares. This type does not
-        //       reproduce that width difference, and the divergence is recorded on DateEditValidator.
+        // Refactoring Rationale: the ten-character mask is used here where the baseline moves an
+        //     eight-character one at line 291. Five of the six baseline call sites use ten characters and
+        //     the service's own linkage declares ten, at app/cbl/CSUTLDTC.cbl lines 84 and 85, so the
+        //     eight-character move supplies narrower fields than its callee declares. This type does not
+        //     reproduce that width difference, and the divergence is recorded on DateEditValidator.
         LanguageEnvironmentResult result =
                 evaluateWithLanguageEnvironment(maskedDate(context), DATE_FORMAT_MASK);
         context.languageEnvironment = result;
 
-        // WHY : Assumptions: acceptance is a severity of zero, reproducing line 298, and the outcome that
-        //       carries a zero severity is the one whose baseline condition name says the opposite. Testing
-        //       the severity rather than the condition name is what keeps this the right way round.
+        // Assumptions: acceptance is a severity of zero, reproducing line 298, and the outcome that
+        //     carries a zero severity is the one whose baseline condition name says the opposite. Testing
+        //     the severity rather than the condition name is what keeps this the right way round.
         if (result.severity() == SEVERITY_VALID) {
-            // WHY : Assumptions: the day marker is re-affirmed only when nothing has failed anywhere
-            //       earlier, reproducing lines 318 to 320. In the baseline the switch it consults is
-            //       program-wide, so an unrelated field's failure could leave this arm untaken; here the
-            //       switch is scoped to one date, and the checkpoint at lines 274 to 279 has already
-            //       required all three markers to be acceptable, so the guard's false branch is
-            //       unreachable within one call. It is reproduced rather than dropped because dropping it
-            //       would assert unconditionally what the baseline asserts conditionally.
+            // Assumptions: the day marker is re-affirmed only when nothing has failed anywhere
+            //     earlier, reproducing lines 318 to 320. In the baseline the switch it consults is
+            //     program-wide, so an unrelated field's failure could leave this arm untaken; here the
+            //     switch is scoped to one date, and the checkpoint at lines 274 to 279 has already
+            //     required all three markers to be acceptable, so the guard's false branch is
+            //     unreachable within one call. It is reproduced rather than dropped because dropping it
+            //     would assert unconditionally what the baseline asserts conditionally.
             if (!context.inputError) {
                 context.mark(FIELD_DAY, FieldValidationFlag.VALID, null);
             }
             return;
         }
 
-        // WHY : Assumptions: the message is assembled from the label and four fragments in the order the
-        //       assembly at lines 306 to 313 lists them -- the trimmed label, a severity fragment, the
-        //       four-character severity, a message-code fragment and the four-character message number.
-        //       Both numbers are inserted at the four-character width their fields declare, which is why
-        //       they are emitted as zero-padded digits rather than in their shortest form.
+        // Assumptions: the message is assembled from the label and four fragments in the order the
+        //     assembly at lines 306 to 313 lists them -- the trimmed label, a severity fragment, the
+        //     four-character severity, a message-code fragment and the four-character message number.
+        //     Both numbers are inserted at the four-character width their fields declare, which is why
+        //     they are emitted as zero-padded digits rather than in their shortest form.
         String assembled = MSG_LE_SEVERITY_FRAGMENT
                 + zoned(result.severity())
                 + MSG_LE_MESSAGE_CODE_FRAGMENT
                 + zoned(result.messageNumber());
 
-        // WHY : Trade-offs: these three markings are RETAINED, where the baseline clears them at line 327
-        //       on both routes out of this gate. The compromise is a visible difference on this one
-        //       rejection mode; the alternative leaves the migrated per-field error array empty for it, so
-        //       a response body would announce a failure with no field attached and a client would have
-        //       nothing to render beside any field. The baseline clears them, this method keeps them, and
-        //       the divergence is recorded on DateEditValidator.
+        // Trade-offs: these three markings are RETAINED, where the baseline clears them at line 327
+        //     on both routes out of this gate. The compromise is a visible difference on this one
+        //     rejection mode; the alternative leaves the migrated per-field error array empty for it, so
+        //     a response body would announce a failure with no field attached and a client would have
+        //     nothing to render beside any field. The baseline clears them, this method keeps them, and
+        //     the divergence is recorded on DateEditValidator.
         context.fail(
                 FieldValidationFlag.NOT_OK, assembled, FIELD_DAY, FIELD_MONTH, FIELD_YEAR);
     }
@@ -2126,14 +1723,14 @@ public final class DateEditValidator {
             return false;
         }
 
-        // WHY : Trade-offs: the divisor selection needs the year-within-century value, which the baseline
-        //       reads from a component it redefines separately at app/cpy/CSUTLDWY.cpy line 12, and this
-        //       passes the whole year instead and lets isLeapYear reduce it. Reading that component here
-        //       and selecting the divisor here was the alternative and was rejected: it would put a second
-        //       copy of the rule in this file, and two copies of one predicate is exactly the condition the
-        //       equivalence proof on this class exists to make unnecessary. The reduction and the component
-        //       agree for every usable year, because a four-digit run of digits has a trailing pair of
-        //       digits with the same value as the year taken modulo one hundred.
+        // Trade-offs: the divisor selection needs the year-within-century value, which the baseline
+        //     reads from a component it redefines separately at app/cpy/CSUTLDWY.cpy line 12, and this
+        //     passes the whole year instead and lets isLeapYear reduce it. Reading that component here
+        //     and selecting the divisor here was the alternative and was rejected: it would put a second
+        //     copy of the rule in this file, and two copies of one predicate is exactly the condition the
+        //     equivalence proof on this class exists to make unnecessary. The reduction and the component
+        //     agree for every usable year, because a four-digit run of digits has a trailing pair of
+        //     digits with the same value as the year taken modulo one hundred.
         return isLeapYear(context.yearValue);
     }
 
@@ -2158,10 +1755,10 @@ public final class DateEditValidator {
     private static EditContext newContext(String fieldLabel, String date) {
         String label = normalizeLabel(fieldLabel);
 
-        // WHY : Assumptions: the no-content case is decided before the width cases, using the same
-        //       two-armed test the gates use per component, because a request can present an absent field
-        //       as null or as an empty string while a terminal presents it as a run of pad characters. All
-        //       three describe a field nobody filled in, and none of them can be split by offset.
+        // Assumptions: the no-content case is decided before the width cases, using the same
+        //     two-armed test the gates use per component, because a request can present an absent field
+        //     as null or as an empty string while a terminal presents it as a run of pad characters. All
+        //     three describe a field nobody filled in, and none of them can be split by offset.
         if (date == null || date.isEmpty() || FieldValidationFlag.isNeverSupplied(date)) {
             return new EditContext(label, "", "", "");
         }
@@ -2184,15 +1781,15 @@ public final class DateEditValidator {
                     date.substring(MASKED_DAY_START, MASKED_DATE_LENGTH));
         }
 
-        // WHY : Refactoring Rationale: the two ways of arriving here are now reported separately. One
-        //       message covered both, so a ten-character value whose separators were wrong was told
-        //       that it "carries content at width 10" while the same sentence listed a ten-character
-        //       form as accepted -- a contradiction a reader has to decode. The separator case is now
-        //       named as itself, which also makes this rejection legible beside the BAD_DATE_VALUE
-        //       feedback evaluateWithLanguageEnvironment reports for the very same value. Neither
-        //       message carries any part of the date: the width and the mask are the whole diagnosis,
-        //       and the field one caller passes is a date of birth, which the shared record layout
-        //       classifies as sensitive at CUST-DOB-YYYY-MM-DD in app/cpy/CVCUS01Y.cpy line 19.
+        // Refactoring Rationale: the two ways of arriving here are now reported separately. One
+        //     message covered both, so a ten-character value whose separators were wrong was told
+        //     that it "carries content at width 10" while the same sentence listed a ten-character
+        //     form as accepted -- a contradiction a reader has to decode. The separator case is now
+        //     named as itself, which also makes this rejection legible beside the BAD_DATE_VALUE
+        //     feedback evaluateWithLanguageEnvironment reports for the very same value. Neither
+        //     message carries any part of the date: the width and the mask are the whole diagnosis,
+        //     and the field one caller passes is a date of birth, which the shared record layout
+        //     classifies as sensitive at CUST-DOB-YYYY-MM-DD in app/cpy/CVCUS01Y.cpy line 19.
         if (date.length() == MASKED_DATE_LENGTH) {
             throw new IllegalArgumentException(
                     "a " + MASKED_DATE_LENGTH + "-character date must carry '" + MASK_SEPARATOR
@@ -2201,14 +1798,14 @@ public final class DateEditValidator {
                             + ", and the supplied date carries something else at one of them");
         }
 
-        // WHY : Trade-offs: an unrecognised width is raised rather than reported as an unacceptable date.
-        //       Reporting it would be gentler on the caller and was rejected, because the two accepted
-        //       widths are both structural contracts -- one from the baseline's field layout, one from the
-        //       service's linkage -- so a third width means the caller assembled the value wrongly, and
-        //       attributing that to the user's input would send a field error for a fault the user cannot
-        //       correct. The separator case above is raised for the same reason: the map field the
-        //       baseline reads from carries its two hyphens as map literals, so a value reaching this
-        //       method without them was assembled by the caller rather than typed by a user.
+        // Trade-offs: an unrecognised width is raised rather than reported as an unacceptable date.
+        //     Reporting it would be gentler on the caller and was rejected, because the two accepted
+        //     widths are both structural contracts -- one from the baseline's field layout, one from the
+        //     service's linkage -- so a third width means the caller assembled the value wrongly, and
+        //     attributing that to the user's input would send a field error for a fault the user cannot
+        //     correct. The separator case above is raised for the same reason: the map field the
+        //     baseline reads from carries its two hyphens as map literals, so a value reaching this
+        //     method without them was assembled by the caller rather than typed by a user.
         throw new IllegalArgumentException(
                 "date carries content at width " + date.length() + ", but only the "
                         + PACKED_DATE_LENGTH + "-character unseparated form and the "
@@ -2275,16 +1872,15 @@ public final class DateEditValidator {
                 || context.monthValue > MAX_VALID_MONTH
                 || context.dayValue < MIN_VALID_DAY
                 || context.dayValue > daysInMonth(context.yearValue, context.monthValue)) {
-            // WHY : Refactoring Rationale: the message described the submitted text and now describes
-            //       only its SHAPE. It previously interpolated the date itself, and the one caller
-            //       that reaches this method is the date-of-birth gate -- a field the shared record
-            //       layout classifies as sensitive, at CUST-DOB-YYYY-MM-DD in app/cpy/CVCUS01Y.cpy
-            //       line 19. An IllegalArgumentException message reaches a stack trace, and a stack
-            //       trace reaches a log aggregator and sometimes an error response, so a date of
-            //       birth was one unhandled exception away from a place it must not be. What an
-            //       operator needs in order to act is which component was unacceptable, and that is
-            //       what is reported: the fault is in the caller's ordering rather than in the
-            //       value's digits, so the digits add nothing to the diagnosis.
+            // Assumptions: the message describes only the SHAPE of the submitted value and never
+            //     interpolates the value itself, because the one caller that reaches this method is
+            //     the date-of-birth gate -- a field the shared record layout classifies as
+            //     sensitive, at CUST-DOB-YYYY-MM-DD in app/cpy/CVCUS01Y.cpy line 19. An
+            //     IllegalArgumentException message reaches a stack trace, and a stack trace reaches
+            //     a log aggregator and sometimes an error response, so interpolating the date would
+            //     leave it one unhandled exception away from a place it must not be. What an
+            //     operator needs in order to act is which component was unacceptable, and the fault
+            //     is in the caller's ordering rather than in the value's digits.
             throw new IllegalArgumentException(
                     "the date-of-birth test requires a date the general edit has already accepted, but "
                             + describe(date) + " is not a well-formed calendar date: "
@@ -2411,10 +2007,10 @@ public final class DateEditValidator {
         for (int index = 0; index < width; index++) {
             char digit = text.charAt(index);
 
-            // WHY : Assumptions: only the ten ASCII digits count, so the platform's general digit test is
-            //       deliberately not used -- it accepts digits from every script the character set defines,
-            //       and a component holding one of those would be reported numeric here while the baseline's
-            //       byte comparison would reject it.
+            // Assumptions: only the ten ASCII digits count, so the platform's general digit test is
+            //     deliberately not used -- it accepts digits from every script the character set defines,
+            //     and a component holding one of those would be reported numeric here while the baseline's
+            //     byte comparison would reject it.
             if (digit < '0' || digit > '9') {
                 return NOT_NUMERIC;
             }
@@ -2481,12 +2077,6 @@ public final class DateEditValidator {
      * {@link IllegalArgumentException} message, so every stack trace that fault produced carried a date of
      * birth into a log aggregator and, on an unhandled path, into an error response.</p>
      *
-     * <p>Trade-offs: an operator reading the message alone can no longer see which value was rejected and
-     * has to correlate with the request that carried it. That is accepted because the width plus the
-     * per-component verdicts composed alongside it already identify the fault -- the caller reached a gate
-     * out of order, which the value's digits do not help diagnose -- and because the alternative places a
-     * date of birth in a durable, widely readable place.</p>
-     *
      * @param date the date text as supplied, which may be {@code null}; read only for its length
      * @return a phrase naming the text's width, or a phrase naming its absence; never any part of the text
      */
@@ -2496,11 +2086,6 @@ public final class DateEditValidator {
 
     /**
      * Requires a date text to be exactly the width its mask declares.
-     *
-     * <p>Assumptions: the service reads its components by offset, so a text narrower than its mask has no
-     * components to read. The baseline never encounters this because every one of its call sites moves into
-     * a field of declared width, which pads or reduces the value before the call; a Java caller passes a
-     * string of whatever length it holds, so the check has to be made explicitly.</p>
      *
      * <p>Refactoring Rationale: the failure message quoted the measured text and now reports only the
      * expected width and the observed width. Both public entry points pass a caller-supplied date through

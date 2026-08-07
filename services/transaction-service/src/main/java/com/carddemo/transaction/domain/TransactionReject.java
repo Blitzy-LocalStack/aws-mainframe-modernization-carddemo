@@ -341,8 +341,15 @@ public class TransactionReject {
     //       denotes -- but the column is still immutable in the schema's terms and the mapping says
     //       so, which is what stops the provider emitting an UPDATE that the stream has no meaning
     //       for.
+    // WHY : Refactoring Rationale: mapped NOT NULL, where an earlier revision of this member left the
+    //       column nullable. A reject row EXISTS because a record was rejected, and
+    //       app/cbl/CBTRN02C.cbl:447 copies the whole 350-byte area unconditionally before the write at
+    //       :448, so there is no path that appends a reject carrying no image. A null image records
+    //       that something was rejected while discarding the only evidence of what, and the 430-byte
+    //       parity comparison cannot be performed against it. The migration and the batch module's
+    //       mapping of this same table were changed together with this one.
     @JdbcTypeCode(SqlTypes.CHAR)
-    @Column(name = "raw_record", length = 350, updatable = false)
+    @Column(name = "raw_record", nullable = false, length = 350, updatable = false)
     private String rawRecord;
 
     /**
@@ -373,11 +380,21 @@ public class TransactionReject {
     //       The numeric column keeps the register a matter of documentation, which is where an open
     //       set belongs, and this package declares no enum type by charter in any case.
     // WHY : Assumptions: the declared picture admits at most 9999, so a 16-bit integer covers the
-    //       whole domain and a wider type would reserve bytes no value can use. The boxed type is
-    //       used rather than the primitive because the migration leaves the column nullable, and a
-    //       primitive would silently render an absent code as zero -- a value that reads as a
-    //       successfully validated record.
-    @Column(name = "reason_code")
+    //       whole domain and a wider type would reserve bytes no value can use.
+    // WHY : Refactoring Rationale: mapped NOT NULL, and the migration now also bounds the column with
+    //       CHECK (reason_code BETWEEN 0 AND 9999). The same reading of PIC 9(04) that makes a 16-bit
+    //       integer WIDE ENOUGH is what makes 9999 the BOUND, and asserting only the sufficiency left
+    //       that type's whole 32767 range admissible including negatives, which an unsigned picture
+    //       cannot express. Every reject site moves a code and its text in one pair of statements, so
+    //       a null code is a state the program never produces, and it would break the reject count
+    //       that :229 turns into the return code because a null neither equals nor differs from any
+    //       code a filter names.
+    // WHY : Assumptions: the BOXED type is retained even though the column is now NOT NULL, because
+    //       nullability of the member and nullability of the column are different questions. A
+    //       primitive cannot represent the unset state a freshly instantiated managed instance is in
+    //       before the provider assigns its fields, so it would read as zero -- a value that looks
+    //       like a successfully validated record -- on a row not yet materialised.
+    @Column(name = "reason_code", nullable = false)
     private Short reasonCode;
 
     /**
@@ -401,7 +418,13 @@ public class TransactionReject {
     //       than fixed width -- unlike the image above -- because this is descriptive text whose
     //       trailing spaces are padding the baseline field forced rather than content, and no
     //       comparison depends on them.
-    @Column(name = "reason_desc", length = 76)
+    // WHY : Refactoring Rationale: mapped NOT NULL, on the same reading as the two columns above.
+    //       Every reject site moves a reason code and its verbatim text in the same pair of
+    //       statements, so a row carrying a code and no text is a state the reference program cannot
+    //       reach, and a null one would silently drop the half of the 430-byte trailer an operator
+    //       reads. The texts are user-visible strings carried across character for character under
+    //       transformation rule T8.
+    @Column(name = "reason_desc", nullable = false, length = 76)
     private String reasonDesc;
 
     /**

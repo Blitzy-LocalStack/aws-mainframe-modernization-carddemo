@@ -381,6 +381,17 @@ locals {
     #       Admitting a name is not requiring it: the required_* maps below decide
     #       which services must carry which, and none of these four is required,
     #       so a root that publishes no queue parameter still plans.
+    # WHY : Refactoring Rationale: the four CARDDEMO_ACCOUNT_CONTEXT_* and
+    #       CARDDEMO_MESSAGING_REPLY_QUEUE_ALLOWLIST names below were absent from this
+    #       set and from every root, and the absence stopped authorization-service from
+    #       starting at all rather than degrading it. Its application.yml resolves
+    #       carddemo.account-context.base-url and
+    #       carddemo.messaging.reply-queue-allowlist from them with NO default, and
+    #       Spring aborts context refresh on an unresolvable placeholder, so the task
+    #       crash-looped. Both roots now publish all three as runtime parameters and the
+    #       required map below obliges authorization to carry them.
+    "CARDDEMO_ACCOUNT_CONTEXT_APPROVED_ORIGIN",
+    "CARDDEMO_ACCOUNT_CONTEXT_BASE_URL",
     "CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE",
     "CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE",
     "CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE",
@@ -389,11 +400,21 @@ locals {
     "CARDDEMO_COGNITO_APP_CLIENT_ID",
     "CARDDEMO_CONFIG_PREFIX",
     "CARDDEMO_MESSAGING_PAUTH_REQUEST_QUEUE",
+    "CARDDEMO_MESSAGING_REPLY_QUEUE_ALLOWLIST",
     "CARDDEMO_REFERENCE_INQUIRY_ERROR_QUEUE",
     "CARDDEMO_REFERENCE_INQUIRY_REPLY_QUEUE",
     "CARDDEMO_REFERENCE_INQUIRY_REQUEST_QUEUE",
     "CARDDEMO_REPORTING_S3_OUTPUT_BUCKET",
     "CARDDEMO_REPORTING_STEP_FUNCTIONS_STATE_MACHINE_ARN",
+    # WHY : Refactoring Rationale: this name was absent from this set while BOTH
+    #       environment roots published it as a runtime parameter for the card
+    #       workload, which is worse than the reverse omission: the precondition
+    #       below refuses a name it does not admit, so the card task definition
+    #       could not be PLANNED at all. The failure surfaces only against a real
+    #       account, because `terraform validate` does not evaluate a lifecycle
+    #       precondition -- which is why it went unnoticed. It names a key ALIAS
+    #       rather than key material, so Parameter Store is the correct channel.
+    "CARDDEMO_SECURITY_CVV_KEY_ID",
     "CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID",
     "SPRING_DATASOURCE_URL",
     "SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI",
@@ -407,16 +428,78 @@ locals {
     #       in step through a client-secret rotation.
     "CARDDEMO_AUTH_COGNITO_CLIENT_ID",
     "CARDDEMO_AUTH_COGNITO_CLIENT_SECRET",
+    # WHY : Assumptions: this is the only admissible secret name in this list that TWO
+    #       services legitimately receive, and that is inherent to what it is: a
+    #       symmetric signing key, so the party that signs and the party that verifies
+    #       must hold the same bytes. The authorization service mints an internal bearer
+    #       token with it and the account service verifies that token on its three
+    #       internal account-context read paths. Every other name here is held by one
+    #       holder, which is why the precondition below gates this one on a pair and the
+    #       others on a single service.
+    #       Alternatives Considered: an asymmetric key pair, which would let the account
+    #       service hold only a public verification key and would remove the shared
+    #       secret entirely. Rejected as disproportionate here: it would require key
+    #       distribution and rotation machinery for a single caller inside one private
+    #       network, and the signing key is already confined to two task roles by the
+    #       gate below. The trade-off is recorded because it is the change to make if a
+    #       third verifier is ever added -- at that point a shared secret held by four
+    #       parties stops being defensible.
+    "CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY",
     "CARDDEMO_MASK_HMAC_KEY",
+    # WHY : Assumptions: this is a SEPARATE name from CARDDEMO_MASK_HMAC_KEY above,
+    #       and the separation is the point rather than an accident of naming. The
+    #       mask key is held by the one-off migration workload that reads cardholder
+    #       extracts; this key is held by the long-running authorization consumer and
+    #       is shared with every other producer on the pending-authorization queue,
+    #       because the queue group identity has to be equal for equal cards ACROSS
+    #       producers -- that equality is the per-card ordering guarantee itself.
+    #       Alternatives Considered: reusing the mask key for both purposes, which is
+    #       one fewer secret to provision and rotate. Rejected on two counts: it would
+    #       give the migration workload the ability to compute production queue group
+    #       identities, and rotating either purpose would require a coordinated stop of
+    #       an interactive consumer and a batch workload at once.
+    "CARDDEMO_MESSAGING_HMAC_KEY",
     "CARDDEMO_SERVER_TLS_CERTIFICATE",
     "CARDDEMO_SERVER_TLS_PRIVATE_KEY",
     "SPRING_DATASOURCE_PASSWORD",
     "SPRING_DATASOURCE_USERNAME",
+    # WHY : Assumptions: a migrating service receives TWO database credentials,
+    #       not one, and they are deliberately different identities. The
+    #       SPRING_DATASOURCE_* pair carries the runtime role, which
+    #       data-migration/sql/V0__schemas_and_roles.sql grants only USAGE on its
+    #       schema plus SELECT, INSERT and UPDATE on its tables -- no CREATE, no
+    #       DROP, no ALTER, no ownership. The SPRING_FLYWAY_* pair carries
+    #       carddemo_<context>_migrator, which is a member of the NOLOGIN schema
+    #       owner WITH INHERIT FALSE and reaches that owner's DDL authority only
+    #       by the SET ROLE its application.yml issues as Flyway's init statement.
+    #       Both names are admitted here rather than in
+    #       parameter_environment_names because both are credentials: Parameter
+    #       Store values land in the task definition's plain `environment` array,
+    #       which `DescribeTaskDefinition` returns to any caller holding read
+    #       access to ECS.
+    # WHY : Alternatives Considered: reusing SPRING_DATASOURCE_* for migration and
+    #       granting the runtime role DDL, which is one credential and one pair of
+    #       names. Rejected: it is the arrangement F-10 identifies, where the
+    #       long-lived credential every request runs under also owns the schema and
+    #       can therefore drop it. Also considered was running migration as a
+    #       separate short-lived ECS task, which removes the DDL credential from
+    #       the serving task entirely. Rejected here because the shipped
+    #       architecture applies migrations in-process before the JPA
+    #       EntityManagerFactory is built -- documented at length in each service's
+    #       application.yml -- so a separate task would additionally need an
+    #       ordering guarantee that no task starts against a schema its own code
+    #       predates. Two credentials in one task achieves the privilege split
+    #       without changing that ordering property.
+    "SPRING_FLYWAY_PASSWORD",
+    "SPRING_FLYWAY_USER",
   ])
 
   # WHY : Assumptions: the reporting service is the only HTTP service whose
-  #       trusted-proxy expression, Cognito audience and PEM pair use the
-  #       canonical CARDDEMO_* names below. Batch is the only service that may
+  #       trusted-proxy expression and Cognito audience use the canonical
+  #       CARDDEMO_* names below. The listener PEM pair that used to be named here
+  #       alongside them is gone: listener material is task-minted rather than
+  #       injected, so no service requires a certificate secret at all.
+  #       Batch is the only service that may
   #       launch the ETL image and therefore the only task allowed to receive
   #       the mask HMAC key. Binding these names to one service prevents a root
   #       from accidentally distributing either capability to every task.
@@ -464,17 +547,53 @@ locals {
       "SPRING_DATASOURCE_URL",
       "SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI",
     ])
+    # WHY : Refactoring Rationale: the three CARDDEMO_ACCOUNT_INQUIRY_* names were
+    #       absent here while the sibling reference entry below already required its
+    #       three, and the asymmetry has now become wrong. It was defensible while
+    #       account-service contained no consumer: an unbound configuration key is
+    #       never resolved, so a missing variable could not fail anything.
+    #       service/InquiryMessageListener.java now binds all three -- request-queue
+    #       through its @SqsListener annotation, reply-queue and error-queue through
+    #       constructor @Value parameters with no defaults -- so each is resolved with
+    #       resolveRequiredPlaceholders and each aborts context refresh when unset.
+    #       Requiring them here moves that failure from container start to plan time,
+    #       where it names the missing variable instead of appearing as a task that
+    #       crash-loops on a placeholder.
+    #       Assumptions: all three are parameters rather than secrets. A queue NAME is
+    #       a routing selector, not key material -- it appears in the queue's own ARN
+    #       and in every metric dimension the queue publishes -- so delivering it
+    #       through Parameter Store discloses nothing and keeps the secret channel for
+    #       values that are actually secret.
     account = toset([
+      "CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE",
+      "CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE",
+      "CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE",
       "CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID",
       "SPRING_DATASOURCE_URL",
       "SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI",
     ])
+    # WHY : Assumptions: the card workload REQUIRES the key alias beyond the shared
+    #       three. com.carddemo.card.service.CardVerificationValueCipher reads
+    #       carddemo.security.cvv.key-id through @Value with no default and refuses a
+    #       blank one, because the wrong key is not a recoverable mistake once values
+    #       have been written under it -- an envelope is readable only through the
+    #       key that produced its data key. Requiring the name here means a root that
+    #       stops publishing it fails at plan time rather than starting a service
+    #       that cannot write a card.
     card = toset([
+      "CARDDEMO_SECURITY_CVV_KEY_ID",
       "CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID",
       "SPRING_DATASOURCE_URL",
       "SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI",
     ])
+    # WHY : Refactoring Rationale: CARDDEMO_ACCOUNT_CONTEXT_BASE_URL is required of this
+    #       service as well as of authorization. service/RestAccountContextClient.java binds
+    #       carddemo.account-context.base-url through a fallback-free @Value, because a
+    #       transaction add resolves its account through the ACCOUNT context's cross-reference
+    #       and a bill payment reads that context's balance -- so an unset value aborts context
+    #       refresh rather than degrading one screen.
     transaction = toset([
+      "CARDDEMO_ACCOUNT_CONTEXT_BASE_URL",
       "CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID",
       "SPRING_DATASOURCE_URL",
       "SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI",
@@ -488,7 +607,28 @@ locals {
       "SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI",
     ])
     batch = toset(["SPRING_DATASOURCE_URL"])
+    # WHY : Refactoring Rationale: the first three names below were absent, and the
+    #       omission was the difference between a running service and a crash loop.
+    #       authorization-service binds carddemo.account-context.base-url,
+    #       carddemo.account-context.approved-origin and
+    #       carddemo.messaging.reply-queue-allowlist with no fallback, and an
+    #       unresolvable placeholder aborts context refresh. Requiring them here is what
+    #       makes a root that forgets one fail at plan instead of at container start --
+    #       and it is the required map rather than only the admitted set above, because
+    #       admitting a name permits it while requiring it is what closes the gap. The request
+    #       queue is required for the same reason: it was admissible and published by both
+    #       roots but was not REQUIRED of this service, so a root that dropped it would have
+    #       planned cleanly and produced a task that could not resolve its own queue.
+    #       Assumptions: the approved origin is required as well as the base address
+    #       even though the service defaults it to the base address, so the deployed
+    #       comparison is between two values a root published from one expression rather
+    #       than between a value and itself.
     authorization = toset([
+      "CARDDEMO_ACCOUNT_CONTEXT_APPROVED_ORIGIN",
+      "CARDDEMO_ACCOUNT_CONTEXT_BASE_URL",
+      "CARDDEMO_MESSAGING_PAUTH_REQUEST_QUEUE",
+
+      "CARDDEMO_MESSAGING_REPLY_QUEUE_ALLOWLIST",
       "CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID",
       "SPRING_DATASOURCE_URL",
       "SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI",
@@ -515,38 +655,82 @@ locals {
     data-migration = toset([])
   }
 
+  # WHY : Assumptions: SPRING_FLYWAY_USER and SPRING_FLYWAY_PASSWORD are required
+  #       of the SEVEN workloads that ship a Flyway migration and of no others.
+  #       Measured against the tree: auth, account, card, transaction, reference,
+  #       batch and authorization each own a src/main/resources/db/migration
+  #       directory; reporting owns none, because reporting-service reads
+  #       cross-schema views that data-migration/sql/V1__reporting_views.sql
+  #       creates, and data-migration is not a database workload at all.
+  #       Requiring the pair of reporting would make its task definition
+  #       unplannable against a root that correctly publishes no migration
+  #       credential for it, and data-migration/sql/V0__schemas_and_roles.sql
+  #       creates no carddemo_reporting_migrator role for such a secret to hold.
+  # WHY : Trade-offs: required rather than merely admissible, so a root that wires
+  #       the runtime credential and forgets the migration credential fails at
+  #       plan time with the name it omitted. The alternative -- letting the
+  #       omission through -- fails much later and much less legibly: Flyway would
+  #       silently fall back to the runtime credential, create the schema's tables
+  #       owned by the runtime role, and every ALTER DEFAULT PRIVILEGES FOR ROLE
+  #       carddemo_<context>_owner clause in the bootstrap SQL would then never
+  #       fire, so the first cross-schema read fails on a permission error naming
+  #       a table nothing had granted anything on.
   required_secret_environment_names = {
     auth = toset([
       "CARDDEMO_AUTH_COGNITO_CLIENT_ID",
       "CARDDEMO_AUTH_COGNITO_CLIENT_SECRET",
-      "CARDDEMO_SERVER_TLS_CERTIFICATE",
-      "CARDDEMO_SERVER_TLS_PRIVATE_KEY",
       "SPRING_DATASOURCE_USERNAME",
       "SPRING_DATASOURCE_PASSWORD",
+      "SPRING_FLYWAY_USER",
+      "SPRING_FLYWAY_PASSWORD",
     ])
+    # WHY : Assumptions: account requires the internal-identity signing key because
+    #       config/InternalApiSecurityConfig.java reads it through a fallback-free
+    #       @Value and refuses a blank value, so a deployment without it fails at
+    #       container start rather than serving the three internal read paths with a
+    #       chain that can verify nothing. Requiring the name here is what turns that
+    #       into a plan-time failure instead.
+    # WHY : Refactoring Rationale: CARDDEMO_SERVER_TLS_CERTIFICATE and
+    #       CARDDEMO_SERVER_TLS_PRIVATE_KEY were listed here and in the
+    #       authorization set below, and both are WITHDRAWN. They remain ADMISSIBLE
+    #       secret names above, because a root may legitimately choose to inject a
+    #       real certificate, but they cannot be REQUIRED: the listener material is
+    #       no longer a deployment input at all. Each image's entry point
+    #       (config/docker/generate-listener-material.sh) mints that task's own key
+    #       pair and self-signed certificate before the JVM starts, and this
+    #       module's own variables.tf records the same withdrawal for the same
+    #       reason. Requiring them would fail every correct call at plan time.
     account = toset([
-      "CARDDEMO_SERVER_TLS_CERTIFICATE",
-      "CARDDEMO_SERVER_TLS_PRIVATE_KEY",
+      "CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY",
       "SPRING_DATASOURCE_USERNAME",
       "SPRING_DATASOURCE_PASSWORD",
+      "SPRING_FLYWAY_USER",
+      "SPRING_FLYWAY_PASSWORD",
     ])
     card = toset([
-      "CARDDEMO_SERVER_TLS_CERTIFICATE",
-      "CARDDEMO_SERVER_TLS_PRIVATE_KEY",
       "SPRING_DATASOURCE_USERNAME",
       "SPRING_DATASOURCE_PASSWORD",
+      "SPRING_FLYWAY_USER",
+      "SPRING_FLYWAY_PASSWORD",
     ])
+    # WHY : Assumptions: this service holds the internal-identity signing key because it
+    #       PRESENTS a token rather than verifying one. Its account-context client mints a
+    #       short-lived bearer credential per request through
+    #       config/InternalIdentityConfig.java, which reads the key through a fallback-free
+    #       @Value, so a deployment without it starts and then fails every add and every
+    #       payment with a refusal no message names.
     transaction = toset([
-      "CARDDEMO_SERVER_TLS_CERTIFICATE",
-      "CARDDEMO_SERVER_TLS_PRIVATE_KEY",
+      "CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY",
       "SPRING_DATASOURCE_USERNAME",
       "SPRING_DATASOURCE_PASSWORD",
+      "SPRING_FLYWAY_USER",
+      "SPRING_FLYWAY_PASSWORD",
     ])
     reference = toset([
-      "CARDDEMO_SERVER_TLS_CERTIFICATE",
-      "CARDDEMO_SERVER_TLS_PRIVATE_KEY",
       "SPRING_DATASOURCE_USERNAME",
       "SPRING_DATASOURCE_PASSWORD",
+      "SPRING_FLYWAY_USER",
+      "SPRING_FLYWAY_PASSWORD",
     ])
     # WHY : Refactoring Rationale: batch was listed as also requiring
     #       CARDDEMO_MASK_HMAC_KEY. Verified against the integrated tree: the keyed
@@ -554,17 +738,49 @@ locals {
     #       carddemo_migration.copybook.layouts, which runs in the data-migration
     #       image and still requires it below; no Java module reads it.
     batch = toset(["SPRING_DATASOURCE_USERNAME", "SPRING_DATASOURCE_PASSWORD"])
+    # WHY : Refactoring Rationale: authorization was listed without
+    #       CARDDEMO_MESSAGING_HMAC_KEY, and the omission was not cosmetic. The
+    #       service derives the pending-authorization queue's group identity through
+    #       that key; with no key supplied, the only per-card stable value it holds is
+    #       the card number, so the card number became the FIFO group identity and was
+    #       published as SQS message metadata on every reply -- outside the encrypted
+    #       body, into queue telemetry, and into every log that observes the queue.
+    #       Requiring the name here is what makes a deployment that forgets it fail at
+    #       plan rather than start and leak. authorization is the only Java service
+    #       listed, because it is the only producer this repository contains.
+    # WHY : Alternatives Considered: keying those identities with CARDDEMO_MASK_HMAC_KEY, the
+    #       extract-transform-load masking key, so that one shared secret serves every
+    #       tokeniser. Rejected on the holder rather than on the mechanism: that key is held
+    #       by a one-off migration workload which reads cardholder extracts, so keying
+    #       production queue metadata with it would let that workload compute the group
+    #       identity of any card's messages, and would couple the rotation of a migration
+    #       secret to a running queue's ordering guarantee. The property the shared key was
+    #       chosen for -- one value across every producer, so equal cards land in equal
+    #       groups -- holds of this dedicated key too, which both roots deliver as ONE secret
+    #       to every task of the service.
+    # WHY : Assumptions: the two listener-material names a parallel revision required here,
+    #       CARDDEMO_SERVER_TLS_CERTIFICATE and CARDDEMO_SERVER_TLS_PRIVATE_KEY, are
+    #       deliberately absent. config/docker/generate-listener-material.sh mints a key pair
+    #       and a self-signed certificate per task at start-up, so neither is a deployment
+    #       input, and requiring them would oblige a root to inject shared listener material
+    #       -- the state the per-task mint exists to remove.
     authorization = toset([
-      "CARDDEMO_SERVER_TLS_CERTIFICATE",
-      "CARDDEMO_SERVER_TLS_PRIVATE_KEY",
+      # WHY : Assumptions: authorization requires the same signing key account does,
+      #       because it is the signing half of the same symmetric pair. Its
+      #       config/InternalIdentityConfig.java reads it through a fallback-free
+      #       @Value, so a deployment without it fails at container start rather than
+      #       consuming authorizations it can never resolve an account context for.
+      "CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY",
+      "CARDDEMO_MESSAGING_HMAC_KEY",
+
       "SPRING_DATASOURCE_USERNAME",
       "SPRING_DATASOURCE_PASSWORD",
+      "SPRING_FLYWAY_USER",
+      "SPRING_FLYWAY_PASSWORD",
     ])
     reporting = toset([
       "SPRING_DATASOURCE_USERNAME",
       "SPRING_DATASOURCE_PASSWORD",
-      "CARDDEMO_SERVER_TLS_CERTIFICATE",
-      "CARDDEMO_SERVER_TLS_PRIVATE_KEY",
     ])
     data-migration = toset(["CARDDEMO_MASK_HMAC_KEY"])
   }
@@ -1340,8 +1556,39 @@ resource "aws_ecs_task_definition" "this" {
       #       the on-demand state machine it starts. Every clause is biconditional on
       #       purpose: a name reaching the wrong service is as much a defect as a name
       #       missing from the right one.
+      # WHY : Refactoring Rationale: clauses were added for the messaging HMAC key and
+      #       for the two account-context parameters, each biconditional for the same
+      #       reason as the original four. The messaging clause closes an omission whose
+      #       halves were both wrong at once: authorization did not receive the key it
+      #       needs to derive an opaque queue group identity, so it fell back to
+      #       publishing a primary account number as SQS metadata, and nothing stopped a
+      #       root handing that key to a service that produces no queue message. The
+      #       address clauses close a gap of the same shape: authorization received no
+      #       account-context address and crash-looped on the unresolvable placeholder,
+      #       while nothing stopped a root handing the address of a cardholder-data
+      #       dependency to a service that never calls it.
+      #       (This block replaces two overlapping notes that both described themselves
+      #       as adding "a fifth clause". They were written in separate passes and the
+      #       later one subsumed the earlier; leaving both left a reader counting six
+      #       clauses against two conflicting descriptions of which was fifth.)
+      # WHY : Assumptions: the internal-identity clause below is gated on THREE services
+      #       rather than on one, and the asymmetry is required rather than stylistic. The
+      #       value is a symmetric signing key: authorization and transaction each sign an
+      #       internal bearer token with it, and account verifies those tokens against it,
+      #       so all three must hold it. It is still biconditional -- any holder can mint a
+      #       token the account service accepts for its internal reads, so the clause
+      #       asserts that exactly these three receive it and that no other service does.
+      #       Assumptions: the account-context address clause names TWO services for the
+      #       same reason in the other direction: both callers bind the address with no
+      #       fallback, and a root handing the address of a cardholder-data dependency to a
+      #       service that never calls it is the widening the biconditional refuses.
       condition = (
         (var.service_name == "data-migration") == contains(keys(var.secret_arns), "CARDDEMO_MASK_HMAC_KEY") &&
+        (var.service_name == "authorization") == contains(keys(var.secret_arns), "CARDDEMO_MESSAGING_HMAC_KEY") &&
+        contains(["authorization", "account", "transaction"], var.service_name) == contains(keys(var.secret_arns), "CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY") &&
+        contains(["authorization", "transaction"], var.service_name) == contains(keys(var.ssm_parameter_arns), "CARDDEMO_ACCOUNT_CONTEXT_BASE_URL") &&
+        (var.service_name == "authorization") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_MESSAGING_REPLY_QUEUE_ALLOWLIST") &&
+
         (var.service_name == "reporting") == contains(keys(var.environment_variables), "CARDDEMO_TRUSTED_PROXY_PATTERN") &&
         (var.service_name == "reporting") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_REPORTING_S3_OUTPUT_BUCKET") &&
         (var.service_name == "auth") == contains(keys(var.secret_arns), "CARDDEMO_AUTH_COGNITO_CLIENT_SECRET")

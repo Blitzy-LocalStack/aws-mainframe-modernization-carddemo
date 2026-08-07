@@ -597,9 +597,12 @@ resource "aws_cloudformation_stack" "app_client" {
             #       ...` stays catalogued for traceability only, and unrelated
             #       provider failures keep `Unable to verify the User ...`. The lost
             #       discrimination between the two credential failures is a
-            #       behavioural divergence and is registered in
+            #       behavioural divergence and is registered as
+            #       D-SIGNON-EXISTENCE-UNIFORM in section 7.4 of
             #       docs/architecture/cobol-to-service-traceability.md rather than
-            #       passed off as parity.
+            #       passed off as parity. The identifier is cited rather than the
+            #       document alone, because a claim of registration that names
+            #       nothing cannot be checked by search.
             #       Alternatives Considered: exposing this as a module input so a
             #       root could select the baseline's distinguishable responses.
             #       Rejected because a reachable LEGACY value ports the defect: the

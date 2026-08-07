@@ -77,12 +77,13 @@
 #     enables the interactive view by default, and the base already pins both
 #     its path and the hand-authored contract it is to display:
 #     openapi/transaction-api.yaml, the document ui/src/api/transactions.ts is
-#     to be written against, and the thing the view exists to exercise the four
-#     screen flows of this context against. NEITHER of those two files exists
-#     at this checkpoint -- both are authored at later indexes of the same plan
-#     and the pinned url resolves to a 404 until the contract lands -- so this
-#     bullet records why no key is added rather than describing a document
-#     served today. Adding an `enabled` key would introduce a key the base does
+#     written against, and the thing the view exists to exercise the four
+#     screen flows of this context against. Refactoring Rationale: this bullet
+#     previously recorded that NEITHER file existed and that the pinned url
+#     resolved to a 404 until the contract landed. Both exist -- the contract in
+#     this module's resources and the client under ui/src/api -- and
+#     ui/src/api/contracts.test.ts holds the two in agreement, so the bullet now
+#     describes a document served today. Adding an `enabled` key would introduce a key the base does
 #     not carry, which is the one thing an overlay may not do. The asymmetry
 #     therefore sits on the other side -- `prod` is where the view is switched
 #     off -- so the two overlays read as a matched pair rather than as an
@@ -255,6 +256,15 @@ management:
         #       sharper reason: it is a WRITE endpoint, so a caller reaching it
         #       could raise the bind-parameter logger at run time and undo the
         #       decision this very file makes, leaving no edit to review.
+        #       (5) Refactoring Rationale: which CALLERS may read the two ids
+        #       added here is decided in SecurityConfig, and it was decided
+        #       wrongly while that chain matched the scrape endpoint alone:
+        #       flyway and threaddump fell to the business catch-all, so every
+        #       ordinary user of this context could read the ledger schema's
+        #       migration history and a full stack dump. SecurityConfig.OPERATOR_PATHS
+        #       now ends in /actuator/** and grants it by network position, so an
+        #       id added to THIS list is confined to the task-local addresses
+        #       without that file having to be edited alongside this one.
         include: health,prometheus,flyway,threaddump
   endpoint:
     health:

@@ -5,15 +5,16 @@
  * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
  *
  * <p>Assumptions: every type name, band inventory and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, and not the set of files
- * present beside this one today. The migration lands its artifacts in plan order and this
- * charter is authored first, so at the checkpoint that authored it this directory holds this
- * charter and nothing else. A type named below that has no file yet is therefore
- * <b>planned</b>, and not missing; a count below is a target total rather than a measurement
- * of the directory. The same reading applies to the shared-kernel types named further down: at
- * this checkpoint {@code com.carddemo.common.time.TimestampFormatter} is authored, while the
- * codec and money types are planned, so the seam described below is a contract to be honoured
- * and not an observation of compiled code.</p>
+ * package's <b>target contract</b> as the migration plan assigns it, and all seven types it
+ * governs have now landed beside it, so the contract and the directory agree. The shared-kernel
+ * types named further down are likewise all authored, so the seam described below is an
+ * observation of compiled code as well as a contract to be honoured.</p>
+ *
+ * <p>Refactoring Rationale: an earlier revision of this paragraph recorded that the directory
+ * held this charter and nothing else, and that a type named below with no file was planned
+ * rather than missing. That was accurate while it stood and is replaced rather than softened
+ * now that all seven exist, because a planned marker that outlives the files it describes reads
+ * as measured and would tell a reader auditing this package that a landed type was absent.</p>
  *
  * <p>Alternatives Considered: withholding this charter until the seven types it governs exist.
  * Rejected, because a package-level Javadoc is what the authors of those types work from --
@@ -443,9 +444,20 @@
  * statement in this file describes an edit to it. Two framings are used and no third: the
  * baseline does one thing, this module does another, and the difference is registered; or this
  * module encodes a stated rule. Where a difference exists it is entered in
- * {@code docs/architecture/cobol-to-service-traceability.md}, which owns that register, so
- * this package cites an entry and never defines one. No baseline field is renamed in this
- * package, and every emitted column is named from the field it carries at the width that field
- * declares.</p>
+ * {@code docs/architecture/cobol-to-service-traceability.md}, which owns that register. This
+ * package defines exactly one entry there, {@code D-STMT-HTML-ESCAPING}, and cites the
+ * rest. No baseline field is renamed in this package, and every emitted column is named from
+ * the field it carries at the width that field declares.</p>
+ *
+ * <h2>Assumptions: the two statement artifacts treat a markup character differently, on purpose</h2>
+ *
+ * <p>The one entry this package defines is the reason its two statement mappers are no longer
+ * symmetric. {@code StatementHtmlMapper} routes every value it embeds through
+ * {@code StatementHtmlMapper}'s own text-node escaping, because that artifact is opened by a browser
+ * where a value carrying a tag opens a tag; {@code StatementTextMapper} routes nothing through it,
+ * because that artifact is not markup and is the side a byte comparison against the recorded golden
+ * output runs on. A reader who found encoding in one mapper and not the other would reasonably suspect
+ * an oversight, so the asymmetry is stated here as well as at both sites: the plain-text file is the
+ * complete record, the markup file is the safe rendering of it, and neither is the other's draft.</p>
  */
 package com.carddemo.reporting.mapper;

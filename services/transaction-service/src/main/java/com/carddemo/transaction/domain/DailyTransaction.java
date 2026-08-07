@@ -459,8 +459,26 @@ public class DailyTransaction {
     //       JSON string, applied by com.carddemo.common.money.MoneyModule rather than by an
     //       annotation here, which costs every client an explicit parse and buys exactness at the
     //       one hop a user actually sees.
-    @Column(name = "amount", precision = 11, scale = Money.SCALE)
+    // WHY : Refactoring Rationale: NOT NULL, where an earlier revision of this mapping left the column
+    //       nullable. The picture declares no absent state, and neither normative zoned codec produces
+    //       one -- common-lib's ZonedDecimalCodec and the ETL's carddemo_migration.copybook.zoned both
+    //       refuse a numeric body that is blank or carries a non-digit -- so a blank amount field fails
+    //       the load rather than loading as null. The migration behind this mapping now asserts the same
+    //       constraint, which is the only place it reaches a row this type did not originate: the
+    //       provider materialises a stored row by field assignment and bypasses every guard here.
+    @Column(name = "amount", precision = 11, scale = Money.SCALE, nullable = false)
     private BigDecimal tranAmt;
+
+    /**
+     * Integer digit positions {@code DALYTRAN-AMT PIC S9(09)V99} declares, at
+     * {@code app/cpy/CVTRA06Y.cpy:10}.
+     *
+     * <p>Assumptions: nine, which is what makes the persisted column {@code NUMERIC(11,2)} rather than
+     * the {@code NUMERIC(12,2)} the widest reference money picture would need. It is named here because
+     * the mutator and the constructor bound against it, and a literal at those sites would be a width
+     * with no citation beside it.</p>
+     */
+    private static final int AMOUNT_INTEGER_DIGITS = 9;
 
     /**
      * The merchant that originated the transaction.
@@ -687,7 +705,7 @@ public class DailyTransaction {
         this.tranCatCd = tranCatCd;
         this.tranSource = tranSource;
         this.tranDesc = tranDesc;
-        this.tranAmt = tranAmt;
+        this.tranAmt = Money.ofPicture(tranAmt, AMOUNT_INTEGER_DIGITS).amount();
         this.merchantId = merchantId;
         this.merchantName = merchantName;
         this.merchantCity = merchantCity;
@@ -827,8 +845,8 @@ public class DailyTransaction {
     /**
      * Returns the transaction amount, exact at two decimal places.
      *
-     * @return the amount, positive or negative, at two decimal places, or {@code null} when the row
-     *     carries none
+     * @return the amount, positive or negative, at two decimal places, and never {@code null} on a
+     *     row this mapping's own {@code NOT NULL} column admits
      */
     public BigDecimal getTranAmt() {
         return this.tranAmt;
@@ -840,12 +858,26 @@ public class DailyTransaction {
      * <p>Assumptions: the caller supplies a value already reduced to the money scale, which is what
      * {@code com.carddemo.common.money.Money} produces. No rescaling is applied here, because
      * rounding a monetary value is a decision with an owner and this type is not it; silently
-     * rescaling would hide a decoder that had lost a fraction of a cent while reading the feed.
+     * rescaling would hide a decoder that had lost a fraction of a cent while reading the feed.</p>
      *
-     * @param tranAmt the amount to assign, exact at two decimal places
+     * <p>Refactoring Rationale: the argument is canonicalised through
+     * {@link Money#ofPicture(java.math.BigDecimal, int)} rather than assigned verbatim, which an
+     * earlier revision did. Money IS the owner the paragraph above names, and delegating to it is not
+     * the same as making the rounding decision here: what verbatim assignment actually admitted was a
+     * null into a column declared {@code NOT NULL}, a scale other than two that the driver would then
+     * coerce without telling anyone, and a ten-integer-digit magnitude that is legal for the widest
+     * reference money picture and illegal for this nine-digit one -- which reached
+     * {@code NUMERIC(11,2)} and raised a numeric-field-overflow at the database with no field name in
+     * it. All three are now refused at the assignment that introduced them.</p>
+     *
+     * @param tranAmt the amount to assign; must not be {@code null}, is reduced to two decimal places
+     *     under the general money contract, and must fit nine integer digits
+     * @throws NullPointerException if {@code tranAmt} is {@code null}
+     * @throws java.lang.ArithmeticException if the reduced magnitude needs more than nine integer
+     *     digits
      */
     public void setTranAmt(BigDecimal tranAmt) {
-        this.tranAmt = tranAmt;
+        this.tranAmt = Money.ofPicture(tranAmt, AMOUNT_INTEGER_DIGITS).amount();
     }
 
     /**

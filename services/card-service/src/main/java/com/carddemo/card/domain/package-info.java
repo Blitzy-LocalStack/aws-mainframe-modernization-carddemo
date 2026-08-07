@@ -1,18 +1,27 @@
 /**
  * Persistence mapping for the card bounded context: one JPA entity over the single table this
  * context owns, derived from a reference COBOL record through an anti-corruption boundary that
- * deliberately sits in a sibling package rather than here.
+ * deliberately sits in a sibling package rather than here, together with the one column type that
+ * cannot be a plain Java type -- the enciphered card verification value and the attribute converter
+ * that is its only route to and from the column.
  *
  * <h2>Target contract, and the tree state at the checkpoint that authored this charter</h2>
  *
- * <p>Assumptions: every type name and every count below describes this package's <b>target
- * contract</b> as the migration plan assigns it, and not the set of files sitting beside this
- * charter today. A package charter is authored ahead of the types it governs, so at the checkpoint
- * that authored this one the directory holds this file alone. The entity named throughout is
- * therefore <b>planned</b> rather than missing, and the same qualification carries to the sibling
- * packages named further down. The context root charter at {@code com.carddemo.card} draws the same
- * distinction for the same reason; this paragraph is the one place a reader of this file has to look
- * to tell a target from a measurement.</p>
+ * <p>Assumptions: every type name below describes this package's <b>target contract</b> as the
+ * migration plan assigns it. The directory now holds <b>four</b> compilation units -- this charter,
+ * {@code Card}, {@code EncryptedCvv} and {@code EncryptedCvvConverter} -- so the entity named
+ * throughout is present rather than planned, while the sibling <i>packages</i> named further down
+ * are still a mixture of authored and planned. The context root charter at
+ * {@code com.carddemo.card} draws the same distinction for the same reason; this paragraph is the
+ * one place a reader of this file has to look to tell a target from a measurement.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph previously stated that "at the checkpoint that authored
+ * this one the directory holds this file alone". That was already untrue when it was written --
+ * {@code Card} was tracked beside it -- and the arrival of the two encryption types made it more
+ * wrong rather than differently wrong. It is restated as a measurement of the directory
+ * ({@code ls} over this package) because a charter that understates its own inventory teaches the
+ * next author that the package is empty and that a new type needs no reconciliation against the
+ * closed-set rule stated below.</p>
  *
  * <p>Alternatives Considered: withholding this charter until the entity it governs exists. Rejected,
  * because the charter is what the author of that entity works from -- which physical column each
@@ -35,13 +44,31 @@
  *
  * <h2>The one entity, and the one table it maps</h2>
  *
- * <p>The inventory is a single entity, {@code Card}, mapping the single table {@code card.cards}.
- * That is worth a sentence of its own because the count is not the one a reader arrives with: the
- * account bounded context maps three tables inside its own domain package, so a reader coming from
- * there will look for company beside {@code Card} and find none. There is none to find. The
- * {@code card} schema owns exactly one table, this package maps exactly one entity onto it, and a
- * second entity appearing here would mean a second table had come into existence outside the
- * migration that is meant to create it.</p>
+ * <p>The inventory is a single <b>entity</b>, {@code Card}, mapping the single table
+ * {@code card.cards}. That is worth a sentence of its own because the count is not the one a reader
+ * arrives with: the account bounded context maps three tables inside its own domain package, so a
+ * reader coming from there will look for company beside {@code Card} and find none. There is none to
+ * find. The {@code card} schema owns exactly one table, this package maps exactly one entity onto
+ * it, and a second entity appearing here would mean a second table had come into existence outside
+ * the migration that is meant to create it.</p>
+ *
+ * <p>Assumptions: entity count and file count are different numbers here, and the difference is the
+ * rule rather than an exception to it. {@code EncryptedCvv} and {@code EncryptedCvvConverter} are
+ * neither entities nor tables: the first is an immutable value carrying the self-describing envelope
+ * the {@code cvv_encrypted} column holds, and the second is the {@code AttributeConverter} that is
+ * the single boundary between that value and the raw bytes the column stores. They live here, beside
+ * the entity, because the type of a column and the conversion into that type are mapping decisions
+ * -- which is exactly and only what this charter says a type here may decide -- and because the
+ * value type is what makes a plaintext verification value <b>inexpressible</b> as entity state
+ * rather than merely discouraged. Alternatives Considered: putting the pair in
+ * {@code com.carddemo.card.mapper} beside the other representation concerns. Rejected because the
+ * mapper package converts between a record shape and a served shape, and a JPA converter is
+ * consulted by the persistence provider rather than called by a mapper; a converter the entity
+ * declares but that lives outside the entity's package would also read as an optional collaborator
+ * when it is the only permitted route to the column. The cipher that produces an envelope is a
+ * different matter and does <b>not</b> live here: it holds a key identifier and calls a key service,
+ * so it sits in {@code com.carddemo.card.service}, and the import prohibitions below are what keep
+ * it out.</p>
  *
  * <p>Assumptions: the authoritative column list is the Flyway migration at
  * {@code services/card-service/src/main/resources/db/migration/V1__card.sql} and not this charter.
@@ -229,9 +256,11 @@
  * {@code app/csd/CARDDEMO.CSD:19} and {@code :21} for the alternate index and at {@code :31} and
  * {@code :33} for the base cluster; that is a property of a non-recoverable storage platform, which
  * has nowhere to keep ciphertext keys or an audit trail, rather than a shortcoming of the programs
- * written against it. The relational target stores an enciphered value in a byte column instead.
- * Both readings are accurate at the same time, and the difference between them is a platform
- * capability and not a correction.</p>
+ * written against it. The relational target stores an enciphered value in a byte column instead --
+ * an {@code EncryptedCvv} envelope, framed and validated in both directions by
+ * {@code EncryptedCvvConverter}, whose enciphered data key comes from a customer-managed key the
+ * platform provides and the baseline platform had no equivalent of. Both readings are accurate at
+ * the same time, and the difference between them is a platform capability and not a correction.</p>
  *
  * <p>Trade-offs: no golden-master oracle exists for the online paths this context serves. The card
  * screens cannot run end to end without a CICS runtime, as recorded at

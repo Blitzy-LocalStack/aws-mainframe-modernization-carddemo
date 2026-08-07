@@ -80,30 +80,34 @@
  * not duplicated here, and no import-control module is added to the ruleset, which omits one
  * deliberately so that the boundary keeps a single owner.
  *
- * <p><strong>Target contract, and the tree state at the checkpoint that authored this
- * section.</strong> Assumptions: every class name, package inventory and count in this
- * charter states the module's <b>target contract</b> as the migration plan assigns it, not
- * a measurement of the files present in this subtree. A type named here that has no file
- * yet is <b>planned</b>, not missing, and is authored at a later index of the same plan.
- * This is the single place a reader has to look to tell a target from a measurement.
+ * <p><strong>Delivered inventory.</strong> Assumptions: every class name and count in this
+ * charter is now a measurement of the files present in this subtree, and no name below is a
+ * forward assignment. The subtree holds <b>42</b> production classes and all <b>8</b> charter
+ * files, distributed as 3 in the root ({@code ReportingApplication}, {@code ReportingTask} and
+ * {@code ReportingTaskRunner}), 2 in {@code .api}, 5 in {@code .config}, 7 in {@code .domain},
+ * 10 in {@code .dto}, 7 in {@code .mapper}, 5 in {@code .repository} and 3 in
+ * {@code .service}. This is the single place a reader has to look for that figure; no other
+ * charter in the subtree restates it.
  *
- * <p>Measured when this section was written, the subtree holds <b>21</b> production classes
- * of a target <b>32</b>, and all <b>8</b> charter files. Landed is the data-and-format half:
- * {@code ReportingApplication}; {@code SecurityConfig}, {@code DataSourceConfig} and
- * {@code JwtDecoderConfig} in {@code .config}; four view projections in {@code .domain};
- * seven records in {@code .dto}; and six classes in {@code .mapper}. Planned and not yet
- * authored are the eleven behavioural types: both controllers in {@code .api}
- * ({@code ReportController} and {@code StatementController}), all three services in
- * {@code .service} ({@code TransactionReportService}, {@code StatementService} and
- * {@code ReportExecutionService}), the four repository roles in {@code .repository},
- * {@code StatementHtmlMapper} in {@code .mapper}, and {@code OpenApiConfig} and
- * {@code StepFunctionsConfig} in {@code .config}.
+ * <p>Refactoring Rationale: an earlier revision of this section recorded 21 landed classes of a
+ * target 32 and listed eleven behavioural types as planned and not yet authored. All eleven have
+ * since landed and the delivered figure is 42 rather than 32, so the section is replaced rather
+ * than adjusted. Two reasons account for the ten-class difference and neither is scope creep.
+ * Three of them are transport aggregates in {@code .dto} -- {@code ReportSubmissionOutcome},
+ * {@code TransactionDetailReport} and {@code StatementDocument} -- each existing because one
+ * published operation returns two populations or a discriminated outcome that no single
+ * pre-existing record could carry; a body claiming a submission while carrying no run handle
+ * would otherwise have been read differently by two conforming clients. The other three are
+ * view projections in {@code .domain} -- {@code AccountView}, {@code CustomerView} and
+ * {@code CardXrefView} -- which the statement path reads and which the domain charter had
+ * always named, so they close a stated roster rather than extending one. The remaining
+ * difference is a fifth repository role, {@code TransactionReportRepository}, carrying the
+ * four-way join the detail report needs.
  *
- * <p>Trade-offs: naming the split costs this charter its brevity and ties it to the moment
- * it was measured. It is worth that because the package list below reads as an inventory,
- * and an inventory a reader cannot verify is worse than no inventory: the first name that
- * turns out to be absent makes every other name in the document a question. Stating which
- * eleven are outstanding keeps the remaining twenty-one readable as facts.
+ * <p>Trade-offs: stating a measured count at all ties this charter to the moment it was
+ * measured, and a later class added without updating it would make it wrong. That cost is
+ * accepted because an inventory a reader cannot verify is worse than no inventory: the first
+ * name that fails to resolve teaches the reader to distrust every other name in the list.
  *
  * <p><strong>Charter of the eight packages in this context.</strong>
  * <ul>
@@ -141,7 +145,16 @@
  * {@code carddemo_reporting_owner} rather than by this context's own login role -- a home for the
  * read-only cross-schema views this context reads through, and the reason the
  * eight-schema post-state is literally true rather than seven-plus-a-footnote. Owning no
- * TABLE, not owning no schema, is what makes this context a pure consumer. Every schema
+ * TABLE, not owning no schema, is what makes this context a pure consumer.
+ *
+ * <p>Assumptions: "created empty" describes {@code V0} and is not a claim about the schema's
+ * final contents. {@code data-migration/sql/V1__reporting_views.sql} later adds the seven views
+ * AND one table, {@code card_grouping_key}, which holds the secret that keeps the per-card
+ * statement grouping token non-invertible; that script assigns the table to the no-login owner
+ * and revokes it from this context's login, so this context still owns no table and still cannot
+ * read the one that exists. The distinction is drawn here because the shorter reading -- that the
+ * schema is empty of tables -- would make that revoke look like dead code. The ownership
+ * authority is {@code docs/architecture/data-model-and-schema-mapping.md}. Every schema
  * holding data it reads belongs to another context: {@code auth} to auth-service; {@code account}, holding
  * {@code accounts}, {@code customers} and {@code card_xref} with
  * {@code idx_card_xref_account_id}, to account-service; {@code card}, holding {@code cards}
@@ -161,9 +174,25 @@
  * by that file, and the reason is sequencing rather than omission -- a view over
  * {@code ledger.transactions} cannot precede that table, and no table exists at the point
  * that file runs. They belong to a data-migration step ordered after the per-service
- * migrations, and neither those views nor most of those migrations exist at this
- * checkpoint. A view absent at runtime is a defect to report against data-migration, never
- * to work around from here. Agreement with the other contexts therefore runs through
+ * migrations, which is {@code data-migration/sql/V1__reporting_views.sql}: it creates the
+ * seven views this context reads, {@code v_report_transactions},
+ * {@code v_statement_transactions}, {@code v_transaction_types},
+ * {@code v_transaction_categories}, {@code v_accounts}, {@code v_customers} and
+ * {@code v_card_xref}. A view absent at runtime is a defect to report against
+ * data-migration, never to work around from here.
+ *
+ * <p>Refactoring Rationale: the paragraph above previously ended by recording that "neither
+ * those views nor most of those migrations exist at this checkpoint". Both halves are now
+ * false and both were checkable when written down, which is why the sentence is replaced by
+ * the file name rather than merely deleted: {@code V1__reporting_views.sql} declares all
+ * seven views, and every one of the seven per-service migrations it depends on is present --
+ * {@code V1__account.sql}, {@code V1__auth.sql}, {@code V1__authorization.sql},
+ * {@code V1__batch.sql}, {@code V1__card.sql}, {@code V1__reference.sql} with its
+ * {@code V2__seed_reference.sql} companion, and {@code V1__ledger.sql}. A charter recording
+ * a dependency as absent when it is present is worse than one recording nothing: it invites
+ * the reader to treat a working path as unavailable and to route around it.
+ *
+ * <p>Agreement with the other contexts runs through
  * the physical views and that grant, never through code: no module in this reactor declares
  * a Maven dependency on another service module, and the only intra-reactor dependency
  * permitted is the shared kernel.
@@ -176,6 +205,18 @@
  * {@code Dockerfile} and {@code README.md}; everything under {@code src/main/resources},
  * the profile configuration and {@code openapi/reporting-api.yaml} included; and the whole
  * {@code src/test} tree.
+ *
+ * <p>Refactoring Rationale: {@code openapi/reporting-api.yaml} is named in that list because
+ * it exists, and it did not when the list was written. Three files in this module -- this
+ * charter, {@code pom.xml} and {@code config/OpenApiConfig.java} -- each asserted it, so the
+ * absence was recorded three times as a presence; the repair is the file rather than three
+ * retractions. It declares five operations, all beneath {@code /api/v1/reports}, which is the
+ * prefix {@code infra/envs/&#123;dev,prod&#125;/main.tf} forwards to this workload at priority
+ * 70 and {@code infra/modules/api-gateway-http/variables.tf} publishes at the edge. What keeps
+ * the three claims true from here on is
+ * {@code src/test/java/com/carddemo/reporting/api/ReportingApiContractTest.java}, which fails
+ * the build if that document is absent, unparseable, routed outside that prefix, or disagreeing
+ * with the metadata bean about the contract's identity.
  *
  * <p><strong>Owned contract: the 133-column transaction report.</strong>
  * {@code app/cpy/CVTRA07Y.cpy} is normative and declares seven {@code 01}-levels, at L4,

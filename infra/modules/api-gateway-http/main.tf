@@ -37,10 +37,19 @@
 #   Seven of the eight migrated services are published here -- auth, accounts,
 #   cards, transactions, reference, authorizations and reports. Two of the seven
 #   own a second top-level path segment because their contracts publish one:
-#   auth-service serves user administration at `/api/v1/users`, and
-#   transaction-service serves bill payment at `/api/v1/billpay`. The eighth
-#   service, batch-service, is reached only by the Step Functions synchronous
-#   run-task call and is deliberately absent from the route table:
+#   card-service serves its administrative card-detail read at
+#   `/api/v1/admin/cards/{cardNumber}`, and transaction-service serves bill
+#   payment at `/api/v1/billpay`. Auth-service is not one of the two -- its five
+#   user-administration operations are a subtree of its own prefix, at
+#   `/api/v1/auth/users` and `/api/v1/auth/users/{userId}`, so the greedy
+#   `/api/v1/auth/{proxy+}` key already reaches them. Refactoring Rationale: this
+#   paragraph formerly named auth-service and placed user administration at a
+#   top-level `/api/v1/users`; that pair of route keys was withdrawn and the
+#   `/api/v1/admin/cards` pair added by the same correction, which is recorded
+#   against `var.route_keys` in variables.tf.
+#
+#   The eighth service, batch-service, is reached only by the Step Functions
+#   synchronous run-task call and is deliberately absent from the route table:
 #   `var.route_keys` carries a validation that rejects any `/batch` route
 #   outright, and `var.public_route_keys` admits no prefix other than `/auth` at
 #   all.
@@ -205,13 +214,23 @@ locals {
   #       been REMOVED, and the removal is the point rather than a tidy-up. The
   #       field carried the RESOLVED request path, and in this system a resolved
   #       path is personal data: AAP 0.7.1 replaces the CICS COMMAREA's
-  #       selection context with REST path parameters, so `/cards/{cardNum}`
-  #       resolves to a path containing a full primary account number and
-  #       `/accounts/{acctId}` to one containing an account id. Writing that
-  #       into a durable log is CWE-532, and it defeats the masking the services
-  #       perform at the one point every single request passes through -- the
-  #       access log would become the least protected copy of the very
-  #       identifiers the services work hardest to mask. `routeKey` is retained
+  #       selection context with REST path parameters, so `/accounts/{acctId}`
+  #       resolves to a path containing an account id, and `/users/{userId}` to
+  #       one containing a user id. Writing that into a durable log is CWE-532,
+  #       and it defeats the masking the services perform at the one point every
+  #       single request passes through -- the access log would become the least
+  #       protected copy of the very identifiers the services work hardest to
+  #       mask.
+  #       Refactoring Rationale: this note also cited `/cards/{cardNum}` as
+  #       resolving to a full primary account number, and it no longer does:
+  #       card-service's single-card paths are keyed by an opaque sealed
+  #       selector, because a request line reaches the load balancer's mandatory
+  #       access log before any application code runs and the workload cannot
+  #       redact a record it does not write. The citation is corrected rather
+  #       than the field reinstated -- the remaining identifiers are reason
+  #       enough on their own, and a field this module cannot transform is not
+  #       worth re-earning each time one contract narrows what it exposes.
+  #       `routeKey` is retained
   #       in its place: it is the route TEMPLATE (`ANY /cards/{proxy+}`), which
   #       is a constant drawn from `var.route_keys` and cannot vary with the
   #       caller's data, so it answers "which surface was called" without

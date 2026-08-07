@@ -23,6 +23,28 @@
  * step outside them, the three distinct days that would collapse under a normalisation, and the two
  * unacceptable-name forms that a check written for only one of them would let through.</p>
  *
+ * <p>It also asserts the paging arithmetic the eighteen-row page corpus exists for, which is the one
+ * property of these fixtures that is not a property of a single record: the page size read from this
+ * module's published contract, the three pages of seven, seven and four, both interior boundaries
+ * traversed forward and backward, the read of one row beyond each full page whose surplus row is
+ * reported and discarded, and the trailing token naming the last row the caller received rather than
+ * that surplus row. Refactoring Rationale: the corpus previously received only an ordering and a size
+ * assertion, and the rationale beside them named a page of ten -- the transaction list's size, from a
+ * different screen in a different module. Both authorities for this screen say seven, at
+ * {@code app/cbl/COCRDLIC.cbl} lines 177 and 178 and at {@code maxItems: 7} on {@code CardPage.items}
+ * in {@code openapi/card-api.yaml}, and the size is now read from the contract so that no number in
+ * this package can disagree with the one the service publishes.</p>
+ *
+ * <p>Trade-offs: the envelope and its cursors are the production
+ * {@code com.carddemo.common.web.PageResponse} and {@code CursorToken}, but the store they page over is
+ * the ordered corpus rather than a query. Under {@code src/main/java/com/carddemo/card} the {@code api},
+ * {@code service}, {@code repository} and {@code mapper} packages hold a {@code package-info.java} and
+ * nothing else, so there is no list repository to query and no list service to call. Waiting for them
+ * would leave the corpus ungated in the meantime; substituting a repository double this package also
+ * wrote would assert a page shape against its own author. Paging the shipped envelope types over the
+ * shipped page size is the part of the contract that can be gated now, and it is the part a wrong page
+ * size actually breaks.</p>
+ *
  * <p>Trade-offs: it does not assert that the service rejects what these fixtures are named for. That
  * needs the validation and mapping classes, and asserting it here against a hand-rolled stand-in would
  * produce a test passing against a fiction. What is asserted instead is that the bytes those eventual

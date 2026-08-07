@@ -36,29 +36,36 @@ import org.springframework.security.web.access.intercept.RequestAuthorizationCon
  *
  * <p>Assumptions: the baseline performs no transaction-level authorization of its own, which is what
  * makes the signed claim a change of mechanism rather than a tightening of policy. All four transactions
- * of this context are defined with resource-level and command-level security switched off:
- * {@code app/csd/CARDDEMO.CSD} carries {@code RESSEC(NO) CMDSEC(NO)} at line 426 for the transaction
- * whose program is named at line 420, at line 436 for the one named at line 430, at line 446 for the one
- * named at line 440, and at line 344 for the bill-payment transaction named at line 338. With the
- * monitor's own two checks off, the user-type byte in that echoed structure is the entire access control
- * the baseline applies to these four paths. The Java reaches the same admit-or-refuse outcome from a
- * claim the caller cannot author, and the divergence is documented.</p>
+ * of this context are defined with resource-level and command-level security switched off --
+ * {@code app/csd/CARDDEMO.CSD} carries {@code RESSEC(NO) CMDSEC(NO)} at lines 426, 436, 446 and 344 --
+ * so the user-type byte in that echoed structure is the entire access control the baseline applies to
+ * these four paths. The Java reaches the same admit-or-refuse outcome from a claim the caller cannot
+ * author, and the divergence is documented.</p>
  *
- * <p>Assumptions: this class has the same three responsibilities in every context of this repository --
- * a filter chain, the group-to-authority conversion, and the decoder that installs the token checks the
- * issuer alone does not make. It reads the same five property keys in every context, so the eight chains
- * cannot diverge in what they accept, and the shared classes it composes live in {@code common-lib}
- * rather than being restated per service. Only the route table below is specific to this context.</p>
+ * <p>Assumptions: no route here is administrator-only, business or otherwise, and that is a preserved
+ * property rather than an oversight. The baseline reaches transaction list, view, add and bill payment
+ * from the MAIN menu, {@code app/cbl/COMEN01C.cbl}, so all four are ordinary-user capabilities. The
+ * chain below therefore grants exactly three things: the health group is public, the metric scrape path
+ * is granted by NETWORK POSITION rather than by authority, and every other request -- including any
+ * remaining {@code /actuator} path -- falls to the business catch-all. What this context does tighten
+ * is the TOKEN it accepts, for a specific reason: these are the operations whose misuse moves money, so
+ * a request admitted on an identity token would post against a real account.</p>
  *
- * <p>Refactoring Rationale: an earlier revision of this repository declared those five keys in each
- * service's configuration and read none of them. The values were therefore documentation of an intent
- * rather than a control: a resource server configured with an issuer location alone validates the
- * signature, the issuer and the time window, and the identity token this provider mints from the same
- * signing key satisfies all three. This class is where the declared keys became effective.</p>
+ * <p>Alternatives Considered: registering the shared correlation filter here, ordered before the
+ * authentication filter. Rejected because the ordering it would buy is already held --
+ * {@code common-lib} auto-configures one {@code CorrelationIdFilter} at
+ * {@code Ordered.HIGHEST_PRECEDENCE + 1}, ahead of the servlet position the whole security chain
+ * occupies -- and because a second registration is not idempotent by construction: the kernel guards its
+ * own registration on the NAME of its registration bean, so a differently named bean here would not
+ * suppress it. The position matters specifically because a request refused with 401 or 403 never reaches
+ * a controller, so ordering the filter first is what makes an authentication refusal correlatable at
+ * all.</p>
  *
  * <p>Assumptions: no BUSINESS route here is administrator-only, and that is a preserved property rather
- * than an oversight -- the management namespace at {@link #MANAGEMENT_PATH} is administrator-only, and it
- * answers no business question. The baseline reaches transaction list, view, add and bill payment from
+ * than an oversight -- the management namespace at {@link #MANAGEMENT_PATH} answers no business question,
+ * and the one endpoint this module publishes inside it is granted by NETWORK POSITION rather than by any
+ * authority, for the reason recorded on {@link #METRIC_SCRAPE_PATH}. The baseline reaches transaction
+ * list, view, add and bill payment from
  * the MAIN menu,
  * {@code app/cbl/COMEN01C.cbl}, so all four are ordinary-user capabilities today. What this context
  * does tighten is the TOKEN it accepts, and it tightens it for a specific reason: these are the
@@ -104,22 +111,46 @@ import org.springframework.security.web.access.intercept.RequestAuthorizationCon
  * layer, at the point that owns the call, rather than as a context-wide bean here.</p>
  *
  * <p>Assumptions: the data source and the connection pool are declared by the sibling
- * {@code DataSourceConfig}, and the API document metadata, the money codec registration and the error
- * advice by {@code OpenApiConfig}. This file owns the chain, the group-to-authority conversion and the
- * decoder, and nothing else, so the four files of this package do not overlap and a reader looking for
- * one of those beans has exactly one place to look.</p>
+ * {@code DataSourceConfig} and the API document metadata by the sibling {@code OpenApiConfig}, while the
+ * money codec module and the error advice are contributed by the SHARED KERNEL rather than by anything in
+ * this package: {@code com.carddemo.common.CardDemoCommonAutoConfiguration} registers both as beans, so
+ * every context gets one identical registration and no module can drift into a second. Attributing them
+ * to {@code OpenApiConfig} would send a reader looking for the money serialisation rule to the file that
+ * describes the document instead of the file that installs the rule. This file owns the chain, the
+ * group-to-authority conversion and the decoder, and nothing else, so the four files of this package do
+ * not overlap and a reader looking for one of those beans has exactly one place to look.</p>
  *
  * <h2>Assumptions: the two starters this class needs are not inherited</h2>
  *
  * <p>{@code common-lib} marks four starters {@code optional} -- web, validation, security and
- * oauth2-resource-server -- so none of them reaches this module transitively, and
- * {@code services/transaction-service/pom.xml} re-declares all four. This class needs two of them:
- * without the security starter the chain builder and the session policy are missing, and without the
- * resource-server starter the decoder, the converter and the validators are. The failure mode of
- * dropping either is worth stating because it is asymmetric: the module still COMPILES, because
- * compilation of this file only needs the types the declared dependencies already supply, and the
- * absence surfaces as a {@code NoClassDefFoundError} when the application context starts. A dependency
- * removed as unused would therefore pass the build that was meant to catch it.</p>
+ * oauth2-resource-server -- and an optional dependency is not transitive, so none of them reaches this
+ * module through the shared kernel and {@code services/transaction-service/pom.xml} re-declares all
+ * four. The two this class consumes are not, however, interchangeable, and the difference is a
+ * property of the published dependency graph rather than a matter of style: the
+ * {@code spring-boot-starter-oauth2-resource-server} pom declares
+ * {@code spring-boot-starter-security} as a direct dependency of its own, so the resource-server
+ * declaration alone would place both on this module's compile path.</p>
+ *
+ * <p>Trade-offs: the direct {@code spring-boot-starter-security} declaration is therefore redundant
+ * against that graph, and it is kept deliberately. What it buys is that the two capabilities this file
+ * uses are each stated where a reader of the module's own pom can see them, rather than one of them
+ * being a fact about a third party's pom that this module does not control; what it costs is one
+ * declaration that a dependency analyser will report as removable. The analyser is right about the
+ * mechanics and the declaration stays for the explicitness.</p>
+ *
+ * <p>Assumptions: the failure modes of removing each are asymmetric, and stating them concretely is
+ * what keeps the redundancy above from being read as an oversight. Removing the
+ * <b>resource-server</b> starter withdraws the artifact carrying
+ * {@code org.springframework.security.oauth2.jwt} and
+ * {@code org.springframework.security.oauth2.server.resource.authentication}, both of which this file
+ * imports by name for its decoder, its validator delegation and its authentication converter, so the
+ * module fails to <b>COMPILE</b> and the build stops at this file. Removing the redundant direct
+ * <b>security</b> declaration changes nothing observable at all, because the resource-server starter
+ * still brings the same artifact in transitively -- the chain builder, the session policy and the
+ * authorization managers all remain resolvable. Neither removal produces a
+ * {@code NoClassDefFoundError} at context start: that failure shape needs a type present at compile
+ * time and absent at run time, which is what a {@code provided} scope or a shaded runtime image can
+ * produce and what a removed compile-scoped starter cannot.</p>
  *
  * @see CognitoAccessTokenValidator
  */
@@ -134,9 +165,15 @@ public class SecurityConfig {
      * stack presenting either address family satisfies the rule and neither has to be guessed at
      * configuration time.</p>
      *
+     * <p>Refactoring Rationale: this method is VISIBLE rather than private, for the same reason
+     * {@link #businessAccess()} is: {@code SecurityConfigTest} applies the decision object this chain
+     * installs instead of assembling an equivalent one from {@link #LOOPBACK_RANGES}. A test that
+     * rebuilt the manager would agree with itself while the installed rule widened, and the rule this
+     * one replaced widened in exactly that way without any test noticing.</p>
+     *
      * @return a manager granting access from any address in {@link #LOOPBACK_RANGES}; never {@code null}
      */
-    private static AuthorizationManager<RequestAuthorizationContext> loopbackOnly() {
+    public static AuthorizationManager<RequestAuthorizationContext> loopbackOnly() {
         @SuppressWarnings("unchecked")
         AuthorizationManager<RequestAuthorizationContext>[] byRange = LOOPBACK_RANGES.stream()
                 .map(IpAddressAuthorizationManager::hasIpAddress)
@@ -161,18 +198,36 @@ public class SecurityConfig {
     public static final String HEALTH_PATH = "/actuator/health/**";
 
     /**
-     * The management namespace, which is reachable only by an operator.
+     * The management namespace, reachable only from inside the task.
      *
-     * <p>Assumptions: this pattern is declared AFTER {@link #HEALTH_PATH} in the rule set below, so the
-     * health group keeps its own more specific rule and stays open. Everything else this service exposes
-     * under {@code /actuator} -- {@code prometheus}, per the {@code management} block of {@code application.yml}
-     * -- describes the deployment rather than answering a business question, so it belongs to the operator
-     * rather than to every holder of a valid token.</p>
+     * <p>Assumptions: this pattern is the last entry of {@link #OPERATOR_PATHS} and is therefore
+     * MATCHED by the chain, granted by network position alongside the scrape endpoint named
+     * individually below. It is matched after {@link #HEALTH_PATH}, so the more specific health pattern
+     * keeps its own permit and the uncredentialed probes still reach it; everything else under
+     * {@code /actuator} describes the deployment rather than answering a business question, so it
+     * belongs to whoever is inside the container rather than to every holder of a business authority.</p>
      *
-     * <p>Assumptions: this constant NAMES the namespace and no rule below grants the namespace as a
-     * whole. The endpoints the module actually publishes are each named and granted by network
-     * position; what remains under this pattern reaches no handler, so it is left to the catch-all
-     * rather than given a rule that would only ever answer for a path that does not exist.</p>
+     * <p>Refactoring Rationale: this constant previously existed and was matched by NOTHING. Its own
+     * documentation said so -- "no rule below grants the namespace as a whole" -- on the reasoning that
+     * whatever the namespace covered beyond the scrape endpoint "reaches no handler", so leaving it to
+     * the catch-all cost nothing. That reasoning was wrong on a matter of fact:
+     * {@code application-dev.yml} publishes {@code flyway} and {@code threaddump} beyond the base list,
+     * both of which DO reach a handler, and both were therefore authorized by the catch-all -- which
+     * admits either business group, so every ordinary user of this context could read the migration
+     * history of the ledger schema and a full stack dump of the running task.</p>
+     *
+     * <p>Assumptions: matching the NAMESPACE rather than enumerating those two ids is deliberate, and it
+     * is what makes the rule survive a profile it was not written against. The exposure list is a
+     * per-profile property that REPLACES rather than extends the inherited one, so an id can be added in
+     * one file without this one being edited; a namespace rule authorizes whatever that file adds, while
+     * a list of ids would silently omit it.</p>
+     *
+     * <p>Alternatives Considered: refusing the namespace outright with {@code denyAll()} instead of
+     * granting it to the loopback address. Rejected because it would make the dev profile's own exposure
+     * list unreadable by anything, including an operator with a shell inside the task, which is the only
+     * consumer those two ids have -- publishing an endpoint and then denying every possible caller
+     * states two contradictory intentions in two files. The loopback grant refuses every caller off the
+     * box, which is the property the finding asked for.</p>
      */
     public static final String MANAGEMENT_PATH = "/actuator/**";
 
@@ -188,6 +243,22 @@ public class SecurityConfig {
     public static final String METRIC_SCRAPE_PATH = "/actuator/prometheus";
 
     /**
+     * The paths granted by network position, in the order the chain applies them.
+     *
+     * <p>Assumptions: the chain is BUILT from this list rather than the list describing the chain, so a
+     * test can assert that the management namespace is covered and the assertion cannot pass while the
+     * chain omits it. The defect this list closes was a constant naming the namespace with no rule
+     * matching it, which is precisely a statement no test could hold to account.</p>
+     *
+     * <p>Assumptions: the scrape endpoint is retained ahead of the namespace even though both share one
+     * decision, so that the one endpoint this module's base exposure list publishes beyond health is
+     * readable here as a name instead of having to be inferred from a wildcard. The namespace entry is
+     * last because it is the backstop for whatever a profile adds, not the statement of what the base
+     * publishes.</p>
+     */
+    private static final List<String> OPERATOR_PATHS = List.of(METRIC_SCRAPE_PATH, MANAGEMENT_PATH);
+
+    /**
      * The loopback addresses the task-local collector can reach this service from.
      *
      * <p>Assumptions: the only configured consumer of the endpoints above is TASK-LOCAL. The
@@ -195,24 +266,6 @@ public class SecurityConfig {
      * {@code metrics_path: /actuator/prometheus} every sixty seconds --
      * {@code infra/modules/ecs-service/main.tf} -- and that scrape configuration carries no
      * authorization header at all, so it can present no token.</p>
-     *
-     * <p>Refactoring Rationale: an earlier revision covered the whole {@link #MANAGEMENT_PATH}
-     * namespace with one rule requiring the administrator authority, on the ground that a metrics
-     * scraper should present an operator token. It was corrected because the configured scraper
-     * sends no header: that rule would not have narrowed who may read metrics, it would have stopped
-     * the only consumer that exists, and silently, since a failed scrape is not a failed request
-     * anybody sees. The alternative is recorded rather than dropped because the instinct behind it
-     * was right -- before either revision this namespace was authorized by the catch-all alone.</p>
-     *
-     * <p>Trade-offs: a range rather than an authority is what grants telemetry, so this one rule
-     * cannot be audited from a token. Both alternatives are worse: requiring a token breaks the only
-     * consumer that exists, and admitting any authenticated principal grants these endpoints to every
-     * token the identity provider will issue, including one carrying no CardDemo group at all.</p>
-     *
-     * <p>Assumptions: both address families are listed because the address a container resolves
-     * loopback to is a property of its network stack. IPv4 is what Fargate presents under
-     * {@code awsvpc}; the IPv6 form is included so a stack presenting {@code ::1} does not silently
-     * lose its metrics.</p>
      */
     private static final List<String> LOOPBACK_RANGES = List.of("127.0.0.1/32", "::1/128");
 
@@ -223,14 +276,19 @@ public class SecurityConfig {
      * -- {@code SEC-USR-TYPE} at {@code app/cpy/CSUSR01Y.cpy} line 22 admits exactly two values and an
      * administrator reached the ordinary screens through the same menu graph -- so this is not a
      * privilege-escalating shortcut but the two-value domain the baseline already had.</p>
-     *
-     * <p>Refactoring Rationale: the pair is a named constant rather than two literals inside the chain
-     * below, so the accompanying test can assert on the SAME list the chain enforces. Restating the pair
-     * in the test would let the two drift and the test would keep passing while the rule narrowed to one
-     * authority or widened to a third.</p>
      */
     public static final List<String> BUSINESS_AUTHORITIES =
             List.of(JwtRoleConverter.ADMIN_AUTHORITY, JwtRoleConverter.USER_AUTHORITY);
+
+    /**
+     * Returns the paths this context grants by network position, in the order the chain applies them.
+     *
+     * @return the ordered operator paths, the last of which is the management namespace; never
+     *     {@code null} and immutable
+     */
+    public static List<String> operatorPaths() {
+        return OPERATOR_PATHS;
+    }
 
     /**
      * The authorization decision the catch-all rule installs, exposed so a test can exercise the object
@@ -243,11 +301,6 @@ public class SecurityConfig {
      * can be asserted: a test can invoke this manager directly, whereas a rule expressed only inside the
      * builder lambda is reachable only by standing up a servlet context and issuing a request.</p>
      *
-     * <p>Trade-offs: {@code access(businessAccess())} reads less immediately than
-     * {@code hasAnyAuthority(ADMIN, USER)} would. The cost is one indirection for a reader; the gain is
-     * that the catch-all -- the rule every route not named above depends on -- is covered by a unit test
-     * that needs no container, which is what stops it silently reverting to a weaker condition.</p>
-     *
      * @return the manager that grants only a principal holding one of {@link #BUSINESS_AUTHORITIES},
      *     never {@code null}
      */
@@ -258,31 +311,6 @@ public class SecurityConfig {
 
     /**
      * Builds the filter chain.
-     *
-     * <p>Assumptions: sessions are STATELESS, and the baseline corroborates that this is the faithful
-     * mapping rather than a convenience. Every transaction of this context is defined with a zero
-     * transaction work area -- {@code TWASIZE(0)} in {@code app/csd/CARDDEMO.CSD} at line 420, line 430,
-     * line 440 and line 338 -- so the structure the client echoes was the only per-conversation storage
-     * these transactions had, and there is no second server-side store to reproduce. The migrated form
-     * carries identity in the token and selection context in the request path, so nothing remains for a
-     * session to hold. Permitting one would reintroduce the sticky routing that horizontal scaling
-     * exists to avoid.</p>
-     *
-     * <p>Trade-offs: cross-site request forgery protection is disabled, which for a cookie-authenticated
-     * application would be a defect. It is not one here: every request authenticates with a bearer token
-     * that a browser does not attach automatically, so the confused-deputy condition the protection
-     * defends against cannot arise. Leaving it enabled would reject every non-browser client --
-     * including the load balancer -- for no gain.</p>
-     *
-     * <p>Assumptions: the catch-all requires one of the two GROUP authorities rather than merely
-     * requiring authentication. Those are not the same condition. {@link JwtRoleConverter} grants an
-     * EMPTY authority set for a token whose {@code cognito:groups} claim is absent, is not a collection,
-     * holds a non-textual entry, or names only groups this application does not recognise -- and every
-     * one of those tokens is still fully authenticated, because it carries a valid signature from the
-     * configured pool. A rule of {@code authenticated()} therefore admitted a principal that had been
-     * granted nothing, which is the missing-authorization defect the baseline does not have: the session
-     * structure at {@code app/cpy/COCOM01Y.cpy} lines 19 to 44 always carries one of exactly two user
-     * types, so no reachable baseline state corresponds to a signed-on user belonging to neither.</p>
      *
      * <p>Alternatives Considered: leaving the catch-all as {@code authenticated()} and adding an explicit
      * rule per published path, which is the shape the auth and card contexts use because each of those
@@ -296,6 +324,19 @@ public class SecurityConfig {
      * already hold a validly signed token for this pool and reveals nothing about which paths exist,
      * which is a smaller cost than admitting an unauthorized principal to every published route.</p>
      *
+     * <p>Assumptions: the management namespace is matched by {@link #operatorPaths()} ABOVE the
+     * catch-all, so a diagnostic endpoint a profile publishes is authorized by network position rather
+     * than inheriting the business grant. That ordering is the whole of the difference: the rule set is
+     * otherwise unchanged, and no business route's authority moves.</p>
+     *
+     * <p>Alternatives Considered: ending this chain with {@code denyAll()} as the auth and card contexts
+     * do. Rejected outright HERE, and the reason is structural rather than a difference of appetite:
+     * those chains enumerate every published path in a rule table, so their catch-all governs only
+     * unpublished paths, whereas this chain publishes no such table and authorizes all four business
+     * operations from the catch-all itself. Denying there would refuse transaction list, view, add and
+     * bill payment to every caller. The exposure that made denyAll attractive was the management
+     * namespace, and the operator rule removes it without touching a business route.</p>
+     *
      * @param http the chain builder; must not be {@code null}
      * @param authenticationConverter the token-to-authentication translation; must not be {@code null}
      * @param clock the clock the rendered refusal bodies read their failure instant from; must not be
@@ -307,46 +348,61 @@ public class SecurityConfig {
     public SecurityFilterChain filterChain(HttpSecurity http,
             JwtAuthenticationConverter authenticationConverter, Clock clock) throws Exception {
         return http
-                // WHY : Trade-offs: no credential reaching this service travels in a cookie. Every
-                //       request authenticates with a bearer token that a browser does not attach on its
-                //       own, so the confused-deputy condition this protection defends against cannot
-                //       arise here, while leaving it enabled would refuse every non-idempotent call the
-                //       browser client makes.
+                // Trade-offs: no credential reaching this service travels in a cookie. Every
+                //     request authenticates with a bearer token that a browser does not attach on its
+                //     own, so the confused-deputy condition this protection defends against cannot
+                //     arise here, while leaving it enabled would refuse every non-idempotent call the
+                //     browser client makes.
                 .csrf(csrf -> csrf.disable())
-                // WHY : Assumptions: the zero transaction work area on all four transactions of this
-                //       context means the baseline kept no server-side per-conversation storage beyond
-                //       the structure the client echoed back, so statelessness reproduces what was there
-                //       rather than simplifying it -- and it is what lets tasks scale out behind the
-                //       load balancer with no sticky routing.
+                // Assumptions: the zero transaction work area on all four transactions of this
+                //     context means the baseline kept no server-side per-conversation storage beyond
+                //     the structure the client echoed back, so statelessness reproduces what was there
+                //     rather than simplifying it -- and it is what lets tasks scale out behind the
+                //     load balancer with no sticky routing.
                 .sessionManagement(session -> session
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(requests -> requests
                         .requestMatchers(HEALTH_PATH).permitAll()
-                        // WHY : Assumptions: the management endpoints this module publishes beyond
-                        //       health are granted by NETWORK POSITION and not by authority,
-                        //       because their only configured consumer is the task-local collector
-                        //       sidecar, which presents no token. See LOOPBACK_RANGES.
-                        .requestMatchers(METRIC_SCRAPE_PATH)
+                        // WHY : Refactoring Rationale: this rule is built from OPERATOR_PATHS, whose
+                        //       last entry is the management NAMESPACE. The preceding revision named
+                        //       the scrape endpoint alone and left the rest of the namespace to the
+                        //       catch-all, so the two ids application-dev.yml adds -- flyway and
+                        //       threaddump -- were authorized by the business rule below, which
+                        //       admits every ordinary user of this context. Matching the namespace is
+                        //       what confines them to the container they run in.
+                        // WHY : Assumptions: every path in the list is granted by NETWORK POSITION
+                        //       and not by authority, because the only configured consumer of any of
+                        //       them is the task-local collector sidecar, which presents no token,
+                        //       and an operator with a shell inside the task. See LOOPBACK_RANGES.
+                        .requestMatchers(OPERATOR_PATHS.toArray(String[]::new))
                         .access(loopbackOnly())
+                        // WHY : Assumptions: the catch-all stays businessAccess() and does NOT become
+                        //       denyAll, which is the opposite of the choice the auth and card
+                        //       contexts make, because this chain has no per-path rule table: every
+                        //       business route of this context is authorized BY the catch-all, so
+                        //       denying there would refuse all four operations. What made denyAll the
+                        //       right rule in those contexts -- that the only surface reaching the
+                        //       catch-all was the management namespace -- is what this rule above now
+                        //       removes here.
                         .anyRequest()
                         .access(businessAccess()))
                 .oauth2ResourceServer(server -> server
-                        // WHY : Assumptions: the bearer-token filter answers a request whose token was
-                        //       absent, expired or malformed BEFORE the exception stage below is reached,
-                        //       and it resolves neither handler from the application context, so both must
-                        //       be set here as well. Setting only the exception stage would leave the more
-                        //       common of the two refusals -- a missing token -- rendered as a bodyless
-                        //       status, which every published contract of this service contradicts.
+                        // Assumptions: the bearer-token filter answers a request whose token was
+                        //     absent, expired or malformed BEFORE the exception stage below is reached,
+                        //     and it resolves neither handler from the application context, so both must
+                        //     be set here as well. Setting only the exception stage would leave the more
+                        //     common of the two refusals -- a missing token -- rendered as a bodyless
+                        //     status, which every published contract of this service contradicts.
                         .authenticationEntryPoint(ApiErrorSecurityHandlers.entryPoint(clock))
                         .accessDeniedHandler(ApiErrorSecurityHandlers.accessDeniedHandler(clock))
                         .jwt(jwt -> jwt.jwtAuthenticationConverter(authenticationConverter)))
-                // WHY : Refactoring Rationale: the shared handlers render the ApiError body that this
-                //       service's OpenAPI document declares for 401 and 403. Without them the framework
-                //       default answers with a status and a WWW-Authenticate header and no body at all,
-                //       because a refusal decided by the filter chain never reaches a controller and so
-                //       never reaches the shared @RestControllerAdvice. The 401 entry point delegates to
-                //       the framework's bearer-token entry point first, so the challenge header the OAuth
-                //       2.0 contract requires is composed exactly as before and only the body is added.
+                // Refactoring Rationale: the shared handlers render the ApiError body that this
+                //     service's OpenAPI document declares for 401 and 403. Without them the framework
+                //     default answers with a status and a WWW-Authenticate header and no body at all,
+                //     because a refusal decided by the filter chain never reaches a controller and so
+                //     never reaches the shared @RestControllerAdvice. The 401 entry point delegates to
+                //     the framework's bearer-token entry point first, so the challenge header the OAuth
+                //     2.0 contract requires is composed exactly as before and only the body is added.
                 .exceptionHandling(ApiErrorSecurityHandlers.renderingRefusals(clock))
                 .build();
     }
@@ -359,17 +415,6 @@ public class SecurityConfig {
      * shared class implementing the wider contract, which keeps the shared class free of any dependency
      * on the resource-server module -- {@code common-lib} is on the class path of every context,
      * including ones that expose no web endpoint at all.</p>
-     *
-     * <p>Assumptions: the authorities the shared converter emits are used VERBATIM, with no role prefix
-     * added. The identity provider's group names are already the vocabulary this application authorizes
-     * against, so prefixing them would create a second spelling of each group and every path expression
-     * would have to know which spelling it was matching.</p>
-     *
-     * <p>Assumptions: the two group names are read from configuration and passed to the shared converter
-     * rather than left implicit. The converter compares them with its own compiled constants and refuses
-     * to start on a mismatch, so this is the point at which a deployed pool whose groups were renamed
-     * becomes a startup failure instead of a service that authenticates every request and authorizes
-     * none.</p>
      *
      * @param configuredAdminGroupName the administrator group name from runtime configuration; must
      *     equal {@link JwtRoleConverter#ADMIN_AUTHORITY}
@@ -390,25 +435,11 @@ public class SecurityConfig {
     /**
      * Builds the decoder, with the provider-specific token checks delegated in behind the standard ones.
      *
-     * <p>Assumptions: the decoder is declared here rather than left to the framework's own
-     * auto-configuration, and that is the only way to add a validator. Setting an issuer location makes
-     * the framework compose signature, issuer and time validation and offers no hook to extend the
-     * composition, so a service that needs a fourth check has to build the decoder and compose the
-     * validators itself. The standard set is composed FIRST and this addition second, so nothing is
-     * replaced and no check is weakened -- a token still has to pass everything the framework would have
-     * required.</p>
-     *
      * <p>Alternatives Considered: the framework's own {@code audiences} property, which is the obvious
      * declarative route and is wrong for this provider. A Cognito ACCESS token carries no audience claim
      * at all -- the client identity travels in {@code client_id} instead -- so an audience validator
      * would reject every access token the sign-on flow issues while accepting exactly the identity
      * tokens the delegated validator exists to refuse. It would invert the control.</p>
-     *
-     * <p>Assumptions: the configured token-use value is asserted against the shared validator's own
-     * compiled constant rather than passed to it. The validator decides the token KIND from a constant
-     * because accepting a configurable kind would let a deployment configure the check away; the
-     * property therefore exists so the requirement is visible in configuration, and this assertion is
-     * what stops the visible value and the enforced value drifting apart.</p>
      *
      * @param issuerUri the user-pool issuer location the framework's standard validators are built
      *     from; must not be {@code null} or blank
@@ -428,20 +459,20 @@ public class SecurityConfig {
             @Value("${carddemo.security.jwt.expected-client-id}") String expectedClientId,
             @Value("${carddemo.security.jwt.required-scope}") String requiredScope) {
 
-        // WHY : Assumptions: the configured kind is asserted against the shared validator's compiled
-        //       constant instead of being handed to it. The validator decides the token KIND from a
-        //       constant because a configurable kind could be configured away; the property exists so
-        //       the requirement is visible where an operator reads configuration, and this assertion is
-        //       what stops the visible value and the enforced value drifting apart.
+        // Assumptions: the configured kind is asserted against the shared validator's compiled
+        //     constant instead of being handed to it. The validator decides the token KIND from a
+        //     constant because a configurable kind could be configured away; the property exists so
+        //     the requirement is visible where an operator reads configuration, and this assertion is
+        //     what stops the visible value and the enforced value drifting apart.
         if (!CognitoAccessTokenValidator.ACCESS_TOKEN_USE.equals(expectedTokenUse)) {
             throw new IllegalStateException("carddemo.security.jwt.expected-token-use must be \""
                     + CognitoAccessTokenValidator.ACCESS_TOKEN_USE + "\"");
         }
 
-        // WHY : Assumptions: a blank client id is refused rather than tolerated. The shared validator
-        //       reads blank as "skip this check", which is correct only for a caller that has decided
-        //       the audience validator pins the client instead. No service here has, so a blank value
-        //       would mean the check was dropped by omission with nothing saying so.
+        // Assumptions: a blank client id is refused rather than tolerated. The shared validator
+        //     reads blank as "skip this check", which is correct only for a caller that has decided
+        //     the audience validator pins the client instead. No service here has, so a blank value
+        //     would mean the check was dropped by omission with nothing saying so.
         if (expectedClientId == null || expectedClientId.isBlank()) {
             throw new IllegalStateException(
                     "carddemo.security.jwt.expected-client-id must name the app client");

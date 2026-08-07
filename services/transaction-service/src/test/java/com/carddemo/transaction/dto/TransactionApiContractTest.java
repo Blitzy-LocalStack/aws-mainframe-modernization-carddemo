@@ -56,6 +56,17 @@ class TransactionApiContractTest {
             "/api/v1/transactions", "/api/v1/transactions/{transactionId}", "/api/v1/billpay");
 
     /**
+     * The keys of a path item that hold an operation, so its own non-operation keys are skipped.
+     *
+     * <p>Assumptions: all eight the specification defines are listed even though this document declares
+     * only three of them, because a list narrowed to what is currently published would stop checking an
+     * operation the moment one was added under a method it omitted -- which is the one occasion the
+     * check is most needed.</p>
+     */
+    private static final List<String> HTTP_METHODS =
+            List.of("get", "put", "post", "delete", "patch", "head", "options", "trace");
+
+    /**
      * Each published schema paired with the Java constraint that must agree with it.
      *
      * <p>Assumptions: the two sides are compared modulo one deliberate difference. The Java patterns
@@ -605,5 +616,112 @@ class TransactionApiContractTest {
                 .isFalse();
         assertThat(parameter("CorrelationIdHeader").get("name"))
                 .isEqualTo(CorrelationIdFilter.CORRELATION_ID_HEADER);
+    }
+
+    /**
+     * Reduces a declared parameter list to the {@code (name, in)} pairs the specification identifies
+     * parameters by, following any reference into the components section.
+     *
+     * <p>Assumptions: a reference is followed rather than compared as a string, because two parameters
+     * are the same parameter when their name and location agree -- not when their references agree. A
+     * document declaring one header inline and the same header by reference would carry it twice while
+     * the two spellings differed, so comparing spellings would report no duplicate at all.</p>
+     *
+     * @param declared the value of a {@code parameters} key, which may be {@code null} when none are
+     *     declared
+     * @return one {@code name|in} entry per declared parameter, in document order and WITH repeats
+     *     preserved, since the repeats are what this reduction exists to expose; never {@code null}
+     * @throws IllegalStateException if an entry is neither a mapping nor resolvable, or if a reference
+     *     names a component the document does not declare, either of which makes the contract
+     *     unreadable rather than merely wrong
+     */
+    private List<String> parameterIdentities(Object declared) {
+        if (declared == null) {
+            return List.of();
+        }
+        if (!(declared instanceof List<?> entries)) {
+            throw new IllegalStateException("a \"parameters\" key must hold a sequence");
+        }
+        List<String> identities = new java.util.ArrayList<>();
+        for (Object entry : entries) {
+            if (!(entry instanceof Map<?, ?> raw)) {
+                throw new IllegalStateException("every declared parameter must be a mapping");
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> resolved = (Map<String, Object>) raw;
+            Object reference = resolved.get("$ref");
+            if (reference instanceof String pointer) {
+                resolved = parameter(pointer.substring(pointer.lastIndexOf('/') + 1));
+            }
+            identities.add(resolved.get("name") + "|" + resolved.get("in"));
+        }
+        return identities;
+    }
+
+    /**
+     * Asserts no operation carries one {@code (name, in)} parameter pair twice, whether within its own
+     * list or by restating one it already inherits from its path item.
+     *
+     * <p>Refactoring Rationale: this gate exists because one operation in this document did exactly
+     * that. The path item for a single transaction declared the correlation header at the PATH level
+     * while its only operation declared the identical reference again, so the effective list carried
+     * the same pair twice. The specification permits an operation to OVERRIDE an inherited parameter,
+     * which is why that shape was not rejected by a parser, and permitting it is precisely what made
+     * the defect invisible: the two declarations were the same reference, so the override narrowed
+     * nothing and a reader could not tell which copy was meant to be authoritative. A generator
+     * reading it emits the header twice.
+     *
+     * <p>Assumptions: an inherited pair restated by an operation is therefore refused here rather than
+     * merely reported. The convention this document now follows without exception is that a path item
+     * declares only its PATH parameters and each operation declares its own header parameters, so a
+     * restatement can only be an oversight; an operation that genuinely needed to narrow an inherited
+     * parameter would move the declaration to the operation level rather than duplicate it.
+     *
+     * <p>Trade-offs: the walk is declared in this module rather than shared with the sibling service
+     * whose contract carried the same defect. The shared kernel's test artifact is deliberately
+     * restricted to its architecture package -- this module's POM records that restriction where it
+     * declares the artifact -- so no test type is visible to both modules. The accepted cost is one
+     * copy of this walk per affected module; what is bought is that neither build depends on widening
+     * a boundary that exists to keep the kernel's test surface closed.
+     */
+    @Test
+    @DisplayName("no operation declares one parameter identity twice, inherited or otherwise")
+    void noOperationDeclaresOneParameterIdentityTwice() {
+        Map<String, Object> paths = mapping(contract, "paths");
+
+        assertThat(paths).as("the contract must publish at least one path").isNotEmpty();
+
+        for (Map.Entry<String, Object> pathEntry : paths.entrySet()) {
+            Map<String, Object> pathItem = mapping(paths, pathEntry.getKey());
+            List<String> inherited = parameterIdentities(pathItem.get("parameters"));
+
+            assertThat(inherited)
+                    .as("path item %s must not declare one parameter identity twice",
+                            pathEntry.getKey())
+                    .doesNotHaveDuplicates();
+
+            for (String method : HTTP_METHODS) {
+                if (!pathItem.containsKey(method)) {
+                    continue;
+                }
+                List<String> own =
+                        parameterIdentities(mapping(pathItem, method).get("parameters"));
+
+                assertThat(own)
+                        .as("%s %s must not declare one parameter identity twice",
+                                method.toUpperCase(java.util.Locale.ROOT), pathEntry.getKey())
+                        .doesNotHaveDuplicates();
+                // WHY : Assumptions: the inherited set is tested for emptiness first because the
+                //       assertion below refuses an empty expectation outright rather than passing
+                //       vacuously -- a path item declaring no parameters of its own would otherwise
+                //       fail this case for a reason that has nothing to do with duplication.
+                if (!inherited.isEmpty()) {
+                    assertThat(own)
+                            .as("%s %s must not restate a parameter it already inherits",
+                                    method.toUpperCase(java.util.Locale.ROOT), pathEntry.getKey())
+                            .doesNotContainAnyElementsOf(inherited);
+                }
+            }
+        }
     }
 }

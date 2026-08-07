@@ -190,37 +190,37 @@ const JSDOC_DOCUMENTATION_RULES = {
   'jsdoc/require-jsdoc': [
     'error',
     {
-      // Assumptions: the scope of this gate is EXPORTED symbols, because that is
-      // what the specification assigns it, twice and in the same words. AAP
-      // §0.2.1.6 lists this file as "`eslint-plugin-jsdoc` requiring JSDoc on
-      // exported components and functions", and §0.8.1 repeats it: "TypeScript is
-      // checked by `eslint-plugin-jsdoc` rules in `ui/eslint.config.js` requiring
-      // documentation on exported components and functions". The value is stated
-      // explicitly rather than left to the plugin default so that a grep for
-      // `publicOnly` finds a decision with its authority attached.
-      // Trade-offs: an exported symbol is the module's contract -- it is what
-      // another file can consume and what a reader arrives at first -- so this is
-      // where a docstring is load-bearing rather than merely present. What is given
-      // up is measured rather than assumed: probed against this configuration, an
-      // inline `.map` callback inside an exported component and a module-private
-      // helper are BOTH exempt now, where previously each was reported. The
-      // exchange is accepted because the alternative demands a block on every
-      // throwaway closure -- every `onClick`, every `useMemo` factory -- and a gate
-      // that reports a hundred blocks nobody reads is one reviewers learn to skip,
-      // which costs more enforcement than it buys. Rule 1's inline-comment
-      // requirement still reaches the exempted code: a non-obvious private helper
-      // owes a WHY comment whether or not it owes a JSDoc block.
-      // Refactoring Rationale: an earlier value here was `false`, arguing from Rule
-      // 1's "every new or modified function ... with no visibility qualifier" that
-      // no symbol may be exempt, and citing `docs/CODE_DOCUMENTATION_STANDARD.md`
-      // in support. That argument reads Rule 1 correctly and still loses, because
-      // it resolves a conflict in the wrong direction: the AAP is the frozen
-      // specification and it assigns this file the exported scope in the two
-      // sentences quoted above, so a document asserting the wider scope is
-      // diverging from the AAP rather than interpreting it. That document's
-      // TypeScript section has been reconciled to match this gate instead of
-      // describing one that does not run.
-      publicOnly: true,
+      // Refactoring Rationale: the scope of this gate is EVERY function and class,
+      // and an earlier value here was `true` -- exported symbols only. That value
+      // argued from AAP §0.2.1.6, which lists this file as "`eslint-plugin-jsdoc`
+      // requiring JSDoc on exported components and functions", and from §0.8.1,
+      // which repeats it in the same words. The argument was withdrawn because it
+      // read a MINIMUM as an EXCLUSION. Both sentences say what the gate must
+      // require; neither says what it may not require, and a gate that additionally
+      // reaches a module-private helper still satisfies both of them literally. Set
+      // against that, Rule 1 states "every new or modified function, class, and
+      // module entry point must include a docstring" and attaches no visibility
+      // qualifier at all. Only one of the two readings satisfies both documents at
+      // once, so `false` is not a departure from the AAP -- `true` was the reading
+      // that had to add a qualifier the specification does not contain. Measured
+      // against the landed tree at the moment of the change, the wider scope reports
+      // ZERO new violations, so nothing here is aspirational.
+      // Assumptions: this value is stated explicitly rather than left to the plugin
+      // default so that a search for `publicOnly` finds a decision with its
+      // authority attached rather than an absence.
+      // Trade-offs: every inline closure now owes a block -- every `onClick`, every
+      // `.map` body, every `useMemo` factory -- and the cost of that is accepted
+      // rather than argued away. Rule 1 allows a trivial function "a single-line
+      // docstring", an allowance about LENGTH and not about presence, so a one-line
+      // closure costs one line. The alternative was measured too, and it is the
+      // reason the exchange goes this way: probed against the narrower value, an
+      // undocumented module-private `function` and an undocumented anonymous `.map`
+      // callback inside an exported component were BOTH reported as clean. This tree
+      // has already been bitten by exactly that gap once -- `ui/src/messages/`
+      // carried an anonymous `.map` callback that branches, returns four different
+      // values and throws -- and a gate that a reviewer has to compensate for by
+      // hand is the shape of gate Rule 1's validation clause forbids.
+      publicOnly: false,
 
       require: {
         // Assumptions: the two expression kinds are `false` HERE and covered by the
@@ -390,35 +390,44 @@ const JSDOC_DOCUMENTATION_RULES = {
   // rules split that one clause -- that a tag exists per parameter, that it
   // names the parameter, and that it describes it.
   //
-  // ⚠ Alternatives Considered -- the TYPE half of the clause, which is the one
-  // decision in this file most likely to be questioned. Requiring `{Type}` on
-  // `@param` and `@returns` in TypeScript was evaluated and REJECTED: the two
-  // rules sit at the plugin's TypeScript-aware default of off in the TypeScript
-  // block below, and are enforced only in plain JavaScript, as the file-overview
-  // block states. The reason is that in TypeScript the type is already stated, in
-  // the signature, where the COMPILER checks it. A `{Type}` tag beside it is
-  // unchecked prose duplicating a checked fact, so the two can disagree and only
-  // the prose can be wrong -- and a docstring that confidently names the wrong
-  // type is worse than one that names none, because a reader trusts it and stops
-  // reading the signature. Rule 1's Parameters element asks the documentation to
-  // state each parameter's name, type and description; a typed signature plus a
-  // named, described tag states all three, with the type carried by the half of
-  // the pair that cannot silently go stale.
+  // ⚠ Refactoring Rationale: the TYPE half of the clause is REQUIRED in TypeScript
+  // as well as in JavaScript, and an earlier arrangement of this file left it off
+  // in `.ts`. That arrangement argued that the signature already carries the type
+  // where the compiler checks it, so a `{Type}` tag beside it is unchecked prose
+  // duplicating a checked fact. The observation is true and the conclusion drawn
+  // from it was still wrong, because it answered a question Rule 1 does not ask.
+  // Rule 1's Parameters element requires the DOCUMENTATION to state "each
+  // parameter with its name and type", and its Return values element the "type and
+  // description of what is returned"; it draws no distinction between a language
+  // whose signature happens to hold the type and one whose signature does not, and
+  // it grants no exemption on the ground that another artifact states the same fact
+  // more reliably. A gate that asks for less than the rule is a gate that reports
+  // success while enforcing less than it claims, which is the specific shape of
+  // failure Rule 1's validation clause exists to catch. The three
+  // `jsdoc/require-*-type` rules are therefore `error` in the TypeScript block
+  // below, exactly as the JavaScript preset has them.
   //
-  // Trade-offs: the cost is that the type is not visible inside the docstring, so
-  // a reader skimming only the block reads one line further to find it. That is
-  // accepted because the alternative buys textual convenience with a second source
-  // of truth, and this migration has a specific reason to refuse second sources of
-  // truth about types: field widths and decimal scale are transcribed from the
-  // copybooks under Transformation Rule T1, and a drifted type annotation is
-  // exactly how a `string` money field silently acquires a documented `number`.
+  // Trade-offs: the accepted cost is a second textual source of truth about types,
+  // and it is a real cost rather than a nominal one -- an annotation can disagree
+  // with the signature, and when it does only the annotation can be wrong. This
+  // migration has a specific reason to care: field widths and decimal scale are
+  // transcribed from the copybooks under Transformation Rule T1, so a drifted tag
+  // is exactly how a `string` money field acquires a documented `number`. Two
+  // things bound that cost. `jsdoc/no-undefined-types` stays on, so a `{Accont}`
+  // typo fails the build; and `typescript-eslint`'s type-aware rules plus
+  // `tsc --noEmit` keep the signature itself authoritative for compilation, so a
+  // drifted annotation misleads a reader without ever misleading the compiler.
+  // What is bought is that Rule 1's Parameters and Return values elements are
+  // enforced whole rather than in the two thirds a reader cannot tell apart from
+  // three.
   //
-  // Assumptions: the split by language is deliberate and is not a divergence left
-  // unresolved. In `.js` the JSDoc types ARE the type system, so the tag is the
-  // only place the type can be stated and the rules are on; in `.ts` the signature
-  // holds it. One clause, two mechanisms, because the languages genuinely differ
-  // -- see the type-tag block in the TypeScript configuration below, where the
-  // four settings that implement this are stated together with what each admits.
+  // Assumptions: the obligation is now identical in both languages, which is what
+  // makes the file readable as one decision. In `.js` the JSDoc types ARE the type
+  // system; in `.ts` they are documentation of a type the compiler also holds. The
+  // rule is the same in both, and `jsdoc/no-types` stays off in the TypeScript
+  // block precisely so that the tags this rule now requires are admitted there --
+  // see that block below, where the four settings are stated together with what
+  // each one does.
   'jsdoc/require-param': [
     'error',
     {
@@ -812,6 +821,49 @@ export default defineConfig([
   globalIgnores(['dist/**', 'node_modules/**'], 'carddemo/generated-output'),
 
   {
+    name: 'carddemo/gate-integrity',
+
+    // Assumptions: this block configures the LINTER rather than any rule, so it
+    // carries no `files` key and applies to every file the run visits. It is a
+    // separate named block, and not a key folded into the TypeScript block below,
+    // because it governs both language blocks equally and a reader auditing "can
+    // this gate be switched off from inside a source file?" should find one answer
+    // in one place.
+    linterOptions: {
+      // Refactoring Rationale: an earlier version of this file configured no
+      // `linterOptions` at all, so the default `noInlineConfig: false` was in
+      // force and any authored file could switch off any rule for a line, a block
+      // or its whole length with an `/* eslint-disable */` comment. That left the
+      // documentation gate technically present and structurally optional: a
+      // missing JSDoc block could be made to pass by adding a comment saying so,
+      // and nothing in the run distinguished that outcome from a documented
+      // symbol. Rule 1's validation clause makes a missing docstring a review
+      // failure, so a mechanism for declaring one acceptable in-file contradicts
+      // it directly. Set to true, an inline directive is IGNORED rather than
+      // honoured, so the only way to satisfy a rule is to satisfy it.
+      // Assumptions: nothing is being taken away from the tree as it stands --
+      // measured at the moment of the change, `ui/` contains ZERO
+      // `eslint-disable` directives of any form, so this closes a door nobody has
+      // walked through rather than breaking a current practice.
+      // Trade-offs: a genuine future need for a one-line exemption now has to be
+      // expressed in THIS file, as a scoped `files` block with a rationale beside
+      // it, instead of as a comment in the file that wants the exemption. That is
+      // more work per exemption, and deliberately so: an exemption recorded here
+      // is reviewable in one place and shows up in the diff of the gate, whereas
+      // a comment in a screen is invisible to anyone auditing the gate.
+      noInlineConfig: true,
+
+      // Assumptions: this is the companion half of `noInlineConfig` rather than a
+      // separate idea. With inline configuration ignored, a directive comment left
+      // behind in a source file is inert text that still LOOKS load-bearing to a
+      // reader, who would reasonably conclude the rule above it is suppressed.
+      // Reporting it as an error means such a comment cannot survive a run, so the
+      // file cannot come to disagree with the gate about what is enforced.
+      reportUnusedDisableDirectives: 'error',
+    },
+  },
+
+  {
     name: 'carddemo/typescript',
 
     // Assumptions: this is the whole authored surface of the package apart from
@@ -932,51 +984,48 @@ export default defineConfig([
       'jsdoc/check-tag-names': ['error', { typed: true }],
 
       // ⚠ Rule 1, element 2 and element 3, the TYPE half of each. In TypeScript a
-      // `{Type}` tag is PERMITTED but never REQUIRED: the signature carries the
-      // type and the compiler checks it, so the three `require-*-type` rules stay
-      // at the plugin's TypeScript-aware default of off. The reasoning is argued in
-      // full at `jsdoc/require-param` in the shared rule object above, and the four
-      // entries below are what implement it. They are one decision and are close to
-      // meaningless read apart, which is why they are stated together.
+      // `{Type}` tag is REQUIRED, exactly as it is in plain JavaScript, so the three
+      // `require-*-type` rules are raised from the plugin's TypeScript-aware default
+      // of off to `error`. The reasoning is argued in full at `jsdoc/require-param`
+      // in the shared rule object above; the four entries below are what implement
+      // it. They are one decision and are close to meaningless read apart, which is
+      // why they are stated together.
       //
-      // Assumptions: `jsdoc/no-types` stays off to PERMIT a type expression rather
-      // than to require one, and that is a different reason from the one an earlier
-      // version of this comment gave. The preset's TypeScript form rejects a
-      // `{Type}` in a `.ts` docstring outright, which would make the 188 type tags
-      // the landed tree already carries build failures -- documentation deleted by a
-      // lint rule, not a defect found by one. Off admits them without obliging the
-      // next author to add more. Trade-offs: the tree therefore holds both forms, a
-      // tagged `@param {string} accountId` and a bare `@param accountId`, and both
-      // pass. That inconsistency is accepted because the alternative is a tree-wide
-      // rewrite of 188 sites in service of a uniformity no reader benefits from,
-      // and because the type each form ultimately relies on is the same one in the
-      // signature either way.
-      // Assumptions: these are the `jsdoc/*` entries set to `off` in this file, and
-      // none of them relaxes a Rule 1 element. Element 2 and element 3 remain
-      // enforced by `jsdoc/require-param`, `-param-name`, `-param-description`,
-      // `jsdoc/require-returns` and `-returns-description`; what is not enforced is
-      // the DUPLICATION of a fact the compiler already holds. `jsdoc/no-undefined-types`
-      // above stays on precisely because tags remain permitted, so a `{Accont}`
-      // typo in one of the 188 is still reported.
+      // Refactoring Rationale: an earlier arrangement held all three at `off` and
+      // argued that the signature carries the type where the compiler checks it, so
+      // the tag would only duplicate a checked fact. Rule 1 asks the DOCUMENTATION
+      // for each parameter's name and type and for the return value's type, without
+      // qualifying by language, so that arrangement enforced two thirds of an
+      // element while reporting a pass -- and a reader cannot tell a gate that
+      // enforces two thirds from one that enforces three. Raising the three rules
+      // was measured against the landed tree before it was adopted: `ui/src/**`
+      // already carries 90 `@param {` and 97 `@returns {` tags and NOT ONE bare tag,
+      // so the change reports zero new violations today and binds every docstring
+      // written after it.
       //
-      // ⚠ Refactoring Rationale: `jsdoc/require-property-type` moves with the other
-      // two rather than being left behind at error, and the honest scope of the
-      // change is narrow. Its entire stated purpose was CONSISTENCY with
-      // `@param`/`@returns` at a time when those required a type; with them at off,
-      // holding `@property` to a stricter standard than `@param` would invert the
-      // very symmetry it was added to protect. Assumptions: this changes no current
-      // verdict, which was measured rather than assumed -- `check-tag-names` with
+      // Assumptions: `jsdoc/no-types` stays off, and it is the one entry here that
+      // is off DELIBERATELY rather than by inheritance. The preset's TypeScript form
+      // rejects a `{Type}` in a `.ts` docstring outright; leaving it on would forbid
+      // the very tags the three rules above now require, so the two settings are one
+      // mechanism and neither works without the other. It relaxes no Rule 1 element:
+      // `jsdoc/no-undefined-types` stays on, so a `{Accont}` typo is still a build
+      // failure, and `jsdoc/check-param-names` still fails when a documented
+      // parameter no longer exists.
+      //
+      // Assumptions: `jsdoc/require-property-type` moves WITH the other two, which
+      // is what keeps the answer to "must a documented member carry its type?" a
+      // single yes rather than a case analysis. Trade-offs: it changes no current
+      // verdict, and that is measured rather than assumed -- `check-tag-names` with
       // `typed: true`, set just above, already rejects `@typedef` and `@property`
       // outright in a `.ts` file as redundant beside a real type system, so a `.ts`
-      // file cannot legally reach this rule at all, and the authored tree contains
-      // zero of either tag. It is stated explicitly rather than inherited so that a
-      // reader auditing "must a documented member carry its type?" gets one answer
-      // from the rule set instead of reasoning about which tag another rule forbids
-      // first.
+      // file cannot legally reach this rule at all and the authored tree contains
+      // zero of either tag. It is stated explicitly rather than inherited so that
+      // the rule set answers the question directly instead of obliging a reader to
+      // reason about which tag another rule forbids first.
       'jsdoc/no-types': 'off',
-      'jsdoc/require-param-type': 'off',
-      'jsdoc/require-returns-type': 'off',
-      'jsdoc/require-property-type': 'off',
+      'jsdoc/require-param-type': 'error',
+      'jsdoc/require-returns-type': 'error',
+      'jsdoc/require-property-type': 'error',
 
       // Assumptions: `jsdoc/require-file-overview` is the only rule that could
       // mechanise Rule 1's "module entry point" clause, and it is left off after

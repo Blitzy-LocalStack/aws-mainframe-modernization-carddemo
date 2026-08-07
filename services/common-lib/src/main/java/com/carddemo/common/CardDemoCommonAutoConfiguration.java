@@ -4,10 +4,15 @@ import com.carddemo.common.error.GlobalExceptionHandler;
 import com.carddemo.common.money.MoneyModule;
 import com.carddemo.common.observability.MetricsConfig;
 import com.carddemo.common.web.CorrelationIdFilter;
+import com.carddemo.common.web.CursorToken;
 import java.time.Clock;
+import java.time.Duration;
+import java.util.Base64;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
@@ -60,7 +65,9 @@ import tools.jackson.databind.JacksonModule;
  * <p>Assumptions: the metrics contribution, system clock and money module remain unconditional
  * because none has a servlet dependency. A one-shot batch task needs the same meter dimensions and
  * exact-money mapper contract as an online service, while the filter and advice have no request or
- * response there to operate on.</p>
+ * response there to operate on. The cursor sealer is the one exception among the non-servlet beans:
+ * it is conditional on a deployment naming its key material, because it is the only component here
+ * that needs a secret and a shared kernel must not ship one.</p>
  */
 @AutoConfiguration
 @Import(MetricsConfig.class)
@@ -78,6 +85,44 @@ public class CardDemoCommonAutoConfiguration {
      * something ahead of it still can.</p>
      */
     public static final int CORRELATION_FILTER_ORDER = Ordered.HIGHEST_PRECEDENCE + 1;
+
+    /**
+     * The property naming the base64-encoded key material every sealed keyset cursor is
+     * authenticated with.
+     *
+     * <p>Assumptions: named here and defaulted nowhere. {@link CursorToken} is the only component in
+     * the shared kernel that needs a secret, and a shared kernel must not invent one -- a value
+     * shipped in this module would be a signing key committed to source, and every deployment that
+     * failed to override it would accept cursors minted by anyone holding this repository. Making the
+     * sealer conditional on a deployment naming a key is what gives the type one concrete configured
+     * owner without shipping the secret that owning it requires.</p>
+     *
+     * <p>Trade-offs: the value is base64 rather than the raw characters of a passphrase, because the
+     * constructor takes bytes and a properties source carries characters. The cost is that an
+     * operator has to encode the secret once; the benefit is that the 32-byte floor
+     * {@link CursorToken#MIN_KEY_LENGTH} imposes is a floor on real key material rather than on a
+     * character count that a multi-byte encoding could satisfy with fewer bytes than it appears.</p>
+     */
+    public static final String CURSOR_SIGNING_KEY_PROPERTY =
+            "carddemo.pagination.cursor.signing-key";
+
+    /**
+     * The property naming how long a sealed cursor stays redeemable, as an ISO-8601 duration.
+     *
+     * <p>Assumptions: separate from the key so that a deployment can shorten the window without
+     * rotating key material, which are two independent operational decisions.</p>
+     */
+    public static final String CURSOR_LIFETIME_PROPERTY = "carddemo.pagination.cursor.lifetime";
+
+    /**
+     * The cursor lifetime applied when a deployment names key material but no lifetime.
+     *
+     * <p>Assumptions: fifteen minutes, chosen as an upper bound on how long a user leaves a list
+     * screen open between paging keystrokes. A default is safe here in a way a default key is not,
+     * because a lifetime is not a secret and a wrong one fails visibly -- a cursor stops being
+     * redeemable -- rather than silently accepting tokens a stranger minted.</p>
+     */
+    public static final String DEFAULT_CURSOR_LIFETIME = "PT15M";
 
     /**
      * Supplies the clock the error advice timestamps problem shapes from.
@@ -113,13 +158,80 @@ public class CardDemoCommonAutoConfiguration {
     @ConditionalOnMissingBean(MoneyModule.class)
     @ConditionalOnClass(JacksonModule.class)
     public JacksonModule carddemoMoneyModule() {
-        // WHY : Assumptions: the declared return type is the codec library's module interface rather
-        //       than the concrete class, because the framework's codec auto-configuration collects
-        //       beans of that interface type into the mapper builder. Declaring the concrete type would
-        //       still satisfy the collection -- a subtype is assignable -- but it would tie the
-        //       registration to this implementation, so a future replacement would change a signature
-        //       that a consumer may have injected by type.
+        // Assumptions: the declared return type is the codec library's module interface rather than
+        //   the concrete class, because the framework's codec auto-configuration collects beans of
+        //   that interface type into the mapper builder. Declaring the concrete type would still
+        //   satisfy the collection -- a subtype is assignable -- but it would tie the registration to
+        //   this implementation, so a future replacement would change a signature that a consumer
+        //   may have injected by type.
         return new MoneyModule();
+    }
+
+    /**
+     * Publishes the one cursor sealer every paged read of the application shares.
+     *
+     * <p>Refactoring Rationale: this bean is the configured owner of {@link CursorToken}. Before it
+     * existed the type had none, so the two components that need a sealer -- the transaction list
+     * service and the pending-authorization view mapper -- each documented a future integration
+     * instead of a wiring, and neither could have started. One bean per application context is also
+     * what makes the contract hold: a token sealed on the way out is only redeemable on the way back
+     * in if the same key opens it, so a second instance with different key material would reject
+     * cursors this application itself issued.</p>
+     *
+     * <p>Alternatives Considered: constructing a sealer inside each consumer from its own property.
+     * Rejected because two consumers reading the same secret independently is two chances to read a
+     * different one, and the failure is silent until a client pages: the cursor a mapper issues is
+     * simply refused by the service that opens it, with nothing in the response saying why.</p>
+     *
+     * @param signingKeyBase64 the base64-encoded key material named by
+     *     {@value #CURSOR_SIGNING_KEY_PROPERTY}, supplied by the deployment from the secret store
+     *     provisioned in {@code infra/modules/secrets}; must decode to at least
+     *     {@link CursorToken#MIN_KEY_LENGTH} bytes
+     * @param lifetime how long a sealed cursor stays redeemable, named by
+     *     {@value #CURSOR_LIFETIME_PROPERTY} as an ISO-8601 duration and defaulting to
+     *     {@value #DEFAULT_CURSOR_LIFETIME}
+     * @return the sealer and opener the application's paged reads share, never {@code null}
+     * @throws IllegalArgumentException if the key material is not base64, decodes to fewer than
+     *     {@link CursorToken#MIN_KEY_LENGTH} bytes, or the lifetime is not a positive ISO-8601
+     *     duration; each of those fails the context at assembly rather than the first paged request
+     * @throws java.time.format.DateTimeParseException if the lifetime is not an ISO-8601 duration
+     */
+    @Bean
+    @ConditionalOnMissingBean(CursorToken.class)
+    @ConditionalOnProperty(name = CURSOR_SIGNING_KEY_PROPERTY)
+    public CursorToken carddemoCursorToken(
+            @Value("${" + CURSOR_SIGNING_KEY_PROPERTY + "}") String signingKeyBase64,
+            @Value("${" + CURSOR_LIFETIME_PROPERTY + ":" + DEFAULT_CURSOR_LIFETIME + "}")
+                    String lifetime) {
+        // Trade-offs: the lifetime is taken as text and parsed here rather than injected as a
+        //   Duration. Binding a Duration through a value expression depends on a conversion service
+        //   being installed on the bean factory, which is true in a Boot application and not in a
+        //   plain context test, so parsing explicitly keeps this bean method behaving identically in
+        //   both and puts the malformed-value failure on a line a reader can find.
+        return new CursorToken(decodeSigningKey(signingKeyBase64), Duration.parse(lifetime.trim()));
+    }
+
+    /**
+     * Decodes the configured signing key, naming the property in any failure.
+     *
+     * <p>Trade-offs: the decoder's own message says only that a character was illegal, which in a
+     * startup stack trace gives an operator no idea which value to correct. Rethrowing with the
+     * property name costs one catch block and turns an unexplained context failure into an
+     * actionable one.</p>
+     *
+     * @param signingKeyBase64 the configured value, base64 with the standard alphabet; must not be
+     *     {@code null}
+     * @return the decoded key material, never {@code null}
+     * @throws IllegalArgumentException if the value is not valid base64
+     */
+    private static byte[] decodeSigningKey(String signingKeyBase64) {
+        try {
+            return Base64.getDecoder().decode(signingKeyBase64.trim());
+        } catch (IllegalArgumentException notBase64) {
+            throw new IllegalArgumentException(
+                    CURSOR_SIGNING_KEY_PROPERTY + " must carry base64-encoded key material of at"
+                            + " least " + CursorToken.MIN_KEY_LENGTH + " bytes", notBase64);
+        }
     }
 
     /**

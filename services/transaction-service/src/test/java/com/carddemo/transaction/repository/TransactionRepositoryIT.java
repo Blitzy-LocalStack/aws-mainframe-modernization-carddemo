@@ -721,6 +721,100 @@ class TransactionRepositoryIT {
     }
 
     /**
+     * Confirms the three UNFILTERED keyset paths open, step forward and step backward over every card.
+     *
+     * <p>This pins the reads the transaction list uses when no card filter is in play, which are a
+     * different set of three from the card-filtered pair above. {@code app/cbl/COTRN00C.cbl} starts its
+     * browse at line 281, suppresses the priming read on an opening turn at line 285 so the fill loop
+     * at line 297 begins at the first record of the file, reads forward at line 626 and reads backward
+     * at line 660. Nothing in those paragraphs constrains the card, so the relational equivalents take
+     * no card argument.
+     *
+     * <p>Assumptions: the fixture deliberately spans TWO cards, and that is what makes this case
+     * distinct from the card-filtered one rather than a second copy of it. Each of the three unfiltered
+     * reads must return rows of both cards, so a query that carried a card predicate -- or a caller
+     * that passed one -- fails here. The card-filtered assertions above cannot detect that, because
+     * every row they seed belongs to the card they filter on.
+     *
+     * <p>Assumptions: both comparisons are STRICT, and the cursor in each direction is itself a seeded
+     * row so the strictness is observable. The opening read is asserted to return the rows in ascending
+     * identifier order beginning at the lowest identifier present, which is what standing in for a
+     * suppressed priming read means; a read that positioned somewhere else would still return a page,
+     * and only the leading identifier distinguishes the two.
+     *
+     * <p>Assumptions: the row cap is asserted as well as the ordering, because the caller supplies the
+     * page size plus one and the surplus row is the whole of its further-page signal. A cap that
+     * returned everything would leave the service unable to tell an exhausted scan from a continuing
+     * one, and no ordering assertion would notice.
+     */
+    @Test
+    void theUnfilteredKeysetPathsOpenAndStepInBothDirectionsAcrossEveryCard() {
+        this.persistAndDetach(
+                this.posted(TRAN_ID_FIRST, SEED_CARD, SEED_AMOUNT_POSITIVE, RANGE_START),
+                this.posted(TRAN_ID_SECOND, SEED_CARD_LEADING_ZERO, SEED_AMOUNT_NEGATIVE, RANGE_START),
+                this.posted(TRAN_ID_THIRD, SEED_CARD, SEED_AMOUNT_POSITIVE, RANGE_START),
+                this.posted(TRAN_ID_FOURTH, SEED_CARD_LEADING_ZERO, SEED_AMOUNT_POSITIVE, RANGE_START));
+
+        List<Transaction> opening =
+                this.transactions.findAllByOrderByTranIdAsc(Limit.of(PAGE_ROWS + 1));
+
+        assertThat(opening).extracting(Transaction::getTranId)
+                .containsExactly(TRAN_ID_FIRST, TRAN_ID_SECOND, TRAN_ID_THIRD);
+        assertThat(opening).extracting(Transaction::getCardNum)
+                .containsOnlyOnceElementsOf(List.of(SEED_CARD_LEADING_ZERO))
+                .contains(SEED_CARD);
+
+        List<Transaction> forward = this.transactions
+                .findByTranIdGreaterThanOrderByTranIdAsc(TRAN_ID_SECOND, Limit.of(PAGE_ROWS + 1));
+
+        assertThat(forward).extracting(Transaction::getTranId)
+                .containsExactly(TRAN_ID_THIRD, TRAN_ID_FOURTH)
+                .doesNotContain(TRAN_ID_SECOND);
+
+        List<Transaction> backward = this.transactions
+                .findByTranIdLessThanOrderByTranIdDesc(TRAN_ID_THIRD, Limit.of(PAGE_ROWS + 1));
+
+        assertThat(backward).extracting(Transaction::getTranId)
+                .containsExactly(TRAN_ID_SECOND, TRAN_ID_FIRST)
+                .doesNotContain(TRAN_ID_THIRD);
+
+        // WHY : Assumptions: the two directions are asserted to disagree about their orderings rather
+        //       than each being checked alone, because a backward finder that had been declared
+        //       ascending would still return the two preceding rows for this fixture -- there are only
+        //       two of them -- and would only diverge once more rows preceded the cursor than the cap
+        //       admits. Comparing the orders directly states the property the cap depends on.
+        assertThat(backward).extracting(Transaction::getTranId)
+                .isSortedAccordingTo(java.util.Comparator.reverseOrder());
+        assertThat(forward).extracting(Transaction::getTranId)
+                .isSortedAccordingTo(java.util.Comparator.naturalOrder());
+    }
+
+    /**
+     * Confirms the unfiltered opening read admits the surplus row and no more than the cap allows.
+     *
+     * <p>Assumptions: this is the probe read of {@code app/cbl/COTRN00C.cbl} line 308 on the unfiltered
+     * path. The fixture holds one row more than the cap, so the cap is what decides the result rather
+     * than the table's size, and the row the cap excludes is asserted absent by identifier. A finder
+     * that ignored its cap would return four rows here and every ordering assertion would still pass.
+     */
+    @Test
+    void theUnfilteredOpeningReadIsBoundedByItsCapRatherThanByTheTableSize() {
+        this.persistAndDetach(
+                this.posted(TRAN_ID_FIRST, SEED_CARD, SEED_AMOUNT_POSITIVE, RANGE_START),
+                this.posted(TRAN_ID_SECOND, SEED_CARD, SEED_AMOUNT_POSITIVE, RANGE_START),
+                this.posted(TRAN_ID_THIRD, SEED_CARD, SEED_AMOUNT_POSITIVE, RANGE_START),
+                this.posted(TRAN_ID_FOURTH, SEED_CARD, SEED_AMOUNT_POSITIVE, RANGE_START));
+
+        List<Transaction> capped =
+                this.transactions.findAllByOrderByTranIdAsc(Limit.of(PAGE_ROWS + 1));
+
+        assertThat(capped).hasSize(PAGE_ROWS + 1);
+        assertThat(capped).extracting(Transaction::getTranId)
+                .containsExactly(TRAN_ID_FIRST, TRAN_ID_SECOND, TRAN_ID_THIRD)
+                .doesNotContain(TRAN_ID_FOURTH);
+    }
+
+    /**
      * Confirms the surplus row reveals a further page without becoming part of that page.
      *
      * <p>This pins the availability probe of {@code app/cbl/COTRN00C.cbl}. Its loop at line 297 fills

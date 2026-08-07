@@ -1,7 +1,9 @@
 package com.carddemo.authorization.dto;
 
 import com.carddemo.common.money.Money;
+import com.carddemo.common.security.MaskedCardNumber;
 import com.carddemo.common.web.CursorToken;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -110,14 +112,31 @@ public record PendingAuthDetailView(
      * Validates every component the contract marks required and confines the two closed domains.
      *
      * <p>Refactoring Rationale: the guards live here rather than in the mapper so that no instance can
-     * exist in a state the contract does not describe, whichever path constructed it. The match status
-     * and the masked card number are re-checked through {@link PendingAuthRowView}'s own declared
-     * domains rather than restated, so the list and the detail resources cannot come to disagree about
-     * either.</p>
+     * exist in a state the contract does not describe, whichever path constructed it. The match status is
+     * re-checked through {@link PendingAuthRowView}'s own declared domain rather than restated, so the
+     * list and the detail resources cannot come to disagree about it.</p>
+     *
+     * <p>Refactoring Rationale: the card number is checked by
+     * {@link MaskedCardNumber#require(String, String)} rather than by the length-and-first-character test
+     * that stood here. That test was an approximation of the list view's rule and admitted values the rule
+     * refuses: {@code *234567890123456} is sixteen characters beginning with the mask character, so it
+     * passed while disclosing fifteen digits of a card number. The masking obligation is stated once in
+     * the shared module now, and this contract reads it instead of restating a weaker form of it.</p>
+     *
+     * <p>Assumptions: the two response members are checked against the CLOSED domains this context's
+     * contract publishes for them -- two values for the code and eight for the reason, each taken from
+     * the producer's own {@code MOVE} statements at {@code cbl/COPAUA0C.cbl} L688 and L693 and at L698
+     * and L700 to L717. Both may be absent, because a stored row may carry no reply at all, and a
+     * stored blank is treated as absent for the same reason the migration's check constraints admit one:
+     * a COBOL character field nothing was moved into holds spaces rather than a null. Checking them here
+     * as well as in the database is not redundant: the database binds what may be STORED while this
+     * binds what may be PUBLISHED, and a row that predates the constraints would otherwise be
+     * serialised into a body the contract says cannot exist.</p>
      *
      * @throws NullPointerException if any required component is {@code null}
      * @throws IllegalArgumentException if the selector is not a sealed token, if the match status is
-     *     outside its four-value domain, or if the card number is not in the masked form the contract
+     *     outside its four-value domain, if either response member is outside the closed domain the
+     *     contract publishes for it, or if the card number is not in the masked form the contract
      *     publishes
      */
     public PendingAuthDetailView {
@@ -129,7 +148,6 @@ public record PendingAuthDetailView(
         Objects.requireNonNull(accountId, "accountId is required");
         Objects.requireNonNull(authDate, "authDate is required");
         Objects.requireNonNull(authTime, "authTime is required");
-        Objects.requireNonNull(cardNum, "cardNum is required");
         Objects.requireNonNull(transactionAmt, "transactionAmt is required");
         Objects.requireNonNull(approvedAmt, "approvedAmt is required");
         Objects.requireNonNull(transactionId, "transactionId is required");
@@ -137,10 +155,62 @@ public record PendingAuthDetailView(
             throw new IllegalArgumentException("matchStatus must be one of "
                     + PendingAuthRowView.MATCH_STATUSES + " but was " + matchStatus);
         }
-        if (cardNum.length() != PendingAuthRowView.MASKED_CARD_LENGTH
-                || cardNum.charAt(0) != '*') {
-            throw new IllegalArgumentException(
-                    "cardNum must be published in the masked form the contract declares");
+        requireWithinDomain(authRespCode, RESPONSE_CODES, "authRespCode");
+        requireWithinDomain(authRespReason, RESPONSE_REASONS, "authRespReason");
+
+        // WHY : Refactoring Rationale: the mask check delegates to the shared module's validator rather
+        //       than restating a weaker one. The restated form here tested only the length and the first
+        //       character, so "*123456789012345" satisfied it and disclosed fifteen digits of a primary
+        //       account number on a detail body. One validator means the list and the detail resources
+        //       -- and the two card contracts that read the same rule -- cannot disagree about what
+        //       masked means, which is exactly the divergence that let the weaker test survive beside
+        //       the stricter one.
+        MaskedCardNumber.require("cardNum", cardNum);
+    }
+
+    /**
+     * The response codes this context can produce, and the only ones a detail body may carry.
+     *
+     * <p>Assumptions: two values, from the two {@code MOVE} statements that write the field --
+     * {@code cbl/COPAUA0C.cbl} L688 moves the declined code and L693 the approved one -- with no third
+     * branch between them. The published contract enumerates the same two plus null.</p>
+     */
+    public static final List<String> RESPONSE_CODES = List.of("00", "05");
+
+    /**
+     * The response reasons this context can produce, and the only ones a detail body may carry.
+     *
+     * <p>Assumptions: eight values. {@code cbl/COPAUA0C.cbl} L698 writes the approved reason and its
+     * L700 to L717 select one of seven decline reasons: not found across the cross-reference, the
+     * account master or the customer master collapse into one at L704, then insufficient funds at L706,
+     * card not active at L708, account closed at L710, card fraud at L712, merchant fraud at L714 and a
+     * catch-all at L716.</p>
+     */
+    public static final List<String> RESPONSE_REASONS =
+            List.of("0000", "3100", "4100", "4200", "4300", "5100", "5200", "9000");
+
+    /**
+     * Refuses a response member that is present, non-blank and outside its published domain.
+     *
+     * <p>Assumptions: absence and blankness both pass. The column is nullable because a stored row may
+     * carry no reply, and a stored blank is the state a COBOL character field holds when nothing was
+     * moved into it, so neither is an out-of-domain value. Only a value that is actually present and
+     * actually different is refused.</p>
+     *
+     * @param candidate the value to check; may be {@code null}
+     * @param domain the closed set of values the contract publishes for the component
+     * @param component the component name, so a rejection names the member rather than only its value
+     * @throws IllegalArgumentException if {@code candidate} is present, non-blank and not in
+     *     {@code domain}
+     */
+    private static void requireWithinDomain(String candidate, List<String> domain, String component) {
+        if (candidate == null || candidate.isBlank()) {
+            return;
+        }
+        if (!domain.contains(candidate)) {
+            throw new IllegalArgumentException(component + " must be one of " + domain
+                    + ", blank, or absent, because the published contract closes that domain, but was "
+                    + candidate);
         }
     }
 }

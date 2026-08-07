@@ -2,6 +2,8 @@ package com.carddemo.authorization.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.carddemo.authorization.api.FraudController;
+import com.carddemo.authorization.api.PendingAuthController;
 import java.io.InputStream;
 import java.util.List;
 import java.util.Map;
@@ -104,8 +106,7 @@ class ContractPublicationTest {
      *
      * <p>Assumptions: the assertion is on the specification version and on the presence of at least one
      * published path. Those two together are what distinguish the authored contract from the document the
-     * annotations would produce at this checkpoint, which carries an empty paths object because this
-     * module's controllers are authored at a later index.</p>
+     * annotations alone would produce.</p>
      */
     @Test
     @DisplayName("the packaged contract is an openapi 3.1 document declaring at least one path")
@@ -119,6 +120,63 @@ class ContractPublicationTest {
                 .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.MAP)
                 .as("an empty paths object would mean the generated stand-in was packaged by mistake")
                 .isNotEmpty();
+    }
+
+    /**
+     * Confirms every published operation is served by a route a controller in this module declares.
+     *
+     * <p>Refactoring Rationale: this assertion exists because a review found the reverse condition. The
+     * contract declared three operations, a sealed path selector and a body-versus-path key comparison,
+     * and no controller existed for any of them -- so the document promised behaviour nothing served, and
+     * the request record the comparison was written for had no production consumer at all. Neither half
+     * could be detected by anything in the build: a YAML document is a valid YAML document whether or not
+     * a handler answers it, and a Java record compiles whether or not anything constructs it.</p>
+     *
+     * <p>Assumptions: the comparison is between the document's own path keys and the mapping constants the
+     * two controllers publish, so both sides are read rather than restated. Writing the three paths out as
+     * literals here would let this test agree with itself while the document and the routes diverged, which
+     * is the exact failure it exists to catch.</p>
+     *
+     * <p>Assumptions: the set is asserted to be EXACTLY the three, in both directions. A fourth path in the
+     * document would be an operation no handler answers; a fourth route in the module would be behaviour
+     * no client is told about, reachable and unreviewed.</p>
+     */
+    @Test
+    @DisplayName("the three published paths are exactly the routes the two controllers declare")
+    void publishedPathsAreExactlyTheRoutesTheControllersDeclare() {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> paths = (Map<String, Object>) contract().get("paths");
+
+        assertThat(paths.keySet()).containsExactlyInAnyOrder(
+                PendingAuthController.BASE_PATH,
+                PendingAuthController.BASE_PATH + "/{key}",
+                FraudController.FRAUD_PATH);
+
+        assertThat(operationIdsOf(paths))
+                .as("each published path declares exactly the operations the module serves")
+                .containsExactlyInAnyOrder("listPendingAuthorizations", "getPendingAuthorization",
+                        "setAuthorizationFraudState");
+    }
+
+    /**
+     * Collects every operation identifier the document declares, across every path and method.
+     *
+     * @param paths the document's paths mapping; must not be {@code null}
+     * @return the operation identifiers in document order, never {@code null}
+     */
+    private static List<String> operationIdsOf(Map<String, Object> paths) {
+        List<String> identifiers = new java.util.ArrayList<>();
+        for (Object pathItem : paths.values()) {
+            if (!(pathItem instanceof Map<?, ?> methods)) {
+                continue;
+            }
+            for (Object operation : methods.values()) {
+                if (operation instanceof Map<?, ?> body && body.get("operationId") != null) {
+                    identifiers.add(String.valueOf(body.get("operationId")));
+                }
+            }
+        }
+        return List.copyOf(identifiers);
     }
 
     /**

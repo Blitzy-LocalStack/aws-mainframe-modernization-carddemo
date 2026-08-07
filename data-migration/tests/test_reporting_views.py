@@ -15,7 +15,7 @@ properties the reporting service's read path depends on:
 4. the service role is granted ``SELECT`` on each view by name and is denied every
    source relation those views read from.
 
-WHY (Alternatives Considered)
+Alternatives Considered:
     Running these assertions against a live database was considered and rejected as
     the primary check. A database test can only run where a database has been
     provisioned, so on a workstation and in the documentation gate it would be
@@ -28,7 +28,7 @@ WHY (Alternatives Considered)
     check can run everywhere and only the database check can observe the resolved
     privilege graph.
 
-WHY (Assumptions)
+Assumptions:
     The assertions are written against normalised whitespace rather than against exact
     lines, because the file carries the explainability commentary Rule 1 requires and
     that commentary is reflowed whenever it is edited. Matching on statement content

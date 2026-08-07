@@ -1700,3 +1700,118 @@ resource "aws_cloudwatch_metric_alarm" "aurora_capacity" {
     Signal = "aurora-capacity"
   })
 }
+
+# ---------------------------------------------------------------------------
+# Alarm 12 of 13: cluster-level connection saturation.
+#
+# WHY : Assumptions: THIS IS NOT THE CONNECTION-POOL ALARM, and the two must not
+#       be conflated. Two different saturations exist, they publish to two
+#       different places, and only one of them is reachable from here:
+#         - Pool ACQUISITION failure inside a task -- a HikariCP meter that
+#           reaches CloudWatch only through each service's Micrometer registry,
+#           under the pool name that service configures. That series is an
+#           application meter, not an AWS/RDS metric, so no alarm on it is
+#           authorable in this module. It stays a dashboard concern.
+#         - CLUSTER connection count -- a first-class AWS/RDS metric on the
+#           DBClusterIdentifier dimension, which this module already graphs on
+#           its dashboard. It is alarmable here, and this resource alarms it.
+#       Refactoring Rationale: the module previously graphed DatabaseConnections
+#       without alarming it, and justified the absence with the application-meter
+#       argument above. That argument is sound for the first bullet and does not
+#       apply to the second, so it was covering a gap it did not actually
+#       explain. ADR-003 records "connection count grows with task count" as a
+#       named risk precisely because "a sufficiently wide scale-out can exhaust
+#       connections before it exhausts capacity" -- that is, this alarm can fire
+#       while both aurora_cpu and aurora_capacity stay OK, which is the whole
+#       reason it is not redundant with either.
+#       Assumptions: the threshold is DERIVED, not chosen. ADR-003 states the
+#       relationship as "tasks times pool size, not tasks plus pool size", and
+#       the environment root computes exactly that product from the task count
+#       and pool size it already configures, so no number here is invented.
+#       Trade-offs: a derived ceiling can be exceeded legitimately when a
+#       deployment briefly runs old and new tasks together, so the alarm uses the
+#       shared evaluation-period count rather than firing on a single period.
+resource "aws_cloudwatch_metric_alarm" "aurora_connections" {
+  count = var.database_connection_threshold == null ? 0 : 1
+
+  alarm_name          = "${local.name_stem}-aurora-connection-saturation"
+  alarm_description   = "Condition: cluster connection count reaches the total the configured service task count and per-task pool size can open. Question: is the cluster running out of connections before it runs out of capacity? Action: reduce per-service pool size or bound the maximum task count; both are compute-side configuration."
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  threshold           = var.database_connection_threshold
+  evaluation_periods  = var.alarm_evaluation_periods
+  datapoints_to_alarm = var.alarm_evaluation_periods
+  period              = var.alarm_period_seconds
+  namespace           = "AWS/RDS"
+  metric_name         = "DatabaseConnections"
+  statistic           = "Maximum"
+  treat_missing_data  = "missing"
+  actions_enabled     = true
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+
+  dimensions = {
+    DBClusterIdentifier = var.aurora_cluster_identifier
+  }
+
+  tags = merge(local.tags, {
+    Signal = "aurora-connections"
+  })
+}
+
+# ---------------------------------------------------------------------------
+# Alarm 13 of 13: edge server-error rate at the content delivery network.
+#
+# WHY : Assumptions: CloudFront metrics publish to us-east-1 ONLY, because a
+#       distribution is a global resource with no regional home. That is the real
+#       and only constraint on this alarm, and it is narrower than the reason
+#       this module used to give for having no CloudFront alarm at all -- which
+#       was that global metrics "require a different provider region". They
+#       require us-east-1 specifically, and both environment roots already set
+#       aws_region to us-east-1, so for every composition this repository
+#       actually ships the metrics are in this provider's region and the alarm is
+#       creatable. Refactoring Rationale: the previous wording turned a
+#       conditional constraint into a blanket impossibility and so omitted a
+#       signal that was available the whole time; the guard below expresses the
+#       constraint accurately instead.
+#       Assumptions: aws_region is an INPUT, not a constant, so a caller may
+#       compose this module in another region. The count guard therefore tests
+#       the region rather than assuming it: outside us-east-1 the series does not
+#       exist for this provider and an alarm on it would sit permanently in
+#       INSUFFICIENT_DATA, which reads identically to a control that is passing.
+#       Trade-offs: an error RATE is alarmed rather than an error COUNT, because
+#       a distribution serving a static single-page application has a request
+#       volume that varies by orders of magnitude between working hours and
+#       overnight; a count threshold that is meaningful at one volume is noise or
+#       silence at the other, whereas a rate is comparable across both.
+resource "aws_cloudwatch_metric_alarm" "cloudfront_5xx" {
+  count = var.cloudfront_distribution_id != null && data.aws_region.current.region == "us-east-1" ? 1 : 0
+
+  alarm_name          = "${local.name_stem}-cloudfront-5xx-rate"
+  alarm_description   = "Condition: percentage of viewer requests answered with a server error by the distribution. Question: is the static delivery path failing, as distinct from the API path the api_5xx alarm watches? Action: compare against the origin bucket's access log before redeploying the built assets."
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  threshold           = var.cloudfront_5xx_error_rate_threshold_percent
+  evaluation_periods  = var.alarm_evaluation_periods
+  datapoints_to_alarm = var.alarm_evaluation_periods
+  period              = var.alarm_period_seconds
+  namespace           = "AWS/CloudFront"
+  metric_name         = "5xxErrorRate"
+  statistic           = "Average"
+  treat_missing_data  = "notBreaching"
+  actions_enabled     = true
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+
+  # WHY : Assumptions: the Region dimension is the literal string "Global" for a
+  #       distribution, not the provider's region. CloudFront publishes every
+  #       distribution metric under that fixed value, so substituting the region
+  #       here would silently match no series and the alarm would never leave
+  #       INSUFFICIENT_DATA.
+  dimensions = {
+    DistributionId = var.cloudfront_distribution_id
+    Region         = "Global"
+  }
+
+  tags = merge(local.tags, {
+    Signal = "cloudfront-5xx"
+  })
+}

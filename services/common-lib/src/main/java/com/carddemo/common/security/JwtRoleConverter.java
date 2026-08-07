@@ -233,7 +233,7 @@ public final class JwtRoleConverter implements Converter<Jwt, Collection<Granted
      * the authority predicate and this constant, never with the role predicate; the reason that
      * distinction matters is recorded on this class.</p>
      *
-     * <p><strong>Assumptions: this literal is a FIXED CROSS-LANGUAGE CONTRACT and is not derived from
+     * <p>Assumptions: <strong>this literal is a FIXED CROSS-LANGUAGE CONTRACT and is not derived from
      * any deployment-time value.</strong> Three consumers match it byte for byte -- this class, which
      * turns it into a Spring Security authority; {@code ui/src/hooks/useAuth.ts}, which reads it out
      * of the token; and the SPA's administrative routes, which test for it -- and the identity

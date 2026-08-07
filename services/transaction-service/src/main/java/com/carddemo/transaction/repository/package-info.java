@@ -22,7 +22,7 @@
  * interface in this directory would fail the charter-presence check if this
  * file were not part of the same package.
  *
- * <p>Exactly five {@code .java} files constitute this package, of which FOUR are landed:
+ * <p>Exactly seven {@code .java} files constitute this package, and ALL SEVEN are landed:
  *
  * <ul>
  *   <li>{@code package-info.java}, this charter -- LANDED;</li>
@@ -39,41 +39,73 @@
  *   <li>{@code TransactionCategoryBalanceRepository}, the Spring Data JPA
  *       interface for
  *       {@code com.carddemo.transaction.domain.TransactionCategoryBalance} --
- *       LANDED. Its identifier is the declared three-part composite key, and it adds one
- *       ordered read to the inherited keyed read; and</li>
+ *       LANDED. Its identifier is the declared three-part composite key; it adds one ordered
+ *       read to the inherited keyed read, and it composes in the two write members named
+ *       below;</li>
+ *   <li>{@code TransactionCategoryBalanceWriter}, the custom fragment interface declaring the
+ *       insert and the update of that same record as two separate members -- LANDED. It exists
+ *       because the inherited save method cannot express them: the entity's identifier is
+ *       always assigned and it carries no version attribute, so the framework's newness test
+ *       routes BOTH branches through the provider's merge, which loses a competing insert on
+ *       one path and a competing delete on the other. Its own file carries the measurement and
+ *       the alternatives weighed against it;</li>
+ *   <li>{@code TransactionCategoryBalanceWriterImpl}, the implementation of that fragment --
+ *       LANDED, package-private, and named by the framework's {@code Impl} convention rather
+ *       than by an annotation; and</li>
  *   <li>{@code TransactionRejectRepository}, the Spring Data JPA interface for
- *       {@code com.carddemo.transaction.domain.TransactionReject} -- PLANNED, not yet
- *       authored. Its ENTITY is landed and keyed on the reject-event sequence
- *       {@code reject_seq}, so this one is a single file away rather than two.</li>
+ *       {@code com.carddemo.transaction.domain.TransactionReject} -- LANDED, keyed on the
+ *       reject-event sequence {@code reject_seq} the owning migration generates. It declares no
+ *       query of its own, because the reference opens the reject dataset for output only and reads
+ *       it back nowhere, so there is no read path to transcribe; its role is the owned table's
+ *       physical contract rather than a behaviour.</li>
  * </ul>
  *
- * <p>Refactoring Rationale: the inventory is re-stated from the directory each time an interface
- * lands, because an entry that cannot be distinguished from a landed one defeats the lookup it
- * exists to serve. An earlier revision of this census said TWO of the five were landed and marked
- * {@code DailyTransactionRepository} and {@code TransactionCategoryBalanceRepository} as not yet
- * authored. Both are present, and each carries substantive query rulings -- the daily feed's scan
- * contract and the composite-key ordered read -- so the census understated the package by two
- * files and, worse, marked as absent the two interfaces whose rulings a reader most needs to
- * find. The same revision said {@code TransactionRejectRepository} was "two files away" because
- * its entity was also unauthored; {@code TransactionReject} is present in the sibling
- * {@code domain} package, so that entry is one file away, not two. A census is consulted
- * precisely to learn which contracts are settled, so under-reporting sends a reader to write an
- * interface that already exists and over-states the work remaining on the one that does not. The
- * inventory stays closed at five and now names the four that are here.
+ * <p>Refactoring Rationale: the inventory is re-stated from the directory each time a file lands,
+ * because an entry that cannot be distinguished from a landed one defeats the lookup it exists to
+ * serve, and this census has understated the package twice. An early revision said TWO of five
+ * were landed and marked {@code DailyTransactionRepository} and
+ * {@code TransactionCategoryBalanceRepository} as not yet authored; both were present, each
+ * carrying substantive query rulings. A later revision then said FOUR of five were landed and
+ * kept {@code TransactionRejectRepository} as planned; that interface is present too. The count
+ * now stands at seven because the category-balance write path was split into a fragment interface
+ * and its implementation, for the reason their own files record. A census is consulted precisely
+ * to learn which contracts are settled, so under-reporting sends a reader to write a file that
+ * already exists -- which is why the number and the LANDED markers are both re-read from the
+ * directory rather than carried forward.
  *
- * <p>Assumptions: the remaining interface is not authored as an empty one to close the gap. A
- * Spring Data interface with no declared query and no caller contributes no behaviour and cannot
- * be exercised, so it would be a placeholder occupying the name of a reviewed contract; it
- * arrives with the job or service whose queries it declares. That is also why the three that are
- * here were correct to author rather than premature: each declares queries a landed caller
- * already issues.
+ * <p>Refactoring Rationale: no file here is an empty placeholder authored to close a gap, and the
+ * rule that establishes it has been restated to say what it was for. An earlier revision held that
+ * an interface with neither a declared query nor a caller contributes no behaviour and is therefore
+ * withheld -- which {@code TransactionRejectRepository} does not satisfy, and which consequently
+ * read as a verdict against a file this same inventory lists as landed. The rule is that an
+ * interface is withheld when nothing in the codebase needs the TABLE mapped, not when nothing in
+ * THIS module happens to call it. The reject stream is needed mapped, because this module owns the
+ * schema the table lives in and is therefore the module whose migration and entity are the single
+ * source of its columns, widths, nullability and key; its writer is the posting job, which reaches
+ * the table through a narrowly scoped cross-schema grant and maps it through its own entity in the
+ * batch deployable, and that split is what keeps the posting unit of work one atomic commit. The
+ * other six either declare queries a landed caller in this module already issues or, in the
+ * fragment pair's case, replace a mechanism that was measurably wrong -- which is a different
+ * justification, recorded separately so neither can be mistaken for the other.
+
  *
- * <p>Trade-offs: the inventory is closed rather than extensible. There is no
- * shared base repository, keyset base interface, custom fragment,
- * implementation fragment, Specification or Criteria helper, DTO, mapper or
- * service here. The cost is repetition across the small interfaces; what is
- * bought is one visible repository per physical record contract and no hidden
- * query surface behind a sixth type. This directory has no subdirectory.
+ * <p>Trade-offs: the inventory is closed rather than extensible. There is no shared base
+ * repository, keyset base interface, Specification or Criteria helper, DTO, mapper or service
+ * here, and there is no subdirectory. The cost is repetition across the small interfaces; what is
+ * bought is one visible repository per physical record contract and no hidden query surface behind
+ * an eighth type.
+ *
+ * <p>Refactoring Rationale: this paragraph used to include "custom fragment" and "implementation
+ * fragment" in that list of absences, and the exclusion has been withdrawn for exactly ONE record.
+ * The reason it was written was sound -- a fragment is a query surface a reader of the interface
+ * cannot see -- and it is answered rather than overridden: the fragment declares its two members on
+ * a named interface that the repository's own contract points at, so the surface is visible in the
+ * type hierarchy rather than hidden behind a convention. What forced the exception is that the
+ * alternative was not "no fragment" but "no distinction": the inherited save method routes an
+ * insert and an update through one provider operation on this entity, so keeping the list absolute
+ * would have meant keeping a mechanism that silently overwrites a competing writer's amount. The
+ * exclusion still holds for every other record in this package, and a second fragment needs its own
+ * measurement rather than this precedent.
  *
  * <h2>Transformation rule T5 is this package's charter</h2>
  *

@@ -6,10 +6,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.carddemo.common.codec.CopybookLayout;
 import com.carddemo.common.codec.FixedWidthCodec;
 import com.carddemo.common.money.Money;
+import com.carddemo.reporting.domain.ReportTransactionView;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.lang.reflect.RecordComponent;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.util.ArrayList;
@@ -313,17 +315,62 @@ class TransactionReportMapperTest {
     private static final int FIXTURE_DESCRIPTION_WIDTH = 50;
 
     /**
-     * An obviously synthetic sixteen-digit card number, used only to prove it is never emitted.
+     * An obviously synthetic sixteen-digit card number, used to prove it is never emitted.
      *
      * <p>Assumptions: {@code TRAN-CARD-NUM} is declared {@code PIC X(16)} at line 15 of
      * {@code app/cpy/CVTRA05Y.cpy}, at zero-based offset 262, which line 41 of
      * {@code app/jcl/TRANREPT.jcl} independently corroborates as the one-based sort position 263.
-     * This value is deliberately a repeated-digit run rather than a plausible account number: it
-     * cannot pass a check-digit test, so it cannot correspond to an issued card, and its
-     * distinctness is what makes a search for it across the whole report meaningful. It is never
-     * passed to the mapper, because the mapper has no parameter that would accept it.</p>
+     * The value is a repeated-digit run rather than a plausible account number, so it is
+     * recognisable on sight, and its distinctness is what makes a search for it across a whole
+     * report meaningful.</p>
+     *
+     * <p>Refactoring Rationale: this value ends in 8 and an earlier revision ended in 1, on the
+     * stated ground that the value could not pass a check-digit test. That ground was false for
+     * the earlier value and the arithmetic is written out here so the claim can be checked rather
+     * than taken on trust. Under the Luhn algorithm every second digit from the right is doubled and
+     * a doubled result above nine has nine subtracted from it, then the digits are summed and a
+     * total ending in zero is valid. For {@code 4444333322221111} the eight undoubled digits
+     * contribute {@code 1+1+2+2+3+3+4+4 = 20} and the eight doubled digits contribute
+     * {@code 2+2+4+4+6+6+8+8 = 40}, giving 60, which ends in zero -- so the earlier value was
+     * <em>valid</em> and the rationale asserted the opposite of the fact. Changing only the last
+     * digit from 1 to 8 raises the undoubled contribution by seven to 27 and the total to 67, which
+     * does not end in zero, so this value genuinely cannot correspond to an issued card. Alternatives
+     * Considered: keeping the value and deleting the check-digit sentence. Rejected because the
+     * property the sentence claims is the property the constant is chosen for -- a test datum that
+     * could be a live card number is a datum a reader has to think twice about before putting it in a
+     * fixture -- so the fix is to make the value satisfy the claim rather than to drop the claim.</p>
      */
-    private static final String SYNTHETIC_CARD_NUMBER = "4444333322221111";
+    private static final String SYNTHETIC_CARD_NUMBER = "4444333322221118";
+
+    /**
+     * Sum of the Luhn contributions of {@link #SYNTHETIC_CARD_NUMBER}, asserted below.
+     *
+     * <p>Assumptions: the total is declared as a constant and asserted rather than left in prose,
+     * because a rationale that rests on arithmetic nobody re-runs is exactly how the earlier revision
+     * came to state the opposite of the fact. Asserting it means the claim fails a build if the
+     * constant is ever edited.</p>
+     */
+    private static final int SYNTHETIC_CARD_LUHN_TOTAL = 67;
+
+    /**
+     * Zero-based offset of the four digits a masked rendering would keep.
+     *
+     * <p>Assumptions: 12 is the sixteen declared characters of {@code TRAN-CARD-NUM} less the four a
+     * mask leaves visible, and it is declared rather than written at each use so that a search for
+     * the masked tail cannot drift out of step with the number it is a tail of.</p>
+     */
+    private static final int CARD_NUMBER_TAIL_OFFSET = 12;
+
+    /**
+     * Number of members the report detail band declares.
+     *
+     * <p>Assumptions: the detail band at lines 15 to 31 of {@code app/cpy/CVTRA07Y.cpy} declares a
+     * transaction identifier, an account identifier, a type code, a type description, a category
+     * code, a category description, a source and an amount. Eight members, and the same eight are the
+     * parameters of the emission call and the components of the payload that feeds it, which is what
+     * makes a count assertion over all three meaningful.</p>
+     */
+    private static final int REPORT_DETAIL_MEMBER_COUNT = 8;
 
     /**
      * First business date of the range used by every heading assertion below.
@@ -1664,35 +1711,194 @@ class TransactionReportMapperTest {
     }
 
     /**
-     * Asserts that no band of the report emits a card number anywhere.
+     * Asserts that a card number carried on the source projection reaches neither payload nor band.
+     *
+     * <p>Refactoring Rationale: this assertion is driven from the source projection, and an
+     * earlier revision drove it from nothing at all. That revision emitted the eight bands from
+     * plain fixtures, none of which held the synthetic number, and then asserted that no band
+     * contained it -- so the assertion could not fail whatever the mapper did with a card number,
+     * because no card number was ever supplied to anything. It would have passed against a mapper
+     * that appended the number to every band. The fix is to introduce the value on the one production
+     * type that legitimately carries it: {@code ReportTransactionView} projects
+     * {@code v_report_transactions.card_num}, because the report's primary ordering key is the card
+     * number even though no band displays it. The number is then carried through the two production
+     * mapping steps a report line actually takes -- projection to payload, payload to band -- and
+     * asserted absent from each. Alternatives Considered: feeding the number into
+     * {@code encodeDetailLine} directly, in place of one of its eight arguments. Rejected because
+     * that asserts nothing about propagation: the transaction-identifier parameter is sixteen
+     * characters wide, so a number placed there is emitted verbatim and correctly, and the test would
+     * fail while reporting a caller's error as a mapper leak.</p>
      */
     @Test
-    @DisplayName("no band emits a card number, because the layout declares no such column")
-    void noBandEmitsACardNumberAnywhere() {
-        List<byte[]> bands = allEightBands(Money.of("1234.56"));
+    @DisplayName("a card number on the source projection reaches neither the payload nor any band")
+    void aCardNumberOnTheSourceProjectionReachesNeitherPayloadNorBand() {
+        ReportTransactionView source = new ReportTransactionView(
+                "0000000000000001", "01", "0001", "POS TERM  ", "Regular Sales Draft",
+                Money.of("1234.56"), 9L, "MERCHANT NAME", "SPRINGFIELD", "0000062701",
+                SYNTHETIC_CARD_NUMBER, null, null);
 
-        // WHY : Assumptions: the 133-column layout has NO card-number field at all. The detail band at
-        //       lines 15 to 31 of app/cpy/CVTRA07Y.cpy declares a transaction identifier, an account
-        //       identifier, a type code and its description, a category code and its description, a
-        //       source and an amount, and nothing else; TRAN-CARD-NUM is declared PIC X(16) at line 15
-        //       of app/cpy/CVTRA05Y.cpy and reaches this report only as the sort key at line 41 of
-        //       app/jcl/TRANREPT.jcl. An emitted primary account number would therefore be both a
-        //       layout defect and a data-exposure defect, and the mapper has no parameter that could
-        //       carry one, which is exactly the property worth pinning before someone adds one.
+        // WHY : Assumptions: the projection is asserted to be carrying the number before anything is
+        //       asserted about what became of it. Without this line the two assertions below would
+        //       silently become vacuous again the moment the projection's constructor changed the
+        //       position of its card-number parameter, which is precisely how the earlier revision
+        //       came to prove nothing.
+        assertThat(source.cardNum())
+                .as("the source projection really is carrying the number under test")
+                .isEqualTo(SYNTHETIC_CARD_NUMBER);
+
+        // WHY : Assumptions: the projection's own diagnostic rendering is the first channel checked,
+        //       because it is the one that leaks without any mapping step at all -- a log statement or
+        //       an assertion message written over the projection would carry whatever that rendering
+        //       carries, and the value is present in the instance at this point. Checking it here,
+        //       with the number genuinely loaded, is what distinguishes a real assertion from a
+        //       restatement of the projection's own documentation.
+        assertThat(source.toString())
+                .as("the projection's diagnostic rendering carries neither the number nor its tail")
+                .doesNotContain(SYNTHETIC_CARD_NUMBER)
+                .doesNotContain(SYNTHETIC_CARD_NUMBER.substring(CARD_NUMBER_TAIL_OFFSET));
+
+        ReportingDtoMapper.ReportTransactionPayload payload =
+                ReportingDtoMapper.toReportTransaction(source.transactionId(), "00000000007",
+                        source.typeCd(), "Regular Sales Draft", source.categoryCd(),
+                        "Restaurant and Bar Purchases", source.source(), source.amount());
+
+        // WHY : Assumptions: every component of the payload is walked by reflection rather than
+        //       named one by one, so a ninth component added later is covered without this test being
+        //       touched. Rendering each component through its own string form is what makes the walk
+        //       type-agnostic: the money component is an exact decimal and the rest are text, and a
+        //       search over the rendered form catches either.
+        for (RecordComponent component
+                : ReportingDtoMapper.ReportTransactionPayload.class.getRecordComponents()) {
+            assertThat(String.valueOf(readComponent(component, payload)))
+                    .as("payload component %s carries neither the number nor its tail",
+                            component.getName())
+                    .doesNotContain(SYNTHETIC_CARD_NUMBER)
+                    .doesNotContain(SYNTHETIC_CARD_NUMBER.substring(CARD_NUMBER_TAIL_OFFSET));
+        }
+
+        List<byte[]> bands = List.of(
+                TransactionReportMapper.encodeNameHeader(RANGE_START, RANGE_END),
+                TransactionReportMapper.encodeBlankLine(),
+                TransactionReportMapper.encodeColumnHeader(),
+                TransactionReportMapper.encodeSeparatorRule(),
+                TransactionReportMapper.encodeDetailLine(payload.transactionId(),
+                        Long.parseLong(payload.accountId()), payload.typeCode(),
+                        payload.typeDescription(), Integer.parseInt(payload.categoryCode()),
+                        payload.categoryDescription(), payload.source(), payload.amount()),
+                TransactionReportMapper.encodePageTotal(payload.amount()),
+                TransactionReportMapper.encodeAccountTotal(payload.amount()),
+                TransactionReportMapper.encodeGrandTotal(payload.amount()));
+
         // WHY : Alternatives Considered: searching only the detail band, since it is the only band
         //       with variable content. Rejected because a card number could reach a heading or a total
         //       band through a mis-seeded template just as easily, and searching all eight costs one
         //       loop.
-        assertThat(bands).allSatisfy(band -> assertThat(text(band))
-                .as("no band carries the synthetic card number")
-                .doesNotContain(SYNTHETIC_CARD_NUMBER));
-
         // WHY : Assumptions: the last four digits are searched for separately, because a masked
         //       rendering would carry them while dropping the leading twelve and would slip past a
-        //       search for the whole number. Neither form belongs in this report.
+        //       search for the whole number. Neither form belongs in this report: the 133-column
+        //       layout has no card-number field at all -- the detail band at lines 15 to 31 of
+        //       app/cpy/CVTRA07Y.cpy declares a transaction identifier, an account identifier, a type
+        //       code and its description, a category code and its description, a source and an amount,
+        //       and nothing else -- and TRAN-CARD-NUM, declared PIC X(16) at line 15 of
+        //       app/cpy/CVTRA05Y.cpy, reaches this report only as the sort key at line 41 of
+        //       app/jcl/TRANREPT.jcl.
         assertThat(bands).allSatisfy(band -> assertThat(text(band))
-                .as("no band carries a masked tail of the synthetic card number")
-                .doesNotContain(SYNTHETIC_CARD_NUMBER.substring(12)));
+                .as("no band carries the synthetic card number")
+                .doesNotContain(SYNTHETIC_CARD_NUMBER)
+                .doesNotContain(SYNTHETIC_CARD_NUMBER.substring(CARD_NUMBER_TAIL_OFFSET)));
+    }
+
+    /**
+     * Asserts that the report's emission surface declares no channel a card number could arrive on.
+     *
+     * <p>Assumptions: the propagation assertion above shows that a card number placed on the
+     * projection does not survive the mapping that exists today. This one shows that no channel
+     * exists for one to be added, which is the half a value-based assertion cannot reach: it counts
+     * the parameters of the only band with variable content and the components of the payload that
+     * feeds it, and it refuses a component whose name suggests a card number. A future author widening
+     * either surface has to change a number here, which is the point at which the exposure question
+     * gets asked.</p>
+     */
+    @Test
+    @DisplayName("the report's emission surface declares no channel a card number could arrive on")
+    void theEmissionSurfaceDeclaresNoCardNumberChannel() {
+        Method detailLine = Arrays.stream(TransactionReportMapper.class.getDeclaredMethods())
+                .filter(method -> "encodeDetailLine".equals(method.getName()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("encodeDetailLine is not declared"));
+
+        assertThat(detailLine.getParameterCount())
+                .as("the detail band takes exactly the eight members app/cpy/CVTRA07Y.cpy declares")
+                .isEqualTo(REPORT_DETAIL_MEMBER_COUNT);
+
+        RecordComponent[] components =
+                ReportingDtoMapper.ReportTransactionPayload.class.getRecordComponents();
+        assertThat(components)
+                .as("the report payload carries exactly the same eight members")
+                .hasSize(REPORT_DETAIL_MEMBER_COUNT);
+        assertThat(Arrays.stream(components).map(RecordComponent::getName).toList())
+                .as("no member of the report surface is named for a card or an account number")
+                .noneMatch(name -> {
+                    String lowered = name.toLowerCase(java.util.Locale.ROOT);
+                    return lowered.contains("card") || lowered.contains("pan");
+                });
+    }
+
+    /**
+     * Asserts that the synthetic card number cannot correspond to an issued card.
+     *
+     * <p>Assumptions: the check-digit arithmetic behind {@link #SYNTHETIC_CARD_NUMBER} is asserted
+     * rather than left in its Javadoc, because an earlier revision of that constant carried a
+     * rationale claiming the property while the value did not have it, and prose that nobody re-runs
+     * is how that happened. Computing the total here means the claim fails a build if the constant is
+     * edited, so the datum cannot quietly become a value that could be a live card number.</p>
+     */
+    @Test
+    @DisplayName("the synthetic card number fails the Luhn check and cannot be an issued card")
+    void theSyntheticCardNumberCannotBeAnIssuedCard() {
+        int total = 0;
+        for (int position = 0; position < SYNTHETIC_CARD_NUMBER.length(); position++) {
+            int digit = Character.digit(
+                    SYNTHETIC_CARD_NUMBER.charAt(SYNTHETIC_CARD_NUMBER.length() - 1 - position),
+                    10);
+            if (position % 2 == 1) {
+                digit *= 2;
+                if (digit > 9) {
+                    digit -= 9;
+                }
+            }
+            total += digit;
+        }
+
+        assertThat(total)
+                .as("the Luhn total is the value the constant's rationale states")
+                .isEqualTo(SYNTHETIC_CARD_LUHN_TOTAL);
+        assertThat(total % 10)
+                .as("a total not ending in zero fails the check, so the value is not an issued card")
+                .isNotZero();
+    }
+
+    /**
+     * Reads one record component from a payload instance.
+     *
+     * @param component the record component to read
+     * @param payload the payload instance to read it from
+     * @return the component's value, which may be {@code null} for an optional component
+     * @throws AssertionError if the accessor cannot be invoked, which reports a defect in this test
+     *     rather than a finding about the code under test
+     */
+    private static Object readComponent(RecordComponent component, Object payload) {
+        try {
+            return component.getAccessor().invoke(payload);
+        } catch (ReflectiveOperationException unreachable) {
+            // WHY : Assumptions: a record accessor is public, takes no argument and is declared on a
+            //       type this test names directly, so neither access nor arity can fail here. The
+            //       failure is reported as an assertion error rather than rethrown as a checked
+            //       exception, because a reflective breakage in a test helper is a defect in the test
+            //       and not a finding about the code under test.
+            throw new AssertionError(
+                    "record component " + component.getName() + " is not readable", unreachable);
+        }
     }
 
     /**

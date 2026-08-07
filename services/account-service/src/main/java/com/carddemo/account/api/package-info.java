@@ -64,12 +64,24 @@
  * with no second table and no duplicated row.</p>
  *
  * <p>Assumptions: this charter deliberately records no count of endpoints, paths, request methods or
- * status codes, and names no contract document as the source of such a count. The migration plan fixes
- * this service's responsibilities at its section 0.5.1.3 and fixes no operation inventory, and no
- * {@code openapi} directory exists under {@code services/account-service/src/main/resources} for one
- * to be read from, so a count written here would be a second and competing statement of the surface
- * that nothing checks. Responsibilities are attributed to named baseline programs instead, because
- * those programs can be opened at the cited lines and a count could not be.</p>
+ * status codes. The migration plan fixes this service's responsibilities at its section 0.5.1.3 and
+ * fixes no operation inventory, so a count written here would be a second and competing statement of
+ * the surface. Responsibilities are attributed to named baseline programs instead, because those
+ * programs can be opened at the cited lines and a count could not be.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph previously justified the absence of a count partly on the
+ * grounds that no {@code openapi} directory existed under
+ * {@code services/account-service/src/main/resources} for one to be read from. That is no longer true.
+ * {@code openapi/account-api.yaml} now exists and is the contract of record for the three internal
+ * read operations this package publishes to the pending-authorization context, and the sentence was
+ * corrected rather than left standing because a charter that misdescribes its own module is worse than
+ * one that says less. The document deliberately declares ONLY those three operations and not the
+ * account view or account update surface named in the roster above, and the reason is recorded in its
+ * own header: those three are already consumed by a deployed caller, so the document records an
+ * agreement that currently binds two running services rather than a plan. The contract test at
+ * {@code src/test/java/com/carddemo/account/api/AccountContextContractTest.java} asserts that
+ * correspondence in both directions, so neither the document nor this package can gain an operation
+ * without the other.</p>
  *
  * <h2>The layer boundary, and the two prohibitions that define it</h2>
  *

@@ -5,6 +5,9 @@ import jakarta.persistence.EmbeddedId;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Table;
 import java.math.BigDecimal;
+import java.util.List;
+import java.util.Objects;
+import java.util.Set;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
@@ -103,16 +106,72 @@ import org.hibernate.type.SqlTypes;
 public class PendingAuthDetail {
 
     /**
-     * The state a newly-recorded authorization starts in: pending a match against a posted
+     * The state an APPROVED authorization is recorded in: pending a match against a posted
      * transaction.
      *
      * <p>Assumptions: {@code 'P'} is the first of the four values the copybook's condition names
      * close the match-status domain to, {@code PA-MATCH-PENDING} at {@code cpy/CIPAUDTY.cpy} L46,
-     * and it is the one meaning "not yet matched". The consumer selects it on an approval at
-     * {@code cbl/COPAUA0C.cbl} L903, so a row this constant creates and a row the extract loads
-     * agree on the initial state.</p>
+     * and it is the one meaning "approved and not yet matched". The consumer selects it on the
+     * APPROVAL BRANCH ONLY, at {@code cbl/COPAUA0C.cbl} L903 inside the two-branch test opened at
+     * L902; the decline branch at L905 selects {@link #MATCH_STATUS_DECLINED} instead. Treating this
+     * value as the state of every newly-recorded authorization would record a declined
+     * authorization as one still awaiting a match, which every consumer of the summary screen and
+     * of the purge job reads as an open commitment against the account.</p>
      */
     public static final String MATCH_STATUS_PENDING = "P";
+
+    /**
+     * The state a DECLINED authorization is recorded in: answered, and never eligible for a match.
+     *
+     * <p>Assumptions: {@code 'D'} is {@code PA-MATCH-AUTH-DECLINED} at {@code cpy/CIPAUDTY.cpy} L47,
+     * the second of the four values the domain admits, and the consumer selects it on the ELSE
+     * branch of {@code cbl/COPAUA0C.cbl} L904 to L906 -- that is, whenever the reply's response code
+     * is not the approved one. It is a terminal state rather than a waiting one: a declined
+     * authorization reserves nothing, so nothing will ever match it. Recording a decline as {@link
+     * #MATCH_STATUS_PENDING} instead would leave it permanently unmatchable while still presenting
+     * as outstanding on the summary screen, which is a behavioural difference rather than a cosmetic
+     * one.</p>
+     */
+    public static final String MATCH_STATUS_DECLINED = "D";
+
+    /**
+     * The state a pending authorization reaches when it expires before any transaction matches it.
+     *
+     * <p>Assumptions: {@code 'E'} is {@code PA-MATCH-PENDING-EXPIRED} at {@code cpy/CIPAUDTY.cpy}
+     * L48. No path in this deployment writes it yet -- it belongs to the expiry and purge program
+     * {@code cbl/CBPAUP0C.cbl} -- but the constant is declared here because the migration's check
+     * constraint at its L582 to L583 admits it and the extract loads rows already carrying it, so a
+     * caller reading a loaded row needs a name for the value rather than a bare literal. It is
+     * deliberately NOT one of {@link #ORIGINATED_MATCH_STATUSES}: naming a state is not the same
+     * claim as being able to create a row in it.</p>
+     */
+    public static final String MATCH_STATUS_PENDING_EXPIRED = "E";
+
+    /**
+     * The state a pending authorization reaches once a posted transaction matches it.
+     *
+     * <p>Assumptions: {@code 'M'} is {@code PA-MATCHED-WITH-TRAN} at {@code cpy/CIPAUDTY.cpy} L49,
+     * the fourth and last value the condition names admit. As with {@link
+     * #MATCH_STATUS_PENDING_EXPIRED}, it is reached by transaction matching rather than by this
+     * context's insert path, and it is named here for the same reason: the extract loads it.</p>
+     */
+    public static final String MATCH_STATUS_MATCHED_WITH_TRAN = "M";
+
+    /**
+     * The two states this service ORIGINATES, in the order the reference branches select them.
+     *
+     * <p>Assumptions: the reference insert reaches exactly two of the four values the domain admits.
+     * The other two are reached later and elsewhere -- {@link #MATCH_STATUS_PENDING_EXPIRED} by the
+     * purge job and {@link #MATCH_STATUS_MATCHED_WITH_TRAN} by the posting match -- so a row created
+     * here carrying either of those would assert an outcome no insert path can have produced. The
+     * constructor validates against this pair and the database validates against all four, which is
+     * the correct division: the column has to be able to HOLD every state a row can ever reach, while
+     * this type may only CREATE the two an insert reaches. The provider materialises a loaded row
+     * through the no-argument constructor and field assignment, so narrowing this check costs a
+     * loaded expired or matched row nothing.</p>
+     */
+    public static final List<String> ORIGINATED_MATCH_STATUSES =
+            List.of(MATCH_STATUS_PENDING, MATCH_STATUS_DECLINED);
 
     /**
      * The fraud indicator meaning the authorization has been reported as fraudulent.
@@ -123,6 +182,71 @@ public class PendingAuthDetail {
      * be stored even by a caller that writes the column without going through this type.</p>
      */
     public static final String FRAUD_REPORTED = "F";
+
+    /**
+     * The fraud indicator meaning a previous fraud report has been withdrawn.
+     *
+     * <p>Assumptions: {@code 'R'} is {@code PA-FRAUD-REMOVED} at {@code cpy/CIPAUDTY.cpy} L52, the
+     * other of the two values the fraud domain names, and it is a REACHED state rather than an
+     * absence of one. {@code cbl/COPAUS1C.cbl} L236 to L241 toggles between the two -- confirmed
+     * becomes removed and anything else becomes confirmed -- so a withdrawal is recorded as this
+     * value and not by blanking the field back to its never-examined state. The published request
+     * contract admits the same pair, {@code enum [F, R]} on the marking action, so the entity and
+     * the interface close the domain to the same two values.</p>
+     */
+    public static final String FRAUD_REMOVED = "R";
+
+    /**
+     * The lowest value the point-of-sale entry mode may take.
+     *
+     * <p>Assumptions: zero, because {@code PA-POS-ENTRY-MODE PIC 9(02)} at {@code cpy/CIPAUDTY.cpy}
+     * L38 is an UNSIGNED two-digit display picture. An unsigned picture cannot hold a negative
+     * quantity at all, so a negative value here did not come from the segment.</p>
+     */
+    public static final short POS_ENTRY_MODE_MIN = 0;
+
+    /**
+     * The highest value the point-of-sale entry mode may take.
+     *
+     * <p>Assumptions: 99, the largest quantity two digits can express. The bound is stated as a
+     * checked invariant rather than left to the column, because {@code SMALLINT} holds five digits
+     * and would accept a three-digit value that the segment cannot represent and that the
+     * two-character wire field at {@code cpy/CCPAURQY.cpy} L30 cannot carry. A value outside this
+     * range would therefore persist successfully and then fail to encode, which is the failure mode
+     * this bound exists to move forward to the boundary that produced it.</p>
+     */
+    public static final short POS_ENTRY_MODE_MAX = 99;
+
+    /**
+     * The four one-character match statuses the copybook's condition names close the domain to.
+     *
+     * <p>Assumptions: the set is the constraint's own membership list, in copybook order, so the
+     * entity and the migration cannot drift apart on which values are admissible. It is used only to
+     * validate, never to iterate for presentation, so its order carries no display meaning.</p>
+     */
+    private static final Set<String> MATCH_STATUS_DOMAIN = Set.of(MATCH_STATUS_PENDING,
+            MATCH_STATUS_DECLINED, MATCH_STATUS_PENDING_EXPIRED, MATCH_STATUS_MATCHED_WITH_TRAN);
+
+    /**
+     * The two fraud indicators a marking transition may set.
+     *
+     * <p>Assumptions: this set deliberately excludes the blank and null states the column also
+     * admits. Blank and null are the states of an authorization NOBODY HAS EXAMINED, reached only by
+     * an insert or an extract load; a marking transition always asserts a fraud position, so it may
+     * only move to one of these two.</p>
+     */
+    private static final Set<String> FRAUD_MARK_DOMAIN = Set.of(FRAUD_REPORTED, FRAUD_REMOVED);
+
+    /**
+     * The exact number of characters a fraud report date occupies.
+     *
+     * <p>Assumptions: eight, from {@code PA-FRAUD-RPT-DATE PIC X(08)} at {@code cpy/CIPAUDTY.cpy}
+     * L53 and the {@code CHAR(8)} column the migration declares at its L536. The width is checked
+     * rather than assumed because a fixed-character column pads a short value with blanks silently,
+     * so a five-character date would store as a plausible-looking eight and only be caught when
+     * something tried to read the day out of it.</p>
+     */
+    private static final int FRAUD_REPORT_DATE_LENGTH = 8;
 
     /**
      * The three-part key: account, authorization date and authorization time.
@@ -261,12 +385,19 @@ public class PendingAuthDetail {
      * The response code returned to the acquirer,
      * {@code PA-AUTH-RESP-CODE PIC X(02)} at {@code cpy/CIPAUDTY.cpy} L30.
      */
-    // WHY : Assumptions: this column carries NO check constraint, and the absence is deliberate rather
-    //       than an omission. The single condition name that follows it, PA-AUTH-APPROVED VALUE '00' at
-    //       cpy/CIPAUDTY.cpy L31, is a sentinel for one value and not an exhaustive set like the four at
-    //       L46 to L49 or the two at L51 to L52; one named value does not close a domain. Deriving a
-    //       constraint or an enumeration from it would reject every decline code the reference system
-    //       can legitimately return.
+    // WHY : Assumptions: this column DOES carry a check constraint, at migration
+    //       ck_pending_auth_detail_auth_resp_code, and the domain it closes is taken from the PRODUCER
+    //       rather than from the condition name. The single condition name that follows the field,
+    //       PA-AUTH-APPROVED VALUE '00' at cpy/CIPAUDTY.cpy L31, is a sentinel for one value and does
+    //       not close a domain by itself -- but the two MOVE statements that write the field do:
+    //       cbl/COPAUA0C.cbl L688 moves '05' on a decline and L693 moves '00' on an approval, with no
+    //       third branch. Those two are exhaustive, so the domain is '00', '05', a blank the extract
+    //       may carry and null.
+    // WHY : Refactoring Rationale: an earlier revision recorded here that the absence of a constraint
+    //       was deliberate. It was corrected because the API contract publishes this member as a CLOSED
+    //       enumeration of those same two values plus null, so an unconstrained column admitted a third
+    //       value that no response body could legally carry -- and the failure would then surface on a
+    //       READ of the offending row rather than on the write that created it.
     @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "auth_resp_code", length = 2)
     private String authRespCode;
@@ -275,6 +406,13 @@ public class PendingAuthDetail {
      * The response reason returned to the acquirer,
      * {@code PA-AUTH-RESP-REASON PIC X(04)} at {@code cpy/CIPAUDTY.cpy} L32.
      */
+    // WHY : Assumptions: this column carries a check constraint over EIGHT values, at migration
+    //       ck_pending_auth_detail_auth_resp_reason, and like the response code above the domain comes
+    //       from the producer rather than from a condition name -- the copybook declares none for this
+    //       field at all. cbl/COPAUA0C.cbl L698 writes the approved reason and its L700 to L717 select
+    //       one of seven decline reasons, which is the whole set the reference system can emit. The
+    //       published contract enumerates the same eight plus null, so the column and the response
+    //       schema now state one domain instead of the schema being narrower than the store.
     @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "auth_resp_reason", length = 4)
     private String authRespReason;
@@ -504,14 +642,32 @@ public class PendingAuthDetail {
      * reached on it.
      *
      * <p>Assumptions: the parameter order follows the segment's own field order at
-     * {@code cpy/CIPAUDTY.cpy} L19 to L44, so a reader checking a call site against the copybook
-     * reads both in the same sequence. The match status is not a parameter: a newly-recorded
-     * authorization is always pending, which is what {@code cbl/COPAUA0C.cbl} L903 selects on the
-     * approval path, so this constructor sets {@link #MATCH_STATUS_PENDING} itself rather than
-     * letting a caller supply a value the insert path never varies.</p>
+     * {@code cpy/CIPAUDTY.cpy} L19 to L45, so a reader checking a call site against the copybook
+     * reads both in the same sequence -- and the match status is the LAST parameter because L45 is
+     * where the copybook declares it.</p>
+     *
+     * <p>Refactoring Rationale: the match status IS a parameter, and an earlier revision of this
+     * constructor set {@link #MATCH_STATUS_PENDING} itself on the ground that a newly-recorded
+     * authorization is always pending. That ground was wrong, and it was wrong in the direction that
+     * loses money rather than merely mis-labelling a row. The reference insert path selects between
+     * TWO values on the decision it just reached: {@code cbl/COPAUA0C.cbl} L902 tests
+     * {@code IF AUTH-RESP-APPROVED}, L903 sets {@code PA-MATCH-PENDING} on that branch, and L905 sets
+     * {@code PA-MATCH-AUTH-DECLINED} on the else branch, with no third outcome. Fixing the value to
+     * pending therefore persisted every DECLINED authorization as one still awaiting a match, which
+     * the summary screen renders as an open commitment and which the purge job at
+     * {@code cbl/CBPAUP0C.cbl} treats as a live pending row to age out -- so a decline consumed
+     * pending capacity it had never been granted. The value now travels from the deciding service,
+     * which is the only place that knows which branch was taken.</p>
+     *
+     * <p>Alternatives Considered: passing the decision object itself, or a boolean approval flag, and
+     * letting this constructor map it to a character. Rejected because it would put the branch in two
+     * places: the caller already renders the same decision into the response code and the approved
+     * amount, and a second, independent mapping here could disagree with those two without any
+     * mechanism noticing. Passing the persisted character keeps one mapping, and the validation below
+     * is what stops a caller passing a character the insert path cannot reach.</p>
      *
      * <p>Trade-offs: every value is supplied at construction and there is no mutator for any of them
-     * except the two fraud members, which move together in {@link #markFraudReported(String)}. A
+     * except the two fraud members, which move together in {@link #applyFraudMark(String, String)}. A
      * pending authorization is an immutable record of what an acquirer presented and what was
      * answered; the only thing that legitimately changes afterwards is whether it was later reported
      * fraudulent, which is the one transition the reference system performs on an existing segment.
@@ -555,7 +711,8 @@ public class PendingAuthDetail {
      *     the wire keeps the baseline spelling; may be {@code null}
      * @param acqrCountryCode the three-character acquirer country; may be {@code null}
      * @param posEntryMode how the card details entered the terminal, as a bounded small integer; may
-     *     be {@code null}
+     *     be {@code null}, and when present must lie between {@value #POS_ENTRY_MODE_MIN} and
+     *     {@value #POS_ENTRY_MODE_MAX} inclusive
      * @param merchantId the fifteen-character merchant identifier; may be {@code null}
      * @param merchantName the merchant name at its declared width, blank padding included and never
      *     trimmed; may be {@code null}
@@ -564,6 +721,16 @@ public class PendingAuthDetail {
      * @param merchantZip the nine-character merchant postal code; may be {@code null}
      * @param transactionId the acquirer's fifteen-character transaction identifier, which with the
      *     card number forms the durable idempotency key; must not be {@code null}
+     * @param matchStatus the state the decision places the authorization in, from
+     *     {@code PA-MATCH-STATUS PIC X(01)} at {@code cpy/CIPAUDTY.cpy} L45: must be
+     *     {@link #MATCH_STATUS_PENDING} when the authorization was approved or
+     *     {@link #MATCH_STATUS_DECLINED} when it was declined, and must not be {@code null}, because
+     *     the column is {@code NOT NULL} and the reference system's two decision branches are
+     *     exhaustive
+     * @throws NullPointerException if {@code matchStatus} is {@code null}
+     * @throws IllegalArgumentException if {@code matchStatus} is outside the column's four-value
+     *     domain, or is inside it but not one of {@link #ORIGINATED_MATCH_STATUSES}, or if
+     *     {@code posEntryMode} is present and outside its two-digit range
      */
     public PendingAuthDetail(PendingAuthDetailKey id, String authOrigDate, String authOrigTime,
             String cardNum, String authType, String cardExpiryDate, String messageType,
@@ -571,7 +738,7 @@ public class PendingAuthDetail {
             String processingCode, BigDecimal transactionAmount, BigDecimal approvedAmount,
             String merchantCategoryCode, String acqrCountryCode, Short posEntryMode,
             String merchantId, String merchantName, String merchantCity, String merchantState,
-            String merchantZip, String transactionId) {
+            String merchantZip, String transactionId, String matchStatus) {
         this.id = id;
         this.authOrigDate = authOrigDate;
         this.authOrigTime = authOrigTime;
@@ -588,7 +755,7 @@ public class PendingAuthDetail {
         this.approvedAmount = approvedAmount;
         this.merchantCategoryCode = merchantCategoryCode;
         this.acqrCountryCode = acqrCountryCode;
-        this.posEntryMode = posEntryMode;
+        this.posEntryMode = requirePosEntryModeInRange(posEntryMode);
         this.merchantId = merchantId;
         this.merchantName = merchantName;
         this.merchantCity = merchantCity;
@@ -596,13 +763,88 @@ public class PendingAuthDetail {
         this.merchantZip = merchantZip;
         this.transactionId = transactionId;
 
-        // WHY : Assumptions: the initial match status is set here rather than defaulted in the schema or
-        //       left to the caller, because the reference insert has exactly two outcomes and pending is
-        //       the one every newly-recorded authorization starts from. The two fraud members are
-        //       deliberately left unassigned: their ordinary state is a space the extract supplies or a
-        //       null this deployment writes, and inventing either here would assert a fraud position
-        //       about an authorization nobody has yet examined.
-        this.matchStatus = MATCH_STATUS_PENDING;
+        // WHY : Assumptions: the match status is validated here rather than relied upon from the check
+        //       constraint alone, because the constraint only fires at flush time. A row built with an
+        //       out-of-domain status would otherwise travel through the whole handler and fail as an
+        //       opaque constraint violation at commit, naming the column but not the call site that
+        //       chose the value. The accepted set is narrower than the column's, for the reason
+        //       recorded on ORIGINATED_MATCH_STATUSES.
+        // WHY : Alternatives Considered: giving the column a database default instead of taking the
+        //       value from the caller. Rejected because a default can express one of the two insert
+        //       outcomes at most, and would then be silently wrong for the other -- and wrong in a
+        //       direction no constraint could catch, since both values are legal for the column to
+        //       hold. Only the caller that reached the decision knows which branch this row is.
+        this.matchStatus = requireOriginatedMatchStatus(matchStatus);
+
+        // WHY : Assumptions: the two fraud members are deliberately left unassigned. Their ordinary
+        //       state is a space the extract supplies or a null this deployment writes -- the reference
+        //       moves SPACES into both at cbl/COPAUA0C.cbl L908 to L909 -- and inventing either here
+        //       would assert a fraud position about an authorization nobody has yet examined.
+    }
+
+    /**
+     * Returns the supplied match status if an insert path could have produced it.
+     *
+     * <p>Assumptions: the refusal is staged, and the two stages report different faults. A value the
+     * copybook does not name at all is not a match status; a value it does name but that only a later
+     * transition reaches is a match status this type may not originate. Collapsing the two would
+     * report a lower-case {@code 'p'} and a legitimately-loaded {@code 'E'} with the same sentence,
+     * and only one of those is a spelling mistake.</p>
+     *
+     * <p>Assumptions: a bare {@link IllegalArgumentException} rather than a bean-validation
+     * annotation, because this invariant has to hold for every instance including the ones a test
+     * builds directly, and bean validation runs only where a validator is wired. Each message names
+     * the rejected value so a caller that passed a lower-case spelling can see which one it was.</p>
+     *
+     * @param candidate the match status a caller supplied; must not be {@code null}
+     * @return {@code candidate} unchanged, once it is known to be one of the two originated values
+     * @throws NullPointerException if {@code candidate} is {@code null}
+     * @throws IllegalArgumentException if {@code candidate} is outside {@link #MATCH_STATUS_DOMAIN},
+     *     or is inside it but not one of {@link #ORIGINATED_MATCH_STATUSES}
+     */
+    private static String requireOriginatedMatchStatus(String candidate) {
+        // WHY : Assumptions: null is refused FIRST and by name, rather than being left for either
+        //       membership test to reject. Both Set.of and List.of build immutable collections whose
+        //       contains THROWS NullPointerException on a null argument instead of returning false, so
+        //       relying on membership alone would raise an NPE from inside a collection -- a refusal
+        //       that names neither the field nor the invariant. requireNonNull raises the same
+        //       exception type the caller documents, carrying the component's name.
+        Objects.requireNonNull(candidate, "matchStatus must not be null");
+        if (!MATCH_STATUS_DOMAIN.contains(candidate)) {
+            throw new IllegalArgumentException("matchStatus is not a match status value: the "
+                    + "copybook's condition names at cpy/CIPAUDTY.cpy L46 to L49 close the domain to "
+                    + "P, D, E or M, of which only P and D may be originated per cbl/COPAUA0C.cbl "
+                    + "L902 to L906, but was: " + candidate);
+        }
+        if (!ORIGINATED_MATCH_STATUSES.contains(candidate)) {
+            throw new IllegalArgumentException("matchStatus must be one of "
+                    + ORIGINATED_MATCH_STATUSES + " -- '" + MATCH_STATUS_PENDING
+                    + "' when the authorization was approved and '" + MATCH_STATUS_DECLINED
+                    + "' when it was declined, per cbl/COPAUA0C.cbl L902 to L906; '" + candidate
+                    + "' is reached by a later transition and never by an insert");
+        }
+        return candidate;
+    }
+
+    /**
+     * Returns the supplied point-of-sale entry mode if it fits the copybook's two unsigned digits.
+     *
+     * <p>Assumptions: {@code null} is permitted and returned unchanged, because the column is
+     * nullable and an extract may legitimately carry no entry mode. Only a PRESENT value is bounded,
+     * which is the distinction between a missing field and an impossible one.</p>
+     *
+     * @param candidate the entry mode a caller supplied; may be {@code null}
+     * @return {@code candidate} unchanged, once it is known to be absent or in range
+     * @throws IllegalArgumentException if {@code candidate} is present and lies outside {@value
+     *     #POS_ENTRY_MODE_MIN} to {@value #POS_ENTRY_MODE_MAX} inclusive
+     */
+    private static Short requirePosEntryModeInRange(Short candidate) {
+        if (candidate != null
+                && (candidate < POS_ENTRY_MODE_MIN || candidate > POS_ENTRY_MODE_MAX)) {
+            throw new IllegalArgumentException("pos entry mode must be between "
+                    + POS_ENTRY_MODE_MIN + " and " + POS_ENTRY_MODE_MAX + " but was: " + candidate);
+        }
+        return candidate;
     }
 
 
@@ -904,7 +1146,7 @@ public class PendingAuthDetail {
     }
 
     /**
-     * Marks this authorization as reported fraudulent, as of a stated date.
+     * Moves this authorization to a stated fraud position, as of a stated date.
      *
      * <p>Assumptions: the indicator and the report date move together in one method because the
      * reference system writes both in one segment replace -- {@code cbl/COPAUS1C.cbl} L525 to L528
@@ -915,12 +1157,61 @@ public class PendingAuthDetail {
      * supplied by the caller rather than read from a clock here, so the marking flow controls the
      * value that is stored and the same call is reproducible in a test.</p>
      *
-     * @param reportDate the eight characters of the date the report was made, in the month-first form
-     *     the reference system writes; must not be {@code null}
+     * <p>Refactoring Rationale: this replaces a method that took only a date and always wrote
+     * {@link #FRAUD_REPORTED}. That shape could not express a WITHDRAWAL at all, so the published
+     * marking contract -- whose action field admits {@code F} and {@code R} -- had a state the entity
+     * could not reach, and the {@code R} half of the interface was unimplementable through this type.
+     * The target state is now a parameter, which makes both published actions reachable through one
+     * transition and keeps the pairing with the date that the reference system's single segment
+     * replace establishes.</p>
+     *
+     * <p>Assumptions: the report date is required for BOTH target states, not only for a report.
+     * That is a reading of the reference marking flow rather than a symmetry preference:
+     * {@code cbl/COPAUS2C.cbl} L101 performs {@code MOVE WS-CUR-DATE TO PA-FRAUD-RPT-DATE}
+     * unconditionally, before either the insert path at its L199 to L201 or the update path at its
+     * L230 to L232 is chosen, and {@code cbl/COPAUS1C.cbl} L520 to L528 copies the whole amended
+     * segment back for either direction of its L236 to L241 toggle. So a withdrawal stamps the date
+     * it was withdrawn on exactly as a report stamps the date it was reported, and a caller that
+     * omitted it for a withdrawal would produce a row the reference system never writes.</p>
+     *
+     * <p>Alternatives Considered: clearing the date to blanks on a withdrawal, on the reading that a
+     * withdrawn report has no report date. Rejected because the only program that blanks these two
+     * fields is the INSERT path at {@code cbl/COPAUA0C.cbl} L908 to L909, which blanks them together
+     * as the never-examined state; no marking path blanks either one. Treating {@code R} as a return
+     * to that state would erase the evidence that the authorization was examined at all.</p>
+     *
+     * <p>Trade-offs: the transition is idempotent and does not refuse a repeat -- marking an already
+     * reported authorization as reported again succeeds and restamps the date. This mirrors the
+     * reference system, where {@code cbl/COPAUS2C.cbl} L203 detects the duplicate key and performs
+     * the update paragraph rather than failing, so a repeated mark is an accepted update there too.
+     * The accepted cost is that a caller cannot learn from this method whether the position changed;
+     * a caller that needs to distinguish an insert from an update reads the prior value through
+     * {@link #getAuthFraud()} before calling.</p>
+     *
+     * @param fraudState the position to move to, which must be {@link #FRAUD_REPORTED} to report this
+     *     authorization as fraudulent or {@link #FRAUD_REMOVED} to withdraw an existing report; must
+     *     not be {@code null}, and neither the blank nor the null never-examined state may be set
+     *     through this transition
+     * @param reportDate the eight characters of the date the mark was applied, in the month-first form
+     *     the reference system writes; must not be {@code null} and must be exactly {@value
+     *     #FRAUD_REPORT_DATE_LENGTH} characters for either target state
+     * @throws IllegalArgumentException if {@code fraudState} is not one of the two marking values, or
+     *     if {@code reportDate} is {@code null} or is not exactly {@value #FRAUD_REPORT_DATE_LENGTH}
+     *     characters long
      */
-    public void markFraudReported(String reportDate) {
-        this.authFraud = FRAUD_REPORTED;
+    public void applyFraudMark(String fraudState, String reportDate) {
+        // WHY : Assumptions: the null test precedes the membership test for the reason recorded on
+        //       requireOriginatedMatchStatus -- a Set.of set throws on contains(null) rather than answering
+        //       false, so membership alone would surface an NPE from inside the collection instead of the
+        //       refusal this method documents.
+        if (fraudState == null || !FRAUD_MARK_DOMAIN.contains(fraudState)) {
+            throw new IllegalArgumentException("fraud state must be F or R but was: " + fraudState);
+        }
+        if (reportDate == null || reportDate.length() != FRAUD_REPORT_DATE_LENGTH) {
+            throw new IllegalArgumentException("fraud report date must be exactly "
+                    + FRAUD_REPORT_DATE_LENGTH + " characters but was: " + reportDate);
+        }
+        this.authFraud = fraudState;
         this.fraudReportDate = reportDate;
     }
 }
-

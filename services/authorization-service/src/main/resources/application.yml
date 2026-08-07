@@ -44,20 +44,53 @@ server:
     #       healthy, so the two move together.
     enabled: true
 
-    # WHY : (1) Alternatives Considered: a keystore file baked into the image.
-    #       Rejected because a private key in an image layer is readable by anyone
-    #       who can pull the image, and one key in one image is one key shared by
-    #       dev and prod.
-    #       (2) Assumptions: both values arrive from Secrets Manager, injected by
-    #       the task definition through the ECS container secrets mechanism, so
-    #       neither is stored in the task definition, in Terraform state or in
-    #       plan output. They must be passed through the ecs-service module's
-    #       secret_arns input rather than environment_variables, whose validation
-    #       refuses a name ending in KEY for exactly this reason.
-    #       (3) Assumptions: these properties accept PEM CONTENT as well as a
-    #       path, which is what lets an environment-injected value work at all.
-    certificate: ${CARDDEMO_SERVER_TLS_CERTIFICATE}
-    certificate-private-key: ${CARDDEMO_SERVER_TLS_PRIVATE_KEY}
+    # WHY : Refactoring Rationale: these four properties replace a
+    #       `certificate` / `certificate-private-key` pair that read PEM CONTENT
+    #       from two environment variables injected from Secrets Manager. The
+    #       comment that stood here claimed the material was "not stored in the
+    #       task definition, in Terraform state or in plan output"; the first and
+    #       last were true and the middle one was FALSE. The pair was produced by
+    #       a managed `tls_private_key` resource in each environment root, so the
+    #       private key was written to Terraform state, and the SAME key was then
+    #       copied into two Secrets Manager entries and injected into every online
+    #       task -- one key for all eight services, held by anyone who could read
+    #       the state file. The claim is withdrawn and the mechanism is changed
+    #       rather than the sentence rewritten.
+    # WHY : Assumptions: the keystore is minted by THIS TASK at startup, by
+    #       config/docker/generate-listener-material.sh, which is the image's
+    #       entry point. It draws a fresh 2048-bit RSA key and a self-signed leaf
+    #       with keytool, writes them mode 0600 on the task's own encrypted
+    #       ephemeral volume, exports the three placeholders below, and then
+    #       `exec`s the JVM. No key is expressible in source, reaches Terraform
+    #       state, reaches Secrets Manager, or is shared by two tasks. That
+    #       script's header records the three alternatives measured and rejected,
+    #       including why an ephemeral `tls_private_key` cannot be used here.
+    # WHY : Assumptions: an Application Load Balancer does NOT validate the
+    #       certificate a target in an HTTPS target group presents, so a per-task
+    #       self-signed leaf is accepted at that hop exactly as the previous
+    #       shared self-signed leaf was. The certificate that IS verified -- the
+    #       one API Gateway checks against `server_name_to_verify` -- belongs to
+    #       the load balancer's own listener and is the operator-supplied ACM
+    #       certificate, which this change does not touch.
+    # WHY : Alternatives Considered: keeping PEM properties and having the script
+    #       write cert.pem and key.pem for `file:` locations, which these
+    #       properties also accept. Rejected on a measured limitation rather than
+    #       a preference: keytool exports a certificate as PEM but cannot export a
+    #       private key at all, so a PEM pair would need openssl, which is absent
+    #       from the pinned runtime digest. PKCS#12 is the one format the tooling
+    #       already in the image can produce.
+    # WHY : Trade-offs: `key-store` and `key-alias` carry defaults matching what
+    #       the script writes, so a local `java -jar` run against a hand-made
+    #       keystore needs only the password. `key-store-password` deliberately
+    #       carries NO default: a literal here would read as a committed secret to
+    #       every reader and to the repository's secret scanner, and an absent
+    #       password must stop startup rather than fall back to cleartext, which
+    #       would present as a healthy service that had quietly stopped meeting
+    #       the requirement this block exists for.
+    key-store: ${CARDDEMO_SERVER_TLS_KEYSTORE:file:/tmp/carddemo-tls/listener.p12}
+    key-store-type: PKCS12
+    key-store-password: ${CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD}
+    key-alias: ${CARDDEMO_SERVER_TLS_KEY_ALIAS:carddemo-listener}
 
     # WHY : (1) Assumptions: the two versions are named rather than left to the
     #       JDK default, which still negotiates the withdrawn TLS 1.1. This holds
@@ -192,6 +225,71 @@ spring:
     #       is survivable is the one where an operator is most likely to run it by
     #       accident. Nothing in this repository needs it.
     clean-disabled: true
+
+    # Assumptions: Flyway authenticates as a DIFFERENT database role than the one
+    #   the datasource above uses, and the two are not interchangeable.
+    #   data-migration/sql/V0__schemas_and_roles.sql creates three tiers of role
+    #   per bounded context: a NOLOGIN carddemo_authorization_owner that owns the
+    #   schema and everything in it, a carddemo_authorization_migrator login that is a
+    #   member of that owner, and the carddemo_authorization login this service serves
+    #   requests as. The runtime role holds USAGE on the schema plus SELECT,
+    #   INSERT and UPDATE on its tables -- CREATE is explicitly REVOKEd from it --
+    #   so it could not apply this migration even if asked to, and equally cannot
+    #   drop or alter the tables it reads.
+    # Refactoring Rationale: these two keys did not exist, and Flyway therefore
+    #   migrated under the runtime credential. That made the runtime role the
+    #   owner of the schema and of every table the migration created, so the one
+    #   long-lived credential every request ran under also held DDL authority over
+    #   the data it served. Naming a separate migration credential here is what
+    #   allows the bootstrap SQL to reduce the runtime role to named DML.
+    # Trade-offs: no fallback value, for the same reason the datasource
+    #   credential above has none -- a default would let the process start against
+    #   a credential nobody chose. The consequence is deliberate: a deployment
+    #   that injects the runtime credential and forgets this one fails at startup
+    #   on an unresolved placeholder, which names the variable it is missing,
+    #   rather than migrating as the wrong identity and succeeding.
+    # Assumptions: setting spring.flyway.user is also what gives Flyway its own
+    #   DataSource. Spring Boot builds a separate SimpleDriverDataSource derived
+    #   from the application DataSource whenever this key is set -- verified
+    #   against FlywayAutoConfiguration in spring-boot-flyway 4.1.0, whose
+    #   getMigrationDataSource falls to a derivedFrom builder when the Flyway URL
+    #   is absent and the Flyway user is not -- so the URL, driver and TLS terms
+    #   are inherited while the credential is replaced. That separation matters
+    #   beyond tidiness: sharing the Hikari pool would leave the SET ROLE below
+    #   applied to pooled connections that later serve runtime queries.
+    user: ${SPRING_FLYWAY_USER}
+    password: ${SPRING_FLYWAY_PASSWORD}
+
+    # Assumptions: this is the other half of the ownership split, and without it
+    #   the migration credential alone achieves nothing. V0 grants
+    #   carddemo_authorization_migrator its owner WITH INHERIT FALSE, so a session
+    #   authenticated as the migrator holds NO privilege at all until it assumes
+    #   the owner explicitly. Flyway runs every string here on each connection it
+    #   opens, before any migration statement, so every object V1 creates is owned
+    #   by carddemo_authorization_owner rather than by the credential that connected.
+    # Trade-offs: INHERIT FALSE plus an explicit SET ROLE is more moving parts
+    #   than granting the migrator ownership directly, and it buys two properties
+    #   that arrangement cannot have. A stolen migrator credential used without
+    #   this statement can read and write nothing, and every
+    #   ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_authorization_owner clause in the
+    #   bootstrap SQL fires -- those clauses are keyed on the CREATING role, so a
+    #   migration that created tables as the migrator would leave them all inert
+    #   and the runtime role would receive no grants on the tables it must read.
+    # Alternatives Considered: ALTER ROLE carddemo_authorization_migrator SET role,
+    #   which is a per-role server-side default and needs nothing in this file.
+    #   Rejected because it makes a privilege decision invisible at the point it
+    #   takes effect: a reader of this configuration would see a migration running
+    #   as the migrator and have no way to learn that the server silently
+    #   substitutes another identity.
+    init-sqls:
+    # Assumptions: the statement is TERMINATED. Spring Boot joins this list with a
+    #   newline and hands Flyway one script, so an unterminated statement is
+    #   concatenated with whatever follows it -- measured against PostgreSQL 17 as
+    #   `syntax error at or near "SET"` when a second entry was added under the test
+    #   profile. One entry cannot hit that today; the semicolon is what keeps a second
+    #   entry from breaking the first.
+      - "SET ROLE carddemo_authorization_owner;"
+
 
   jpa:
     hibernate:
@@ -395,6 +493,19 @@ carddemo:
       expected-client-id: ${CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID}
       required-scope: aws.cognito.signin.user.admin
 
+    # WHY : Refactoring Rationale: a `mask-hmac-key` setting stood here, delivered as
+    #       CARDDEMO_MASK_HMAC_KEY and shared with the extract-transform-load image, and it
+    #       keyed a SECOND tokeniser bean for the queue identities that
+    #       carddemo.messaging.hmac-key below already keys. It is withdrawn, and the
+    #       withdrawal is the security-preserving direction rather than the tidy one: the
+    #       shared key is held by a one-off migration workload that reads cardholder
+    #       extracts, so keying production queue metadata with it would let that workload
+    #       compute the group identity of any card's messages, and would couple the
+    #       rotation of a migration secret to the ordering guarantee of a running queue.
+    #       The property the shared key was chosen for -- one value across every producer,
+    #       so equal cards land in equal groups -- is a property of carddemo.messaging.
+    #       hmac-key too, which both roots deliver as one secret to every task.
+
     cognito:
       # WHY : Assumptions: these exist to be COMPARED, not to be chosen.
       #       common-lib's JwtRoleConverter holds the authority vocabulary as
@@ -419,10 +530,12 @@ carddemo:
   messaging:
     # WHY : (1) Assumptions: the queue is named by an injected value rather than
     #       a literal, because the same image runs against the dev and prod
-    #       queues. It is a FIFO queue whose message group is the card number, so
-    #       requests for one card arrive in order and requests for different cards
-    #       arrive in parallel -- which is what lets the consumer take a row lock
-    #       on one account's summary without serialising the whole service.
+    #       queues. It is a FIFO queue whose message group is one group PER CARD --
+    #       carried as the keyed opaque derivation described under hmac-key below,
+    #       never as the card number itself -- so requests for one card arrive in
+    #       order and requests for different cards arrive in parallel, which is what
+    #       lets the consumer take a row lock on one account's summary without
+    #       serialising the whole service.
     #       (2) Assumptions: the three polling values below are the migrated form
     #       of the baseline's own discipline, not new tuning.
     #       COPAUA0C reads with a five-second wait, so poll-timeout-seconds is 5;
@@ -448,6 +561,22 @@ carddemo:
     outbox-poll-interval-ms: 1000
     outbox-batch-size: 25
 
+    # WHY : (1) Assumptions: a PUBLISHED reply is kept for a bounded window and then
+    #       deleted by OutboxPublisher.purgePublished, and a PENDING one is never
+    #       deleted at all -- the repository's delete predicate requires a
+    #       publication instant to be present, because deleting an unpublished row
+    #       would lose the reply this table exists to guarantee.
+    #       (2) Trade-offs: seven days rather than indefinitely. The window exists so
+    #       an operator can answer whether a reply was sent for a given transaction;
+    #       a row still carries an encoded reply containing a primary account
+    #       number, so keeping one longer than that question needs is a disclosure
+    #       surface rather than a safety margin.
+    #       (3) Trade-offs: the sweep runs hourly rather than on the drain interval,
+    #       because retention is measured in days and a per-second pass would issue a
+    #       delete that matched nothing.
+    outbox-retention-days: 7
+    outbox-retention-sweep-interval-ms: 3600000
+
     # WHY : (1) Assumptions: this is the set of queue addresses a reply may be sent
     #       to, and the consumer compares the request's reply-to attribute against
     #       it by EXACT match. The attribute is chosen by whoever can put a message
@@ -467,6 +596,41 @@ carddemo:
     #       unanswered.
     reply-queue-allowlist: ${CARDDEMO_MESSAGING_REPLY_QUEUE_ALLOWLIST}
 
+    # WHY : (1) Assumptions: this is the key the queue GROUP identity and the
+    #       queue CORRELATION identity are derived under, and it carries no
+    #       default at all. A group identifier is message metadata: it sits
+    #       outside the encrypted body, it is reported in queue telemetry, and it
+    #       reaches every log and metric that observes the queue. The only
+    #       per-card stable value otherwise available is the card number, so
+    #       without this key the derivation collapses back to publishing a primary
+    #       account number on every message -- which is why an unset value stops
+    #       startup instead of falling back.
+    #       (2) Alternatives Considered: an unkeyed digest, or a keyed digest with
+    #       a published salt. Both rejected for one reason: the protected value is
+    #       a sixteen-digit number with a check digit, so the candidate space is
+    #       small enough to enumerate, and anyone holding a token could confirm
+    #       which card produced it. Only a secret key makes the token
+    #       unconfirmable, which is what makes it worth publishing at all.
+    #       (3) Assumptions: the SAME key is shared with every other producer on
+    #       this queue and is NOT per instance. That sharing is the ordering
+    #       guarantee: the group identity has to be equal for equal cards across
+    #       producers and across restarts, and a per-instance key would scatter one
+    #       card's messages across as many groups as there are running tasks,
+    #       removing the per-card ordering silently.
+    #       (4) Assumptions: this is a DIFFERENT secret from the extract-transform-
+    #       load masking key CARDDEMO_MASK_HMAC_KEY. The two have different
+    #       holders and different trust purposes -- that one is held by a one-off
+    #       migration workload reading cardholder extracts, this one by a
+    #       long-running consumer -- so sharing a single value would let the
+    #       migration workload compute production queue group identities and would
+    #       make rotating either one require stopping both.
+    #       (5) Assumptions: the value arrives as a container secret from the
+    #       deployment's secret store, in base64 or as raw text, and it is never a
+    #       literal in this file or in any tfvars file. config/
+    #       MessagingIdentityConfig.java detects the form and refuses anything
+    #       shorter than the tokeniser's minimum key length.
+    hmac-key: ${CARDDEMO_MESSAGING_HMAC_KEY}
+
   account-context:
     # WHY : (1) Assumptions: this context decides an authorization against records
     #       the ACCOUNT context owns -- the card cross-reference, the account master
@@ -485,5 +649,74 @@ carddemo:
     #       timeout, so a stalled dependency surfaces as a redelivered message
     #       rather than as an exhausted connection pool.
     base-url: ${CARDDEMO_ACCOUNT_CONTEXT_BASE_URL}
+
+    # WHY : (1) Assumptions: this is the EXACT origin the base address above is
+    #       required to equal, and service/RestAccountContextClient.java refuses to
+    #       start when the two differ. It exists because the first request that
+    #       client makes -- the cross-reference lookup -- carries a primary account
+    #       number in its body, so a base address quietly repointed after review
+    #       exfiltrates cardholder data on the first authorization rather than
+    #       failing visibly.
+    #       (2) Alternatives Considered: matching the address against a host suffix
+    #       or a pattern rather than an exact origin. Rejected for the same reason
+    #       the reply-queue allowlist above is exact: the legitimate value is a
+    #       deployment fact published by a Terraform output, not a shape, and any
+    #       pattern wide enough to cover a legitimate internal origin also covers a
+    #       host an attacker could arrange to control.
+    #       (3) Trade-offs: it DEFAULTS to the base address, so a deployment that
+    #       configures only the base address still starts and still gets every shape
+    #       check -- absolute, HTTPS, no user information, no path, no query, no
+    #       fragment. Requiring two values to be typed identically in the ordinary
+    #       case would be a step every operator learns to copy without reading. Both
+    #       Terraform roots publish the two names from ONE expression, so in a
+    #       deployed environment they are pinned to each other rather than to this
+    #       default.
+    approved-origin: ${CARDDEMO_ACCOUNT_CONTEXT_APPROVED_ORIGIN:${CARDDEMO_ACCOUNT_CONTEXT_BASE_URL}}
     connect-timeout-ms: 2000
     read-timeout-ms: 3000
+
+  internal-identity:
+    # WHY : (1) Assumptions: this is KEY MATERIAL, not a name, an address or an
+    #       identifier. It is the symmetric secret this service signs its
+    #       machine-to-machine bearer token with, and that the account context
+    #       verifies the same token against, so the two services must hold the same
+    #       value and nobody else may hold it. It carries NO default for that
+    #       reason: a default would be a shared secret published in source, which
+    #       would let anything that could read this repository mint a token the
+    #       account context accepts for its internal reads.
+    #       (2) Alternatives Considered: obtaining a machine token from the managed
+    #       identity provider through a client-credentials grant, which is the
+    #       conventional answer and would remove this value entirely. It is
+    #       unavailable: infra/modules/cognito provisions the user pool with no
+    #       hosted domain, so no token endpoint exists for a machine caller to call.
+    #       Mutual TLS was considered and rejected as disproportionate for one
+    #       caller inside one private network, since it would add certificate
+    #       issuance and rotation for two services. A static shared header was
+    #       rejected outright: it carries no expiry, names no audience and cannot be
+    #       scoped, so one capture would be a permanent credential.
+    #       (3) Assumptions: it is a DIFFERENT secret from
+    #       carddemo.messaging.hmac-key above, and the separation is deliberate
+    #       rather than incidental. That key derives opaque queue-metadata tokens
+    #       and is held by this service alone; this one is a signing key shared with
+    #       exactly one other service. Sharing a single value would mean rotating
+    #       the account context's trust anchor and this service's queue grouping
+    #       together, and would let a holder of either capability exercise the
+    #       other.
+    #       (4) Assumptions: the value arrives as a container secret from the
+    #       deployment's secret store, in base64 or as raw text.
+    #       common-lib InternalServiceToken refuses anything shorter than the digest
+    #       width at construction, so a short value fails startup rather than
+    #       weakening the credential silently.
+    signing-key: ${CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY}
+
+    # WHY : (1) Assumptions: the lifetime is expressed in seconds and defaults to
+    #       sixty. A token is minted fresh for every request and is used within
+    #       milliseconds, so the only thing a longer lifetime buys is a wider window
+    #       in which a captured token still works.
+    #       (2) Trade-offs: sixty seconds rather than five is chosen so that clock
+    #       skew between two tasks cannot make a freshly minted token appear expired
+    #       at the receiver, which would present as an intermittent 401 under load
+    #       and would be attributed to almost anything else first. common-lib
+    #       InternalServiceToken caps the configurable value at five minutes, so this
+    #       key cannot be widened into a durable credential by configuration.
+    token-lifetime-seconds: 60

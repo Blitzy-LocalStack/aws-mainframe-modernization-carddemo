@@ -43,16 +43,17 @@
  * {@code data-migration/sql/V1__reporting_views.sql} creates all three views, so the relation
  * column above names the file that declares each of the seven rather than an intention.
  *
- * <p>Assumptions: the three projection TYPES named in those rows are nonetheless still to be
- * authored, and the distinction between a missing relation and a missing projection is the point
- * of this paragraph. The relations exist and are granted; what does not yet exist is the Java
- * type that maps each one, because no repository or service in this module reads them yet -- the
- * statement and report assemblies that will are themselves not yet authored. The closed set this
- * charter opens with is therefore a set of SEVEN by declaration and FOUR by present count, and an
- * eighth name is still a defect. Trade-offs: authoring the three types ahead of a reader would put
- * three mappings into the module that nothing exercises, so a column name or a nullability wrong
- * in one of them would be caught by no test until its first reader arrived; the mapping table
- * above is what keeps the obligation visible in the meantime.
+ * <p>Refactoring Rationale: the three projection TYPES named in those rows formerly read as still
+ * to be authored as well, with the count stated as SEVEN by declaration and FOUR by present count.
+ * That is spent too: {@code CardXrefView}, {@code AccountView} and {@code CustomerView} are
+ * authored, so the count is SEVEN by declaration and SEVEN by present count and an eighth name is
+ * a defect on both readings. The reason they were withheld was that nothing read them, and the
+ * stated cost of authoring them early was that a wrong column name or nullability in one would be
+ * caught by no test until its first reader arrived. That cost is now paid rather than avoided: the
+ * four statement repository roles and the report role in
+ * {@code com.carddemo.reporting.repository} read all seven, and the services above those roles
+ * compose the statement and the report from what they return, so every mapping in this package has
+ * a reader and a wrong column name fails a read rather than sitting undetected.
  *
  * <p>Refactoring Rationale: {@code TransactionTypeView} previously mapped the base relation
  * {@code reference.transaction_types} directly, which broke the invariant this paragraph opens

@@ -519,21 +519,18 @@ class TransactionRecordMapperTest {
                         (Executable) () -> TransactionRecordMapper
                                 .toRecord(TransactionRecordMapper.toEntity(postedImage()), null),
                         "a layout must be named"),
-                Arguments.of("an absent amount", (Executable) () -> {
-                    Transaction transaction = TransactionRecordMapper.toEntity(postedImage());
-                    transaction.setAmount(null);
-                    TransactionRecordMapper.toRecord(transaction);
-                }, "no absent form"),
-                Arguments.of("an amount carrying a third decimal place", (Executable) () -> {
-                    Transaction transaction = TransactionRecordMapper.toEntity(postedImage());
-                    transaction.setAmount(new BigDecimal("1.234"));
-                    TransactionRecordMapper.toRecord(transaction);
-                }, "more than 2 decimal places"),
-                Arguments.of("an amount needing a tenth integer digit", (Executable) () -> {
-                    Transaction transaction = TransactionRecordMapper.toEntity(postedImage());
-                    transaction.setAmount(new BigDecimal("1000000000.00"));
-                    TransactionRecordMapper.toRecord(transaction);
-                }, "digit positions"),
+                // Refactoring Rationale: the three amount cases that stood here have MOVED to
+                //   theAmountMutatorGovernsWhatTheColumnCanHold below, because the boundary they
+                //   exercise moved. Transaction.setAmount now canonicalises through
+                //   Money.ofPicture, so an absent amount and a ten-integer-digit amount are refused
+                //   at the assignment and never reach this encoder, and a third decimal place is
+                //   reduced there under the general money contract rather than surviving to be
+                //   refused here. Asserting them through the encoder would now assert nothing about
+                //   the encoder: the executable would raise before toRecord was called, and the
+                //   diagnostic fragment matched would be the mutator's. The encoder retains its own
+                //   guards, which are still reachable for an entity the persistence provider
+                //   materialised by field assignment, and that reachability is why they were not
+                //   removed with these cases.
                 Arguments.of("an absent source image for the sign-preserving encode",
                         (Executable) () -> TransactionRecordMapper.toRecord(
                                 TransactionRecordMapper.toEntity(postedImage()),
@@ -545,6 +542,42 @@ class TransactionRecordMapperTest {
                                 TransactionRecordMapper.Layout.POSTED_MASTER,
                                 Arrays.copyOf(postedImage(), RECORD_LENGTH - 1)),
                         "sign-carrier source"));
+    }
+
+    /**
+     * Asserts that the amount mutator governs exactly what the persisted column can hold.
+     *
+     * <p>Three properties are asserted together because they are one contract: the column is
+     * {@code NUMERIC(11,2) NOT NULL}, so an absent amount and a magnitude needing a tenth integer
+     * digit are refused, while a value carrying more decimal places than the column keeps is reduced
+     * to two under the general money contract rather than being handed to the driver to coerce.
+     *
+     * <p>Assumptions: the nine-integer-digit bound is the picture's, not the shared kernel's.
+     * {@code Money.of} admits ten integer digits because {@code PIC S9(10)V99} is the widest money
+     * field in the reference corpus, so the value refused here is one that would have passed a bare
+     * canonicalisation and then failed at the database as a numeric-field-overflow.
+     *
+     * <p>The method accepts no parameters, returns nothing, and expects
+     * {@link NullPointerException} and {@link ArithmeticException} from the two refused assignments.
+     */
+    @Test
+    @DisplayName("the amount mutator refuses an absent or over-wide amount and reduces excess scale")
+    void theAmountMutatorGovernsWhatTheColumnCanHold() {
+        Transaction transaction = TransactionRecordMapper.toEntity(postedImage());
+
+        assertThatThrownBy(() -> transaction.setAmount(null))
+                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> transaction.setAmount(new BigDecimal("1000000000.00")))
+                .isInstanceOf(ArithmeticException.class)
+                .hasMessageContaining("integer digits")
+                .hasMessageNotContaining("1000000000");
+
+        transaction.setAmount(new BigDecimal("1.234"));
+        assertThat(transaction.getAmount()).isEqualByComparingTo(new BigDecimal("1.23"));
+        assertThat(transaction.getAmount().scale()).isEqualTo(2);
+
+        transaction.setAmount(new BigDecimal("-999999999.99"));
+        assertThat(transaction.getAmount()).isEqualByComparingTo(new BigDecimal("-999999999.99"));
     }
 
     /**

@@ -468,8 +468,8 @@ def test_a_stamp_mixing_the_two_pad_bytes_is_refused() -> None:
 
     :returns: nothing; the assertion is the test.
     """
-    # WHAT: thirteen blanks followed by thirteen low values -- neither documented form.
-    # WHY : Trade-offs: an earlier revision stripped both pad bytes together, so ANY
+    # Trade-offs: the span below is thirteen blanks followed by thirteen low values, which is
+    #   neither documented pad form. An earlier revision stripped both pad bytes together, so ANY
     #   mixture collapsed to an empty result and was reported as an absent timestamp.
     #   That converted partial corruption into a NULL indistinguishable from an unwritten
     #   field, which is the one outcome a load cannot detect afterwards. Refusing costs a

@@ -1,11 +1,11 @@
 package com.carddemo.authorization.service;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -15,13 +15,19 @@ import static org.mockito.Mockito.when;
 import com.carddemo.authorization.domain.AuthReplyOutbox;
 import com.carddemo.authorization.domain.PendingAuthDetail;
 import com.carddemo.authorization.domain.PendingAuthSummary;
+import com.carddemo.authorization.mapper.AuthorizationMessageMapper;
 import com.carddemo.authorization.repository.OutboxRepository;
 import com.carddemo.authorization.repository.PendingAuthDetailRepository;
 import com.carddemo.authorization.repository.PendingAuthSummaryRepository;
 import com.carddemo.common.codec.CsvAuthCodec;
 import com.carddemo.common.codec.CsvAuthCodec.AuthMessageFormatException;
+import com.carddemo.common.codec.CsvAuthCodec.AuthReply;
 import com.carddemo.common.codec.CsvAuthCodec.AuthRequest;
+import com.carddemo.common.messaging.MessagingCorrelationId;
 import com.carddemo.common.money.Money;
+import com.carddemo.common.security.OpaqueIdentifier;
+import jakarta.validation.Validation;
+import jakarta.validation.Validator;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
@@ -109,6 +115,48 @@ class AuthorizationRequestListenerTest {
      */
     private static final int WINDOW_LIMIT = 3;
 
+    /**
+     * The validation engine the payload crossing applies.
+     *
+     * <p>Assumptions: the default provider's engine is built once and shared, because it is stateless
+     * and immutable and building one per test costs more than every assertion here put together. It is a
+     * REAL engine rather than a stub for the same reason the decision service is real: what these tests
+     * assert is that the consumer routes a decoded message through the declared contract, and a stub
+     * engine would make that assertion vacuous.</p>
+     */
+    private static final Validator VALIDATOR =
+            Validation.buildDefaultValidatorFactory().getValidator();
+
+    /**
+     * The keyed tokeniser the consumer derives its queue group identity through.
+     *
+     * <p>Assumptions: the key material is FIXED rather than random, so the token a given card produces is
+     * the same in every run and a failure is reproducible. It is a REAL tokeniser rather than a stub for
+     * the same reason the validation engine is: what these tests assert about the outbox row is that the
+     * stored group identity is a derived token and not the card number, and a stub that returned a
+     * constant would satisfy that assertion without proving the derivation happened.</p>
+     *
+     * <p>Trade-offs: the material is the ascending byte sequence rather than anything resembling a real
+     * key. That is adequate here and would not be in production -- the production key comes from the
+     * secret store through {@code config/MessagingIdentityConfig.java} -- because nothing in this class
+     * asserts that the token is unguessable, only that it is derived, stable and free of the card
+     * number.</p>
+     */
+    private static final OpaqueIdentifier TOKENISER = new OpaqueIdentifier(fixedKeyMaterial());
+
+    /**
+     * Builds deterministic tokeniser key material of the minimum admissible length.
+     *
+     * @return the key material, never {@code null}
+     */
+    private static byte[] fixedKeyMaterial() {
+        byte[] material = new byte[OpaqueIdentifier.MIN_KEY_LENGTH];
+        for (int index = 0; index < material.length; index++) {
+            material[index] = (byte) (index + 1);
+        }
+        return material;
+    }
+
     /** The summary repository mock. */
     private PendingAuthSummaryRepository summaries;
 
@@ -152,7 +200,9 @@ class AuthorizationRequestListenerTest {
         //       mechanism that acts on it needs a listener container registry and a live queue; separating
         //       the two is what makes the bound assertable at all, and it is why the seam is an interface.
         this.listener = new AuthorizationRequestListener(this.summaries, this.details, this.outbox,
-                new AuthorizationDecisionService(), this.accounts, List.of(ALLOWED_REPLY_QUEUE),
+                new AuthorizationDecisionService(),
+                new AuthorizationMessageMapper(VALIDATOR), this.accounts, TOKENISER,
+                List.of(ALLOWED_REPLY_QUEUE),
                 Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC), WINDOW_LIMIT,
                 handled -> this.closedWindows.add(handled));
     }
@@ -165,7 +215,9 @@ class AuthorizationRequestListenerTest {
      */
     private AuthorizationRequestListener listenerWithWindow(int limit) {
         return new AuthorizationRequestListener(this.summaries, this.details, this.outbox,
-                new AuthorizationDecisionService(), this.accounts, List.of(ALLOWED_REPLY_QUEUE),
+                new AuthorizationDecisionService(),
+                new AuthorizationMessageMapper(VALIDATOR), this.accounts, TOKENISER,
+                List.of(ALLOWED_REPLY_QUEUE),
                 Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC), limit,
                 handled -> this.closedWindows.add(handled));
     }
@@ -228,6 +280,65 @@ class AuthorizationRequestListenerTest {
     }
 
     /**
+     * An approved authorization is recorded as pending a match against a posted transaction.
+     *
+     * <p>Assumptions: this is the {@code IF} branch of lines 902 to 906, which selects
+     * {@code PA-MATCH-PENDING} when the reply carries the approval response code. The stored status is
+     * asserted alongside the response code, because the two are set from one predicate in the source
+     * and a row carrying one without the other is a combination the reference system never writes.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an approved authorization is recorded with the pending match status")
+    void anApprovedAuthorizationIsRecordedAsPending() {
+        givenResolvableCard();
+        when(this.summaries.findWithLockByAccountId(ACCOUNT_ID))
+                .thenReturn(Optional.of(summaryWithRoom()));
+
+        this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
+
+        ArgumentCaptor<PendingAuthDetail> saved = ArgumentCaptor.forClass(PendingAuthDetail.class);
+        verify(this.details).save(saved.capture());
+        assertEquals(PendingAuthDetail.MATCH_STATUS_PENDING, saved.getValue().getMatchStatus());
+        assertEquals("00", saved.getValue().getAuthRespCode());
+    }
+
+    /**
+     * A declined authorization is recorded as declined and never as pending.
+     *
+     * <p>Assumptions: this is the {@code ELSE} branch of lines 902 to 906, reached here by requesting
+     * more than the summary's remaining room so that the decision refuses it -- the insufficient-funds
+     * path at lines 665 to 671. The assertion matters because the two statuses are both valid values of
+     * the same column, so recording a decline as pending fails no constraint: it silently moves the row
+     * into the population the expiry sweep walks and the pending list renders. The declined counter is
+     * asserted beside it, so a row and its summary cannot disagree about the outcome.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a declined authorization is recorded with the declined match status")
+    void aDeclinedAuthorizationIsRecordedAsDeclined() {
+        givenResolvableCard();
+        PendingAuthSummary exhausted = new PendingAuthSummary(ACCOUNT_ID, CUSTOMER_ID);
+        exhausted.refreshLimits(new BigDecimal("100.00"), new BigDecimal("50.00"));
+        when(this.summaries.findWithLockByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(exhausted));
+
+        this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
+
+        ArgumentCaptor<PendingAuthDetail> saved = ArgumentCaptor.forClass(PendingAuthDetail.class);
+        verify(this.details).save(saved.capture());
+        assertEquals(PendingAuthDetail.MATCH_STATUS_DECLINED, saved.getValue().getMatchStatus());
+        assertEquals("05", saved.getValue().getAuthRespCode());
+        assertEquals(0, BigDecimal.ZERO.compareTo(saved.getValue().getApprovedAmount()));
+
+        ArgumentCaptor<PendingAuthSummary> summary = ArgumentCaptor.forClass(PendingAuthSummary.class);
+        verify(this.summaries).save(summary.capture());
+        assertEquals(1, summary.getValue().getDeclinedAuthCount().intValue());
+        assertEquals(0, summary.getValue().getApprovedAuthCount().intValue());
+    }
+
+    /**
      * No account, customer or summary read happens when the cross-reference does not resolve.
      *
      * <p>Assumptions: this is the conditionality of lines 450 to 456 and the write guard at line 463. An
@@ -250,9 +361,19 @@ class AuthorizationRequestListenerTest {
         verify(this.details, never()).save(any(PendingAuthDetail.class));
         verify(this.summaries, never()).save(any(PendingAuthSummary.class));
 
+        // WHY : Refactoring Rationale: this assertion required the group identity to EQUAL the card
+        //       number, and it is corrected to require the derived token instead. The old expectation
+        //       encoded the defect rather than a requirement: the group identity is copied onto the send
+        //       as MessageGroupId, so it is queue metadata outside the encrypted body and reaches queue
+        //       telemetry and every log that observes the queue. A passing test asserting a primary
+        //       account number belongs there is worse than no test, because it converts the exposure into
+        //       an expectation that a later correct fix appears to break.
         ArgumentCaptor<AuthReplyOutbox> reply = ArgumentCaptor.forClass(AuthReplyOutbox.class);
         verify(this.outbox).save(reply.capture());
-        assertEquals(CARD_NUM, reply.getValue().getMessageGroupId());
+        assertEquals(TOKENISER.token(CsvAuthCodec.GROUP_PURPOSE, CARD_NUM),
+                reply.getValue().getOrderGroupToken());
+        assertNotEquals(CARD_NUM, reply.getValue().getOrderGroupToken());
+
     }
 
     /**
@@ -287,33 +408,103 @@ class AuthorizationRequestListenerTest {
     }
 
     /**
-     * A correlation attribute that does not conform to the shared rule is dropped, not persisted.
+     * A correlation identity carrying a control character REFUSES the message.
      *
-     * <p>Assumptions: the request is still decided, which is the point. The queue transport drops the
-     * attribute and proceeds, because a queued authorization cannot be corrected by its sender in time to
-     * matter; the servlet transport refuses the request outright. Both apply the same predicate.</p>
+     * <p>Refactoring Rationale: this test previously asserted that a nonconforming attribute was DROPPED
+     * and the request decided anyway, using a value made of ordinary punctuation. Both halves changed
+     * with the rule. The messaging rule admits every printable character, so punctuation is now canonical
+     * and is echoed -- see the test below -- and what remains non-canonical is a control character or an
+     * over-long value, neither of which a legitimate requester sends. Such a message is refused so the
+     * queue redelivers and then dead-letters it, which leaves evidence, where dropping the attribute left
+     * the requester holding a correlation value that never came back and nothing to explain why.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("a nonconforming correlation attribute is dropped while the request is still decided")
-    void aNonconformingCorrelationAttributeIsDropped() {
-        givenResolvableCard();
-        when(this.summaries.findWithLockByAccountId(ACCOUNT_ID))
-                .thenReturn(Optional.of(summaryWithRoom()));
+    @DisplayName("a correlation identity carrying a control character refuses the message")
+    void aNonCanonicalCorrelationAttributeRefusesTheMessage() {
         Message<String> message = MessageBuilder
                 .withPayload(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
                 .setHeader(AuthorizationRequestListener.HEADER_REPLY_TO, ALLOWED_REPLY_QUEUE)
-                .setHeader(AuthorizationRequestListener.HEADER_CORRELATION_ID,
-                        "a\",\"level\":\"ERROR")
+                .setHeader(AuthorizationRequestListener.HEADER_CORRELATION_ID, "a\nlevel=ERROR")
+                .build();
+
+        assertThrows(AuthMessageFormatException.class, () -> this.listener.onRequest(message));
+
+        verifyNoInteractions(this.outbox);
+        verify(this.details, never()).save(any(PendingAuthDetail.class));
+    }
+
+    /**
+     * A correlation identity the servlet rule would have refused is carried through unaltered.
+     *
+     * <p>Assumptions: the value is forty-eight hexadecimal characters, which is how a requester renders
+     * the baseline's twenty-four BYTE correlation field. It is twice the servlet rule's own width bound,
+     * so the borrowed predicate refused it and the consumer answered with a reply carrying no correlation
+     * attribute -- leaving the requester unable to pair the answer with its question. Asserting this exact
+     * shape is what pins the regression rather than merely testing that some value survives.</p>
+     *
+     * <p>Assumptions: the punctuation case is asserted alongside it, because that is where the echo and
+     * the LOG rendering deliberately differ: the outbox row carries the requester's bytes verbatim while
+     * the logged rendering replaces the characters that could forge a log record.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a rendering of the baseline's 24-byte correlation field is echoed verbatim")
+    void aWideCorrelationAttributeIsEchoedVerbatim() {
+        givenResolvableCard();
+        when(this.summaries.findWithLockByAccountId(ACCOUNT_ID))
+                .thenReturn(Optional.of(summaryWithRoom()));
+        String twentyFourBytesAsHex = "0123456789abcdef0123456789abcdef0123456789abcdef";
+        Message<String> message = MessageBuilder
+                .withPayload(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
+                .setHeader(AuthorizationRequestListener.HEADER_REPLY_TO, ALLOWED_REPLY_QUEUE)
+                .setHeader(AuthorizationRequestListener.HEADER_CORRELATION_ID, twentyFourBytesAsHex)
                 .build();
 
         this.listener.onRequest(message);
 
         ArgumentCaptor<AuthReplyOutbox> reply = ArgumentCaptor.forClass(AuthReplyOutbox.class);
         verify(this.outbox).save(reply.capture());
-        assertNull(reply.getValue().getCorrelationId());
+        assertEquals(twentyFourBytesAsHex, reply.getValue().getCorrelationId());
         verify(this.details).save(any(PendingAuthDetail.class));
+    }
+
+    /**
+     * A punctuation-bearing identity is echoed verbatim while its logged rendering is neutralised.
+     *
+     * <p>Assumptions: the value is a structured-log injection attempt. The echo must be exact because the
+     * requester correlates on its own bytes, and the log rendering must not be, because a quotation mark
+     * in a structured log field forges a record. Asserting both in one test is what stops a later change
+     * collapsing the two renderings into one.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a log-injection attempt is echoed verbatim but rendered safely for the log")
+    void anInjectionAttemptIsEchoedVerbatimAndLoggedSafely() {
+        givenResolvableCard();
+        when(this.summaries.findWithLockByAccountId(ACCOUNT_ID))
+                .thenReturn(Optional.of(summaryWithRoom()));
+        String injection = "a\",\"level\":\"ERROR";
+        Message<String> message = MessageBuilder
+                .withPayload(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
+                .setHeader(AuthorizationRequestListener.HEADER_REPLY_TO, ALLOWED_REPLY_QUEUE)
+                .setHeader(AuthorizationRequestListener.HEADER_CORRELATION_ID, injection)
+                .build();
+
+        this.listener.onRequest(message);
+
+        ArgumentCaptor<AuthReplyOutbox> reply = ArgumentCaptor.forClass(AuthReplyOutbox.class);
+        verify(this.outbox).save(reply.capture());
+        assertEquals(injection, reply.getValue().getCorrelationId());
+        // WHY : Assumptions: the expected rendering keeps the colon and replaces every quotation mark
+        //       and the comma, because a colon cannot close or split a structured log field once the
+        //       quotation marks around it are gone, while a quotation mark can. The rendering is the same
+        //       LENGTH as the value, which is what lets an operator still tell two identities apart.
+        assertEquals("a...level.:.ERROR", MessagingCorrelationId.logSafe(injection));
+        assertEquals(injection.length(), MessagingCorrelationId.logSafe(injection).length());
     }
 
     /**
@@ -387,6 +578,51 @@ class AuthorizationRequestListenerTest {
     }
 
     /**
+     * A supplied expiry that will not parse is refused, while an absent one is answered normally.
+     *
+     * <p>Refactoring Rationale: the two halves are asserted in one case because the property is the
+     * DISTINCTION between them, and each half alone is satisfied by a defect in the other direction. An
+     * implementation that answered both would let a producer defeat expiry enforcement by corrupting the
+     * attribute -- {@code expiresAt=not-an-instant} would be honoured -- and an implementation that refused
+     * both would silently discard every request from a producer that never adopted the attribute at
+     * all.</p>
+     *
+     * <p>Assumptions: the unparseable half is asserted by the absence of any lookup rather than by a
+     * reply, because a refused request produces no reply of any kind; and the absent half is asserted by
+     * the decision being recorded, which is the only observable that separates "answered" from
+     * "dropped".</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an unparseable expiry is refused while an absent one is answered")
+    void anUnparseableExpiryIsRefusedWhileAnAbsentOneProceeds() {
+        Message<String> unparseable = MessageBuilder
+                .withPayload(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
+                .setHeader(AuthorizationRequestListener.HEADER_REPLY_TO, ALLOWED_REPLY_QUEUE)
+                .setHeader(AuthorizationRequestListener.HEADER_EXPIRES_AT, "not-an-instant")
+                .build();
+
+        this.listener.onRequest(unparseable);
+
+        verifyNoInteractions(this.accounts);
+        verifyNoInteractions(this.outbox);
+        verifyNoInteractions(this.details);
+
+        givenResolvableCard();
+        when(this.summaries.findByAccountId(ACCOUNT_ID))
+                .thenReturn(Optional.of(summaryWithRoom()));
+        Message<String> noExpiry = MessageBuilder
+                .withPayload(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
+                .setHeader(AuthorizationRequestListener.HEADER_REPLY_TO, ALLOWED_REPLY_QUEUE)
+                .build();
+
+        this.listener.onRequest(noExpiry);
+
+        verify(this.details).save(any(PendingAuthDetail.class));
+    }
+
+    /**
      * A redelivered request is answered from the recorded row rather than decided a second time.
      *
      * <p>Assumptions: the seek is by the CARD and the identifier together, which is the durable key the
@@ -416,7 +652,10 @@ class AuthorizationRequestListenerTest {
         verify(this.summaries, never()).save(any(PendingAuthSummary.class));
         ArgumentCaptor<AuthReplyOutbox> reply = ArgumentCaptor.forClass(AuthReplyOutbox.class);
         verify(this.outbox).save(reply.capture());
-        assertEquals(TRANSACTION_ID, reply.getValue().getDeduplicationId());
+        assertEquals(new AuthReply(CARD_NUM, TRANSACTION_ID, "104530", "00", "0000",
+                Money.of("100.99")).deduplicationKey(TOKENISER),
+                reply.getValue().getDeduplicationToken());
+        assertThat(reply.getValue().getDeduplicationToken()).doesNotContain(TRANSACTION_ID);
     }
 
     /**
@@ -556,6 +795,64 @@ class AuthorizationRequestListenerTest {
 
         assertEquals(List.of(2), this.closedWindows,
                 "a message whose handling threw must still have occupied its place in the window");
+    }
+
+    /**
+     * Concurrent handlers close exactly one window per quota and never drive the counter negative.
+     *
+     * <p>Assumptions: the container delivers on several threads at once, and the defect this closes was
+     * two-step counting: an increment, a comparison, then a subtraction of the observed value. Two threads
+     * observing a count at or past the quota each subtracted their own observation and left the counter
+     * negative, after which one window admitted the quota plus the deficit and the boundary fired twice for
+     * one window. The case drives a whole number of quotas from several threads and asserts the boundary
+     * count exactly, which is the only externally visible consequence of the counter's arithmetic.</p>
+     *
+     * <p>Assumptions: every message is an expired one, so the case exercises the counting path without
+     * needing account stubs, and the assertion is on the number of boundaries rather than on timing -- so
+     * it is deterministic rather than a race the test hopes to lose.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     *
+     * @throws InterruptedException if the wait for the worker threads is interrupted
+     */
+    @Test
+    @DisplayName("concurrent handlers close one window per quota and never overshoot it")
+    void concurrentHandlersCloseOneWindowPerQuota() throws InterruptedException {
+        int windows = 8;
+        int threads = 4;
+        int messagesPerThread = WINDOW_LIMIT * windows / threads;
+        List<Integer> observed = java.util.Collections.synchronizedList(new ArrayList<>());
+        AuthorizationRequestListener concurrent = new AuthorizationRequestListener(this.summaries,
+                this.details, this.outbox, new AuthorizationDecisionService(),
+                new AuthorizationMessageMapper(VALIDATOR), this.accounts, TOKENISER,
+                List.of(ALLOWED_REPLY_QUEUE),
+                Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC), WINDOW_LIMIT, observed::add);
+
+        java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+        List<Thread> workers = new ArrayList<>();
+        for (int worker = 0; worker < threads; worker++) {
+            Thread thread = new Thread(() -> {
+                try {
+                    start.await();
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                for (int message = 0; message < messagesPerThread; message++) {
+                    concurrent.onRequest(expiredMessage());
+                }
+            });
+            workers.add(thread);
+            thread.start();
+        }
+        start.countDown();
+        for (Thread thread : workers) {
+            thread.join();
+        }
+
+        assertEquals(windows, observed.size(),
+                "a whole number of quotas must close exactly that many windows");
+        assertThat(observed).containsOnly(WINDOW_LIMIT);
     }
 
     /**

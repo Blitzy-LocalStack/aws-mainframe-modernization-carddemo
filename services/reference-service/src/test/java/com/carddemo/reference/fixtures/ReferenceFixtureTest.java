@@ -251,8 +251,14 @@ class ReferenceFixtureTest {
                 decodeAll("reference_update/delete_restricted_by_category/trantype.txt", types);
         assertThat(rows).hasSize(2);
 
+        // WHY : Refactoring Rationale: the referencing set is now built from the SCENARIO'S OWN category
+        //       fixture, where an earlier revision built it from the happy path's. The scenario ships a
+        //       two-record trancatg.txt beside its two-record trantype.txt, so the pair a loader for this
+        //       scenario would load is now the pair this assertion reads; borrowing another scenario's
+        //       categories described a combination that is never loaded together.
         Set<String> referenced = new LinkedHashSet<>();
-        decodeAll("reference_update/happy_path/trancatg.txt", CopybookLayout.layout("TRANCAT"))
+        decodeAll("reference_update/delete_restricted_by_category/trancatg.txt",
+                CopybookLayout.layout("TRANCAT"))
                 .forEach(category -> referenced.add((String) category.get("TRAN-TYPE-CD")));
 
         assertThat(rows.get(0).get("TRAN-TYPE"))
@@ -263,6 +269,12 @@ class ReferenceFixtureTest {
                 .as("the second row must be referenced by nothing, so its delete is permitted")
                 .isEqualTo("99");
         assertThat(referenced).doesNotContain("99");
+
+        // WHY : Assumptions: the set is asserted to hold EXACTLY the restricted code. A category file
+        //       referring to a third type would satisfy every assertion above and would additionally make
+        //       that third type's delete refusable, so the fixture would stop isolating one refused delete
+        //       from one permitted one.
+        assertThat(referenced).containsExactly("06");
     }
 
     /**
@@ -288,6 +300,28 @@ class ReferenceFixtureTest {
                 .distinct()
                 .toList();
         assertThat(orphans).as("a category whose type is absent violates the restricting foreign key")
+                .isEmpty();
+
+        // WHY : Assumptions: the LIST scenario is checked for the same closure, in the same case, rather
+        //       than in a second one. Its category fixture was enrolled in no inventory and read by
+        //       nothing when the review found it, and the property that matters about it is identical to
+        //       the property asserted above -- so a second test would restate this argument rather than
+        //       add one. The declared set differs: the list scenario seeds SEVEN types where the update
+        //       scenario seeds eight, and asserting both sets by value is what keeps the two scenarios
+        //       distinguishable.
+        Set<String> listDeclared = new LinkedHashSet<>();
+        decodeAll("reference_list/happy_path/trantype.txt", CopybookLayout.layout("TRANTYPE"))
+                .forEach(type -> listDeclared.add((String) type.get("TRAN-TYPE")));
+        assertThat(listDeclared).containsExactly("01", "02", "03", "04", "05", "06", "07");
+
+        List<String> listOrphans = decodeAll("reference_list/happy_path/trancatg.txt",
+                CopybookLayout.layout("TRANCAT")).stream()
+                .map(row -> (String) row.get("TRAN-TYPE-CD"))
+                .filter(code -> !listDeclared.contains(code))
+                .distinct()
+                .toList();
+        assertThat(listOrphans)
+                .as("the list scenario's categories must all name a type the list scenario seeds")
                 .isEmpty();
     }
 
@@ -388,10 +422,35 @@ class ReferenceFixtureTest {
                         + " identically because CODATE01 reads no field of the request")
                 .isEqualTo("DTE ");
         assertThat(ignoredPayload.get("WS-KEY")).isEqualTo(2L);
+
+        // WHY : Refactoring Rationale: the third scenario is decoded here because its record file was
+        //       authored during this remediation, having previously had a README documenting bytes
+        //       that did not exist. Decoding it through the same registered layout is what turns that
+        //       README's field table into an asserted fact; a fixture no test decodes states an
+        //       intention only.
+        // WHY : Assumptions: its key decodes to the same ordinal as the scenario above, and the
+        //       equality is asserted rather than worked around. Neither scenario is distinguished by
+        //       its envelope -- the date refusal one exercises is carried by a ten-character parameter
+        //       to DateEditValidator, not by any field of these bytes -- so a differing key here would
+        //       imply an envelope-level distinction CODATE01 cannot act on.
+        Map<String, Object> refusedDate =
+                decodeAll("date_conversion/invalid_date_rejected/date-request.txt", layout).get(0);
+        assertThat(refusedDate.get("WS-FUNC")).isEqualTo("DTE ");
+        assertThat(refusedDate.get("WS-KEY")).isEqualTo(2L);
+        assertThat(refusedDate.get("WS-FILLER"))
+                .as("section 5.3: this record's filler is space-filled per VALUE SPACES, not zeroed")
+                .isEqualTo(" ".repeat(985));
     }
 
     /**
      * Supplies the path, record length and record count of every fixture in the tree.
+     *
+     * <p>Assumptions: this list is the tree's geometry INVENTORY and is complete, so a record file that
+     * exists on disk and is absent from it is a gap rather than an omission of no consequence -- the
+     * width, record-count and line-ending assertions this method feeds are the only ones every file in
+     * the tree receives, and a file left out of the list receives none of them. Its size is the count
+     * the tree charter publishes, so the two are checkable against each other and against
+     * {@code find . -name '*.txt' | wc -l}.</p>
      *
      * @return one argument triple per fixture file
      */
@@ -402,20 +461,23 @@ class ReferenceFixtureTest {
                 Arguments.of("batch_reference_update/invalid_type_soft_reject/trtype-update.txt", 53, 2),
                 Arguments.of("date_conversion/empty_input/date-request.txt", 1000, 0),
                 Arguments.of("date_conversion/happy_path/date-request.txt", 1000, 1),
+                Arguments.of("date_conversion/invalid_date_rejected/date-request.txt", 1000, 1),
                 Arguments.of("date_conversion/request_payload_ignored/date-request.txt", 1000, 1),
                 Arguments.of("disclosure_group/default_fallback/discgrp.txt", 50, 34),
                 Arguments.of("disclosure_group/empty_input/discgrp.txt", 50, 0),
                 Arguments.of("disclosure_group/happy_path/discgrp.txt", 50, 1),
                 Arguments.of("reference_list/empty_input/trancatg.txt", 60, 0),
                 Arguments.of("reference_list/empty_input/trantype.txt", 60, 0),
+                Arguments.of("reference_list/happy_path/trancatg.txt", 60, 18),
                 Arguments.of("reference_list/happy_path/trantype.txt", 60, 7),
+                Arguments.of("reference_update/delete_restricted_by_category/trancatg.txt", 60, 2),
                 Arguments.of("reference_update/delete_restricted_by_category/trantype.txt", 60, 2),
                 Arguments.of("reference_update/happy_path/trancatg.txt", 60, 18),
                 Arguments.of("reference_update/happy_path/trantype.txt", 60, 8));
     }
 
     /**
-     * Supplies the four zero-byte fixtures and the record length their domain declares.
+     * Supplies the five zero-byte fixtures and the record length their domain declares.
      *
      * @return one argument pair per empty fixture
      */
@@ -437,8 +499,11 @@ class ReferenceFixtureTest {
         return Stream.of(
                 Arguments.of("disclosure_group/default_fallback/discgrp.txt", "DISGROUP"),
                 Arguments.of("disclosure_group/happy_path/discgrp.txt", "DISGROUP"),
+                Arguments.of("reference_list/happy_path/trancatg.txt", "TRANCAT"),
                 Arguments.of("reference_list/happy_path/trantype.txt", "TRANTYPE"),
+                Arguments.of("reference_list/happy_path/trancatg.txt", "TRANCAT"),
                 Arguments.of("reference_update/delete_restricted_by_category/trantype.txt", "TRANTYPE"),
+                Arguments.of("reference_update/delete_restricted_by_category/trancatg.txt", "TRANCAT"),
                 Arguments.of("reference_update/happy_path/trantype.txt", "TRANTYPE"),
                 Arguments.of("reference_update/happy_path/trancatg.txt", "TRANCAT"));
     }

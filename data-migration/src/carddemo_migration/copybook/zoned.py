@@ -846,9 +846,18 @@ def decode_zoned(
     #   checks and downstream NUMERIC(p,2) parity.
 
     # Trade-offs: a closing-brace zero is normalised to an opening-brace zero on
-    #   re-encode because the Java parity codec has no signed-zero representation. This
-    #   is the one accepted non-byte-identical round trip; retaining a minus here would
-    #   make Python and Java disagree on the same source span.
+    #   re-encode, matching the Java parity codec's ORDINARY decimal API -- the
+    #   ``decode``/``encode`` pair, whose ``BigDecimal`` carries no negative zero. This is
+    #   the one accepted non-byte-identical round trip on that pair; retaining a minus
+    #   here would make Python and Java disagree on the same source span.
+    # Assumptions: the Java codec DOES offer a byte-exact alternative, and this function
+    #   is deliberately not it. ``ZonedDecimalCodec.decodePreservingSign`` returns a
+    #   ``SignedZoned`` carrying the overpunch class beside the value, and
+    #   ``encodePreservingSign`` reproduces the original span from that pair with no
+    #   exception at all. A caller here that must reproduce a dataset byte for byte
+    #   therefore has a Java counterpart to compare against; a Python equivalent belongs
+    #   with the loader that needs it rather than on this ordinary decode path, which
+    #   every reader calls and none of which re-emits the span it read.
     if negative and any(digit != _PAD_DIGIT for digit in digits):
         number = f"-{number}"
     return Decimal(number)
@@ -981,9 +990,13 @@ def encode_zoned(
         )
 
     # Trade-offs: signum comparison deliberately makes negative zero non-negative.
-    #   A decoded ``}`` zero therefore emits ``{`` on re-encode, matching the Java codec
-    #   and documenting the sole byte-level exception to the otherwise exact round-trip
-    #   law instead of allowing language-specific signed-zero behaviour to diverge.
+    #   A decoded ``}`` zero therefore emits ``{`` on re-encode, matching the Java codec's
+    #   ordinary ``encode`` entry point and documenting the sole byte-level exception to
+    #   the otherwise exact round-trip law instead of letting language-specific
+    #   signed-zero behaviour diverge. The Java codec's sign-preserving pair,
+    #   ``decodePreservingSign`` with ``encodePreservingSign``, has no such exception
+    #   because it carries the overpunch class beside the value; this function takes a
+    #   bare ``Decimal`` and so has nothing to carry.
     negative = quantized < 0
     if not signed and negative:
         raise ZonedDecimalError(

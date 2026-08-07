@@ -117,8 +117,12 @@ them is what makes the additive claim above checkable rather than asserted: `REA
 `CONTRIBUTING.md` and `.gitignore`. There is no fourth — every other artifact of the
 migration, every table derived below included, is a new file in a new tree. The
 current `.gitignore` contains the migration's build-output, state, plan-file and
-environment patterns; the root `README.md` and `CONTRIBUTING.md` migration updates
-remain unauthored.
+environment patterns, and the root `README.md` and `CONTRIBUTING.md` updates are
+authored — a "Linux and AWS Migration" section in the former and a "Code
+documentation and explainability" section in the latter. Refactoring Rationale: this
+sentence previously reported both as unauthored, which was true when written; all
+three of the repository's pre-existing files that this migration modifies are now in
+place, so the sentence would otherwise send a reader looking for work already done.
 
 
 ## WHY (non-obvious design decisions)
@@ -314,7 +318,7 @@ consequence that makes the mapping correct, not a preference.
 | `PIC X(10)` holding `'YYYY-MM-DD'` | `DATE` | `LocalDate` | The form is already ISO-ordered, so a lexical comparison of the ten characters gives the same ordering as a date comparison. The baseline relies on exactly that equivalence — see the character-literal range filter in [Corroboration A](#corroboration-a-the-transaction-record) — so `DATE` preserves the ordering the source already uses while adding calendar validity |
 | `PIC X(26)` timestamp | `TIMESTAMP(6)` | `LocalDateTime` | The 26-character form is `YYYY-MM-DD HH:MM:SS.mmmmmm` — 19 characters to the second plus a point plus six fractional digits. Microsecond precision matches it exactly, so no digit is truncated on the way in and none is invented on the way out |
 | `PIC S9(n) COMP-3` | `NUMERIC` or `INTEGER`, per scale | `BigDecimal` or `Integer` | **Decoded at the extract-transform-load edge; packed bytes are never persisted.** Storing the nibbles as `BYTEA` would make every query and every constraint depend on a decoder, so the packing is unwound exactly once, at the boundary where the file is read |
-| `FILLER` | dropped | — | Padding to the fixed record length, carrying no data. Every `FILLER` in the eleven records is the final field and exists to reach the declared length; mapping it to a column would create a column whose only content is blanks. The drop is recorded per record in [The dropped `FILLER`, per record](#the-dropped-filler-per-record) so no reader mistakes a missing column for a missing field |
+| `FILLER` | dropped | — | Padding to the fixed record length, carrying no data. Every `FILLER` in the eleven records is the final field and exists to reach the declared length; mapping it to a column would create a column whose only content is padding. **Do not assume that padding is blanks** — see [The dropped `FILLER`, per record](#the-dropped-filler-per-record), where the observed bytes are recorded. The drop is recorded there per record so no reader mistakes a missing column for a missing field |
 
 Two rules in that table look like the same rule and are not. `PIC 9(n)` maps to an
 integer type when the field is an identifier or a quantity, and to `CHAR(n)` when
@@ -394,11 +398,31 @@ The derivations the baseline chose, each with the target rule it corroborates:
 > `'E'` and `'M'` at `CIPAUDTY.cpy` L46–L49, and `PA-AUTH-FRAUD` carries `'F'` and
 > `'R'` at L51–L52. Those domains are therefore **application-only invariants**: a
 > program that wrote `'X'` would be accepted by the table. The target promotes both
-> into the database as `CHECK (match_status IN ('P','D','E','M'))` and
-> `CHECK (auth_fraud IN ('F','R') OR auth_fraud IS NULL)`. What was wrong with the
-> old approach is specific and not stylistic — the invariant existed only in the
-> code path that happened to write the row, so a second writer, a migration or a
-> manual correction could violate it undetected.
+> into the database, on the segment-derived `pending_auth_detail` table, as
+> `CHECK (match_status IN ('P','D','E','M'))` at `V1__authorization.sql` **L582–L583**
+> and `CHECK (auth_fraud IN ('F','R') OR auth_fraud IS NULL OR auth_fraud = ' ')` at
+> **L607–L608**. What was wrong with the old approach is specific and not stylistic —
+> the invariant existed only in the code path that happened to write the row, so a
+> second writer, a migration or a manual correction could violate it undetected.
+>
+> Assumptions: **the fraud predicate has three arms, not two, and the third is not an
+> oversight.** Blank is an ordinary state of this field, not an invalid one: the
+> baseline writes `SPACES` into it outright on the ordinary insert path at
+> `COPAUA0C.cbl` **L908–L909**, so a two-armed `IN ('F','R') OR IS NULL` predicate
+> would reject rows the baseline creates as a matter of course. An earlier revision of
+> this paragraph stated the predicate with two arms; that is corrected here because a
+> constraint quoted one arm short reads as a specification, and a reader
+> re-implementing it from this page would have written a migration that refuses valid
+> data.
+>
+> Trade-offs: **these two constraints land on `pending_auth_detail` and not on the
+> `auth_fraud` table this section is about**, whose `match_status` and `auth_fraud`
+> columns at **L746** and the lines around it stay bare `CHAR(1)`. That asymmetry is
+> deliberate: `pending_auth_detail` is written by this service's own decision path, so
+> the domain is knowable at every insert, whereas `auth_fraud` is loaded from a Db2
+> extract whose historical rows this migration must accept as they are rather than
+> reject at load time. Naming the table is what keeps the claim checkable — the
+> promotion is real, and it is not everywhere.
 
 > Trade-offs: identifiers as `BIGINT` here, `DECIMAL` in the baseline. The
 > rules above map `PIC 9(n)` identifiers to `BIGINT`, but the baseline's own DDL
@@ -813,10 +837,45 @@ than a single surrogate. The job consumes `TCATBALF.BKUP(+1)` (L39) and its
 `FILLER` is dropped rather than mapped to a column, for one specific reason: in
 every one of these records the `FILLER` is the **final** field and exists solely to
 pad the declared fields out to the fixed record length. It carries no data — a
-column derived from it would contain nothing but blanks in every row — and the
+column derived from it would hold nothing but padding in every row — and the
 baseline's own relational mapping already drops it, at `CIPAUDTY.cpy` L54 versus
 `AUTHFRDS.ddl`, which is the precedent cited in
 [Column-count reconciliation](#column-count-reconciliation-28-fields-become-26-columns).
+
+### The padding bytes are the character zero, not blanks
+
+Refactoring Rationale: an earlier revision of this section asserted that a column
+derived from `FILLER` would contain **blanks**, and that assertion is wrong on the
+data. Measured from the seed files rather than assumed, the trailing `FILLER` of the
+disclosure-group record and of the transaction-category-balance record is filled with
+the **character zero** in both shipped encodings:
+
+| Seed file | Span measured | Observed bytes | What that character is |
+|---|---|---|---|
+| `app/data/ASCII/discgrp.txt` | the last 10 bytes of the 50-byte record | `30` × 10 | ASCII `'0'`, not ASCII blank `20` |
+| `app/data/EBCDIC/AWS.M2.CARDDEMO.DISCGRP.PS` | the same span | `F0` × 10 | EBCDIC `'0'`, not EBCDIC blank `40` |
+| `app/data/ASCII/tcatbal.txt` | the last 22 bytes of the 50-byte record | `30` × 22 | ASCII `'0'` |
+| `app/data/EBCDIC/AWS.M2.CARDDEMO.TCATBALF.PS` | the same span | `F0` × 22 | EBCDIC `'0'` |
+
+**The relational conclusion is unchanged: the column is still dropped.** Padding is
+not data whether it is a zero or a blank, so nothing above alters a single column of
+a single table. What the correction does change is a different consumer's contract,
+and that is why it is recorded rather than quietly fixed:
+
+- Assumptions: **dropping a field relationally and preserving its bytes on export are
+  two separate obligations, and only the first is unconditional.** A round-trip that
+  re-encodes one of these records has to write the span back exactly as it was read,
+  because a re-encode that substituted blanks would produce a byte difference against
+  a golden master on a field that carries no meaning at all. That is why
+  `DisclosureGroupRecordMapper` and `TransactionCategoryBalanceRecordMapper` take a
+  defensive source image and copy the `FILLER` span from it verbatim rather than
+  synthesising it — the span is supplied to the shared codec by omission precisely so
+  that no default can invent a value for it.
+- Trade-offs: writing "blanks" was the intuitive guess and cost nothing to write,
+  whereas measuring four spans across two encodings cost a hexdump each. The measured
+  form is kept because the guess would have justified a blank-filling encoder, and the
+  first golden-master comparison over either record would then have failed on twenty-two
+  bytes that no reader would think to suspect.
 
 The drop is recorded per record so that a reader comparing a copybook against a
 migration can account for every byte. Each row below is the identity
@@ -889,7 +948,7 @@ outside it, and one owns a schema whose only table is unreadable by the service 
 uses the schema — `reporting.card_grouping_key`, which holds the secret behind the
 statement grouping token and is granted to the schema owner alone.
 
-> **Refactoring Rationale: the status column below formerly reported three of these
+> Refactoring Rationale: **the status column below formerly reported three of these
 > seven migrations as unauthored** — `account`, `card` and `authorization` — and
 > described the reporting schema as holding four views whose "account/card source
 > migrations remain absent". The `account` row was accurate until
@@ -1105,7 +1164,7 @@ account-service deliverable and the authoritative column list for this schema.
 Every column name, type, nullability, key and index recorded above was verified
 against that migration applied to a live PostgreSQL 17 database.
 
-> **Refactoring Rationale: this subsection formerly recorded the dependency as
+> Refactoring Rationale: **this subsection formerly recorded the dependency as
 > UNSATISFIED, and the change is worth stating rather than silently editing away.**
 > It reported that the three tables were "described by this document and by two
 > already-authored consuming entities, and are not yet created by any migration",
@@ -1117,7 +1176,7 @@ against that migration applied to a live PostgreSQL 17 database.
 > notice instead of granting. All of that was accurate when written and none of it
 > is true now.
 >
-> **Assumptions: the resolution followed the direction of authority this subsection
+> Assumptions: **the resolution followed the direction of authority this subsection
 > insisted on rather than overriding it.** The earlier note rejected authoring the
 > migration from one of the *consuming* modules, on the ground that a migration
 > written from a reader's view of a schema inverts the direction the document set
@@ -1126,7 +1185,7 @@ against that migration applied to a live PostgreSQL 17 database.
 > in `account-service`, the owning module, which is exactly what that objection
 > prescribed.
 >
-> **Assumptions: the bootstrap re-run is part of the sequence and has been
+> Assumptions: **the bootstrap re-run is part of the sequence and has been
 > performed.** The order is `V0__schemas_and_roles.sql` → each service's Flyway
 > migration → `data-migration/sql/V1__reporting_views.sql` → `V0` once more. `V0` is
 > idempotent by construction, so the second pass is the documented sequence rather
@@ -1136,7 +1195,7 @@ against that migration applied to a live PostgreSQL 17 database.
 > `SELECT` alone on `account.customers` — the narrow privilege the nightly posting
 > and interest jobs need, and no more.
 >
-> **Assumptions: the three account-backed reporting views exist for the same
+> Assumptions: **the three account-backed reporting views exist for the same
 > reason.** `reporting.v_accounts`, `reporting.v_customers` and
 > `reporting.v_card_xref` are created by `V1__reporting_views.sql`, which could not
 > create them while the base tables were absent because `CREATE VIEW` resolves its
@@ -1453,18 +1512,43 @@ L19–L54 · 200 bytes · segment `PAUTDTL1` → table
 | `PA-TRANSACTION-ID` (L44) | `X(15)` | 15 | 158 | `transaction_id` | `CHAR(15)` | `String` |
 | `PA-MATCH-STATUS` (L45) | `X(01)` | 1 | 173 | `match_status` | `CHAR(1)` + `CHECK` | `String` |
 | `PA-AUTH-FRAUD` (L50) | `X(01)` | 1 | 174 | `auth_fraud` | `CHAR(1)` + `CHECK` | `String` |
-| `PA-FRAUD-RPT-DATE` (L53) | `X(08)` | 8 | 175 | `fraud_rpt_date` | `DATE` | `LocalDate` |
+| `PA-FRAUD-RPT-DATE` (L53) | `X(08)` | 8 | 175 | `fraud_rpt_date` | `CHAR(8)` | `String` |
 | `FILLER` (L54) | `X(17)` | 17 | 183 | dropped | — | — |
 | — | — | — | — | `account_id` | `BIGINT` **PK₁** | `Long` |
 
 Every type choice in that table follows the baseline's own `AUTHFRDS` mapping where
 one exists — `merchant_name` is the single `VARCHAR`, `processing_code` is `CHAR(6)`
-from a `9(06)` picture, `pos_entry_mode` is an integer from a `9(02)` picture, both
-money columns are precision 12 scale 2, and `fraud_rpt_date` is a `DATE` from the
-eight-character form. The two `CHECK` constraints are the addition described in
+from a `9(06)` picture, `pos_entry_mode` is an integer from a `9(02)` picture, and
+both money columns are precision 12 scale 2. The two `CHECK` constraints are the
+addition described in
 [`AUTHFRDS`, column by column](#authfrds-the-fraud-table-column-by-column):
-`CHECK (match_status IN ('P','D','E','M'))` from L46–L49 and
-`CHECK (auth_fraud IN ('F','R') OR auth_fraud IS NULL)` from L51–L52.
+`CHECK (match_status IN ('P','D','E','M'))` from L46–L49 at
+`V1__authorization.sql` **L582–L583**, and
+`CHECK (auth_fraud IN ('F','R') OR auth_fraud IS NULL OR auth_fraud = ' ')` from
+L51–L52 plus the blank state at **L607–L608**.
+
+**`fraud_rpt_date` is the one column on this table that deliberately does *not*
+follow the `AUTHFRDS` mapping.** It is `CHAR(8)` holding `String`, declared at
+`V1__authorization.sql` **L536**, and `PendingAuthDetail` carries the same eight
+characters at `@Column(name = "fraud_rpt_date", length = 8)`.
+
+- Refactoring Rationale: an earlier revision of this section mapped it to `DATE` and
+  `LocalDate` by following the Db2 column, and the migration's own comment records the
+  same correction being made in the SQL. Three facts decide it, each checkable: the
+  characters are `MM/DD/YY`, which is **not** ISO-ordered, so the character-date rule
+  in [the type table](#the-picture-to-type-derivation-rules) does not reach them; widening the
+  two-digit year to a real date needs a century pivot the baseline never chose; and the
+  baseline writes `SPACES` into the field at `COPAUA0C.cbl` **L908–L909**, which no
+  `DATE` column can hold. Storing the characters keeps every state the segment can
+  actually be in, including that blank one.
+- Assumptions: **the `auth_fraud` table below still uses a real `DATE` for its own
+  `fraud_rpt_date`, at `V1__authorization.sql` L758**, because there the baseline
+  itself declares `DATE` at `AUTHFRDS.ddl` L25. The two representations of one value
+  therefore still differ in the target exactly as they differ in the baseline — the
+  segment holds characters, the relational table holds a date — and the conversion
+  happens at the single boundary that writes the relational row. Recording both is what
+  stops a reader concluding that one of the two rows in this document contradicts the
+  other.
 
 > Assumptions: **the composite primary key transcribes the hierarchical path, and
 > the two key components stay separate integers.** IMS addresses a detail segment by
@@ -1498,16 +1582,23 @@ the reply belongs to, the moment it was written and the moment it was published.
 `authorization-service` is the target owner, and the extract-transform-load path
 never loads into it.
 
-**Measured implementation status:** the authorization module currently has no
-Flyway migration and no non-`package-info.java` main-source implementation. The
-table, both indexes, transactional writer, publisher and purge integration described
-below are therefore specified but not yet authored.
+**Measured implementation status:** the authorization module carries
+`V1__authorization.sql`, which creates this table and both indexes below, and its
+main sources implement the `AuthReplyOutbox` entity, `OutboxRepository`, the
+transactional writer inside `AuthorizationRequestListener`, and `OutboxPublisher`
+with its per-group claim and its retention purge. Refactoring Rationale: this
+paragraph previously reported the module as having no Flyway migration and no
+main-source implementation. That contradicted the status note above, which already
+records that the `authorization` migration row "had fallen out of date while their
+migrations existed" — the same failure mode, in the same document, one section
+apart. A status line is only worth carrying if it is re-measured when it is quoted,
+so it is now stated against the artifacts it names.
 
 Two target indexes, both partial and both on unpublished rows only:
 
 | Index | Definition | Why |
 |---|---|---|
-| `idx_auth_reply_outbox_pending` | `(created_at) WHERE published_at IS NULL` | The drain's claim query. Partial rather than full because a published row is never selected again, so indexing one would grow the index for the lifetime of the retention window without ever serving a read. |
+| `idx_auth_reply_outbox_unpublished` | `(outbox_id) WHERE published_at IS NULL` | The drain's claim query. Partial rather than full because a published row is never selected again, so indexing one would grow the index for the lifetime of the retention window without ever serving a read. Keyed on `outbox_id` rather than `created_at` because insertion order is what the drain resumes from, and a monotonic identity orders rows written inside the same clock tick unambiguously. |
 | `idx_auth_reply_outbox_group` | `(order_group_token, outbox_id) WHERE published_at IS NULL` | Per-card publication order through the purpose-scoped opaque group token. The drain sends one token's pending replies in write order without putting the primary account number in SQS metadata; this index makes that ordering an index scan rather than a sort. |
 
 > Assumptions: **publication state is a nullable timestamp rather than a status
@@ -1567,14 +1658,51 @@ context read `ledger`, `account`, `card` and `reference` through a login holding
 disposable PostgreSQL validation database; no provisioned application environment is
 claimed.
 
-Three properties of this schema differ from the other seven, and all three are
-deliberate:
+Two properties of this schema differ from the other seven, and both are deliberate:
 
 | Property | The other seven | `reporting` |
 |---|---|---|
-| Database owner | the login role named after the schema | `carddemo_reporting_owner`, created `NOLOGIN` |
-| Contents | tables, indexes and constraints | views only, no table of any kind |
-| Target creation authority | the owning service's own Flyway migration | `data-migration/sql/V1__reporting_views.sql`, applied after the source-table migrations |
+| Contents | tables, indexes and constraints | seven views the service role may read, plus `card_grouping_key`, the one table it may not |
+| Target creation authority | the owning service's own Flyway migration, applied under `SET ROLE carddemo_<context>_owner` | `data-migration/sql/V1__reporting_views.sql`, applied after the source-table migrations under `SET ROLE carddemo_reporting_owner` |
+
+> Refactoring Rationale: **database ownership used to be the third difference and is
+> not one any more.** This table recorded that the other seven schemas were owned by
+> "the login role named after the schema", with `reporting` alone owned by a `NOLOGIN`
+> role. `V0__schemas_and_roles.sql` now creates a `NOLOGIN`
+> `carddemo_<context>_owner` for **all eight**, so `reporting` no longer differs on
+> that axis — it was simply the first context to get the arrangement, and the reason
+> it needed it is the reason every context needed it. The runtime login for each of
+> the other seven correspondingly loses the implicit `CREATE`, `ALTER` and `DROP` that
+> came with ownership; its Flyway migration reaches DDL through a separate
+> `carddemo_<context>_migrator` credential and the same `SET ROLE` this file's views
+> already used.
+
+
+> **Refactoring Rationale: the Contents row above formerly read "views only, no table of
+> any kind", which contradicted the paragraph directly above it and is corrected.** The
+> paragraph named `reporting.card_grouping_key` and the row denied it, so a reader taking
+> the row at face value would conclude the schema held no table and would then read a
+> `REVOKE` on one as dead code. This document is the ownership authority for the eight
+> schemas, so the single authoritative statement is set out here in the terms every other
+> artifact should cite it in, and the three levels it distinguishes are not
+> interchangeable:
+>
+> 1. **`reporting-service` owns no table.** The migrated module carries no
+>    data-definition script, no Flyway artifact and no `db/migration` directory, and the
+>    login role it authenticates as, `carddemo_reporting`, holds `USAGE` on the schema and
+>    `SELECT` on the seven views and nothing else whatsoever.
+> 2. **The `reporting` schema is not empty of tables.** It holds exactly one,
+>    `card_grouping_key`, created by `V1__reporting_views.sql` and owned by
+>    `carddemo_reporting_owner`.
+> 3. **The service cannot read that one table.** Both scripts revoke it from
+>    `carddemo_reporting`, which is what keeps the per-card grouping token
+>    non-invertible; a role that could read the key could recover a card number from a
+>    fingerprint by hashing sixteen digits.
+>
+> Statement 1 is the AAP's "owned tables: (none)" for this context, and statements 2 and 3
+> are the mechanism that delivers it rather than an exception to it. An artifact that
+> states 1 without 2 and 3 is accurate about the service and misleading about the schema,
+> which is the failure the corrected row above removes.
 
 > Assumptions: **the owner is deliberately not the reporting login, and that is
 > the security property.** A schema's owner holds `CREATE` in it unconditionally.
@@ -1586,7 +1714,9 @@ deliberate:
 > only by a principal already holding membership in it. The schema's NAME is still
 > `reporting`, matching the login role and every configuration string that resolves
 > it, so nothing that looks the schema up by name is affected — only the owner
-> differs.
+> differs. That reasoning is not specific to reporting, which is why the same
+> arrangement now covers all eight schemas: the only thing reporting-specific about
+> it was that a read-only context made the defect obvious first.
 
 > Assumptions: **a view executes with its owner's privileges, which is why the
 > grant model has two halves.** `carddemo_reporting_owner` holds `USAGE` and `SELECT` on
@@ -1959,7 +2089,7 @@ listed so that its absence is a recorded decision rather than an apparent omissi
 
 * **Read replicas** — reporting reads go to the writer through `SELECT`-only
   cross-schema views, for the reason given under
-  [`reporting-service`](#reporting--reporting-service-a-schema-with-no-tables).
+  [`reporting-service`](#reporting--reporting-service-a-schema-it-can-only-read).
 * **Application-level caching** — no in-memory cache tier of any kind. The baseline
   has none and none is required for parity, so every read in this model goes to the
   database.

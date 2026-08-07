@@ -2,47 +2,6 @@
  * Shared kernel of the CardDemo mainframe migration: the single home for every
  * contract that more than one bounded context consumes.
  *
- * <h2>Target contract, not a directory listing</h2>
- *
- * <p>Assumptions: every inventory, subpackage name and class name in this charter
- * states the package's <b>target contract</b> as the migration plan assigns it. It
- * is a specification of what this module owns and of what it may never hold, so it
- * is read against the plan rather than against a listing of the directory beside
- * it.</p>
- *
- * <p>Alternatives Considered: deriving the inventory from the directory instead of
- * from the plan. Rejected, because a charter that describes whatever happens to be
- * present cannot say what may <em>not</em> be added, and that is the half of a
- * package contract a reader cannot reconstruct from the files. Stating the closed
- * set costs a charter that has to be revised when the contract itself changes, and
- * buys a boundary a reviewer can enforce against a proposed addition.</p>
- *
- * <p><b>Purpose.</b> This package and its eight subpackages hold exactly the
- * types that all eight service modules need and that none of them owns: exact
- * fixed-point money and its wire form, the copybook record codecs, the API
- * problem shape and the structured abend detail, correlation-id propagation and
- * the keyset page envelope, the group-claim-to-authority conversion, the metric
- * tag set, the timestamp form, and the date-edit and field-flag validators. A
- * type belongs here when two or more bounded contexts depend on it being
- * identical, and in a service module otherwise. There is no third category, and
- * nothing in this package is specific to one context.
- *
- * <p><b>Parameters, return values, exceptions or errors.</b> A package
- * declaration takes no parameters, returns no value and raises nothing, so this
- * charter deliberately carries no parameter, return or exception at-clauses.
- * The inapplicability is declared rather than left silent, because the
- * Explainability rule's line 39 forbids a docstring that omits parameters,
- * return values or purpose, and a reader has to be able to tell a declared
- * inapplicability from an oversight.
- *
- * <p>Assumptions: fabricating those at-clauses here would not merely be noise.
- * Javadoc has no parameter, return or exception concept for a package, and the
- * repository ruleset audits at-clause bodies for emptiness, so an invented
- * at-clause would either be discarded or flagged. The rule enumerates four
- * docstring elements at its lines 18 to 21 -- Purpose, Parameters, Return
- * values, and Exceptions or errors -- and for this compilation unit exactly one
- * of the four is applicable. The paragraph above accounts for the other three.
- *
  * <h2>What each subpackage owns</h2>
  *
  * <ul>
@@ -55,18 +14,28 @@
  *       {@code ZonedDecimalCodec}, {@code PackedDecimalCodec},
  *       {@code CsvAuthCodec}.</li>
  *   <li><b>{@code error}</b> -- the problem shape carrying a per-field error
- *       array, and the structured equivalent of the baseline abend data block.
- *       Three production classes: {@code ApiError},
- *       {@code GlobalExceptionHandler}, {@code AbendDetail}.</li>
- *   <li><b>{@code web}</b> -- correlation-id propagation and the keyset
- *       pagination envelope. Two production classes:
- *       {@code CorrelationIdFilter}, {@code PageResponse}.</li>
+ *       array, the structured equivalent of the baseline abend data block, the
+ *       two refusals the security filter chain answers itself, and the two
+ *       markers plus the field-order interface that let the raising code say
+ *       what the advice cannot infer. Seven production classes:
+ *       {@code ApiError}, {@code GlobalExceptionHandler}, {@code AbendDetail},
+ *       {@code ApiErrorSecurityHandlers}, {@code ClientInputException},
+ *       {@code RecordConflictException}, {@code FieldOrdering}.</li>
+ *   <li><b>{@code web}</b> -- correlation-id propagation, the keyset pagination
+ *       envelope and the sealed token that carries a paging position between two
+ *       requests. Three production classes: {@code CorrelationIdFilter},
+ *       {@code PageResponse}, {@code CursorToken}.</li>
  *   <li><b>{@code security}</b> -- conversion of the identity provider's group
- *       claim into Spring Security authorities. One production class:
- *       {@code JwtRoleConverter}.</li>
+ *       claim into Spring Security authorities, the access-token checks the
+ *       issuer's decoder does not perform, and the two renderings that keep an
+ *       identifier out of an operational record. Four production classes:
+ *       {@code JwtRoleConverter}, {@code CognitoAccessTokenValidator},
+ *       {@code CardNumberMasker}, {@code OpaqueIdentifier}.</li>
  *   <li><b>{@code observability}</b> -- the Micrometer common tag set
- *       {@code service}, {@code environment} and {@code version}. One
- *       production class: {@code MetricsConfig}.</li>
+ *       {@code service}, {@code environment} and {@code version}, and the
+ *       decision about what a rendered value may contain before it reaches a log
+ *       line. Two production classes: {@code MetricsConfig},
+ *       {@code LogSafeText}.</li>
  *   <li><b>{@code time}</b> -- the exact 26-character
  *       {@code YYYY-MM-DD HH:MM:SS.mmmmmm} form. One production class:
  *       {@code TimestampFormatter}.</li>
@@ -104,8 +73,8 @@
  *
  * <h2>The closed inventory</h2>
  *
- * <p>The module's contract is <b>23 production classes</b> in a root and eight
- * subpackages, each carrying one charter file, for <b>32</b> compilation units. The
+ * <p>The module's contract is <b>27 production classes</b> in a root and eight
+ * subpackages, each carrying one charter file, for <b>36</b> compilation units. The
  * table is the closed set: a class belonging to this module belongs to exactly one
  * of these nine rows, and a proposed addition that fits none of them does not belong
  * in the shared kernel at all.
@@ -115,7 +84,7 @@
  * common (this root)                     1         1                   2
  * common.money                           2         1                   3
  * common.codec                           5         1                   6
- * common.error                           3         1                   4
+ * common.error                           7         1                   8
  * common.web                             3         1                   4
  * common.security                        4         1                   5
  * common.observability                   2         1                   3
@@ -124,20 +93,94 @@
  * </pre>
  *
  * <p>Read down the table. Cross-check by production class:
- * 1 + 2 + 5 + 3 + 3 + 4 + 2 + 1 + 2 = 23, the root contributing one. Cross-check by
- * compilation unit: 2 + 3 + 6 + 4 + 4 + 5 + 3 + 2 + 3 = 32. Both totals agree,
+ * 1 + 2 + 5 + 7 + 3 + 4 + 2 + 1 + 2 = 27, the root contributing one. Cross-check by
+ * compilation unit: 2 + 3 + 6 + 8 + 4 + 5 + 3 + 2 + 3 = 36. Both totals agree,
  * and this file is one of the nine charters. Each sum is kept whole on one line
  * so that it can be checked by eye and matched by a search without a line break
  * splitting it.
  *
- * <p>Assumptions: the authoritative figures are <strong>23 production classes
- * across 8 subpackages and the root, in 32 compilation units, of which 9 are charters</strong>
+ * <p>Assumptions: the authoritative figures are <strong>27 production classes
+ * across 8 subpackages and the root, in 36 compilation units, of which 9 are charters</strong>
  * -- this file among them. They are counted subpackage by subpackage, and both
  * cross-checks above re-derive them independently, by class and by compilation
  * unit. The total and the breakdown are stated together for that reason: a bare
  * total invites a reader to trust it, whereas a breakdown lets a reader re-derive
  * it and reject any figure that does not add up. Any class count for this package
- * other than 23 fails both sums and is wrong.
+ * other than 27 fails both sums and is wrong.
+ *
+ * <p>Refactoring Rationale: the table said 23 production classes in 32 compilation
+ * units, and one row was the whole of the error. {@code common.error} carried 3 and
+ * 4 where the directory holds 7 and 8, so both totals were four short and the two
+ * cross-check sums agreed with each other while disagreeing with the tree -- which
+ * is the one failure mode a pair of mutually consistent sums cannot catch. The row
+ * is corrected at its source and the totals re-derived from the corrected row rather
+ * than adjusted by adding four, so that the arithmetic a reader repeats is the
+ * arithmetic that produced the figures. The subpackage charter at
+ * {@code com.carddemo.common.error} was corrected in the same change and states the
+ * same 7 and 8, because a row here that disagreed with the charter beneath it would
+ * merely relocate the defect.
+ *
+ * <h2>Where this inventory exceeds the plan, and why each addition is here</h2>
+ *
+ * <p>Assumptions: the migration plan's section 0.4.1.2 names <b>17</b> shared-kernel
+ * production classes by path, and the closed inventory above admits <b>27</b>. The
+ * difference is 10 deliberate additions rather than drift, and it is enumerated here
+ * because a count that exceeds the plan's without saying so reads as either an
+ * oversight or an unrecorded scope change. Each addition below is in the shared
+ * kernel for the same reason the plan's own 17 are: it carries a contract that two or
+ * more bounded contexts must agree on, so a per-service copy of it could disagree
+ * with another service's copy without anything failing.
+ *
+ * <ul>
+ *   <li>{@code CardDemoCommonAutoConfiguration} in this root -- the registration
+ *       entry. A service scans its own bounded context's root and never reaches
+ *       {@code com.carddemo.common}, so without it the correlation filter, the
+ *       meter filter, the money codec module and the single error advice were
+ *       compiled, tested and then instantiated by nothing.</li>
+ *   <li>{@code error.ApiErrorSecurityHandlers} -- the 401 and 403 the security
+ *       filter chain answers before any advice runs, rendered as the same problem
+ *       shape as every other failure, because every published contract declares
+ *       those two statuses with that body.</li>
+ *   <li>{@code error.ClientInputException} -- the caller-fault marker the advice
+ *       keys HTTP 400 on. The standard exception hierarchy cannot distinguish a
+ *       value a caller supplied from an internal invariant violation, and the
+ *       advice must not answer 400 for the second.</li>
+ *   <li>{@code error.RecordConflictException} -- lets a service that has already
+ *       detected contention name which kind, instead of the advice inferring it by
+ *       walking a persistence provider's cause chain.</li>
+ *   <li>{@code error.FieldOrdering} -- declares the order one request body's fields
+ *       are checked in. Bean Validation evaluates constraints in no defined order,
+ *       while several migrated screens report the first failure and only the
+ *       first.</li>
+ *   <li>{@code web.CursorToken} -- seals and opens the paging position. Keyset
+ *       paging is the plan's own choice at its section 0.4.3, and the token that
+ *       carries a position between two requests is a wire contract every browse
+ *       endpoint shares.</li>
+ *   <li>{@code security.CardNumberMasker} -- the one implementation of the
+ *       last-four rendering the plan requires at its section 0.4.1.9. Two
+ *       implementations that disagreed on how many digits survive would each look
+ *       correct in isolation.</li>
+ *   <li>{@code security.CognitoAccessTokenValidator} -- the access-token checks the
+ *       issuer's own decoder does not perform. It sits beside
+ *       {@code JwtRoleConverter}, which the plan does name, because both take effect
+ *       inside the same decoder.</li>
+ *   <li>{@code security.OpaqueIdentifier} -- renders an identifier for an
+ *       operational record without disclosing it, which is what lets a log line and
+ *       an error body name a row at all under the plan's data-exposure rules.</li>
+ *   <li>{@code observability.LogSafeText} -- decides what a rendered value may
+ *       contain before it reaches a log line, which is the executable half of the
+ *       sensitive-data logging prohibition in
+ *       {@code docs/architecture/observability.md}.</li>
+ * </ul>
+ *
+ * <p>Trade-offs: the alternative to naming these 10 here was to leave the plan's 17
+ * and this charter's 27 to be reconciled by whoever next noticed the gap. Rejected,
+ * because the reconciliation is not mechanical -- nine of the ten are cross-cutting
+ * contracts and one is a registration mechanism, and no arithmetic recovers that
+ * from two totals. The cost accepted is that this list has to be maintained
+ * alongside the table above whenever an addition is argued in; the compensation is
+ * that the argument for each existing addition is on the record rather than
+ * reconstructed.
  *
  * <h2>The dependency arrow points inward only</h2>
  *
@@ -208,9 +251,10 @@
  * {@code tests/README.md} line 542 is one such site, and the label word at line
  * 548 of the same file is another. The wording is unchanged and only those two
  * punctuation code points are normalised. The substitution is stated here so
- * that it reads as a deliberate normalisation rather than a transcription slip;
- * the authoring notes at the foot of this charter give the reason the whole
- * file is restricted to ASCII.
+ * that it reads as a deliberate normalisation rather than a transcription slip.
+ * This compilation unit is restricted to ASCII so that a non-breaking hyphen,
+ * indistinguishable on screen from an ordinary one, cannot quietly turn a label
+ * into a token a search for that label fails to find.
  *
  * <p>Alternatives Considered: the obvious alternative is to let each service
  * declare the shared types it needs for itself, which removes a module from the
@@ -238,7 +282,7 @@
  *
  * <p>Assumptions: first, the count canon above admits exactly nine charter
  * files, every one of them at this package or deeper. A tenth would break the
- * 26-compilation-unit total, and authoring an artifact the migration plan does
+ * 36-compilation-unit total, and authoring an artifact the migration plan does
  * not call for falls outside the scope this tree is held to. Second, the
  * ruleset's charter-presence check is a file-set check: it fires only for a
  * directory that contains a compilation unit the audit actually processed.
@@ -499,7 +543,7 @@
  * layer, its single-program integration layer, its golden-master end-to-end
  * layer, and its fixtures, goldens, helpers and mocks. This module's own test
  * tree is {@code services/common-lib/src/test}, and it holds the unit tests and
- * the architecture rules for the 23 production classes this charter enumerates.
+ * the architecture rules for the 27 production classes this charter enumerates.
  * Neither substitutes for the other, and work on one does not modify the other.
  *
  * <p>Assumptions: the oracle suite covers batch flows. Three of the contracts

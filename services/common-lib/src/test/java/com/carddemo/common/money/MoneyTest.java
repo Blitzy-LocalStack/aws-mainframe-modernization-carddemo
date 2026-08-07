@@ -82,7 +82,7 @@ final class MoneyTest {
         Money balance = Money.of("1000.00");
         BigDecimal resolvedRate = new BigDecimal("15.00");
 
-        assertThat(balance.monthlyInterestTruncated(resolvedRate))
+        assertThat(balance.monthlyInterest(resolvedRate))
                 .isEqualTo(Money.of("12.50"));
     }
 
@@ -119,7 +119,7 @@ final class MoneyTest {
         Money zeroBalance = Money.of("0.00");
         BigDecimal liveRate = new BigDecimal("15.00");
 
-        assertThat(zeroBalance.monthlyInterestTruncated(liveRate))
+        assertThat(zeroBalance.monthlyInterest(liveRate))
                 .isEqualTo(Money.ZERO);
     }
 
@@ -137,7 +137,7 @@ final class MoneyTest {
         BigDecimal presentZeroRate = new BigDecimal("0.00");
 
         assertThat(presentZeroRate).isEqualByComparingTo("0.00");
-        assertThat(balance.monthlyInterestTruncated(presentZeroRate))
+        assertThat(balance.monthlyInterest(presentZeroRate))
                 .isEqualTo(Money.ZERO);
     }
 
@@ -158,100 +158,112 @@ final class MoneyTest {
         //       default_fallback/discgrp.txt contains all 17 rows, so this null case is synthetic.
         NullPointerException failure = assertThrows(
                 NullPointerException.class,
-                () -> balance.monthlyInterestTruncated(null));
+                () -> balance.monthlyInterest(null));
 
         assertThat(failure).isExactlyInstanceOf(NullPointerException.class);
     }
 
     /**
-     * Verifies that common rates can agree under DOWN and HALF_UP and therefore cannot prove the
-     * production rounding choice.
+     * Verifies the two rates on which half up and the reference truncation cannot be told apart.
      *
      * <p>The test accepts no parameters and returns normally after its void assertions. It
      * expects no exception because all balances and rates are valid monetary inputs.
+     *
+     * <p>Alternatives Considered: using either of these rates to evidence the rounding contract.
+     * Rejected, and recorded here so that nobody adopts one for that purpose: their quotients do not
+     * land on a half cent, so half up and truncation agree and the vector proves nothing about which
+     * mode ran. The two vectors that DO discriminate are asserted separately below.
      */
     @Test
-    @DisplayName("non-discriminating rates agree under DOWN and HALF_UP")
-    void documentsRatesThatDoNotDiscriminateInterestRounding() {
+    @DisplayName("rates whose quotient misses a half cent cannot evidence the rounding contract")
+    void documentsRatesThatCannotEvidenceTheRoundingContract() {
         Money balance = Money.of("1000.00");
         BigDecimal fixtureRate = new BigDecimal("25.00");
         BigDecimal syntheticRate = new BigDecimal("2.50");
 
-        // WHY : Alternatives Considered: The synthetic 2.50 rate was rejected as a rounding
-        //       regression discriminator because both supported modes produce 2.08 here.
-        assertThat(balance.monthlyInterestTruncated(fixtureRate))
-                .isEqualTo(Money.of("20.83"));
-        assertThat(balance.monthlyInterestHalfUp(fixtureRate))
-                .isEqualTo(Money.of("20.83"));
-        assertThat(balance.monthlyInterestTruncated(syntheticRate))
-                .isEqualTo(Money.of("2.08"));
-        assertThat(balance.monthlyInterestHalfUp(syntheticRate))
-                .isEqualTo(Money.of("2.08"));
+        assertThat(balance.monthlyInterest(fixtureRate)).isEqualTo(Money.of("20.83"));
+        assertThat(balance.monthlyInterest(syntheticRate)).isEqualTo(Money.of("2.08"));
     }
 
     /**
-     * Verifies the first vector that distinguishes production DOWN from a HALF_UP counterfactual.
+     * Verifies the first vector on which half up parts company with the reference truncation.
      *
      * <p>The test accepts no parameters and returns normally after its void assertions. It
      * expects no exception because the source-derived balance and synthetic discriminating rate
      * are valid inputs.
+     *
+     * <p>Assumptions: the quotient of this vector is {@code 2.2583...}, so half up gives
+     * {@code 2.26} while the reference program's truncating store gives {@code 2.25}. Both values are
+     * asserted -- the produced one against the API and the reference one against arithmetic computed
+     * here -- because divergence C-ROUNDING is only meaningful if the cent it costs is
+     * pinned rather than described.
      */
     @Test
-    @DisplayName("1000.00 at 2.71 distinguishes DOWN from HALF_UP")
-    void truncatesFirstDiscriminatingInterestVector() {
+    @DisplayName("1000.00 at 2.71 rounds half up to 2.26 where the reference truncates to 2.25")
+    void roundsFirstDivergentInterestVectorHalfUp() {
         Money balance = Money.of("1000.00");
         BigDecimal rate = new BigDecimal("2.71");
-        Money production = balance.monthlyInterestTruncated(rate);
-        Money halfUpCounterfactual = balance.monthlyInterestHalfUp(rate);
+        Money production = balance.monthlyInterest(rate);
+        BigDecimal referenceTruncation = balance.amount().multiply(rate)
+                .divide(Money.MONTHLY_RATE_DIVISOR, Money.SCALE, RoundingMode.DOWN);
 
-        assertThat(production).isEqualTo(Money.of("2.25"));
-        assertThat(halfUpCounterfactual).isEqualTo(Money.of("2.26"));
-        assertThat(production).isNotEqualTo(halfUpCounterfactual);
+        assertThat(production).isEqualTo(Money.of("2.26"));
+        assertThat(referenceTruncation).isEqualByComparingTo("2.25");
+        assertThat(production.amount()).isNotEqualByComparingTo(referenceTruncation);
     }
 
     /**
-     * Verifies the second vector that distinguishes production DOWN from a HALF_UP
-     * counterfactual.
+     * Verifies the second, independent vector on which half up parts company with truncation.
      *
      * <p>The test accepts no parameters and returns normally after its void assertions. It
      * expects no exception because the synthetic balance-and-rate combination remains within the
      * fixed-point domain.
+     *
+     * <p>Assumptions: this vector's quotient is {@code 2.0850} EXACTLY rather than a repeating
+     * expansion, which is the cleanest possible statement of the divergence -- there is no truncated
+     * tail to argue about, only a half cent resolved in one direction or the other. Two independent
+     * vectors are asserted because a single one could be satisfied by an implementation that happened
+     * to be right at one input.
      */
     @Test
-    @DisplayName("1000.80 at 2.50 independently distinguishes DOWN from HALF_UP")
-    void truncatesSecondDiscriminatingInterestVector() {
+    @DisplayName("1000.80 at 2.50 rounds half up to 2.09 where the reference truncates to 2.08")
+    void roundsSecondDivergentInterestVectorHalfUp() {
         Money balance = Money.of("1000.80");
         BigDecimal rate = new BigDecimal("2.50");
-        Money production = balance.monthlyInterestTruncated(rate);
-        Money halfUpCounterfactual = balance.monthlyInterestHalfUp(rate);
+        Money production = balance.monthlyInterest(rate);
+        BigDecimal referenceTruncation = balance.amount().multiply(rate)
+                .divide(Money.MONTHLY_RATE_DIVISOR, Money.SCALE, RoundingMode.DOWN);
 
-        assertThat(production).isEqualTo(Money.of("2.08"));
-        assertThat(halfUpCounterfactual).isEqualTo(Money.of("2.09"));
-        assertThat(production).isNotEqualTo(halfUpCounterfactual);
+        assertThat(production).isEqualTo(Money.of("2.09"));
+        assertThat(referenceTruncation).isEqualByComparingTo("2.08");
+        assertThat(production.amount()).isNotEqualByComparingTo(referenceTruncation);
     }
 
     /**
-     * Verifies that signed interest truncates toward zero with DOWN rather than toward negative
-     * infinity with FLOOR.
+     * Verifies that a negative accrual rounds half up on magnitude, away from zero.
      *
      * <p>The test accepts no parameters and returns normally after its void assertions. It
      * expects no exception because the synthetic signed balance is permitted by the source
      * copybooks and remains inside the money domain.
+     *
+     * <p>Assumptions: a negative accrual is reachable rather than hypothetical, because both the
+     * balance picture {@code PIC S9(10)V99} at line 7 of {@code app/cpy/CVACT01Y.cpy} and the rate
+     * picture {@code PIC S9(04)V99} at line 9 of {@code app/cpy/CVTRA02Y.cpy} are SIGNED. Half up
+     * rounds on magnitude, so the negative mirror of the {@code 2.26} vector is {@code -2.26} and not
+     * {@code -2.25}; asserting only the positive vector would leave that direction unproved.
      */
     @Test
-    @DisplayName("signed interest rejects FLOOR as the truncation interpretation")
-    void truncatesSignedInterestTowardZeroRatherThanFloor() {
+    @DisplayName("a negative accrual rounds half up away from zero")
+    void roundsNegativeInterestHalfUpAwayFromZero() {
         Money balance = Money.of("-1000.00");
         BigDecimal rate = new BigDecimal("2.71");
 
-        // WHY : Alternatives Considered: FLOOR agrees with DOWN for positive amounts but yields
-        //       -2.26 here, while the signed receiving field truncates toward zero to -2.25.
-        Money production = balance.monthlyInterestTruncated(rate);
-        Money floorCounterfactual = balance.monthlyInterest(rate, RoundingMode.FLOOR);
+        Money production = balance.monthlyInterest(rate);
+        BigDecimal referenceTruncation = balance.amount().multiply(rate)
+                .divide(Money.MONTHLY_RATE_DIVISOR, Money.SCALE, RoundingMode.DOWN);
 
-        assertThat(production).isEqualTo(Money.of("-2.25"));
-        assertThat(floorCounterfactual).isEqualTo(Money.of("-2.26"));
-        assertThat(production).isNotEqualTo(floorCounterfactual);
+        assertThat(production).isEqualTo(Money.of("-2.26"));
+        assertThat(referenceTruncation).isEqualByComparingTo("-2.25");
     }
 
     /**
@@ -266,17 +278,19 @@ final class MoneyTest {
     void multipliesBeforeDividingInterest() {
         Money balance = Money.of("1000.00");
         BigDecimal rate = new BigDecimal("2.71");
-        Money production = balance.monthlyInterestTruncated(rate);
+        Money production = balance.monthlyInterest(rate);
 
-        // WHY : Assumptions: CBACT04C.cbl:465 parenthesizes the product, and the scale-two
-        //       CVTRA01Y/CVTRA02Y operands form a scale-four raw product before division.
+        // Assumptions: CBACT04C.cbl:465 parenthesizes the product, and the scale-two
+        //   CVTRA01Y/CVTRA02Y operands form a scale-four raw product before division. The
+        //   counterfactual uses the SAME rounding mode as production, so the cent it differs by is
+        //   attributable to the operation order alone and not to the mode.
         BigDecimal divideFirstCounterfactual = balance.amount()
-                .divide(Money.MONTHLY_RATE_DIVISOR, Money.SCALE, RoundingMode.DOWN)
+                .divide(Money.MONTHLY_RATE_DIVISOR, Money.SCALE, Money.GENERAL_ROUNDING)
                 .multiply(rate)
-                .setScale(Money.SCALE, RoundingMode.DOWN);
+                .setScale(Money.SCALE, Money.GENERAL_ROUNDING);
 
-        assertThat(production).isEqualTo(Money.of("2.25"));
-        assertThat(divideFirstCounterfactual).isEqualByComparingTo("2.24");
+        assertThat(production).isEqualTo(Money.of("2.26"));
+        assertThat(divideFirstCounterfactual).isEqualByComparingTo("2.25");
         assertThat(production.amount()).isNotEqualByComparingTo(divideFirstCounterfactual);
     }
 
@@ -289,23 +303,25 @@ final class MoneyTest {
      * money domain.
      */
     @Test
-    @DisplayName("per-item truncation precedes interest accumulation")
-    void truncatesEachInterestItemBeforeAccumulation() {
+    @DisplayName("per-item reduction precedes interest accumulation")
+    void reducesEachInterestItemBeforeAccumulation() {
         Money balance = Money.of("1000.00");
-        BigDecimal rate = new BigDecimal("2.71");
-        Money reducedItem = balance.monthlyInterestTruncated(rate);
+        BigDecimal rate = new BigDecimal("1.00");
+        Money reducedItem = balance.monthlyInterest(rate);
 
-        // WHY : Trade-offs: CBACT04C.cbl:467 adds WS-MONTHLY-INT after its scale-two receive;
-        //       reducing only once after summing would instead produce the divergent 6.77 value.
+        // Trade-offs: CBACT04C.cbl:467 adds WS-MONTHLY-INT after its scale-two receive, so each
+        //   category's accrual is reduced BEFORE it joins the running total. The 1.00 rate is used
+        //   rather than the 2.71 of the vectors above because at 2.71 the two orders happen to agree
+        //   under half up, so that rate would assert nothing about the order.
         Money perItemTotal = Money.total(reducedItem, reducedItem, reducedItem);
         BigDecimal reduceOnceCounterfactual = balance.amount()
                 .multiply(new BigDecimal("3"))
                 .multiply(rate)
-                .divide(Money.MONTHLY_RATE_DIVISOR, Money.SCALE, RoundingMode.DOWN);
+                .divide(Money.MONTHLY_RATE_DIVISOR, Money.SCALE, Money.GENERAL_ROUNDING);
 
-        assertThat(reducedItem).isEqualTo(Money.of("2.25"));
-        assertThat(perItemTotal).isEqualTo(Money.of("6.75"));
-        assertThat(reduceOnceCounterfactual).isEqualByComparingTo("6.77");
+        assertThat(reducedItem).isEqualTo(Money.of("0.83"));
+        assertThat(perItemTotal).isEqualTo(Money.of("2.49"));
+        assertThat(reduceOnceCounterfactual).isEqualByComparingTo("2.50");
         assertThat(perItemTotal.amount()).isNotEqualByComparingTo(reduceOnceCounterfactual);
     }
 
@@ -780,7 +796,7 @@ final class MoneyTest {
      *
      * <p>Alternatives Considered: asserting only that the operations return the arithmetically
      * obvious product and quotient. Rejected because these two methods carry a rounding decision that
-     * the accrual path must not use -- {@link Money#monthlyInterest(BigDecimal, RoundingMode)} exists
+     * the accrual path must not use -- {@link Money#monthlyInterest(BigDecimal)} exists
      * because reducing the intermediate product changes the result -- so a test that never rounds
      * would not distinguish the general contract from the accrual one at all.
      */
@@ -902,6 +918,65 @@ final class MoneyTest {
         assertThat(oneCentMore.compareTo(fromOnePlace)).isPositive();
         assertThat(fromOnePlace.equals(null)).isFalse();
         assertThat(fromOnePlace.equals("1.50")).isFalse();
+    }
+
+    /**
+     * Asserts that the picture-bounded factory admits a narrow picture's domain and refuses beyond it.
+     *
+     * <p>The nine-integer-digit boundary is the one that matters for the persisted ledger columns:
+     * {@code TRAN-AMT PIC S9(09)V99} and {@code TRAN-CAT-BAL PIC S9(09)V99} both map to
+     * {@code NUMERIC(11,2)}, so an amount the widest picture admits must be refused here. Both signs
+     * are asserted because a signed picture bounds the magnitude and not the value.
+     *
+     * <p>The method accepts no parameters, returns nothing, and expects
+     * {@link ArithmeticException} from each over-domain amount.
+     */
+    @Test
+    @DisplayName("ofPicture bounds a nine-digit picture where of() admits the ten-digit domain")
+    void ofPictureBoundsANarrowerPictureThanTheWidestReferenceField() {
+        BigDecimal nineDigitMaximum = new BigDecimal("999999999.99");
+        BigDecimal oneCentOver = new BigDecimal("1000000000.00");
+
+        assertThat(Money.ofPicture(nineDigitMaximum, 9).amount()).isEqualByComparingTo(
+                nineDigitMaximum);
+        assertThat(Money.ofPicture(nineDigitMaximum.negate(), 9).amount()).isEqualByComparingTo(
+                nineDigitMaximum.negate());
+
+        // Assumptions: the same value is legal under the widest picture, which is what makes the
+        //   narrower bound load-bearing rather than redundant with of().
+        assertThat(Money.of(oneCentOver).amount()).isEqualByComparingTo(oneCentOver);
+
+        ArithmeticException positiveOverflow =
+                assertThrows(ArithmeticException.class, () -> Money.ofPicture(oneCentOver, 9));
+        assertThat(positiveOverflow.getMessage()).contains("999999999.99").doesNotContain(
+                "1000000000");
+        assertThrows(ArithmeticException.class, () -> Money.ofPicture(oneCentOver.negate(), 9));
+    }
+
+    /**
+     * Asserts that the picture-bounded factory reduces before it measures and refuses a bad width.
+     *
+     * <p>Reduction before measurement is the documented ordering: a value carrying a third decimal
+     * place is rounded to cents and then judged, so an amount that only exceeds the picture in digits
+     * it does not keep is accepted. An integer-digit count outside one to ten names no reference
+     * picture and is refused as a programming error rather than silently widening the bound.
+     *
+     * <p>The method accepts no parameters, returns nothing, and expects
+     * {@link IllegalArgumentException} for each out-of-range width.
+     */
+    @Test
+    @DisplayName("ofPicture reduces before bounding and refuses a width no picture declares")
+    void ofPictureReducesBeforeBoundingAndRefusesAnUndeclaredWidth() {
+        assertThat(Money.ofPicture(new BigDecimal("999999999.994"), 9).amount())
+                .isEqualByComparingTo(new BigDecimal("999999999.99"));
+        assertThat(Money.ofPicture(new BigDecimal("0.005"), 1).amount())
+                .isEqualByComparingTo(new BigDecimal("0.01"));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> Money.ofPicture(BigDecimal.ONE, 0));
+        assertThrows(IllegalArgumentException.class,
+                () -> Money.ofPicture(BigDecimal.ONE, Money.MAX_PICTURE_INTEGER_DIGITS + 1));
+        assertThrows(NullPointerException.class, () -> Money.ofPicture(null, 9));
     }
 
     /**

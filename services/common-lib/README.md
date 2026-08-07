@@ -215,14 +215,14 @@ reports nothing at all, while looking identical to a passing build.
 > the default Surefire execution, so leaving the inherited execution active would
 > run the identical gate a second time against the identical classes.
 >
-> **Assumptions:** nothing is skipped by that element. The rules still execute
+> Assumptions: nothing is skipped by that element. The rules still execute
 > here, once, in the default execution — `mvn -f services/common-lib/pom.xml test
 > -Dtest=LayeringRulesTest` is how you see them, and the count it reports is the
 > full set of cases. The element refines the inherited execution rather than
 > adding one, which requires the id to match character for character; the POM
 > comment beside it states the same thing at greater length.
 >
-> **Trade-offs:** documenting a narrow exception costs the prohibition some of
+> Trade-offs: documenting a narrow exception costs the prohibition some of
 > its bluntness, and an unqualified prohibition beside a POM that visibly
 > contradicts it costs more — a reader who finds the contradiction has to decide
 > for themselves which of the two to trust, and the safest-looking resolution is
@@ -413,7 +413,7 @@ repeats in the type's own Javadoc.
 | `TimestampFormatter` | The exact 26-character `YYYY-MM-DD HH:MM:SS.mmmmmm` form | `app/cpy/CVTRA05Y.cpy` line 17; `app/cbl/CBTRN02C.cbl` line 159 |
 | `DateEditValidator` | The date-edit rules, including leap-year and range handling | `app/cbl/CSUTLDTC.cbl`; `app/cpy/CSUTLDPY.cpy`; `app/cpy/CSUTLDWY.cpy` |
 | `FieldValidationFlag` | The `FLG-*-NOT-OK` / `FLG-*-BLANK` equivalent, including the `'*'` blank marker | `app/cpy/CSSETATY.cpy` lines 17 to 27 |
-| `CardDemoCommonAutoConfiguration` | Registers the shared filter, advice and Jackson module in a host application, so no service wires them by hand | no baseline analogue; additive |
+| `CardDemoCommonAutoConfiguration` | Registers the shared filter, advice, Jackson module, clock and cursor sealer in a host application, so no service wires them by hand | no baseline analogue; additive |
 | `LayeringRulesTest` | The ArchUnit layering rules, inherited by all eight services | §7 |
 
 ---
@@ -499,7 +499,10 @@ every entry below is a boundary that has already been reasoned about.
   hard-codes an endpoint; runtime endpoints and identifiers arrive from
   parameter storage at startup. Keyed material for `CursorToken` and
   `OpaqueIdentifier` is supplied by configuration and never defaulted to a
-  literal in source.
+  literal in source. `CardDemoCommonAutoConfiguration` owns the single
+  `CursorToken` bean and publishes it **only** when a deployment names key
+  material in `carddemo.pagination.cursor.signing-key`, which is how the type
+  gets one configured owner without this module shipping a signing key.
 
 ---
 
@@ -596,12 +599,9 @@ the first money field in that record.
 
 ### 5.3 Multiply before divide
 
-`Money` exposes three multiply-then-divide entry points, so that no caller has to
-reconstruct the ordering: `monthlyInterest(rate, mode)`, which takes the rounding
-mode as a mandatory parameter, and the two named forms `monthlyInterestTruncated`
-and `monthlyInterestHalfUp` that fix it. There is deliberately **no overload
-taking no mode** — see §5.3.1 for why the choice is forced on every caller. The
-formula all three implement is, verbatim from the baseline
+`Money` exposes one multiply-then-divide entry point, `monthlyInterest(rate)`, so
+that no caller has to reconstruct the ordering and none can vary the rounding. The
+formula it implements is, verbatim from the baseline
 [`app/cbl/CBACT04C.cbl` lines 464 to 465]:
 
 ```text
@@ -611,14 +611,9 @@ COMPUTE WS-MONTHLY-INT
 
 **The COBOL source itself parenthesises the multiplication.** The ordering is
 explicit in the baseline; it is not inferred from a convention. Multiply at
-**full precision first**, then divide with an explicit scale and an explicit
-rounding mode. *"Dividing first and multiplying second yields different cents on
-many inputs"* — re-ordering is forbidden.
-
-**The rounding mode is a separate decision from the ordering, and it is not
-`HALF_UP` on the parity path.** These two are easy to conflate, so they are stated
-apart: the ordering above is fixed and has one right answer, whereas the mode has
-**two** documented contracts and the caller picks.
+**full precision first**, then divide with an explicit scale and rounding mode.
+*"Dividing first and multiplying second yields different cents on many inputs"* —
+re-ordering is forbidden.
 
 Two worked cases make the failure concrete rather than theoretical, both
 computed on a balance of `1000.00`:
@@ -635,65 +630,49 @@ anywhere.
 
 **The accumulator subtlety.** The baseline performs
 `ADD WS-MONTHLY-INT TO WS-TOTAL-INT` **per transaction**
-[`app/cbl/CBACT04C.cbl` line 467], so the total is the sum of **rounded** values,
-not a rounded sum. Accumulating at full precision and rounding once at the end
-produces a different total, and it is the wrong one for parity purposes. Round
-each term, then add.
+[`app/cbl/CBACT04C.cbl` line 467], so the total is the sum of **reduced** values,
+not a reduced sum. Accumulating at full precision and reducing once at the end
+produces a different total, because rounding does not distribute over addition.
+Reduce each term, then add.
 
-#### 5.3.1 Two rounding contracts — which to call, and why there is no default
+#### 5.3.1 One rounding contract, and the divergence it accepts
 
-The baseline **truncates toward zero**; the migration plan specifies **half up**
-for money generally. Both behaviours are therefore implemented, both are named,
-and the difference between them is a documented divergence rather than a defect on
-either side.
+Transformation rule T3 of the migration plan states scale-2 `HALF_UP` for the whole
+money path, without exception. `GENERAL_ROUNDING` is therefore the only mode this
+module declares, and it governs `Money.of(BigDecimal)`, `multipliedBy`, `dividedBy`
+and `monthlyInterest` alike. **No entry point takes a rounding mode**, so no call
+site can select a different one.
 
-| Contract | Constant | Named entry point | Call it when |
-|---|---|---|---|
-| Baseline accrual | `BASELINE_INTEREST_ROUNDING` = `RoundingMode.DOWN` | `monthlyInterestTruncated(rate)` | **The result must agree with the reference goldens.** This is the parity path. |
-| General money | `GENERAL_ROUNDING` = `RoundingMode.HALF_UP` | `monthlyInterestHalfUp(rate)` | A new target-side calculation with no golden to match, following plan rule T3. |
+The baseline accrual truncates instead: the statement at
+[`app/cbl/CBACT04C.cbl` lines 464 to 465] stores its quotient into a field declared
+with two decimal places at line 168 and carries **no `ROUNDED` phrase** — and no
+statement anywhere in that program's 652 lines carries one either. A COBOL store
+into a fixed-scale item without `ROUNDED` discards the surplus digits.
 
-`GENERAL_ROUNDING` also governs `Money.of(BigDecimal)` and the ordinary
-arithmetic, so half up remains the module's default **everywhere except this one
-reduction**. Accrual is the exception because it is the one calculation with a
-byte-comparable reference output.
+**Where the two behaviours part company.** On every vector the reference fixtures
+carry they agree, which is precisely why a test using only those vectors would not
+detect a wrong mode:
 
-**How the baseline behaviour was established, so it reads as derived rather than
-assumed.** The accrual statement at
-[`app/cbl/CBACT04C.cbl` lines 464 to 465] stores its quotient into a field
-declared with two decimal places at line 168 and carries **no `ROUNDED` phrase** —
-and no statement anywhere in that program's 652 lines carries one either. A COBOL
-store into a fixed-scale item without `ROUNDED` discards the surplus digits, which
-is truncation toward zero.
-
-`RoundingMode.FLOOR` is **not** the truncating mode to use, and the distinction is
-not academic. `DOWN` and `FLOOR` agree on a positive value and disagree on a
-negative one, and a negative value is reachable here: the receiving field at line
-168 is `PIC S9(09)V99`, the balance at
-[`app/cpy/CVACT01Y.cpy` line 7] is `PIC S9(10)V99`, and the rate itself at
-[`app/cpy/CVTRA02Y.cpy` line 9] is `PIC S9(04)V99` — all three **signed**.
-
-**Where the two modes actually part company.** On every vector the reference
-fixtures carry, they agree, which is precisely why a test that used only those
-vectors would not detect a wrong mode:
-
-| Balance | Annual rate | Quotient | `…Truncated` | `…HalfUp` | Discriminating? |
+| Balance | Annual rate | Quotient | This module | Reference truncation | Discriminating? |
 |---|---|---|---|---|---|
 | `1000.00` | `25.00` | `20.8333…` | `20.83` | `20.83` | no |
 | `1000.00` | `2.50` | `2.0833…` | `2.08` | `2.08` | no |
-| `1000.80` | `2.50` | `2.0850` exactly | **`2.08`** | **`2.09`** | **yes** |
+| `1000.00` | `2.71` | `2.2583…` | **`2.26`** | **`2.25`** | **yes** |
+| `1000.80` | `2.50` | `2.0850` exactly | **`2.09`** | **`2.08`** | **yes** |
 
-The third row is the one to remember: the modes differ by **at most one cent**, and
-only where the quotient lands **exactly** on a half cent. `MoneyTest` asserts both
-modes on both kinds of vector, so a mode changed by accident fails on the third row
-rather than passing on the first two.
+The difference is **at most one cent**, and only where the quotient lands on or
+above a half cent. `MoneyTest` asserts both discriminating vectors against the API
+and against the reference arithmetic computed alongside it, so the cent is pinned
+rather than described.
 
-**Why the mode-taking form has no no-argument overload.** An overload defaulting
-the mode was evaluated and rejected: whichever default it chose would be silently
-wrong for half the callers, and the wrongness would surface as a one-cent golden
-diff with nothing at the call site to explain it. Forcing the choice makes the
-decision visible where it is made. The divergence is registered as **`C-ROUNDING`**
-in
-[`docs/architecture/cobol-to-service-traceability.md`](../../docs/architecture/cobol-to-service-traceability.md).
+**Why there is no mode parameter.** Alternatives Considered: keeping the mode on
+the accrual entry point so a parity caller could ask for truncation. Rejected
+because a selectable mode is a second money contract in disguise — two call sites
+computing the same accrual could disagree by a cent with nothing in either one
+signalling that they had chosen differently. The reference truncation is preserved
+where it belongs, as documented divergence **`C-ROUNDING`** in
+[`docs/architecture/cobol-to-service-traceability.md`](../../docs/architecture/cobol-to-service-traceability.md),
+with its measured vectors, rather than as an API a caller can reach.
 
 ---
 
@@ -1004,9 +983,9 @@ lineage is never ambiguous:
 | `CARD-EXPIRAION-DATE` | `expiration_date` | [`app/cpy/CVACT02Y.cpy` line 9] |
 | `PA-MERCHANT-CATAGORY-CODE` | `merchant_category_code` | [`CIPAUDTY.cpy` line 36] — see the note below |
 
-> **Assumptions:** the third row names the **persisted** declaration, and that is
+> Assumptions: the third row names the **persisted** declaration, and that is
 > the one the target column is derived from, so it is the one the register cites.
-> **Refactoring Rationale:** an earlier revision of this row cited
+> Refactoring Rationale: an earlier revision of this row cited
 > `PA-RQ-MERCHANT-CATAGORY-CODE` [`CCPAURQY.cpy` line 28] instead. That is a real
 > declaration and it carries the same misspelling, but it is the **request
 > message** field, not the persisted one, so a register presenting itself as an
@@ -1024,7 +1003,7 @@ lineage is never ambiguous:
 > Java component, the PostgreSQL column, the detail resource and the JSON
 > envelope schema of the queue payload alike.
 >
-> **Trade-offs:** the baseline spelling still appears verbatim in exactly one
+> Trade-offs: the baseline spelling still appears verbatim in exactly one
 > place, `REQUEST_FIELD_NAMES` in `CsvAuthCodec`, and that is deliberate: every
 > wire-order assertion and every codec failure message reads its field names from
 > there, so a reader diffing a failure against `CCPAURQY.cpy` sees the same
@@ -1350,7 +1329,7 @@ need justifying.
 | Decision | Category or categories | What the comment must say |
 |---|---|---|
 | `Money` scale 2 with `HALF_UP`, and the multiply-then-divide helper | `Assumptions:` + `Trade-offs:` | Cite `app/cbl/CBACT04C.cbl` lines 464 to 465; state that dividing first *"yields different cents on many inputs"* and that at a 2.50 rate it yields `0.00` |
-| The accrual rounding mode being a required parameter | `Alternatives Considered:` + `Trade-offs:` | Name the defaulting overload and reject it: the baseline truncates (`DOWN`) while plan rule T3 specifies `HALF_UP`, so either default is silently wrong for half the callers — see §5.3.1 and divergence `C-ROUNDING` |
+| The accrual carrying no rounding-mode parameter | `Alternatives Considered:` + `Trade-offs:` | Name the mode-taking form and reject it: a selectable mode is a second money contract in disguise, so two call sites could disagree by a cent unnoticed — see §5.3.1 and divergence `C-ROUNDING` |
 | Money serialised as a JSON string | `Alternatives Considered:` | Name the JSON number and reject it — most clients parse it into an IEEE-754 double and destroy exactness at the boundary the user sees |
 | `ZonedDecimalCodec`'s explicit EBCDIC sign mode | `Assumptions:` | Quote `tests/README.md` lines 273 to 274 verbatim; note that EBCDIC here names a sign convention, not an encoding |
 | `PackedDecimalCodec` existing at all | `Assumptions:` | The ten base masters are zoned, not packed — two regimes, two codecs; packed appears only in `CVEXPORT.cpy` and the two authorization segments |
@@ -1403,9 +1382,12 @@ does not assert one where the other applies.
 
 | Measure | Value | Why |
 |---|---|---|
-| Copybook declared width sum | **153** | money declared `PIC +9(10).99`, fourteen characters [line 27] |
-| **Emitted** width sum | **152** | the money field is emitted at **13** characters to fit the consumer's receiver, `WS-TRANSACTION-AMT-AN PIC X(13)` [`COPAUA0C.cbl` line 63] |
-| **Emitted** wire length | **169** | 152 plus **17 interior** delimiters |
+| Declared width sum | **153** | money declared `PIC +9(10).99`, fourteen characters [line 27] |
+| **Emitted** wire length | **170** | 153 plus **17 interior** delimiters |
+
+The reference consumer copies the money token into a 13-character intermediate,
+`WS-TRANSACTION-AMT-AN PIC X(13)` [`COPAUA0C.cbl` line 63], before converting it.
+That narrower token is accepted on decode and re-emitted at the declared width.
 
 **Authorization reply** — 6 fields, `CCPAURLY.cpy` lines 19 to 24, widths
 `16, 15, 6, 2, 4, 14`:

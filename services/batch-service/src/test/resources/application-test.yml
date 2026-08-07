@@ -223,6 +223,59 @@ spring:
     #       silently un-applied change would be hardest to notice.
     validate-on-migrate: true
 
+    # Assumptions: `user` and `password` are deliberately ABSENT here while
+    #   application.yml binds both to SPRING_FLYWAY_* with no fallback, and the
+    #   absence resolves rather than conflicts. Boot only reads those two keys
+    #   through PropertiesFlywayConnectionDetails, which
+    #   FlywayAutoConfiguration creates @ConditionalOnMissingBean
+    #   (FlywayConnectionDetails.class). The container below carries
+    #   @ServiceConnection, whose JdbcConnectionDetails is adapted into a
+    #   FlywayConnectionDetails bean by
+    #   JdbcAdaptingFlywayConnectionDetailsFactory -- measured, not assumed: with
+    #   the keys added and no SPRING_FLYWAY_USER in the environment, the context
+    #   reached Flyway and failed on the SQL below rather than on an unresolved
+    #   placeholder. So the container's own generated credential migrates here,
+    #   and no stand-in credential has to be invented for a role this profile
+    #   never creates with a password.
+    #
+    # Refactoring Rationale: `init-sqls` IS restated, and it has to be. The base
+    #   file's single statement is `SET ROLE carddemo_batch_owner`, naming the
+    #   NOLOGIN role data-migration/sql/V0__schemas_and_roles.sql creates and this
+    #   container has never heard of; left inherited, every test in the four
+    #   *RepositoryIT classes failed context load with
+    #   `role "carddemo_batch_owner" does not exist`.
+    #
+    # Alternatives Considered: overriding this to an empty list, or to a no-op
+    #   statement, so the ownership split simply does not happen under test.
+    #   Rejected: it would leave the mechanism the deployed configuration depends
+    #   on asserted by nothing, and the mechanism is the whole of the control --
+    #   objects a migration creates must belong to the NOLOGIN owner, because every
+    #   ALTER DEFAULT PRIVILEGES FOR ROLE clause in the bootstrap SQL is keyed on
+    #   the CREATING role and is inert otherwise. The statements below reproduce it
+    #   instead: the role is created if absent, granted CREATE on whichever
+    #   database the container generated, and then assumed -- so Flyway creates the
+    #   schema, the history table and every V1 object as carddemo_batch_owner,
+    #   exactly as it does in a deployed environment.
+    #
+    # Assumptions: the first statement is idempotent because Flyway runs every
+    #   string here on EACH connection it opens, not once per migration. The role
+    #   test and the grant are both re-runnable, and the grant is issued through
+    #   `format` with `%I` on `current_database()` rather than a literal, because
+    #   Testcontainers generates the database name and no fixed value would match
+    #   it. CREATE on the database is required and is not implied by role
+    #   creation: a fresh role holds only the PUBLIC grants, which are CONNECT and
+    #   TEMPORARY, so without it `CREATE SCHEMA` fails once the SET ROLE takes
+    #   effect.
+    # Trade-offs: the container's user is a superuser and could therefore assume
+    #   this role with no grant at all, which would make the GRANT look
+    #   superfluous. It is kept because the grant is what the OWNER needs to create
+    #   the schema, not what the connecting user needs to become it -- and
+    #   `SET ROLE` drops the superuser attribute for the remainder of the session.
+    init-sqls:
+      - "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'carddemo_batch_owner') THEN CREATE ROLE carddemo_batch_owner NOLOGIN; END IF; EXECUTE format('GRANT CREATE ON DATABASE %I TO carddemo_batch_owner', current_database()); END $$;"
+      - "SET ROLE carddemo_batch_owner;"
+
+
   jpa:
     hibernate:
       # WHY : (1) Assumptions: `none` here, which is an intentional DIVERGENCE from

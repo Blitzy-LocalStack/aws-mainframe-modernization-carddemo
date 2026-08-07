@@ -400,7 +400,9 @@ spring:
       #   module OWNS wins any future name collision and so the job-repository
       #   tables, the batch_run ledger and Flyway's own history table all resolve
       #   there:
-      #     batch     owned; V0:469 creates it AUTHORIZATION carddemo_batch and
+      #     batch     owned; V0:699 creates it AUTHORIZATION
+      #               carddemo_batch_owner -- the NOLOGIN role this module's
+      #               migration assumes with SET ROLE -- and
       #               db/migration/V1__batch.sql declares everything in it.
       #     ledger    write under grant; V0:666-667 grants SELECT, INSERT and
       #               UPDATE on all its tables. Owned by transaction-service.
@@ -590,12 +592,13 @@ spring:
 
     # Assumptions: the schema and its owning role already exist when this
     #   runs. data-migration/sql/V0__schemas_and_roles.sql creates all eight
-    #   schemas, the per-service roles and the cross-schema grants before any
-    #   service starts, creating `batch` AUTHORIZATION carddemo_batch at its
-    #   line 469. Letting Flyway create the schema instead would conjure it
-    #   with whatever owner happened to connect, and the default privileges V0
-    #   grants for objects owned by carddemo_batch would then never fire. With
-    #   creation off, a missing schema fails loudly here instead.
+    #   schemas, the three tiers of per-service role and the cross-schema grants
+    #   before any service starts, creating `batch` AUTHORIZATION
+    #   carddemo_batch_owner at its line 699. Letting Flyway create the schema
+    #   instead would conjure it with whatever owner happened to connect, and the
+    #   default privileges V0 grants for objects owned by carddemo_batch_owner
+    #   would then never fire. With creation off, a missing schema fails loudly
+    #   here instead.
     create-schemas: false
 
     # Trade-offs: stated explicitly even though the current default already
@@ -623,6 +626,71 @@ spring:
     #   the missing-relation failure that migration exists to prevent.
     validate-on-migrate: true
     baseline-on-migrate: false
+
+    # Assumptions: Flyway authenticates as a DIFFERENT database role than the one
+    #   the datasource above uses, and the two are not interchangeable.
+    #   data-migration/sql/V0__schemas_and_roles.sql creates three tiers of role
+    #   per bounded context: a NOLOGIN carddemo_batch_owner that owns the
+    #   schema and everything in it, a carddemo_batch_migrator login that is a
+    #   member of that owner, and the carddemo_batch login this service serves
+    #   requests as. The runtime role holds USAGE on the schema plus SELECT,
+    #   INSERT and UPDATE on its tables -- CREATE is explicitly REVOKEd from it --
+    #   so it could not apply this migration even if asked to, and equally cannot
+    #   drop or alter the tables it reads.
+    # Refactoring Rationale: these two keys did not exist, and Flyway therefore
+    #   migrated under the runtime credential. That made the runtime role the
+    #   owner of the schema and of every table the migration created, so the one
+    #   long-lived credential every request ran under also held DDL authority over
+    #   the data it served. Naming a separate migration credential here is what
+    #   allows the bootstrap SQL to reduce the runtime role to named DML.
+    # Trade-offs: no fallback value, for the same reason the datasource
+    #   credential above has none -- a default would let the process start against
+    #   a credential nobody chose. The consequence is deliberate: a deployment
+    #   that injects the runtime credential and forgets this one fails at startup
+    #   on an unresolved placeholder, which names the variable it is missing,
+    #   rather than migrating as the wrong identity and succeeding.
+    # Assumptions: setting spring.flyway.user is also what gives Flyway its own
+    #   DataSource. Spring Boot builds a separate SimpleDriverDataSource derived
+    #   from the application DataSource whenever this key is set -- verified
+    #   against FlywayAutoConfiguration in spring-boot-flyway 4.1.0, whose
+    #   getMigrationDataSource falls to a derivedFrom builder when the Flyway URL
+    #   is absent and the Flyway user is not -- so the URL, driver and TLS terms
+    #   are inherited while the credential is replaced. That separation matters
+    #   beyond tidiness: sharing the Hikari pool would leave the SET ROLE below
+    #   applied to pooled connections that later serve runtime queries.
+    user: ${SPRING_FLYWAY_USER}
+    password: ${SPRING_FLYWAY_PASSWORD}
+
+    # Assumptions: this is the other half of the ownership split, and without it
+    #   the migration credential alone achieves nothing. V0 grants
+    #   carddemo_batch_migrator its owner WITH INHERIT FALSE, so a session
+    #   authenticated as the migrator holds NO privilege at all until it assumes
+    #   the owner explicitly. Flyway runs every string here on each connection it
+    #   opens, before any migration statement, so every object V1 creates is owned
+    #   by carddemo_batch_owner rather than by the credential that connected.
+    # Trade-offs: INHERIT FALSE plus an explicit SET ROLE is more moving parts
+    #   than granting the migrator ownership directly, and it buys two properties
+    #   that arrangement cannot have. A stolen migrator credential used without
+    #   this statement can read and write nothing, and every
+    #   ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_batch_owner clause in the
+    #   bootstrap SQL fires -- those clauses are keyed on the CREATING role, so a
+    #   migration that created tables as the migrator would leave them all inert
+    #   and the runtime role would receive no grants on the tables it must read.
+    # Alternatives Considered: ALTER ROLE carddemo_batch_migrator SET role,
+    #   which is a per-role server-side default and needs nothing in this file.
+    #   Rejected because it makes a privilege decision invisible at the point it
+    #   takes effect: a reader of this configuration would see a migration running
+    #   as the migrator and have no way to learn that the server silently
+    #   substitutes another identity.
+    init-sqls:
+    # Assumptions: the statement is TERMINATED. Spring Boot joins this list with a
+    #   newline and hands Flyway one script, so an unterminated statement is
+    #   concatenated with whatever follows it -- measured against PostgreSQL 17 as
+    #   `syntax error at or near "SET"` when a second entry was added under the test
+    #   profile. One entry cannot hit that today; the semicolon is what keeps a second
+    #   entry from breaking the first.
+      - "SET ROLE carddemo_batch_owner;"
+
 
   jpa:
     hibernate:

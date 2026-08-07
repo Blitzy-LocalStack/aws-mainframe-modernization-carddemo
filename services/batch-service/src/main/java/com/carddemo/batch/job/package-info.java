@@ -115,7 +115,7 @@
  * which is exactly why the identity is stated here in prose that a reviewer
  * reads, in addition to being asserted by test.</p>
  *
- * <p><strong>Assumptions:</strong> the container command supplies the job token
+ * <p>Assumptions: the container command supplies the job token
  * and the business date as process arguments. Step Functions passes them
  * through container overrides, so the argument list is the boundary at which an
  * orchestration decision becomes a Java one, and renaming a job bean silently
@@ -161,7 +161,7 @@
  * {@code reject_103_expired}. That distribution is the empirical form of the
  * preceding paragraph — no scenario in any other domain expects {@code 4}.</p>
  *
- * <p><strong>Alternatives Considered:</strong> two other homes for this
+ * <p>Alternatives Considered: two other homes for this
  * contract were evaluated. Copying it into all seven class-level comments was
  * rejected because seven copies of a rule drift the moment one is edited, and
  * the tier that drifts is the one nobody re-derives. Adding an eighth type to
@@ -171,13 +171,13 @@
  * only prose — and prose belongs in the package's own documentation entry
  * point, which every reader of any class in the package already lands on.</p>
  *
- * <p><strong>Trade-offs:</strong> stating the contract once, away from the
+ * <p>Trade-offs: stating the contract once, away from the
  * classes that implement it, accepts one real cost — a reader of a single job
  * class must follow one hop to find the rule that governs its exit status. That
  * cost was accepted in exchange for a single source of truth, and it is the
  * reason each job class points here rather than restating the tiers.</p>
  *
- * <p><strong>Assumptions:</strong> these three tiers are deliberately narrower
+ * <p>Assumptions: these three tiers are deliberately narrower
  * than the graded vocabulary the baseline uses internally.
  * {@code app/cbl/CBTRN02C.cbl} declares {@code 88 APPL-AOK VALUE 0.} at line
  * 143 and {@code 88 APPL-EOF VALUE 16.} at line 144, pre-sets a paragraph to
@@ -194,7 +194,7 @@
  * either lose the distinction between warn and failure or, worse, turn a
  * correctly-written business reject into a red build.</p>
  *
- * <p><strong>Assumptions:</strong> the existing COBOL suite under
+ * <p>Assumptions: the existing COBOL suite under
  * {@code tests/**} aggregates its own return code to {@code 4}, and for that
  * suite {@code 4} <em>is</em> the green state. Its single cause is documented
  * at {@code tests/README.md:53-69}: {@code CBEXPORT} and {@code CBIMPORT}
@@ -266,7 +266,7 @@
  *       {@code app/jcl/TRANREPT.jcl:47}.</li>
  * </ul>
  *
- * <p><strong>Assumptions:</strong> only the first of those three groups belongs
+ * <p>Assumptions: only the first of those three groups belongs
  * to a job in this package. The eight clean-predecessor gates govern statement
  * generation, the reference-data generation jobs and a document-conversion
  * utility, so they are cited here as the evidence that {@code (4,LT)} is
@@ -274,14 +274,14 @@
  *
  * <h2>Assumptions shared by every job in this package</h2>
  *
- * <p><strong>Assumptions:</strong> baseline provenance is reference-only. Every
+ * <p>Assumptions: baseline provenance is reference-only. Every
  * {@code app/**} path cited anywhere in this package is cited by path and line
  * so a reader can confirm it, and nothing under {@code app/**} is modified,
  * generated from, or reached at run time. The COBOL is the behavioural oracle
  * against which these jobs are compared, which only holds while it stays
  * byte-identical.</p>
  *
- * <p><strong>Assumptions:</strong> restart capability here is net-new, not
+ * <p>Assumptions: restart capability here is net-new, not
  * migrated. There is no baseline checkpoint contract to preserve: the only
  * {@code RESTART=} anywhere in the thirty-eight jobs is commented out —
  * {@code app/jcl/DEFGDGD.jcl:2} carries the {@code //*} comment prefix — and no
@@ -294,7 +294,7 @@
  * contract was inherited will look for baseline semantics to match and find
  * none.</p>
  *
- * <p><strong>Assumptions:</strong> generation-dataset retention is bounded at
+ * <p>Assumptions: generation-dataset retention is bounded at
  * five, and a rolled-off generation is physically deleted rather than merely
  * uncatalogued. Ten generation bases are defined with both {@code LIMIT(5)} and
  * an explicit {@code SCRATCH}: six in {@code app/jcl/DEFGDGB.jcl} at lines 25,
@@ -304,7 +304,7 @@
  * noncurrent object versions and then expiring them, not retaining five and
  * keeping the remainder.</p>
  *
- * <p><strong>Alternatives Considered:</strong> that bound is not stated
+ * <p>Alternatives Considered: that bound is not stated
  * uniformly by the baseline, so the normative form had to be chosen rather
  * than read off. {@code app/jcl/REPTFILE.jcl:26} re-defines the report base
  * under the same name with {@code LIMIT(10)} at line 27 and no
@@ -320,7 +320,7 @@
  * family on the strength of the definition less likely to have won the
  * race.</p>
  *
- * <p><strong>Assumptions:</strong> money is exact fixed point at every hop —
+ * <p>Assumptions: money is exact fixed point at every hop —
  * {@code BigDecimal} at scale 2, never {@code float} and never {@code double}.
  * The baseline holds these amounts as zoned decimal with sign overpunch and as
  * packed decimal, both of which are exact; routing either through a binary
@@ -329,7 +329,7 @@
  * rather than left to convention, so a job in this package cannot introduce a
  * {@code double} into the money path without failing the build.</p>
  *
- * <p><strong>Assumptions:</strong> the business date arrives as a job parameter
+ * <p>Assumptions: the business date arrives as a job parameter
  * and is never read from the wall clock. {@code app/jcl/INTCALC.jcl:22} injects
  * it as {@code PARM='2022071800'}, and that injection is the entire reason a
  * rerun of a nightly chain reproduces its earlier output byte for byte. A job

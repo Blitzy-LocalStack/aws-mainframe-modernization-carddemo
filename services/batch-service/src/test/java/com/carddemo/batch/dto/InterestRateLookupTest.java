@@ -451,8 +451,8 @@ class InterestRateLookupTest {
     /**
      * Confirms the record performs no accrual arithmetic, by reading its own source.
      *
-     * <p>Assumptions: the accrual belongs to {@link Money#monthlyInterestTruncated(BigDecimal)} and
-     * to nothing else, so that one definition of the contract exists rather than two. This
+     * <p>Assumptions: the accrual belongs to {@link Money#monthlyInterest(BigDecimal)} and to
+     * nothing else, so that one definition of the contract exists rather than two. This
      * expectation reads the source with comments and documentation removed, because the prose
      * legitimately names the very operations the code must not perform -- it cites the multiplication
      * and the division at {@code app/cbl/CBACT04C.cbl} lines 464 and 465, and it names the rejected
@@ -480,7 +480,7 @@ class InterestRateLookupTest {
                 .as("the quotient belongs to the shared kernel, not to this record")
                 .doesNotContain(".divide(");
         assertThat(code)
-                .as("no rounding mode is applied here; the kernel names the truncating contract")
+                .as("no rounding mode is applied here; the kernel owns the one money contract")
                 .doesNotContain("RoundingMode")
                 .doesNotContain("HALF_UP")
                 .doesNotContain("setScale");
@@ -499,10 +499,10 @@ class InterestRateLookupTest {
      * Confirms the record's documentation states the accrual contract it does not execute.
      *
      * <p>Assumptions: these are documentation expectations and they are asserted because the
-     * contract is the reason this type is preferred to a bare decimal. The truncating mode, the
-     * multiply-before-divide order and the sum-of-truncated-values property are each invisible in
-     * the reference source -- the absence of a {@code ROUNDED} phrase is what establishes the first
-     * -- so a reader who cannot find them here has no other place to find them.</p>
+     * contract is the reason this type is preferred to a bare decimal. The rounding divergence, the
+     * multiply-before-divide order and the sum-of-reduced-values property are each invisible in the
+     * reference source -- the ABSENCE of a {@code ROUNDED} phrase is what establishes the first --
+     * so a reader who cannot find them here has no other place to find them.</p>
      *
      * <p>This zero-argument test returns no value; failed expectations surface as assertion
      * errors.</p>
@@ -511,28 +511,29 @@ class InterestRateLookupTest {
      *     is a failure of the expectation rather than of the type under test
      */
     @Test
-    @DisplayName("documentation records truncation, multiply-before-divide and sum-of-truncated-values")
+    @DisplayName("documentation records the rounding divergence, the order and the reduction point")
     void arithmeticContractIsDocumentedEvenThoughItIsExecutedElsewhere() throws IOException {
         String source = Files.readString(lookupRecordSourcePath());
 
         assertThat(source)
-                .as("the truncating contract, and where it is named")
-                .contains("truncates toward zero")
-                .contains("BASELINE_INTEREST_ROUNDING");
+                .as("the one rounding contract, and the registered divergence from the reference")
+                .contains("rounded half up")
+                .contains("GENERAL_ROUNDING")
+                .contains("C-ROUNDING");
         assertThat(source)
                 .as("the order of the two operations, and the scale-4 intermediate it protects")
                 .contains("the product is formed before the quotient")
                 .contains("scale 4");
         assertThat(source)
-                .as("the accumulation property that truncation does not distribute over")
-                .contains("the sum of truncated values");
+                .as("the accumulation property that rounding does not distribute over")
+                .contains("the sum of per-category reduced values");
         assertThat(source)
                 .as("the divergence vector that makes the rounding choice concrete")
                 .contains("2.08")
                 .contains("2.09");
         assertThat(source)
                 .as("the arithmetic is stated to live in the shared kernel")
-                .contains("monthlyInterestTruncated");
+                .contains("monthlyInterest");
     }
 
     /**

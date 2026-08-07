@@ -4,7 +4,11 @@
 > credential for each CardDemo service database role, generates each initial
 > value at apply time so that no credential is expressible in source, and
 > attaches a rotation schedule when — and only when — the calling root supplies a
-> rotation function of its own.
+> rotation function of its own. Neither shipped environment root supplies one, so
+> in `dev` and `prod` as delivered **no rotation schedule is created and no stored
+> credential is re-issued on a schedule**. Replacement is operator-initiated and
+> scripted; the procedure is in
+> [`docs/runbooks/deploy.md`](../../../docs/runbooks/deploy.md).
 >
 > **Source of truth.** The authoritative implementation is
 > [`versions.tf`](versions.tf), [`variables.tf`](variables.tf),
@@ -45,7 +49,7 @@ The service-role inventory is closed and defaulted so an omitted role fails
 configuration validation instead of surfacing later as a service that cannot
 resolve a credential:
 
-| Bounded context | Login role stored and rotated by this module |
+| Bounded context | Login role **stored** by this module (not rotated by it) |
 |---|---|
 | Auth | `carddemo_auth` |
 | Account | `carddemo_account` |
@@ -62,38 +66,22 @@ credential for it would contradict its database contract.
 
 ### What the module deliberately does NOT provision
 
-**No rotation function.** Refactoring Rationale: this module previously packaged
-a Python rotation Lambda from a committed source file, together with an execution
-role, an inline policy, a log group and one invoke permission per secret. All of
-it was removed. Rotation of a secret VALUE is not this module's remit — the only
-rotation this infrastructure package owns is KMS *key* rotation, in
-[`../kms/`](../kms/) — and owning a function here pulled eight cross-module
-coordinates into the input contract (the cluster ARN, the RDS-managed master
-secret ARN, the writer endpoint, the port, the database name, a log-group key, a
-log retention value and an IAM permissions boundary) plus a third Terraform
-provider to build the deployment package. What remains is a pass-through hook: a
-root that has a rotation function passes `rotation_lambda_arn` together with
-`rotation_automatically_after_days`, and the module attaches one
-`aws_secretsmanager_secret_rotation` per secret. A root that has neither — which
-is the state of both environment roots in this package — gets no rotation
-resource at all. Trade-offs: the accepted cost is that credentials are not
-re-issued on a schedule until an operator supplies a function. Alternatives
-Considered: recreating the same function at the environment root instead, which
-was rejected because it relocates out-of-scope work rather than removing it.
+**No rotation function.** Rotation of a secret VALUE is not this module's remit;
+the only rotation this infrastructure package owns is KMS *key* rotation, in
+[`../kms/`](../kms/). What this module offers is a pass-through hook — see
+[Rotation is NOT implemented here](#rotation-is-not-implemented-here) for the
+rationale, the accepted cost and the rejected alternative.
 
-**No TLS certificate or private-key entries.** Refactoring Rationale: two
-`sensitive` PEM inputs and the two scalar secrets they fed were removed as well.
-A reusable module is the wrong custodian for private-key material, and — the
-sharper point — an *input* is the wrong channel for it: a Terraform variable can
-only be given a value from a committed tfvars file, a committed default, or a
-CI-carried environment variable, so `sensitive = true` changed how a plan
-*rendered* the value and nothing about whether a tfvars or state file could hold
-it. Both environment roots now generate the pair with the `tls` provider and
-write it into two root-owned Secrets Manager entries and into
-`aws_acm_certificate`, so the material has no input to arrive through.
-Alternatives Considered: keeping the inputs nullable and relying on both roots
-passing null — rejected as a convention rather than a control, and in fact both
-roots were passing them.
+**No TLS certificate or private-key entries.** Assumptions: a reusable module is
+the wrong custodian for private-key material, and — the sharper point — an *input*
+is the wrong channel for it: a Terraform variable can only be given a value from a
+committed tfvars file, a committed default, or a CI-carried environment variable,
+so `sensitive = true` would change how a plan *rendered* the value and nothing
+about whether a tfvars or state file could hold it. Both environment roots
+generate the pair with the `tls` provider and write it into two root-owned Secrets
+Manager entries and into `aws_acm_certificate`, so the material has no input to
+arrive through. Alternatives Considered: nullable PEM inputs that both roots pass
+null — rejected as a convention rather than a control.
 
 **No connection coordinates.** Assumptions: the writer endpoint, the listener
 port and the database name are non-secret, and
@@ -126,9 +114,18 @@ No database password is accepted as a variable, committed in a variable file,
 or written into module source. The initial value exists only as an ephemeral
 `random_password` result while the provider sends `secret_string_wo` to
 Secrets Manager. Terraform records the non-secret
-`secret_string_wo_version`, not the generated password. Scheduled rotation
-then generates pending values inside Secrets Manager and the Lambda runtime,
-outside Terraform.
+`secret_string_wo_version`, not the generated password.
+
+Refactoring Rationale: this paragraph previously ended by asserting that
+"scheduled rotation then generates pending values inside Secrets Manager and the
+Lambda runtime, outside Terraform" — stated as a fact about the delivered stack,
+which it is not. That sentence describes what WOULD happen if a root supplied a
+rotation function, and neither root does. The property that actually holds
+without qualification is the one above it: the generated value is never
+expressible in source and never lands in Terraform state, whether or not it is
+ever replaced. Replacement, when an operator performs it, likewise keeps the
+value out of state — it goes through Secrets Manager and the scripted applicator,
+not through a Terraform argument.
 
 Alternatives Considered: accepting a `password`, `master_password`, or
 role-to-password map would force a caller to provide the credential through a
@@ -138,12 +135,28 @@ repository safety depend on every author and reviewer noticing it. A database
 password that the module cannot accept cannot be committed through its
 contract.
 
-The optional TLS inputs are a deliberate, narrower exception to the statement
-above: they import certificate material rather than database credentials.
-They are marked sensitive, must be supplied through an operator-controlled
-secret channel, and must never be placed in a committed variable file. See
+There is no exception to the statement above. Refactoring Rationale: this
+paragraph previously described "the optional TLS inputs" as a deliberate,
+narrower exception — certificate material that had to be supplied through an
+operator-controlled secret channel and kept out of any committed variable file.
+Those inputs no longer exist. They were removed for the reason recorded in the
+**No TLS certificate or private-key entries** paragraph under
+[What the module deliberately does NOT provision](#what-the-module-deliberately-does-not-provision)
+above, and the two paragraphs contradicted each other: one said the inputs were
+gone, the other told an operator how to supply them. An instruction for
+supplying material through a channel that no longer accepts it is worse than no
+instruction, because an operator following it looks for a variable, does not
+find one, and has no way to tell whether the variable or the instruction is the
+mistake. This module's input contract now admits **no** secret of any kind.
+
+The state-handling obligation that paragraph pointed at has not gone away; it
+has moved to where the material now lives. Both environment roots generate the
+internal HTTPS key pair with the `tls` provider, so `private_key_pem` is an
+attribute of a managed resource and is recorded in the roots' state — not in
+anything this module owns. See
 [Trade-offs and operational boundaries](#trade-offs-and-operational-boundaries)
-for the resulting state-handling obligation.
+for what this module's own state does and does not carry, and
+`docs/architecture/security-and-identity.md` for the root-owned key.
 
 
 ## Measured baseline divergence
@@ -173,8 +186,8 @@ a second path and leaves the REFERENCE implementation intact.
 
 ## Ownership boundaries
 
-This module owns the eight service database credentials and nothing else.
-Four neighbouring owners remain separate:
+This module owns the fifteen service database credentials -- eight runtime and
+seven migration -- and nothing else. Three neighbouring owners remain separate:
 
 * [`../cognito/`](../cognito/) owns the Cognito app-client and seed-user
   secrets, together with the `carddemo-admin` and `carddemo-user` groups.
@@ -182,11 +195,20 @@ Four neighbouring owners remain separate:
   RDS-managed master secret.
 * [`../kms/`](../kms/) owns the customer-managed keys; this module receives
   their ARNs and cannot change their policies.
-* Each environment root owns the service TLS certificate and private key. It
-  generates the pair with the `tls` provider, stores it in two root-owned Secrets
-  Manager entries and imports it into `aws_acm_certificate`. This module accepts
-  no PEM material at all, so there is no channel through which key material
-  could reach a tfvars file.
+This module accepts no PEM material at all, so there is no channel through which
+TLS key material could reach a tfvars file. It has no counterpart owner either:
+each task mints its own listener key pair and self-signed certificate at startup
+(`config/docker/generate-listener-material.sh`), so no module and no root holds
+listener material in state.
+
+Refactoring Rationale: a fourth bullet above named "each environment root" as the
+owner of a service TLS certificate and private key, generated with the `tls`
+provider, stored in two root-owned Secrets Manager entries and imported into
+`aws_acm_certificate`. Every part of that is withdrawn: those resources are
+deleted, the `tls` provider requirement is removed from both roots, and the
+private key no longer exists as a Terraform-managed object. It is called out
+rather than silently dropped because an ownership section is exactly where a
+reader goes to find out who holds a private key.
 
 Assumptions: each resource has one Terraform owner. If this module and the
 Cognito module declared the same secret, each state would claim authority over
@@ -217,8 +239,10 @@ identifier and no credential. Every other input has a default:
 `database_master_username` defaults to the same value
 [`../aurora-postgresql/`](../aurora-postgresql/) defaults its own
 `master_username` to, so a root that overrides neither is consistent by
-construction; `service_credential_names` defaults to the eight roles the
-bootstrap SQL creates; and both rotation inputs default to null, which is why
+construction; `service_credential_names` defaults to the fifteen login
+roles the bootstrap SQL creates -- eight runtime and seven migration, with the
+eight NOLOGIN schema owners deliberately excluded because they hold no
+credential; and both rotation inputs default to null, which is why
 neither root passes them and no rotation schedule is created.
 
 The module is never applied directly. It has no backend block, provider
@@ -279,7 +303,7 @@ automation silently repair and hide the drift.
 | <a name="input_recovery_window_in_days"></a> [recovery\_window\_in\_days](#input\_recovery\_window\_in\_days) | Days a deleted secret remains recoverable before Secrets Manager removes it<br/>permanently, or 0 to delete immediately with no recovery. Defaults to the<br/>protected value. Set 0 only in an environment that is expected to be<br/>destroyed and recreated under the same secret names, because a non-zero<br/>window keeps those names reserved until it expires and a recreating apply<br/>will fail while it does. | `number` | `30` | no |
 | <a name="input_rotation_automatically_after_days"></a> [rotation\_automatically\_after\_days](#input\_rotation\_automatically\_after\_days) | Interval in days between automatic service-credential rotations, applied<br/>only when rotation\_lambda\_arn is also supplied. Null -- the default --<br/>configures no rotation schedule at all, which is the state of both<br/>environment roots in this package. | `number` | `null` | no |
 | <a name="input_rotation_lambda_arn"></a> [rotation\_lambda\_arn](#input\_rotation\_lambda\_arn) | ARN of an operator-supplied Lambda function that rotates the service<br/>credentials, or null to configure no rotation. This module does not create a<br/>rotation function; it only attaches a rotation schedule when both this input<br/>and rotation\_automatically\_after\_days are supplied. Nullable with a null<br/>default, so a root that has no rotation function still applies cleanly. | `string` | `null` | no |
-| <a name="input_service_credential_names"></a> [service\_credential\_names](#input\_service\_credential\_names) | Names of the per-service database roles that each need their own generated<br/>credential; one secret is created per element. Fixed at the eight roles<br/>data-migration/sql/V0\_\_schemas\_and\_roles.sql creates: the seven that own one<br/>schema per bounded context (carddemo\_auth, carddemo\_account, carddemo\_card,<br/>carddemo\_ledger, carddemo\_reference, carddemo\_batch and<br/>carddemo\_authorization) plus carddemo\_reporting, the read-only role the<br/>reporting service connects as. Note the carddemo\_ prefix: these are ROLE<br/>names, not the bare schema names, and the two are not interchangeable --<br/>"ledger" is the schema and carddemo\_ledger is the role that owns it.<br/>carddemo\_reporting\_owner is deliberately NOT accepted: it owns the reporting<br/>schema, is created NOLOGIN, and so has no credential to generate. Defaulted<br/>and validated rather than left to the caller, because a service whose secret<br/>was never created starts and then fails to resolve it. | `set(string)` | <pre>[<br/>  "carddemo_auth",<br/>  "carddemo_account",<br/>  "carddemo_card",<br/>  "carddemo_ledger",<br/>  "carddemo_reference",<br/>  "carddemo_batch",<br/>  "carddemo_authorization",<br/>  "carddemo_reporting"<br/>]</pre> | no |
+| <a name="input_service_credential_names"></a> [service\_credential\_names](#input\_service\_credential\_names) | Names of the database roles that each need their own generated credential; one<br/>secret is created per element. Fixed at the fifteen LOGIN roles<br/>data-migration/sql/V0\_\_schemas\_and\_roles.sql creates, in two tiers:<br/><br/>  * eight RUNTIME roles, the identity each service connects as --<br/>    carddemo\_auth, carddemo\_account, carddemo\_card, carddemo\_ledger,<br/>    carddemo\_reference, carddemo\_batch, carddemo\_authorization and<br/>    carddemo\_reporting;<br/>  * seven MIGRATION roles, the identity Flyway connects as --<br/>    carddemo\_auth\_migrator and its six siblings. Reporting has none because<br/>    reporting-service runs no migration.<br/><br/>The EIGHT owner roles (carddemo\_auth\_owner and its siblings, including<br/>carddemo\_reporting\_owner) are deliberately NOT accepted. Each owns one schema<br/>and every object in it, each is created NOLOGIN, and so none has a credential<br/>to generate -- which is the property that makes schema ownership unreachable by<br/>authentication rather than merely unused. Issuing an owner a credential would<br/>undo the separation this inventory exists to preserve.<br/><br/>Note the carddemo\_ prefix: these are ROLE names, not the bare schema names, and<br/>the two are not interchangeable -- "ledger" is the schema, carddemo\_ledger is<br/>the role a service connects as, and carddemo\_ledger\_owner is the role that owns<br/>it. Defaulted and validated rather than left to the caller, because a service<br/>whose secret was never created starts and then fails to resolve it. | `set(string)` | <pre>[<br/>  "carddemo_auth",<br/>  "carddemo_account",<br/>  "carddemo_card",<br/>  "carddemo_ledger",<br/>  "carddemo_reference",<br/>  "carddemo_batch",<br/>  "carddemo_authorization",<br/>  "carddemo_reporting",<br/>  "carddemo_auth_migrator",<br/>  "carddemo_account_migrator",<br/>  "carddemo_card_migrator",<br/>  "carddemo_ledger_migrator",<br/>  "carddemo_reference_migrator",<br/>  "carddemo_batch_migrator",<br/>  "carddemo_authorization_migrator"<br/>]</pre> | no |
 | <a name="input_tags"></a> [tags](#input\_tags) | Tags applied to every secret this module creates, merged by the caller into<br/>whatever this stack's common tag set contains. Applied per resource in<br/>main.tf because a module cannot configure a provider and therefore cannot<br/>use default\_tags. Defaults to empty so the module imposes no tag of its own. | `map(string)` | `{}` | no |
 
 ### Outputs
@@ -357,23 +381,20 @@ supplying one without the other is refused at plan time, because an interval wit
 no function rotates nothing and a function with no interval is not a schedule.
 Neither environment root supplies them.
 
-Refactoring Rationale: a module-owned Python rotation Lambda, its execution role,
-inline policy, log group, source archive and per-secret invoke permission were
-all removed. Trade-offs: what that costs is real and is stated rather than
-glossed — a stored initial credential is no longer applied to its PostgreSQL role
-by this module, and is not re-issued on a schedule. Binding a stored value to its
-role is the schema-bootstrap step's responsibility, and scheduled re-issue waits
-on an operator-supplied function. What it buys is a module whose input contract is
-ten non-secret values rather than eighteen: owning a function here required the
-cluster ARN, the RDS-managed master secret ARN, the writer endpoint, the port, the
-database name, a log-group key, a log retention value and an IAM permissions
-boundary, none of which a credential store needs in order to store a credential,
-plus a third Terraform provider purely to build a deployment package.
-Alternatives Considered: recreating the same function at the environment root, so
-that the behaviour survived the boundary move. Rejected — it relocates
-out-of-scope work rather than removing it, and the root that would own it is the
-root that already owns the schema-bootstrap function the credential binding
-properly belongs to.
+Trade-offs: what that boundary costs is real and is stated rather than glossed — a
+stored initial credential is not applied to its PostgreSQL role by this module and
+is not re-issued on a schedule. Binding a stored value to its role is the
+schema-bootstrap step's responsibility, and scheduled re-issue waits on an
+operator-supplied function. What it buys is a module whose input contract is ten
+non-secret values rather than eighteen: owning a rotation function here would
+require the cluster ARN, the RDS-managed master secret ARN, the writer endpoint,
+the port, the database name, a log-group key, a log retention value and an IAM
+permissions boundary — none of which a credential store needs in order to store a
+credential — plus a third Terraform provider purely to build a deployment package.
+Alternatives Considered: declaring the same function at the environment root so
+the behaviour survived the boundary move. Rejected — it relocates out-of-scope
+work rather than removing it, and the root that would own it already owns the
+schema-bootstrap function the credential binding properly belongs to.
 
 ### State handling
 
@@ -383,13 +404,23 @@ value is written by whatever rotation function the calling root supplies. Only
 the non-secret write-only revision remains in state.
 
 Assumptions: no PEM material reaches this module's state, because there is no
-input through which it could arrive. The service certificate and private key are
-generated and stored by the environment root, and the root's `tls_private_key`
-resource does place key material in the ROOT's state. A root that uses that path
-must therefore protect its state as credential-bearing material;
-[`infra/bootstrap`](../../bootstrap/) provides the versioned, encrypted remote
-state bucket and locking controls the environment roots use for exactly that
-reason.
+input through which it could arrive -- and none reaches the CALLING root's state
+either, because no root generates any. Each task mints its own listener key pair
+and self-signed certificate at startup, so the only Terraform-managed credential
+material anywhere in this stack is the generated database passwords above, every
+one of which is delivered through `secret_string_wo`.
+
+Refactoring Rationale: this paragraph said the certificate and private key were
+generated and stored by the environment root, and that the root's
+`tls_private_key` resource "does place key material in the ROOT's state", with a
+pointer to the encrypted remote backend as the mitigation. The first two claims
+are withdrawn -- that resource is deleted from both roots along with the
+self-signed certificate, the two Secrets Manager entries and the imported ACM
+certificate. The backend is still versioned and encrypted and
+[`infra/bootstrap`](../../bootstrap/) still provides it, which remains the right
+control for state generally; it is simply no longer the mitigation for a
+listener private key, because there is no longer a listener private key in state
+to mitigate.
 
 ### Tags
 
@@ -399,14 +430,6 @@ creates, which is now the only kind of taggable resource it has. The
 [`infra/bootstrap`](../../bootstrap/) root can use `default_tags` because it
 owns its provider configuration; the different mechanism follows the
 root-versus-module boundary rather than representing inconsistent tagging.
-
-### Static validation boundary
-
-The module can be formatted, initialized without a backend, validated, linted,
-documentation-drift checked, and policy scanned without claiming a live
-deployment. Applying an environment root to an AWS account and accepting the
-resulting cost remain operator actions outside this document's evidence.
-
 
 ## Validation gates
 

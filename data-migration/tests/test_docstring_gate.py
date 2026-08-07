@@ -16,7 +16,7 @@ Every clause above was measured against the pinned ruff, not inferred from its r
 This module walks the same trees with ``ast`` and asserts the presence Rule 1 asks for on
 all of them.
 
-WHY (Alternatives Considered)
+Alternatives Considered:
     Four alternatives were evaluated. (1) A ``per-file-ignores`` entry or a different
     ``convention`` in ``pyproject.toml`` cannot help, because the behaviour is upstream
     visibility semantics rather than a suppression this repository could withdraw --
@@ -30,7 +30,7 @@ WHY (Alternatives Considered)
     outright: it enlarges a published API surface to satisfy a linter, which is the wrong
     artifact to change.
 
-WHY (Assumptions)
+Assumptions:
     The subject is the source under version control, so both trees are located relative to
     this file rather than through the imported package. That matters here specifically:
     this package deliberately runs its suite against the INSTALLED distribution and sets no
@@ -38,7 +38,7 @@ WHY (Assumptions)
     ``carddemo_migration.__file__`` would reach neither this suite nor the source tree a
     reviewer edits. Reading from disk is also what lets the gate cover itself.
 
-WHY (Trade-offs)
+Trade-offs:
     This gate checks PRESENCE only, and that is the whole of its remit. Ruff's content
     rules -- D400, D403, D205 and the rest -- were measured to apply to every docstring it
     finds regardless of visibility or nesting, so shape is already covered everywhere and
@@ -47,7 +47,7 @@ WHY (Trade-offs)
     judgement no walker can make: a docstring that says nothing satisfies this gate and
     still fails review.
 
-WHY (Refactoring Rationale)
+Refactoring Rationale:
     The walker is self-tested by ``test_the_walker_reaches_every_nesting_and_visibility``
     rather than trusted, because this gate's only failure mode that matters is the quiet
     one. A walker that stopped descending into function bodies would report nothing

@@ -227,8 +227,9 @@ export const cardDemoTheme: ThemeConfig = {
    * token expresses the role, precisely so that everything derived from it moves
    * together.
    *
-   * Alternatives Considered, both rejected: a bespoke turquoise hex value, which
-   * is the literal the design-token reference forbids — it would have no recorded
+   * Alternatives Considered: two, and both are rejected. A bespoke turquoise hex
+   * value, which is the literal the design-token reference forbids — it would have
+   * no recorded
    * origin, could not be diffed against the library, and would survive a palette
    * change while everything around it moved. And overriding the derived
    * informational shades directly instead of the seed, which pins one shade of a

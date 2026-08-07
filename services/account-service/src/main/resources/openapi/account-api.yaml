@@ -1,0 +1,530 @@
+# =============================================================================
+# services/account-service/src/main/resources/openapi/account-api.yaml
+# -----------------------------------------------------------------------------
+# Purpose:
+#   The OpenAPI 3.1 contract of record for the three internal read operations
+#   the account bounded context publishes to another bounded context. It settles
+#   the paths, the operation identifiers, the property names, the response
+#   shapes, the rendering of money and the not-found behaviour of each, so that
+#   the one consumer of these operations is written against this document rather
+#   than against a reading of this module's Java.
+#
+#   The consumer is the pending-authorization context. Its client is
+#   services/authorization-service/src/main/java/com/carddemo/authorization/
+#   service/RestAccountContextClient.java, which builds each path itself and
+#   deserialises each response into its own record. The two modules are separate
+#   deployables and the layering rules forbid either importing the other's
+#   types, so no compiler and no build sees both halves of this agreement. This
+#   document is the only place the whole of it is written down.
+#
+# Why this document records only what exists:
+#   Assumptions: the four sibling contracts in this repository lead their Java.
+#   Each declares the operations its module is planned to publish and says so in
+#   its own header, because in each case the document was authored before the
+#   controllers. This document does the opposite: it declares exactly the three
+#   operations this module publishes today and declares nothing else.
+#
+#   Alternatives Considered: following the sibling convention and additionally
+#   declaring the human-facing account view and account update operations, which
+#   the package charter at src/main/java/com/carddemo/account/api/package-info.java
+#   names as this package's target contract from app/cbl/COACTVWC.cbl and
+#   app/cbl/COACTUPC.cbl. Rejected, and the reason is specific to these three
+#   operations rather than a general preference. They are already consumed by a
+#   deployed caller, so this document records an agreement that currently binds
+#   two running services. A document that mixed binding operations with planned
+#   ones would give a reader no way to tell which is which, and the reader who
+#   most needs to tell is the one debugging a 404 between two live services.
+#
+#   Trade-offs: the cost is that this file must be extended when the view and
+#   update operations arrive, rather than already describing them. That cost is
+#   accepted and it is made visible: the contract test at
+#   src/test/java/com/carddemo/account/api/AccountContextContractTest.java
+#   asserts that this document declares EXACTLY these three paths, so a
+#   controller added without a contract entry fails the build, and so does a
+#   contract entry added without a controller.
+#
+# Parameters:
+#   Requests carry input in three forms and each is described again where it is
+#   declared.
+#     - Two path parameters: the account identifier and the customer
+#       identifier, both integers, declared under components/parameters.
+#     - One request body: CardXrefLookupRequest, carried by the cross-reference
+#       operation alone. The card number travels in a body rather than in a path
+#       for the reason recorded on that operation.
+#     - No query parameter and no request header is required by any operation.
+#       The correlation header the platform propagates is accepted on every
+#       path in this system and is not redeclared per operation here.
+#
+# Return values:
+#     - CardXrefView, from the cross-reference operation: the account and the
+#       customer the card belongs to. It does not echo the card number.
+#     - AccountContextView, from the account operation: the credit limit, the
+#       cash credit limit and the posted balance, each rendered as a JSON
+#       string.
+#     - No body at all from the customer operation. Its whole answer is its
+#       status.
+#
+# Exceptions / error responses:
+#   Every failure is rendered by the shared handler in common-lib as a problem
+#   document, so the error vocabulary is identical to every other contract in
+#   this migration. Three statuses are declared per operation where they apply:
+#   400 for a request whose declared constraints are not met, 401 for a caller
+#   presenting no acceptable internal credential, and 404 for an absent row. The
+#   customer operation declares no 400 because an unparseable identifier cannot
+#   reach it.
+#
+# Authorization:
+#   Assumptions: these three paths are NOT reachable with a human token. They
+#   are governed by a dedicated filter chain,
+#   src/main/java/com/carddemo/account/config/InternalApiSecurityConfig.java,
+#   ordered ahead of the application chain and matching exactly these three
+#   paths. It requires a bearer token issued by the calling service and carrying
+#   the scope named below. The identity-provider tokens every other path in this
+#   service accepts do not satisfy it, and the credential named below does not
+#   satisfy any other path.
+#
+# Reference sources (REFERENCE-ONLY; read as the specification, never modified):
+#   app/cbl/CBACT03C.cbl  - the cross-reference reader, 178 lines. Its file is
+#                           keyed by card number, which is why the lookup below
+#                           takes a card number and returns the two identifiers.
+#   app/cbl/CBACT01C.cbl  - the account master reader, 430 lines.
+#   app/cbl/CBCUS01C.cbl  - the customer master reader, 178 lines.
+#   app/cpy/CVACT03Y.cpy  - the 50-byte cross-reference record layout.
+#   app/cpy/CVACT01Y.cpy  - the 300-byte account record layout, which declares
+#                           each monetary field as a signed zoned decimal with
+#                           two fractional digits.
+#   app/csd/CARDDEMO.CSD  - L63 defines the CXACAIX alternate index this
+#                           context replaces with a secondary index.
+# =============================================================================
+
+openapi: 3.1.0
+
+info:
+  title: CardDemo Account Context - Internal Read API
+  version: 1.0.0
+  summary: >-
+    The three account-context reads the pending-authorization context resolves
+    each incoming authorization against.
+  description: >-
+    This document covers only the internal read surface of the account bounded
+    context. Each operation replaces one keyed file read performed by a
+    reference batch program, and together they supply the three facts an
+    authorization decision needs: which account and customer a card belongs to,
+    what that account's limits and balance are, and whether the customer exists.
+
+
+    Money is rendered as a JSON string throughout. That is not a stylistic
+    choice: every monetary field in the reference layouts is an exact
+    fixed-point value with two fractional digits, and a JSON number is parsed
+    into a binary floating-point double by most clients, which cannot represent
+    every such value exactly. Transformation rule T3 of the migration plan
+    forbids binary floating point anywhere in the money path, and a string is
+    how that prohibition survives the wire.
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+
+servers:
+  - url: https://{internalHost}
+    description: >-
+      The internal service origin. These operations are not published at the
+      public edge: they are reachable only from inside the private network, and
+      the calling service additionally pins this origin exactly before it will
+      send a request to it.
+    variables:
+      internalHost:
+        default: carddemo-dev.services.internal
+        description: >-
+          The internal host name the environment provisions. The value shown is
+          the development default; each environment supplies its own and the
+          caller reads it from configuration rather than composing it.
+
+tags:
+  - name: card-cross-reference
+    description: Resolution of a primary account number to its account and customer.
+  - name: account
+    description: Reads of the account master.
+  - name: customer
+    description: Presence checks against the customer master.
+
+paths:
+
+  /api/v1/card-xrefs/lookup:
+    post:
+      tags: [card-cross-reference]
+      operationId: lookupCardCrossReference
+      summary: Resolve a primary account number to its account and customer.
+      description: >-
+        Replaces the keyed read of the cross-reference file at
+        app/cbl/CBACT03C.cbl, whose record is declared with
+        RECORD KEY IS FD-XREF-CARD-NUM at L32.
+
+
+        This operation is a POST carrying a body rather than a GET carrying the
+        card number in the path, and that is a deliberate departure from the
+        shape a read would otherwise take. A path segment is recorded verbatim
+        in the access log of every hop it traverses -- the load balancer, the
+        gateway and the application -- and a primary account number in a log is
+        a disclosure that no amount of downstream masking can withdraw. A body
+        is not logged by default at any of those hops. The alternative
+        considered was a GET with the card number as a query parameter, which
+        was rejected for the same reason: query strings are logged with the
+        path.
+      security:
+        - internalServiceToken: [internal:account-context.read]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CardXrefLookupRequest'
+      responses:
+        '200':
+          description: >-
+            The card is cross-referenced. The body carries the account and the
+            customer it belongs to and does not echo the card number: the caller
+            supplied it, so returning it would place a primary account number in
+            a further response body and a further client's memory for no gain.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CardXrefView'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: >-
+            No cross-reference row exists for the card. The problem document's
+            detail names no part of the card number, because the caller already
+            knows which card it asked about. The calling context reads this
+            status as its card-not-found decision input, which corresponds to
+            reject reason 100 in the reference posting program.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /api/v1/accounts/{accountId}:
+    get:
+      tags: [account]
+      operationId: readAccountContext
+      summary: Read the limits and posted balance of one account.
+      description: >-
+        Replaces the keyed read of the account master at app/cbl/CBACT01C.cbl.
+        The three values returned are the three the reference authorization
+        decision examines; the remaining account columns are deliberately not
+        published, because a consumer that does not read a value should not
+        receive it.
+      security:
+        - internalServiceToken: [internal:account-context.read]
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      responses:
+        '200':
+          description: The account exists. Every monetary value is a JSON string.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountContextView'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: >-
+            The account master holds no such row. The calling context reads this
+            status as its account-not-found decision input, which corresponds to
+            reject reason 101 in the reference posting program.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /api/v1/customers/{customerId}:
+
+    # WHY : Assumptions: BOTH methods are declared, and HEAD is declared first
+    #       because HEAD is the method the only consumer actually issues -- see
+    #       RestAccountContextClient, which calls head() on this path. Declaring
+    #       only GET would have described a surface the caller never uses and
+    #       would have left a reader of this document unable to tell whether HEAD
+    #       was supported at all.
+    #       Assumptions: one handler serves both. It is declared as a GET mapping
+    #       and the framework answers HEAD from a GET mapping by discarding the
+    #       body, which is why the two entries below describe identical status
+    #       codes rather than differing ones. They are NOT two operations that
+    #       could diverge: a change to one changes both.
+    head:
+      tags: [customer]
+      operationId: customerExistsHead
+      summary: Report whether the customer master holds one customer, without a body.
+      description: >-
+        The form the pending-authorization context uses. Semantically identical
+        to the GET below, which is the same handler: the answer is carried
+        entirely by the status code, so a caller that needs only presence has no
+        reason to request a body it would discard.
+      security:
+        - internalServiceToken: [internal:account-context.read]
+      parameters:
+        - $ref: '#/components/parameters/CustomerIdPath'
+      responses:
+        '204':
+          description: The customer master holds the row.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: The customer master holds no such row.
+
+    get:
+      tags: [customer]
+      operationId: customerExists
+      summary: Report whether the customer master holds one customer.
+      description: >-
+        Replaces the keyed read of the customer master at app/cbl/CBCUS01C.cbl,
+        reduced to the question the caller actually asks. The implementation
+        issues an existence check rather than a read: the answer is a status
+        either way, and reading the row would carry eighteen columns including
+        two encrypted identifiers out of the database and into a process's heap
+        to answer a yes-or-no question.
+
+
+        A successful answer is 204 rather than 200 because there is no
+        representation to return; 200 would announce one. This operation
+        therefore returns no body on either answer, which is what makes the HEAD
+        form above identical rather than merely similar.
+      security:
+        - internalServiceToken: [internal:account-context.read]
+      parameters:
+        - $ref: '#/components/parameters/CustomerIdPath'
+      responses:
+        '204':
+          description: The customer master holds the row. There is no body.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: >-
+            The customer master holds no such row. There is no body on this
+            answer either, so that a HEAD request and a GET request receive the
+            same shape.
+
+components:
+
+  securitySchemes:
+    internalServiceToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        A bearer token minted by the calling service and verified by this one
+        against a signing key both hold. It is not an identity-provider token
+        and it is not interchangeable with one.
+
+
+        Alternatives Considered: a client-credentials grant from the managed
+        identity provider, which would be the conventional choice. It is
+        unavailable here: the provisioned user pool has no hosted domain, so it
+        exposes no token endpoint for a machine caller to obtain a token from.
+        Mutual TLS was also considered and rejected as disproportionate for a
+        single caller inside one private network, since it would introduce
+        certificate issuance and rotation for two services. A static shared
+        header was rejected outright because it carries no expiry, names no
+        audience and cannot be scoped, so a single capture would be a permanent
+        credential.
+
+
+        The token names this service as its audience and carries exactly one
+        scope, so a token minted for another callee or another purpose is
+        refused rather than accepted for the wrong path. Its lifetime is bounded
+        at five minutes and the caller mints a fresh one per request.
+
+  parameters:
+    AccountIdPath:
+      name: accountId
+      in: path
+      required: true
+      description: >-
+        The account identifier. The reference layout at app/cpy/CVACT01Y.cpy
+        declares it as an eleven-digit unsigned display field, which is why it
+        is an integer here rather than a string: it is a numeric key in the
+        baseline as well as in the target, and no leading zero is significant.
+      schema:
+        type: integer
+        format: int64
+        minimum: 0
+        maximum: 99999999999
+      example: 12345678901
+
+    CustomerIdPath:
+      name: customerId
+      in: path
+      required: true
+      description: >-
+        The customer identifier, a nine-digit unsigned display field in the
+        reference layout at app/cpy/CVCUS01Y.cpy.
+      schema:
+        type: integer
+        format: int64
+        minimum: 0
+        maximum: 999999999
+      example: 987654321
+
+  responses:
+    BadRequest:
+      description: >-
+        The request does not satisfy its declared constraints. The body is a
+        problem document carrying one entry per rejected field, which is the
+        target form of the reference programs' per-field validation flags.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    Unauthorized:
+      description: >-
+        No acceptable internal credential was presented. Every distinguishable
+        cause -- an absent token, a token signed with another key, one naming
+        another audience, one that has expired -- produces this same status and
+        the same body, deliberately: telling a caller which check refused it
+        tells an unauthorized caller how to make progress.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+  schemas:
+
+    CardXrefLookupRequest:
+      type: object
+      additionalProperties: false
+      required: [cardNumber]
+      description: >-
+        Names the card to resolve. The single property is required and is
+        validated for exact width and digits only before any lookup is
+        attempted.
+      properties:
+        cardNumber:
+          type: string
+          minLength: 16
+          maxLength: 16
+          pattern: '^[0-9]{16}$'
+          description: >-
+            The unmasked primary account number, exactly sixteen digits, matching
+            the PIC X(16) width of XREF-CARD-NUM at app/cpy/CVACT03Y.cpy. It is
+            unmasked because it is the lookup key: a masked value identifies no
+            row. This is the only property in this document that carries one, and
+            it travels only inbound and only in a body.
+          example: '4111111111111111'
+
+    CardXrefView:
+      type: object
+      additionalProperties: false
+      required: [accountId, customerId]
+      description: >-
+        The account and customer a card belongs to. Both members are declared
+        required because the reference record declares both, and a row missing
+        either is a data defect rather than a representable state -- the calling
+        context refuses such a response rather than proceeding on half of it.
+      properties:
+        accountId:
+          type: integer
+          format: int64
+          description: The account the card belongs to.
+          example: 12345678901
+        customerId:
+          type: integer
+          format: int64
+          description: The customer the card belongs to.
+          example: 987654321
+
+    AccountContextView:
+      type: object
+      additionalProperties: false
+      required: [creditLimit, cashCreditLimit, currentBalance]
+      description: >-
+        The three monetary values an authorization decision examines. Each is a
+        string for the reason recorded in this document's description, and each
+        is rendered with exactly two fractional digits regardless of the scale
+        the value is stored at, so a whole number of units renders as ".00"
+        rather than as an integer.
+      properties:
+        creditLimit:
+          $ref: '#/components/schemas/Money'
+          description: >-
+            The account's credit limit, from ACCT-CREDIT-LIMIT PIC S9(10)V99 at
+            app/cpy/CVACT01Y.cpy. The over-limit comparison in the reference
+            posting program is inclusive: a balance exactly at this value posts,
+            and one cent beyond it rejects.
+        cashCreditLimit:
+          $ref: '#/components/schemas/Money'
+          description: >-
+            The account's cash credit limit, from ACCT-CASH-CREDIT-LIMIT
+            PIC S9(10)V99.
+        currentBalance:
+          $ref: '#/components/schemas/Money'
+          description: >-
+            The posted balance, from ACCT-CURR-BAL PIC S9(10)V99. It may be
+            negative, and the sign is carried as a leading minus in the string.
+
+    Money:
+      type: string
+      pattern: '^-?[0-9]{1,10}\.[0-9]{2}$'
+      description: >-
+        An exact monetary amount with two fractional digits, carried as a string
+        so that no client parses it into a binary double. The integral width of
+        ten digits is the width the reference layouts declare.
+      examples:
+        - '5000.00'
+        - '-123.45'
+        - '0.00'
+
+    ApiError:
+      type: object
+      description: >-
+        The shared problem document this system returns for every failure. Its
+        shape is defined once in common-lib and is identical across every
+        service contract in this migration, so a client writes one error handler
+        rather than one per service. The members are described here rather than
+        referenced, because this document must be readable on its own.
+      properties:
+        type:
+          type: string
+          description: A stable identifier for the kind of problem.
+        title:
+          type: string
+          description: A short summary of the problem kind.
+        status:
+          type: integer
+          description: The HTTP status code, repeated in the body.
+        detail:
+          type: string
+          description: >-
+            An explanation of this occurrence. It never carries a primary account
+            number, an encrypted identifier or any other value the responding
+            service withholds from its own responses.
+        instance:
+          type: string
+          description: The path the failure occurred on.
+        correlationId:
+          type: string
+          description: >-
+            The correlation identifier of the request, echoed so a caller can
+            find the same request in this service's logs.
+        timestamp:
+          type: string
+          format: date-time
+          description: When the failure was rendered.
+        fieldErrors:
+          type: array
+          description: >-
+            One entry per rejected field on a 400. This is the target form of the
+            reference programs' FLG-*-NOT-OK and FLG-*-BLANK validation flags and
+            of the templated field highlight at app/cpy/CSSETATY.cpy L17-L27.
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+                description: The rejected field's name.
+              message:
+                type: string
+                description: Why it was rejected. It never echoes the rejected value.

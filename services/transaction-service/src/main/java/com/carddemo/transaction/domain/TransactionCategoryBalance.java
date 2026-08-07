@@ -198,19 +198,65 @@ public class TransactionCategoryBalance {
     // Assumptions: only @Column attributes with a runtime effect are declared, so `name` appears and
     //   `precision` and `scale` do not. With generation switched off those two are read by nothing,
     //   which puts them in the same class of inert, driftable metadata as the @Index rejected above;
-    //   declaring them would state a width this file cannot enforce. V1__ledger.sql line 580 is the
+    //   declaring them would state a width this file cannot enforce. V1__ledger.sql line 869 is the
     //   authority for the column, and Money is the authority for the scale.
     //
-    // Assumptions: the column is nullable in the migration and this member is stricter than the
-    //   column, which is deliberate rather than contradictory. That file asserts NOT NULL on primary
-    //   key columns only, because a blank fixed-width field decodes to NULL at the load boundary and
-    //   asserting more widely would refuse a load the reference system itself accepts. Nothing this
-    //   type ORIGINATES is ever null: every constructor and the mutator below route through Money,
-    //   which has no representation for an absent amount. A row already carrying NULL is materialised
-    //   by the provider through field assignment and bypasses all three, so this is a guarantee about
-    //   values this type creates and not a claim about every row in the table.
-    @Column(name = "balance")
+    // WHY : Refactoring Rationale: nullable = false was ADDED here and NOT NULL DEFAULT 0 was added
+    //   to the column, so the member and the column now agree. They did not before, and the
+    //   reasoning that let them disagree is recorded because it was specific and it was wrong twice
+    //   over. It held that "the column is nullable in the migration and this member is stricter than
+    //   the column, which is deliberate rather than contradictory. That file asserts NOT NULL on
+    //   primary key columns only, because a blank fixed-width field decodes to NULL at the load
+    //   boundary and asserting more widely would refuse a load the reference system itself accepts."
+    //
+    //   The second sentence was false when it was written: V1__ledger.sql L265 declares
+    //   `proc_ts TIMESTAMP(6) NOT NULL`, and L275 declares `pk_transactions` over `transaction_id`
+    //   alone, so a non-key column already carried the constraint. The first sentence's premise does
+    //   not hold for THIS field either: there is no blank fixed-width field to decode. All 50 records
+    //   of app/data/ASCII/tcatbal.txt carry `0000000000{` in bytes 18-28 -- fifty explicit zoned
+    //   zeros, zero blanks, measured -- and the create path INITIALIZEs to zero at
+    //   app/cbl/CBTRN02C.cbl L504 before adding at L508. Both normative zoned codecs agree that a
+    //   blank body is malformed rather than absent: com.carddemo.common.codec.ZonedDecimalCodec and
+    //   carddemo_migration.copybook.zoned each reject a numeric body that is blank or carries a
+    //   non-digit, so such a record fails the load instead of loading as NULL.
+    //
+    // WHY : Assumptions: the guarantee is now about every row and not only about values this type
+    //   originates, which is the substantive change. The earlier note was careful to limit itself --
+    //   "a row already carrying NULL is materialised by the provider through field assignment and
+    //   bypasses all three" -- and that limitation was the defect rather than a caveat on it: a
+    //   member that cannot express an absent amount, reading a column that can hold one, yields a
+    //   null BigDecimal on a field the arithmetic below then dereferences. The column now forbids the
+    //   state, so the hydration path has nothing to admit.
+    //
+    // WHY : Assumptions: this member and the batch module's mapping of the same table were changed
+    //   together with the migration, and that is a requirement rather than tidiness. Two mappings of
+    //   one table that disagree about nullability are worse than either being wrong alone, because
+    //   whichever one a caller happens to read becomes the answer.
+    //
+    // WHY : Trade-offs: the width and scale are still not restated as `precision` and `scale`
+    //   attributes, for the reason given above the previous note -- they are inert metadata this
+    //   file cannot enforce. Only the nullability is declared here, because that one IS enforced: the
+    //   provider reads it when it validates a mapping against the live schema, and the schema refuses
+    //   the value outright, so the two agree at both layers instead of one asserting what the other
+    //   permits.
+    @Column(name = "balance", nullable = false)
     private BigDecimal balance;
+
+    /**
+     * The count of integer digit positions {@code TRAN-CAT-BAL} declares, being nine.
+     *
+     * <p>Assumptions: read from {@code TRAN-CAT-BAL PIC S9(09)V99} at {@code app/cpy/CVTRA01Y.cpy}
+     * line 9. It is NOT the ten {@link Money} admits, and the gap is why this constant exists:
+     * {@code Money}'s own bound is the widest money field in the reference set, {@code PIC S9(10)V99},
+     * so a ten-integer-digit balance satisfies {@code Money.of} and then overflows the
+     * {@code NUMERIC(11,2)} column {@code V1__ledger.sql} declares for this member.</p>
+     *
+     * <p>Refactoring Rationale: bounding the value here rather than leaving it to the database moves
+     * the refusal to the assignment that introduced it. A provider-side numeric-field-overflow names
+     * neither the column nor the row and arrives after the surrounding unit of work has performed its
+     * other writes, so the record that is wrong is not the record that fails.</p>
+     */
+    private static final int BALANCE_INTEGER_DIGITS = 9;
 
     /**
      * Creates an empty instance for the persistence provider to populate when it materialises a row.
@@ -235,10 +281,11 @@ public class TransactionCategoryBalance {
      * @param balance the running balance for that account, type and category, reduced to the
      *     migration's two-decimal money contract through {@link Money}; must not be {@code null}
      * @throws NullPointerException if {@code id} is {@code null}, or if {@code balance} is
-     *     {@code null}, which {@link Money#of(BigDecimal)} refuses because a monetary field under
-     *     this contract has no representation for an absent amount
-     * @throws ArithmeticException if {@code balance} falls outside the domain {@link Money} admits,
-     *     which that type reports before attempting any reduction to two decimal places
+     *     {@code null}, which {@link Money#ofPicture(BigDecimal, int)} refuses because a monetary
+     *     field under this contract has no representation for an absent amount
+     * @throws ArithmeticException if {@code balance} needs more than the nine integer digits
+     *     {@code TRAN-CAT-BAL} declares, which is a narrower bound than {@link Money#of(BigDecimal)}
+     *     applies and is the bound the {@code NUMERIC(11,2)} column actually enforces
      */
     public TransactionCategoryBalance(TransactionCategoryBalanceId id, BigDecimal balance) {
         this.id = Objects.requireNonNull(id, "id");
@@ -248,7 +295,7 @@ public class TransactionCategoryBalance {
         //   the one type that owns the money contract. Assigning the argument directly was the
         //   alternative and would let an instance carry a scale the rest of the money path does not
         //   use, which equality on a decimal value is sensitive to.
-        this.balance = Money.of(balance).amount();
+        this.balance = Money.ofPicture(balance, BALANCE_INTEGER_DIGITS).amount();
     }
 
     /**
@@ -316,13 +363,14 @@ public class TransactionCategoryBalance {
      * @param balance the balance to carry, reduced to the migration's two-decimal money contract
      *     through {@link Money}; must not be {@code null}
      * @throws NullPointerException if {@code balance} is {@code null}, which
-     *     {@link Money#of(BigDecimal)} refuses because a monetary field under this contract has no
-     *     representation for an absent amount
-     * @throws ArithmeticException if {@code balance} falls outside the domain {@link Money} admits,
-     *     which that type reports before attempting any reduction to two decimal places
+     *     {@link Money#ofPicture(BigDecimal, int)} refuses because a monetary field under this
+     *     contract has no representation for an absent amount
+     * @throws ArithmeticException if {@code balance} needs more than the nine integer digits
+     *     {@code TRAN-CAT-BAL} declares, which is a narrower bound than {@link Money#of(BigDecimal)}
+     *     applies and is the bound the {@code NUMERIC(11,2)} column actually enforces
      */
     public void setBalance(BigDecimal balance) {
-        this.balance = Money.of(balance).amount();
+        this.balance = Money.ofPicture(balance, BALANCE_INTEGER_DIGITS).amount();
     }
 
     /**
@@ -333,7 +381,7 @@ public class TransactionCategoryBalance {
      * does not: two references to the same row, one taken before an accrual and one after, would then
      * compare unequal, and an instance's hash would shift while a hash-based collection still held it.
      * Uniqueness in the schema is asserted on the key and on nothing else, by
-     * {@code pk_transaction_category_balances} at {@code V1__ledger.sql} line 595, so identity is what
+     * {@code pk_transaction_category_balances} at {@code V1__ledger.sql} line 806, so identity is what
      * equality here follows.</p>
      *
      * @param other the object to compare against; may be {@code null}
@@ -378,19 +426,36 @@ public class TransactionCategoryBalance {
      * into a per-account, per-category statement of what every balance was, which is the substance of
      * this file rather than an incidental detail of it.
      *
-     * <p>Assumptions: the identity is rendered whole. Its three components are an account identifier
-     * and two reference codes, and the migration's disclosure rules name the primary account number,
-     * the card verification value, the national identifier and the government-issued identifier --
-     * not the internal account identifier, which the published contracts of this context carry in full
-     * as eleven digits. Withholding the identity as well would leave a rendering that names no row and
-     * so serves no diagnostic purpose at all.
+     * <p>Refactoring Rationale: THE ACCOUNT IDENTIFIER IS OMITTED TOO, and an earlier revision of this
+     * block argued at length that it need not be. That argument ran: the three components are an
+     * account identifier and two reference codes, the migration's disclosure rules name the primary
+     * account number, the card verification value, the national identifier and the government-issued
+     * identifier, the internal account identifier is none of those, and the published contracts of
+     * this context carry it in full as eleven digits anyway, so withholding it from a log while
+     * publishing it to a client would defend nothing. Two things are wrong with it. The list it checked
+     * against is incomplete -- the sensitive-data logging contract in
+     * {@code docs/architecture/observability.md} names account and customer identifiers in a clause of
+     * their own -- and the appeal to the published contract compares two different surfaces. A response
+     * body goes to one authenticated caller that already holds authority over that account and is not
+     * retained; a log line is retained, aggregated, and readable by every holder of log access
+     * regardless of which accounts they may act on. That a value is disclosed to an authorised
+     * requester is not an argument for disclosing it to everyone who can read a log.
      *
-     * <p>Trade-offs: a reader diagnosing a balance discrepancy from logs alone now sees which row was
-     * touched but not what it held, and must read the row to learn that. That is accepted: the
-     * accessor above returns the balance to any caller that needs it, and a test asserting a balance
-     * asserts it through that accessor rather than through this string.
+     * <p>Assumptions: the omission takes effect through the identity's own rendering rather than by
+     * this method reaching past it, so there is exactly one place where a component of this key is
+     * withheld. Composing the surviving components here instead would give one key two renderings, and
+     * the nested one -- reached whenever an identity is rendered directly, as a persistence-context
+     * entry key or a map key is -- would be the one nothing had reviewed.
      *
-     * @return the composite identity, and no monetary value
+     * <p>Trade-offs: a reader diagnosing a balance discrepancy from logs alone now sees which CATEGORY
+     * was touched, and neither whose row it was nor what it held. Both costs are accepted and both are
+     * paid down: the accessors return the identity and the balance to any caller that needs either, a
+     * test asserting a balance asserts it through the accessor rather than through this string, and a
+     * request-scoped line already carries the correlation identifier
+     * {@code com.carddemo.common.web.CorrelationIdFilter} publishes.
+     *
+     * @return the two reference codes of the composite identity, and neither the account identifier
+     *     nor any monetary value
      */
     @Override
     public String toString() {
@@ -454,7 +519,7 @@ public class TransactionCategoryBalance {
         //   in this class is load-bearing rather than cosmetic. It is the copybook's own order --
         //   TRANCAT-ACCT-ID at app/cpy/CVTRA01Y.cpy line 6, TRANCAT-TYPE-CD at line 7, TRANCAT-CD at
         //   line 8 -- which is the order of the group item at line 5 and therefore the order of the
-        //   reference file's record key, and V1__ledger.sql line 595 declares the primary key on
+        //   reference file's record key, and V1__ledger.sql line 806 declares the primary key on
         //   (account_id, type_cd, category_cd) to match. The order is confirmed a third time outside
         //   both the copybook and the program, by app/jcl/PRTCATBL.jcl line 52, which sorts the same
         //   file on (TRANCAT-ACCT-ID,A,TRANCAT-TYPE-CD,A,TRANCAT-CD,A).
@@ -485,7 +550,7 @@ public class TransactionCategoryBalance {
         // Assumptions: the SECOND component, TRANCAT-TYPE-CD PIC X(02) at app/cpy/CVTRA01Y.cpy line 7,
         //   occupying one-based bytes 12 to 13. It is carried as text and not as a number because the
         //   picture is alphanumeric, so the two characters are a code rather than a quantity, and the
-        //   migration maps it to CHAR(2) at V1__ledger.sql line 563 -- deliberately the same type the
+        //   migration maps it to CHAR(2) at V1__ledger.sql line 741 -- deliberately the same type the
         //   transaction tables in this schema give the same code, so a lookup across them needs no
         //   cast. Its position between the account and the category is what makes an account's rows
         //   arrive grouped by type within the account.
@@ -501,7 +566,7 @@ public class TransactionCategoryBalance {
         //   precision, scale and nullability in this package, and the divergence is recorded rather
         //   than smoothed over. Deriving from the picture alone would narrow a bounded four-digit
         //   numeric code to a small integer, the way the migration narrows a three-digit credit score
-        //   elsewhere, and would name the column cat_cd. V1__ledger.sql line 569 instead declares
+        //   elsewhere, and would name the column cat_cd. V1__ledger.sql line 747 instead declares
         //   category_cd CHAR(4) NOT NULL, and its own note at lines 565 to 568 gives the reason: the
         //   value is a code rather than a quantity, and being part of the key makes that stronger
         //   here, not weaker, because 0001 and 1 must not resolve to two different keys. The column
@@ -618,25 +683,37 @@ public class TransactionCategoryBalance {
         }
 
         /**
-         * Returns a diagnostic rendering of the three components in key order.
+         * Returns a diagnostic rendering of the two reference components, in key order.
          *
-         * <p>Assumptions: this identity is rendered in full, and the reason is narrower than "an
-         * identity is safe", which is what an earlier revision claimed. Its three components are an
-         * account identifier and two reference codes; the migration's disclosure rules name the
-         * primary account number, the card verification value, the national identifier and the
-         * government-issued identifier, and the internal account identifier is none of those -- the
-         * published contracts of this context carry it in full as eleven digits, so withholding it
-         * from a log while publishing it to a client would defend nothing. No monetary value and no
-         * cardholder datum is a component here, and the enclosing type withholds the one monetary
-         * value it does hold. The components are rendered in key order so that the text reads the way
-         * the composite key sorts.</p>
+         * <p>Refactoring Rationale: THE ACCOUNT IDENTIFIER IS OMITTED, and an earlier revision
+         * rendered it. That revision was explicit that its reason was "narrower than an identity is
+         * safe": it checked the three components against the primary account number, the card
+         * verification value, the national identifier and the government-issued identifier, found
+         * the internal account identifier among none of them, and added that the published contracts
+         * of this context carry it in full as eleven digits so withholding it from a log would defend
+         * nothing. The care was real and the list was incomplete. The sensitive-data logging contract
+         * in {@code docs/architecture/observability.md} names account and customer identifiers in a
+         * clause of their own, so the component was protected the whole time; and a response body
+         * reaching one authenticated caller who already holds authority over that account is not the
+         * same surface as a retained log readable by every holder of log access.</p>
          *
-         * @return the account, type code and category code, in that order
+         * <p>Trade-offs: the omission is total rather than partial. Abbreviating a protected value IS
+         * masking, and masking has one owner in this context, {@code com.carddemo.transaction.mapper};
+         * a second and slightly different rule inside an entity key would give one value two
+         * renderings with neither authoritative. This method is also reached from the enclosing type's
+         * own rendering, not only directly, so leaving the component here would have re-disclosed
+         * through the key exactly what the enclosing type set out to withhold -- which is why the fix
+         * belongs here rather than there. What survives is the two reference codes in key order, so
+         * the text still reads the way the composite key sorts and still says WHICH CATEGORY a line
+         * concerns; what is given up is that two accounts' rows for one category are no longer
+         * distinguishable from a log line alone. The accessor returns the identifier to any caller
+         * that needs it.</p>
+         *
+         * @return the type code and the category code, in key order, and no account identifier
          */
         @Override
         public String toString() {
-            return "TransactionCategoryBalanceId[accountId=" + this.accountId
-                    + ", typeCd=" + this.typeCd
+            return "TransactionCategoryBalanceId[typeCd=" + this.typeCd
                     + ", categoryCd=" + this.categoryCd + "]";
         }
     }

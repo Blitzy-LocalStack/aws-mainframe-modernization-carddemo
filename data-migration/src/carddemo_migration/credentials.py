@@ -10,16 +10,19 @@ module is what does, and it is the delivered mechanism the two of them name.
 
 The ordered sequence a deployment follows is therefore:
 
-1. Terraform creates the cluster and the eight per-role secrets.
+1. Terraform creates the cluster and the fifteen per-role secrets.
 2. The bootstrap step applies ``sql/V0__schemas_and_roles.sql``, which creates the schemas, the
-   eight login roles and every grant.
+   three tiers of role behind them -- eight NOLOGIN schema owners, seven migration logins and
+   eight runtime logins -- and every grant. Only the fifteen LOGIN roles need a credential; an
+   owner is reached by ``SET ROLE`` from its migration role, never by authenticating.
 3. The bootstrap step runs **this module**, which reads each secret, derives that role's
    SCRAM-SHA-256 verifier locally, applies it, and then proves the role can log in.
 4. The services start and authenticate with the credential each one reads from its own secret.
 
-Step 3 refuses to report success unless every role in :data:`carddemo_migration.config.SCHEMA_ROLES`
-both holds a SCRAM verifier and completes a real TLS login, so a deployment cannot finish green
-while a service still cannot reach its schema.
+Step 3 refuses to report success unless every role in
+:data:`carddemo_migration.config.LOGIN_ROLE_NAMES` both holds a SCRAM verifier and completes a
+real TLS login, so a deployment cannot finish green while a service still cannot reach its schema
+or apply its migration.
 
 Command-line entry point
 ------------------------

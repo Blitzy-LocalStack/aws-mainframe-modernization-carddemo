@@ -3,13 +3,24 @@
  *
  * <h2>Why this package exists</h2>
  *
- * <p>Fifteen record files across thirteen scenario directories described a contract that nothing
+ * <p>Eighteen record files across fourteen scenario directories described a contract that nothing
  * executed. Their bytes could change -- a padding byte, a sign overpunch, a record width, a
  * deliberately zero-byte file gaining a trailing newline -- and every test in this module would have
  * stayed green, because no test opened them. A fixture with no consumer documents an intention rather
  * than asserting a fact, and the tree README states the direction of the contract plainly: the bytes
  * are the contract, and a disagreement is settled by reading them rather than by editing them. This
  * package is what makes that statement enforceable.</p>
+ *
+ * <p>Refactoring Rationale: this package's inventories reach all eighteen, and the count is stated
+ * because they previously reached only fifteen. Three files were named in no test at all -- the
+ * category file under {@code reference_list/happy_path}, the category file under
+ * {@code reference_update/delete_restricted_by_category}, and the request envelope under
+ * {@code date_conversion/invalid_date_rejected} -- so the gap this package exists to close was still
+ * open for exactly the files whose contract was hardest to see: two copies of rows a sibling scenario
+ * also holds, where reading only the sibling leaves an edit to either copy undetected, and one
+ * envelope whose scenario asserts a validation outcome rather than a record shape. Each is now
+ * enrolled in the geometry inventory and read by a named case, and the two duplicated copies are
+ * compared against the file they duplicate rather than each being read alone.</p>
  *
  * <p>Assumptions: this is the first test package in {@code reference-service}. Before it the module
  * contributed only the five shared architecture rules inherited from {@code common-lib}'s test

@@ -20,13 +20,19 @@ by path and line only.
 > [section 11](#11-verification) therefore have inputs, and that section reports
 > what they returned.
 >
-> The one absence that remains is on the **consuming** side, and
-> [section 10](#10-where-the-docstring-obligation-actually-attaches) is where it
-> belongs: the module's test tree holds `CardApiContractTest` and
-> `SecurityConfigTest` beside two package documentation declarations, and **neither
-> test class loads a fixture from this directory**, so the per-fixture docstring
-> obligation section 10 describes is still owed by whoever writes the first
-> consumer.
+> **This directory now has a consumer.**
+> `services/card-service/src/test/java/com/carddemo/card/fixtures/CardFixtureContractTest.java`
+> reads **all twelve** fixtures — the eleven record-bearing files through its
+> `allFixtures()` source, and `card-empty-input.txt` through
+> `theEmptyFixtureIsZeroBytes()` — and asserts the invariants this README declares.
+> [Section 10](#10-where-the-docstring-obligation-actually-attaches) records what
+> remains owed, which is the **behavioural** consumers rather than any consumer at
+> all. Refactoring Rationale: an earlier revision of this paragraph said neither of
+> the two test classes then present read this directory, and concluded that the
+> per-fixture docstring obligation was owed by whoever wrote the first consumer. That
+> was true when written; leaving it standing would now tell a reader the fixtures are
+> unread, which is the one conclusion this directory cannot afford — an unread fixture
+> is indistinguishable from a wrong one.
 >
 > **Why the annotation is here.** Assumptions:
 > `tests/fixtures/README.md` section 9.3 mandates a **[present]**/**[planned]**
@@ -35,9 +41,10 @@ by path and line only.
 > already existed. This register was authored ahead of the bytes it governs, and
 > deliberately so, because it is what the author of those bytes worked from. The
 > markers are kept now that the bytes exist, rather than deleted as spent, because
-> the register still names one artifact class that does not exist -- the consumers
-> in section 10 -- and because a row that carries its availability explicitly is
-> the row a reader can falsify.
+> the register still names one artifact class that does not exist -- the **behavioural**
+> consumers in section 10, which are not the same thing as the contract consumer that
+> now reads every file here -- and because a row that carries its availability
+> explicitly is the row a reader can falsify.
 
 Read this file before adding a fixture, before loading one into PostgreSQL, and
 before asserting on one. Section 4 in particular prevents a real and confusing
@@ -832,16 +839,45 @@ attaches to the **test class that loads them**, in
 `services/card-service/src/test/java`. That is where a per-fixture docstring
 belongs, and this file does not relieve whoever writes it.
 
-The consumers assigned to this module are the four the package documentation
-names -- `CardControllerTest`, `CardListServiceTest`, `CardUpdateServiceTest` and
-`CardRepositoryIT` -- together with the card mapper test, which is named here
-only. **None of the five exists yet**: the test tree currently holds
-`CardApiContractTest` and `SecurityConfigTest`, and neither reads this
-directory. For each fixture a consumer loads, that consumer's Javadoc should
-state the fixture's purpose, its provenance (`app/cpy/CVACT02Y.cpy`, plus the
-seed record positions from the register in
+There are two kinds of consumer here, and only one kind is still outstanding.
+
+**The contract consumer exists.** `CardFixtureContractTest`, in
+`services/card-service/src/test/java/com/carddemo/card/fixtures/`, reads every one of
+the twelve files in this directory and asserts the invariants this README declares
+rather than any business behaviour. Measured from the class, it asserts: that every
+fixture divides into whole 150-byte records at the expected record count
+(`everyFixtureHoldsWholeRecords`); that the empty fixture is exactly zero bytes
+(`theEmptyFixtureIsZeroBytes`); that the valid pair differs only in status
+(`theValidPairDiffersOnlyInStatus`); the expiry-year, month and day-preservation
+boundaries (`theExpiryBoundaryFixtureBracketsTheAcceptedYears`,
+`theMonthBoundaryFixtureBracketsTheRange`,
+`theDayPreservedFixtureKeepsThreeDistinctDays`); that the two name-reject fixtures
+carry two distinct reject kinds (`theNameRejectFixturesCarryTwoDistinctKinds`); the
+by-account grouping and the page ordering
+(`theByAccountCorpusGroupsCardsUnderOneAccount`,
+`thePageCorpusExceedsOnePageAndIsOrdered`); that the trailing filler is dropped on
+decode (`aBlankFillerIsDroppedFromEveryRecord`); that the sensitive fields decode
+unmasked at this layer (`theSensitiveFieldsDecodeUnmasked`); and two negative guards —
+a record at the wrong width is refused, and an absent fixture name fails loudly
+(`aRecordAtTheWrongWidthIsRefused`, `anAbsentFixtureNameFailsLoudly`).
+
+**The behavioural consumers do not exist.** Those are the four the package
+documentation names -- `CardControllerTest`, `CardListServiceTest`,
+`CardUpdateServiceTest` and `CardRepositoryIT` -- together with the card mapper test,
+which is named here only. **None of those five exists yet.** For each fixture one of
+them loads, that consumer's Javadoc should state the fixture's purpose, its provenance
+(`app/cpy/CVACT02Y.cpy`, plus the seed record positions from the register in
 [section 4.1](#41-the-register)) and the byte layout it relies on -- and, for a
 Class B fixture, that it must not be inserted.
+
+- Refactoring Rationale: an earlier revision of this section said none of five
+  consumers existed and that the only two test classes present read nothing from this
+  directory. Both halves have to be corrected together, because correcting only the
+  count would leave the more misleading half standing. Assumptions: the distinction
+  that matters to a reader is **contract versus behaviour**, not how many classes
+  there are: the fixtures' shape is now guarded, so a malformed fixture fails a build,
+  while what the fixtures *mean* is still unasserted, so a fixture that encodes the
+  wrong rule still fails nothing.
 
 The package documentation under `com/carddemo/card/service` names those four
 consumers -- measured, it cites each of them -- and names this README among their

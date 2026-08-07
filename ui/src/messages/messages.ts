@@ -170,10 +170,23 @@
  * belong to that screen under `ui/src/screens/**`; the four status-line prompts
  * belong to `ui/src/layout/ScreenHeader.tsx`; and the function-key legends belong
  * to `ui/src/layout/PfKeyBar.tsx`, which derives its key semantics from
- * `app/cpy/CSSTRPFY.cpy` rather than from the painted legend text. None of those
- * modules exists at this checkpoint; all three are authored at later indexes of
- * the same plan, so this section states where that text will live rather than
- * describing modules that hold it today.
+ * `app/cpy/CSSTRPFY.cpy` rather than from the painted legend text.
+ *
+ * Refactoring Rationale: this paragraph previously ended by stating that none of
+ * those modules existed yet and that the section therefore said where the text
+ * WOULD live. All three now exist and hold it: `ui/src/layout/ScreenHeader.tsx`
+ * declares the four status-line prompts, `ui/src/layout/PfKeyBar.tsx` declares the
+ * three legend labels whose wording is uniform across the mapsets that use them,
+ * and each screen under `ui/src/screens/**` declares its own title, field labels
+ * and per-screen legend parts beside the controls they name. The sentence is
+ * corrected rather than deleted, because a reader checking this boundary needs to
+ * know it is a description of the delivered tree and not a plan for it.
+ *
+ * Assumptions: the boundary is unchanged by that -- the ownership rule below is
+ * what those modules implement, not something they superseded. Screens authored
+ * later add their own mapset text the same way, so a string absent from this
+ * catalog is still evidence that a `.bms` file holds it rather than evidence of a
+ * gap.
  *
  * Alternatives Considered: the boundary is drawn here rather than by absorbing the
  * BMS text into this module. Absorbing it was the obvious alternative and
@@ -188,9 +201,10 @@
  * `ENTER=Sign-on  F3=Exit` is a RENDERING of the key bindings, not their
  * definition; the definition is `app/cpy/CSSTRPFY.cpy`, and duplicating the
  * rendered form here would create a second place for the two to disagree.
- * Trade-off accepted: no single module is total, so "which module owns this
- * string?" has to be answered by asking where the baseline holds it - a copybook
- * constant or program literal here, a `.bms` `INITIAL=` value in the renderer.
+ * Trade-offs: no single module is total, and that split is accepted rather than
+ * argued away, so "which module owns this string?" has to be answered by asking
+ * where the baseline holds it - a copybook constant or program literal here, a
+ * `.bms` `INITIAL=` value in the renderer.
  *
  * Invariant
  * ---------

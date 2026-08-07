@@ -3,6 +3,7 @@ package com.carddemo.transaction.repository;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
+import com.carddemo.common.error.RecordConflictException;
 import com.carddemo.common.money.Money;
 import com.carddemo.transaction.domain.TransactionCategoryBalance;
 import com.carddemo.transaction.domain.TransactionCategoryBalance.TransactionCategoryBalanceId;
@@ -22,6 +23,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.transaction.IllegalTransactionStateException;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -129,24 +131,39 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * observable outcomes into one, so a regression that turned every create into an update, or every
  * update into a create, would leave every balance assertion green and go undetected. The migration
  * reaches the same conclusion from the schema side and records it at
- * {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql} lines 744 to
- * 757: the composite natural key is the sole constraint, it carries no default and no generated
+ * {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql} lines 809 to
+ * 822: the composite natural key is the sole constraint, it carries no default and no generated
  * value, and nothing conflict-shaped is provided, expressly so that a caller can still tell an
  * insert from an update. The parity oracle requires the same thing of the behaviour:
  * {@code tests/README.md} lines 581 to 583 state that the create-versus-update branch --
  * {@code 2700-A-CREATE} when the category row is new, {@code 2700-B-UPDATE} when it exists -- is
  * exercised both ways.
  *
- * <p>Alternatives Considered: the repository's inherited save method for these two arms, which is
- * the shorter call and the one a reader expects on a Spring Data test. It is rejected on a measured
- * property of this entity rather than on taste. The identifier is ASSIGNED and this entity carries
- * no version attribute, so the newness test reads a non-null identifier, concludes the instance is
- * not new, and routes EVERY call through the provider's merge operation -- one code path for both
- * outcomes, deciding insert against update inside the provider where an assertion cannot see it.
- * That is the same opacity the paragraph above declines at the schema level, arriving through the
- * back door. The create arm therefore persists explicitly, mirroring the {@code WRITE} at line 510,
- * and the update arm mutates the MANAGED instance and flushes, mirroring the {@code REWRITE} at line
- * 528. Each arm's statement is then the one the reference source issues.
+ * <p>Refactoring Rationale: the two arms are driven through the repository's own write members,
+ * {@code createRow} and {@code updateBalance}, and this paragraph used to explain why they could not
+ * be. The reason it gave was correct about the mechanism then available: the inherited save method is
+ * the shorter call a reader expects on a Spring Data test, but this entity's identifier is ASSIGNED
+ * and it carries no version attribute, so the newness test reads a non-null identifier, concludes
+ * the instance is not new, and routes EVERY call through the provider's merge operation -- one code
+ * path for both outcomes, deciding insert against update inside the provider where an assertion
+ * cannot see it. This class therefore reproduced the two statements locally, persisting on the create
+ * arm and mutating a managed instance on the update arm. What was wrong with that arrangement was not
+ * the statements it issued but WHOSE they were: the test held the discipline and production code did
+ * not, so every assertion below could pass while the only caller that mattered still merged.
+ *
+ * <p>Assumptions: the discipline now lives on {@code TransactionCategoryBalanceWriter}, the fragment
+ * the repository composes in, and this class drives it rather than duplicating it. The create arm
+ * calls the member that persists, mirroring the {@code WRITE} at line 510; the update arm calls the
+ * member that mutates in place, mirroring the {@code REWRITE} at line 528. Two cases at the foot of
+ * this class then pin what the merge silently permitted and the members refuse -- a create onto a key
+ * another writer already holds, and an update against a key no row carries.
+ *
+ * <p>Trade-offs: one write path is deliberately NOT routed through the repository. The fixture
+ * builder persists through the entity manager directly, because it is also the instrument that proves
+ * the ENGINE's own composite key refuses a duplicate, naming the constraint and its three columns.
+ * The create member refuses that case earlier, by design, so routing the builder through it would
+ * replace an assertion about the schema with an assertion about the application. Both facts are worth
+ * holding, so both paths exist and the division is stated here rather than left to be inferred.
  *
  * <p><b>What this class does not reach into.</b>
  *
@@ -253,7 +270,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  *
  * <p>Assumptions: the balance is exact fixed point at two places and never an approximate type.
  * {@code app/cpy/CVTRA01Y.cpy} line 9 declares {@code TRAN-CAT-BAL PIC S9(09)V99}, which the
- * migration maps to {@code balance NUMERIC(11,2)} at its line 726 -- the picture's nine integral and
+ * migration maps to {@code balance NUMERIC(11,2)} at its line 791 -- the picture's nine integral and
  * two fractional digits, and not one digit more. Arithmetic and scale come from
  * {@code com.carddemo.common.money.Money} and are not re-implemented here, and no binary
  * floating-point type appears in this file, in the values it draws from fixtures or in its
@@ -269,6 +286,33 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * positions recorded, while the decoding itself, the money contract, the page envelope, the timestamp
  * formatter and the validation-flag model all stay in {@code com.carddemo.common} where the whole
  * migration reads them.
+  *
+ * <h2>What this class asserts, and what it deliberately does not</h2>
+ *
+ * <p>Refactoring Rationale: this class asserts PERSISTENCE behaviour of the owned category-balance
+ * table -- that an absent key inserts exactly one row, that a present key updates in place and leaves
+ * the count unchanged, that the composite key resolves by value across a detach boundary, that the
+ * amount keeps its sign and both decimal places, and that the declared constraints refuse what they
+ * say they refuse. It does NOT assert the reference's create-against-update DISPATCH, and an earlier
+ * revision of this class read as though it did: it constructed the row, performed the addition through
+ * a local helper and persisted the result, which is the shape of the reference's two arms rather than a
+ * call into anything that implements them. A test that performs the logic it is named after can only
+ * ever agree with itself, so it would have passed unchanged had the production dispatch been absent,
+ * inverted or never written -- which is exactly the state it was written in.
+ *
+ * <p>Assumptions: the dispatch itself belongs to the posting owner. The reference performs it in
+ * {@code 2700-UPDATE-TCATBAL} of {@code app/cbl/CBTRN02C.cbl}, whose two arms at lines 500 and 526 are
+ * reached from the flag the read at line 474 sets, and that program migrates to the batch deployable --
+ * which reaches this table through a narrowly scoped cross-schema grant so that the three posting
+ * writes stay one atomic commit. The arms are therefore asserted against the service that implements
+ * them, in the module that owns it, where a failure names the dispatch. What remains here is the
+ * physical contract that dispatch relies on, which is this module's to own because this module owns the
+ * schema.
+ *
+ * <p>Trade-offs: the local addition helper is retained, because these cases still need a base and an
+ * increment in order to observe that an in-place update is an update and not a second row. What
+ * changed is the claim: the helper is fixture arithmetic used to produce two distinguishable stored
+ * values, and no case presents it as evidence about how the reference chooses an arm.
  */
 @Testcontainers
 @SpringBootTest(
@@ -336,7 +380,7 @@ class TransactionCategoryBalanceRepositoryIT {
     //   combination -- app/data/ASCII/trancatg.txt record 1 is `010001Regular Sales Draft` -- and it
     //   is the only pair the whole 50-record seed at app/data/ASCII/tcatbal.txt uses.
     // WHY : Assumptions: the width matters at the point of use, not merely in documentation. The
-    //       column is CHAR(4) at V1__ledger.sql line 715, so a shorter value is stored blank padded
+    //       column is CHAR(4) at V1__ledger.sql line 822, so a shorter value is stored blank padded
     //       and reads back padded, which would not compare equal to the value written; the failure
     //       then presents as a row that cannot be found rather than as anything about a width.
     private static final String SEED_CATEGORY_CD = "0001";
@@ -386,7 +430,7 @@ class TransactionCategoryBalanceRepositoryIT {
     // Assumptions: the largest account the declared picture admits. PIC 9(11) at
     //   app/cpy/CVTRA01Y.cpy line 6 reaches 99999999999, which exceeds the 2147483647 a 32-bit
     //   integer holds, so this value is what proves the column is genuinely the wider integer type
-    //   the migration declares at V1__ledger.sql line 703 rather than a narrower one that happened to
+    //   the migration declares at V1__ledger.sql line 810 rather than a narrower one that happened to
     //   fit every other value in this file.
     private static final Long MAX_DOMAIN_ACCOUNT_ID = 99_999_999_999L;
 
@@ -472,7 +516,7 @@ class TransactionCategoryBalanceRepositoryIT {
      * <p>Assumptions: the constraint NAME is asserted and not merely the behaviour, because nothing in
      * the repository package declares a key: schema generation is switched off for this module, so
      * {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql} is the only
-     * thing that creates one, at its lines 740 and 741, and a rename there would otherwise be
+     * thing that creates one, at its lines 805 and 806, and a rename there would otherwise be
      * discovered as a duplicate row rather than as a failure.
      *
      * <p>Assumptions: the component ORDER is asserted because it is load-bearing and because every
@@ -522,7 +566,7 @@ class TransactionCategoryBalanceRepositoryIT {
      * which is a divergence from what the pictures alone would suggest and is therefore worth
      * asserting rather than assuming. The type code follows its picture -- {@code PIC X(02)} is
      * already alphanumeric -- but the category code is declared {@code PIC 9(04)} and is still mapped
-     * to a four-character column at {@code V1__ledger.sql} line 715, because it is a code rather than
+     * to a four-character column at {@code V1__ledger.sql} line 747, because it is a code rather than
      * a quantity and being part of the key makes that stronger: {@code 0001} and {@code 1} must not
      * resolve to two different keys. The migration is normative for every column name, type,
      * precision and scale in this schema; the picture is recorded here for provenance.
@@ -531,7 +575,7 @@ class TransactionCategoryBalanceRepositoryIT {
      * an exact numeric column of the wrong scale would still accept every value in this file while
      * rendering it with the wrong number of digits. Eleven and two are the nine integral and two
      * fractional digits of {@code PIC S9(09)V99} at line 9 of the copybook, mapped at
-     * {@code V1__ledger.sql} line 726, and not one digit more.
+     * {@code V1__ledger.sql} line 791, and not one digit more.
      */
     @Test
     void theFourMappedColumnsCarryTheDeclaredTypesTheMigrationGivesThem() {
@@ -667,7 +711,7 @@ class TransactionCategoryBalanceRepositoryIT {
      * <p>This pins the key's ARITY, which {@code app/cpy/CVTRA01Y.cpy} line 5 fixes at three by
      * grouping exactly the items at lines 6, 7 and 8, and which the migration declares as
      * {@code PRIMARY KEY (account_id, type_cd, category_cd)} at
-     * {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql} line 741.
+     * {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql} line 806.
      * No fourth component and no surrogate is admissible, and none is introduced.
      *
      * <p>Assumptions: coexistence is the converse of the three absence cases above and is asserted
@@ -714,8 +758,8 @@ class TransactionCategoryBalanceRepositoryIT {
      *
      * <p>Assumptions: uniqueness is asserted as a REFUSAL rather than as a row count, because the
      * migration keeps it a refusal on purpose. Its note at
-     * {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql} lines 744 to
-     * 757 records that the composite natural key is the sole constraint and that nothing
+     * {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql} lines 809 to
+     * 822 records that the composite natural key is the sole constraint and that nothing
      * conflict-shaped is provided, expressly so that a uniqueness violation -- and therefore the
      * create-versus-update decision -- stays visible to the service that has to report it. A design
      * that silently absorbed the second write is exactly what this case is here to catch.
@@ -725,6 +769,14 @@ class TransactionCategoryBalanceRepositoryIT {
      * version attribute, so the newness test concludes the instance is not new and the call becomes a
      * merge, which would load the existing row and update it -- and this case would then pass by
      * silently observing no refusal at all. Persisting states the insert the reference source issues.
+     *
+     * <p>Alternatives Considered: the repository's {@code createRow} member, which now exists and
+     * refuses exactly this case. It is deliberately NOT used here, because the two assertions differ in
+     * subject. That member refuses on its own guard, before any statement reaches the database, so a
+     * case driving it would establish that the APPLICATION refuses -- which is what the case at the
+     * foot of this class establishes. This one establishes that the SCHEMA refuses, by naming
+     * {@code pk_transaction_category_balances} and its three columns in the provider's own message, so
+     * a key silently reduced to fewer components fails here. Neither case can stand in for the other.
      *
      * <p>Alternatives Considered: asserting the framework's portable data-integrity exception, which
      * would keep this case independent of the persistence provider. It is rejected on two measured
@@ -807,8 +859,8 @@ class TransactionCategoryBalanceRepositoryIT {
      *
      * <p>This pins the three key components declared at {@code app/cpy/CVTRA01Y.cpy} lines 6, 7 and 8
      * against the columns the migration gives them at
-     * {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql} lines 703,
-     * 709 and 715. It asserts no procedural paragraph, because a round trip is a property of the
+     * {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql} lines 735,
+     * 741 and 747. It asserts no procedural paragraph, because a round trip is a property of the
      * declaration rather than of any statement.
      *
      * <p>Assumptions: the two code components are asserted at their exact declared LENGTHS, not merely
@@ -927,7 +979,7 @@ class TransactionCategoryBalanceRepositoryIT {
     /**
      * Confirms the create arm yields the amount alone and adds exactly one row.
      *
-     * <p>This pins {@code 2700-A-CREATE-TCATBAL-REC} of {@code app/cbl/CBTRN02C.cbl}, lines 503 to
+     * <p>The stored value this asserts is the one {@code 2700-A-CREATE-TCATBAL-REC} of {@code app/cbl/CBTRN02C.cbl}, lines 503 to
      * 512: {@code INITIALIZE TRAN-CAT-BAL-RECORD} at line 504, the three key moves at lines 505 to
      * 507, {@code ADD DALYTRAN-AMT TO TRAN-CAT-BAL} at line 508 and
      * {@code WRITE FD-TRAN-CAT-BAL-RECORD FROM TRAN-CAT-BAL-RECORD} at line 510, whose status gate
@@ -955,13 +1007,14 @@ class TransactionCategoryBalanceRepositoryIT {
      * requirements do not meet. No query, method name or assertion in this file positions a read by
      * counting rows from the start of an ordered set.
      *
-     * <p>Assumptions: the write is an explicit persist rather than the repository's inherited save,
-     * for the reason recorded on the class: an assigned identifier and no version attribute make that
-     * call a merge, which would decide insert against update inside the provider and hide the arm this
-     * case is named after.
+     * <p>Assumptions: the write goes through the repository's create member rather than through the
+     * inherited save, for the reason recorded on the class: an assigned identifier and no version
+     * attribute make that call a merge, which would decide insert against update inside the provider
+     * and hide the arm this case is named after. The member persists, so the statement this case
+     * observes is the insert the reference source issues.
      */
     @Test
-    void theCreateArmYieldsTheAmountAloneAndAddsExactlyOneRow() {
+    void insertingAnAbsentKeyStoresTheAmountAndAddsExactlyOneRow() {
         long before = this.rowCount();
 
         assertThat(before).isZero();
@@ -972,7 +1025,7 @@ class TransactionCategoryBalanceRepositoryIT {
         assertThat(created.getBalance()).isEqualByComparingTo(ZERO_AMOUNT);
 
         created.setBalance(added(created.getBalance(), FEED_AMOUNT));
-        this.persistAndDetach(created);
+        this.createThroughWriteMember(created);
 
         assertThat(this.rowCount()).isEqualTo(before + 1L);
 
@@ -985,7 +1038,7 @@ class TransactionCategoryBalanceRepositoryIT {
     /**
      * Confirms the update arm yields the sum and leaves the row count unchanged.
      *
-     * <p>This pins {@code 2700-B-UPDATE-TCATBAL-REC} of {@code app/cbl/CBTRN02C.cbl}, lines 526 to
+     * <p>The stored value this asserts is the one {@code 2700-B-UPDATE-TCATBAL-REC} of {@code app/cbl/CBTRN02C.cbl}, lines 526 to
      * 528: the IDENTICAL {@code ADD DALYTRAN-AMT TO TRAN-CAT-BAL} at line 527 and
      * {@code REWRITE FD-TRAN-CAT-BAL-RECORD FROM TRAN-CAT-BAL-RECORD} at line 528, whose status gate
      * opens at line 530. The arm is reached from the dispatcher's branch at line 495 taking its
@@ -1010,7 +1063,7 @@ class TransactionCategoryBalanceRepositoryIT {
      * an existing key, which is the case two methods above and would fail here.
      */
     @Test
-    void theUpdateArmYieldsTheSumAndLeavesTheRowCountUnchanged() {
+    void updatingAPresentKeyStoresTheSumAndLeavesTheRowCountUnchanged() {
         this.persistAndDetach(new TransactionCategoryBalance(this.seededKey(), SEED_BALANCE));
 
         long before = this.rowCount();
@@ -1070,7 +1123,7 @@ class TransactionCategoryBalanceRepositoryIT {
 
         TransactionCategoryBalance created = new TransactionCategoryBalance(absentKey);
         created.setBalance(added(created.getBalance(), FEED_AMOUNT));
-        this.persistAndDetach(created);
+        this.createThroughWriteMember(created);
 
         this.accumulateOntoManagedRow(presentKey, FEED_AMOUNT);
 
@@ -1109,7 +1162,7 @@ class TransactionCategoryBalanceRepositoryIT {
 
         TransactionCategoryBalance created = new TransactionCategoryBalance(this.seededKey());
         created.setBalance(added(created.getBalance(), ZERO_AMOUNT));
-        this.persistAndDetach(created);
+        this.createThroughWriteMember(created);
 
         assertThat(this.rowCount()).isEqualTo(before + 1L);
 
@@ -1158,7 +1211,7 @@ class TransactionCategoryBalanceRepositoryIT {
      * signed field. {@code app/cpy/CVTRA01Y.cpy} line 9 declares {@code TRAN-CAT-BAL PIC S9(09)V99},
      * whose leading {@code S} is the whole reason a negative case exists, and the migration maps it to
      * an exact decimal column of precision eleven and scale two at
-     * {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql} line 726.
+     * {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql} line 791.
      *
      * <p>Assumptions: exactness is the property under test and binary floating point is the specific
      * alternative excluded. A 64-bit binary floating-point column would return plausible values that
@@ -1194,6 +1247,172 @@ class TransactionCategoryBalanceRepositoryIT {
         assertThat(afterAdd).isEqualByComparingTo(NEGATIVE_ACCUMULATED).isNegative();
         assertThat(afterAdd.scale()).isEqualTo(Money.SCALE);
     }
+
+    /**
+     * Confirms the create member refuses a key another writer already holds and changes nothing.
+     *
+     * <p>This pins the failure mode of the {@code WRITE FD-TRAN-CAT-BAL-RECORD} at
+     * {@code app/cbl/CBTRN02C.cbl} line 510. That statement writes to an indexed dataset keyed on the
+     * group at {@code app/cpy/CVTRA01Y.cpy} line 5, and its status gate at line 512 accepts only
+     * {@code '00'}, so a write onto an existing key is refused and the paragraph abends rather than
+     * replacing the record. Nothing in the reference create arm can update.
+     *
+     * <p>Refactoring Rationale: this case exists because the mechanism it now exercises replaced one
+     * that silently did the opposite. The repository previously offered only the inherited save for this
+     * arm, and on this entity -- assigned identifier, no version attribute -- that call is a merge: it
+     * would have FOUND the row this case seeds and UPDATED it, discarding the seeded balance in favour
+     * of the amount the second writer carried, and raised nothing at all. That is why the balance is
+     * asserted afterwards and not merely the row count: a count of one is satisfied by an overwrite, and
+     * the overwritten VALUE is the loss.
+     *
+     * <p>Assumptions: this is the concurrent create race stated as two sequential writers, which is the
+     * only form in which it is deterministic. Two genuinely simultaneous transactions would race on the
+     * key and one of them would be refused, but which one is not fixed, so an assertion over the
+     * surviving balance could name either. Seeding the row first makes the second writer's outcome the
+     * only variable while exercising exactly the code path a loser of that race reaches.
+     *
+     * @throws AssertionError if the second write is absorbed, if the row count changes, or if the
+     *     seeded balance is replaced
+     */
+    @Test
+    void theCreateMemberRefusesAKeyAnotherWriterAlreadyHoldsAndLeavesTheBalanceIntact() {
+        this.persistAndDetach(new TransactionCategoryBalance(this.seededKey(), SEED_BALANCE));
+
+        long before = this.rowCount();
+
+        assertThat(before).isEqualTo(1L);
+
+        TransactionCategoryBalance second =
+                new TransactionCategoryBalance(this.seededKey(), FEED_AMOUNT);
+
+        assertThatExceptionOfType(RecordConflictException.class)
+                .isThrownBy(() -> this.createThroughWriteMember(second))
+                .satisfies(refusal -> assertThat(refusal.kind())
+                        .isEqualTo(RecordConflictException.Kind.STALE_VERSION));
+
+        assertThat(this.rowCount()).isEqualTo(before);
+        assertThat(this.balances.findById(this.seededKey()).orElseThrow().getBalance())
+                .isEqualByComparingTo(SEED_BALANCE);
+    }
+
+    /**
+     * Confirms the update member refuses a key no row carries and inserts nothing.
+     *
+     * <p>This pins the reachability of the {@code REWRITE FD-TRAN-CAT-BAL-RECORD} at
+     * {@code app/cbl/CBTRN02C.cbl} line 528. That statement is reached only through the {@code ELSE} of
+     * the branch at line 495, which requires the flag to still hold the {@code 'N'} preset at line 473
+     * -- that is, it requires the read at line 474 to have found the record. A rewrite against a key no
+     * record carries is not a path the reference program has, and it certainly cannot create one.
+     *
+     * <p>Refactoring Rationale: this case is the mirror of the one above and exists for the mirrored
+     * reason. Under the inherited save the update arm would have found no row and INSERTED one, so a row
+     * a competing writer had deleted would quietly reappear carrying the balance of the caller that
+     * thought it was updating. Asserting that the table is still empty afterwards is what distinguishes
+     * a refusal from that recreation.
+     *
+     * <p>Assumptions: the vanished-row race is likewise stated sequentially -- the row simply never
+     * exists -- because the outcome of the member is identical whether the row was deleted a moment ago
+     * or was never there. The member establishes absence by a keyed read, so both histories reach the
+     * same statement, and only the sequential form makes the assertion deterministic.
+     *
+     * @throws AssertionError if the update is absorbed, or if any row is created by it
+     */
+    @Test
+    void theUpdateMemberRefusesAKeyNoRowCarriesAndCreatesNothing() {
+        assertThat(this.rowCount()).isZero();
+
+        TransactionCategoryBalanceId absent = this.seededKey();
+
+        assertThatExceptionOfType(RecordConflictException.class)
+                .isThrownBy(() -> this.transactionTemplate.executeWithoutResult(
+                        status -> this.balances.updateBalance(absent, FEED_AMOUNT)))
+                .satisfies(refusal -> assertThat(refusal.kind())
+                        .isEqualTo(RecordConflictException.Kind.STALE_VERSION));
+
+        assertThat(this.rowCount()).isZero();
+        assertThat(this.balances.findById(absent)).isEmpty();
+    }
+
+    /**
+     * Confirms the update member rewrites the existing row in place rather than replacing it.
+     *
+     * <p>This pins the {@code REWRITE} at {@code app/cbl/CBTRN02C.cbl} line 528 as an update IN PLACE.
+     * The distinction matters because the resulting balance alone does not establish it: a delete
+     * followed by an insert would leave the same value behind. What separates them is the row's
+     * identity, so this case reads the generated column that no reference field corresponds to -- there
+     * is none on this table -- and instead asserts the two properties that are available: the row count
+     * is unchanged, and the value replaces rather than accumulates onto itself.
+     *
+     * <p>Assumptions: the member is given an absolute balance rather than an increment, so this case
+     * supplies a value that is NOT the sum of the existing one and anything, and asserts it lands
+     * exactly. An increment-shaped member would make that assertion impossible to write, which is why
+     * the fragment takes the computed value and leaves the addition to its caller.
+     *
+     * <p>Assumptions: the scale is asserted as well as the value, because the member routes through the
+     * entity's mutator and therefore through the shared money contract. A member that assigned the
+     * argument directly would store whatever scale a caller happened to supply, and this case supplies
+     * four decimal places precisely so that the reduction to two is observable.
+     *
+     * @throws AssertionError if a row is added or removed, if the balance is not replaced exactly, or if
+     *     the stored scale is not the money contract's
+     */
+    @Test
+    void theUpdateMemberReplacesTheBalanceInPlaceAtTheMoneyContractsScale() {
+        this.persistAndDetach(new TransactionCategoryBalance(this.seededKey(), SEED_BALANCE));
+
+        long before = this.rowCount();
+
+        this.transactionTemplate.executeWithoutResult(status -> {
+            this.balances.updateBalance(this.seededKey(), new BigDecimal("604.7700"));
+            this.entityManager.clear();
+        });
+
+        assertThat(this.rowCount()).isEqualTo(before);
+
+        BigDecimal stored = this.balances.findById(this.seededKey()).orElseThrow().getBalance();
+
+        assertThat(stored).isEqualByComparingTo(ACCUMULATED_BALANCE);
+        assertThat(stored.scale()).isEqualTo(Money.SCALE);
+    }
+
+    /**
+     * Confirms both write members refuse to run without a caller's transaction, and write nothing.
+     *
+     * <p>Assumptions: this asserts a load-bearing annotation rather than a convention. Both members
+     * declare mandatory transaction participation on the fragment interface, which is what stops the
+     * repository infrastructure from supplying its own default attribute -- taken from the read-only
+     * class-level attribute of its base implementation -- to a method that writes. Without the
+     * declaration a write reaching either member outside a transaction would run inside a read-only one
+     * and be refused by the database as a rejected statement instead of by the boundary as a stated
+     * precondition.
+     *
+     * <p>Assumptions: the refusal is asserted through the repository PROXY, by calling the members with
+     * no surrounding transaction template, because that is the only arrangement in which the interceptor
+     * participates at all. A direct call on the implementation class would bypass the proxy and prove
+     * nothing about the annotation.
+     *
+     * <p>Assumptions: the reference analogue is the commit boundary the posting program owns rather
+     * than anything this table declares. {@code app/cbl/CBTRN02C.cbl} performs three writes in sequence
+     * at lines 440 to 442 inside one unit of work, so a member that opened a boundary of its own would
+     * make a partial posting observable; refusing outright is the behaviour that keeps the boundary the
+     * caller's.
+     *
+     * @throws AssertionError if either member runs without a transaction, or if the table is changed
+     */
+    @Test
+    void bothWriteMembersRefuseToRunWithoutACallersTransaction() {
+        TransactionCategoryBalance row =
+                new TransactionCategoryBalance(this.seededKey(), SEED_BALANCE);
+
+        assertThatExceptionOfType(IllegalTransactionStateException.class)
+                .isThrownBy(() -> this.balances.createRow(row));
+
+        assertThatExceptionOfType(IllegalTransactionStateException.class)
+                .isThrownBy(() -> this.balances.updateBalance(this.seededKey(), FEED_AMOUNT));
+
+        assertThat(this.rowCount()).isZero();
+    }
+
 
     /**
      * Adds an amount to a balance exactly as both reference arms do, at the money contract's scale.
@@ -1251,7 +1470,7 @@ class TransactionCategoryBalanceRepositoryIT {
      * {@code TRANCAT-TYPE-CD} at line 7 and {@code TRANCAT-CD} at line 8 -- which is the order of the
      * group item at line 5 and therefore of the reference file's record key, and which the migration
      * matches at
-     * {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql} line 741.
+     * {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql} line 806.
      * Two of the three components are strings, so a transposition would compile and would then miss
      * silently; keeping this construction in one place is what makes the order stated once.
      *
@@ -1293,43 +1512,70 @@ class TransactionCategoryBalanceRepositoryIT {
     }
 
     /**
-     * Reads a row by its whole key, adds an amount to the value read, and flushes the change in place.
+     * Reads a row by its whole key and applies the sum of its value and an amount through the
+     * repository's update member.
      *
-     * <p>Assumptions: this is the update arm of {@code app/cbl/CBTRN02C.cbl} expressed as three
-     * statements in the reference order. The read corresponds to line 474, whose success is what leaves
-     * the flag at the {@code 'N'} preset at line 473 and so takes the {@code ELSE} of the branch at
-     * line 495; the addition corresponds to line 527; and the flush corresponds to the
-     * {@code REWRITE} at line 528. The row read is deliberately left MANAGED while it is mutated, so
-     * the flush issues an update against the existing key rather than an insert.
+     * <p>Assumptions: this is the update arm of {@code app/cbl/CBTRN02C.cbl} expressed as the two acts
+     * the reference performs in that order. The read corresponds to line 474, whose success is what
+     * leaves the flag at the {@code 'N'} preset at line 473 and so takes the {@code ELSE} of the branch
+     * at line 495; the addition corresponds to line 527; and the member's own statement corresponds to
+     * the {@code REWRITE} at line 528.
      *
-     * <p>Alternatives Considered: the repository's inherited save, called with a transient instance
-     * carrying the new value. Rejected because this entity's identifier is always assigned and it
-     * carries no version attribute, so the newness test concludes the instance is not new and the call
-     * becomes a merge -- one code path that decides insert against update inside the provider, which is
-     * the opacity this whole class exists to prevent, arriving through the framework rather than through
-     * a statement. Mutating the managed instance keeps the resulting statement an update in place.
+     * <p>Refactoring Rationale: this helper used to mutate the managed instance and flush the change
+     * itself, which reproduced the reference statement inside the test while production code still
+     * offered only the inherited save. The statement is now issued by
+     * {@code TransactionCategoryBalanceWriter.updateBalance}, so the discipline is exercised where it
+     * has to hold rather than restated here; the arithmetic stays in this helper because deciding the
+     * base is the calling service's rule in the migration and the caller's rule here.
      *
-     * <p>Assumptions: the read is performed INSIDE the transaction rather than outside it, because an
-     * instance loaded in an earlier scope would be detached and mutating it would reach nothing. The
-     * context is cleared afterwards for the same reason every write in this file clears it: the
-     * assertion that follows must be answered by PostgreSQL and not by the persistence context.
+     * <p>Assumptions: the read is performed INSIDE the transaction rather than outside it, because the
+     * update member requires a caller's transaction and refuses to start one, and because the member
+     * finds the row in the same persistence context this read populated rather than issuing a second
+     * query. The context is cleared afterwards for the same reason every write in this file clears it:
+     * the assertion that follows must be answered by PostgreSQL and not by the persistence context.
      *
      * @param id the whole composite key of the row to accumulate onto, which must already exist; must
      *     not be {@code null}
      * @param amount the amount to add, which may be zero or negative; must not be {@code null}
-     * @throws java.util.NoSuchElementException if no row carries that key, which means the caller has
-     *     reached the update arm for a key that belongs to the create arm
+     * @throws java.util.NoSuchElementException if no row carries that key when this helper reads it,
+     *     which means the caller has reached the update arm for a key that belongs to the create arm
      */
     private void accumulateOntoManagedRow(TransactionCategoryBalanceId id, BigDecimal amount) {
         this.transactionTemplate.executeWithoutResult(status -> {
-            TransactionCategoryBalance managed = this.balances.findById(id).orElseThrow();
-            managed.setBalance(added(managed.getBalance(), amount));
+            BigDecimal base = this.balances.findById(id).orElseThrow().getBalance();
+            this.balances.updateBalance(id, added(base, amount));
 
-            // WHY : Assumptions: the order is not interchangeable. Clearing before the flush would
-            //       discard the pending update unwritten, so the row the following assertion reasons
-            //       about would still hold its original balance and the failure would name the
-            //       arithmetic rather than this method.
-            this.entityManager.flush();
+            // WHY : Assumptions: the clear stays here even though the member flushes for itself,
+            //       because the two acts answer different needs. The member's flush sends the
+            //       statement; this clear empties the context, so the read in the case that follows
+            //       has nothing local to satisfy it and must reach PostgreSQL. Dropping the clear
+            //       would let an assertion be answered by the very instance this helper handed over.
+            this.entityManager.clear();
+        });
+    }
+
+    /**
+     * Inserts one row through the repository's create member inside its own transaction.
+     *
+     * <p>Assumptions: this is the create arm's write path expressed through production code. The
+     * member's persist corresponds to the {@code WRITE} at line 510 of {@code app/cbl/CBTRN02C.cbl},
+     * and its own flush sends the insert while the transaction is still open, so the read that follows
+     * must reach PostgreSQL rather than the persistence context.
+     *
+     * <p>Trade-offs: this exists alongside the raw fixture builder rather than replacing it, and the
+     * two are not interchangeable. The member refuses a duplicate key on its own guard before any
+     * statement is issued, which is the right behaviour and the wrong instrument for the case that has
+     * to observe the ENGINE refusing and name the constraint. Fixtures and that one case use the
+     * builder; every case asserting the create ARM uses this.
+     *
+     * @param row the transient entity to insert, which must carry all three key components because the
+     *     migration declares every one of them not null; must not be {@code null}
+     * @throws com.carddemo.common.error.RecordConflictException if a row already carries that composite
+     *     key, which the member refuses rather than absorbing into an update
+     */
+    private void createThroughWriteMember(TransactionCategoryBalance row) {
+        this.transactionTemplate.executeWithoutResult(status -> {
+            this.balances.createRow(row);
             this.entityManager.clear();
         });
     }

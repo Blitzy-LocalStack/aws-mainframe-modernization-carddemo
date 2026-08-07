@@ -450,97 +450,98 @@ so that adding either one is understood as removing the gate:
 
 ### TypeScript
 
-**Required form.** JSDoc or TSDoc on **every exported function, every exported
-class and every module entry point**, with `@param`, `@returns` and `@throws` as
+**Required form.** JSDoc or TSDoc on **every function, every class and every
+module entry point**, exported or not, with `@param`, `@returns` and `@throws` as
 applicable. Trivial accessors may use the single-line form. The inline-comment
-requirement applies **in addition**, never instead, and — unlike the block
-requirement — it is **not** scoped to exports: a module-private helper that
-makes a non-obvious choice owes its WHY comment exactly as an exported one does.
+requirement applies **in addition**, never instead: a module-private helper that
+makes a non-obvious choice owes its WHY comment as well as its block.
 
-**Assumptions — the block scope is exports, and that is assigned rather than
-chosen.** AAP §0.2.1.6 lists `ui/eslint.config.js` as "`eslint-plugin-jsdoc`
-requiring JSDoc on exported components and functions", and §0.8.1 repeats it
-verbatim: "TypeScript is checked by `eslint-plugin-jsdoc` rules in
-`ui/eslint.config.js` requiring documentation on exported components and
-functions". An exported symbol is the module's contract — what another file may
-consume and what a reader arrives at first — so it is where a block is
-load-bearing.
+Refactoring Rationale: **an earlier wording of this section scoped the block
+requirement to exported symbols, and it was withdrawn.** It argued from AAP
+§0.2.1.6, which lists `ui/eslint.config.js` as "`eslint-plugin-jsdoc` requiring
+JSDoc on exported components and functions", and from §0.8.1, which repeats that
+verbatim. The argument failed on one step: it read a **minimum as an exclusion**.
+Both sentences say what the gate must require; neither says what it may not
+require, so a gate that additionally reaches a module-private helper satisfies
+both of them literally. Set against that, Rule 1 asks for a docstring on "every
+new or modified function, class, and module entry point" and attaches no
+visibility qualifier at all. Only one reading satisfies both documents at once,
+which is why the wider scope is not a divergence from the AAP — the narrower one
+was the reading that had to add a qualifier the specification does not contain.
 
-**Refactoring Rationale — an earlier wording of this section extended the block
-requirement to every symbol regardless of visibility.** It argued from Rule 1's
-"every new or modified function, class, and module entry point", which attaches
-no visibility qualifier, and that reading of Rule 1 is correct. It was
-nonetheless withdrawn, because it resolved a conflict in the wrong direction:
-the AAP is the frozen specification, it assigns this gate the exported scope in
-the two sentences quoted above, and a standard that asserts a wider scope than
-the AAP describes a gate that does not run. **Trade-offs:** the practical cost
-is that an inline closure — an `onClick`, a `.map` body, a `useMemo` factory —
-no longer needs a block, and the wider wording was reaching for something real
-in wanting one. That is recovered by the inline-comment requirement above, which
-the exported scope does not touch, so a non-obvious private helper is still
-covered; what is given up is the ceremony of a block on a throwaway closure, and
-a gate that reports a hundred of those is one reviewers learn to skip.
+Assumptions: **the widened scope costs the landed tree nothing, which was
+measured rather than asserted.** With `publicOnly: false` in force, `npm run
+lint` reports zero violations across `ui/**`, so nothing in this section is
+aspirational. Trade-offs: **every inline closure now owes a block** — an
+`onClick`, a `.map` body, a `useMemo` factory. Rule 1 allows a trivial function
+"a single-line docstring", an allowance about length and not about presence, so a
+one-line closure costs one line. The exchange goes this way because the
+alternative was measured too: under the narrower scope, an undocumented
+module-private `function` and an undocumented anonymous `.map` callback inside an
+exported component were both reported clean, and this tree had already been
+bitten by exactly that gap once, in `ui/src/messages/messages.ts`.
 
-**Assumptions — the GATE's scope and the RULE's obligation are two different
-statements, and only the first is narrowed here.** Rule 1 asks for a docstring on
-every function with no visibility qualifier, and nothing above licenses omitting
-one from an un-exported member: a copybook field-slice, a sign-overpunch
-normaliser or a keyset-cursor comparator is exactly where this migration's
-non-obvious logic lands, and each of them earns a block on its own merits. What
-the exported scope decides is only which of those omissions a linter can FAIL a
-build for. Writing the two down separately is what keeps a reader from reading a
-configuration limit as permission.
+**Every `@param` and `@returns` carries its type in the tag, in TypeScript
+exactly as in JavaScript** — `@param {string} accountId - ...`,
+`@returns {AccountView} The account view ...`. Rule 1's Parameters element asks
+for "name, type and description for each parameter" and its Return values element
+for the "type and description of what is returned"; both are addressed to the
+DOCUMENTATION, and neither is qualified by language.
 
-**In TypeScript the SIGNATURE carries the type; `@param` and `@returns` carry
-the name and the description** — `@param accountId - ...`, `@returns The account
-view ...`. A `{Type}` annotation is **permitted** and a good deal of this tree
-still carries one, but it is never **required**, and the two forms pass the gate
-equally. Rule 1's Parameters element asks for "name, type and description for
-each parameter" and its Return values element for the "type and description of
-what is returned"; a typed signature beside a named, described tag states all
-three, with the type held by the half of the pair the compiler checks.
+Refactoring Rationale: **an earlier wording of this section made the `{Type}`
+annotation permitted but never required in TypeScript, and it was withdrawn.** Its
+argument was a good observation — the signature already states the type, and the
+compiler checks it, so the tag duplicates a checked fact with unchecked prose —
+that answered a question Rule 1 does not ask. Rule 1 draws no distinction between
+a language whose signature happens to carry the type and one whose signature does
+not, and it grants no exemption on the ground that another artifact states the
+same fact more reliably. A gate asking for two thirds of an element while
+reporting a pass is the shape of failure Rule 1's validation clause exists to
+catch, and a reader cannot tell it apart from one asking for three.
 
-**Trade-offs — a `{Type}` tag duplicates a checked fact with unchecked prose.**
-That is why it is not required. The two can disagree, and when they do only the
-prose can be wrong, so a docstring confidently naming the wrong type is worse
-than one naming none — a reader trusts it and stops reading the signature. This
-migration has a specific reason to refuse second sources of truth about types:
-field widths and decimal scale are transcribed from the copybooks under
+Trade-offs: **a `{Type}` tag is a second textual source of truth about a type, and
+that cost is accepted rather than argued away.** The two can disagree, and when
+they do only the annotation can be wrong. This migration has a specific reason to
+care: field widths and decimal scale are transcribed from the copybooks under
 Transformation Rule T1, and a drifted annotation is exactly how a `string` money
-field silently acquires a documented `number`. The cost accepted in exchange is
-that a reader skimming only the block reads one line further to find the type.
+field acquires a documented `number`. Two things bound the cost.
+`jsdoc/no-undefined-types` stays on, so a `{Accont}` typo is a build failure; and
+`typescript-eslint`'s type-aware rules plus `tsc --noEmit` keep the signature
+authoritative for compilation, so a drifted annotation misleads a reader without
+ever misleading the compiler. `jsdoc/check-param-names` still fails the build when
+a documented parameter no longer exists.
 
-**Assumptions — the split by language is deliberate.** In plain JavaScript the
-JSDoc types *are* the type system, so the tag is the only place a type can be
-stated and `jsdoc/require-param-type` and `jsdoc/require-returns-type` are
-enforced there. In TypeScript the signature holds it and those rules sit at the
-plugin's TypeScript-aware default of off. One clause, two mechanisms, because
-the languages genuinely differ. Permitted-but-not-required is not the same as
-unchecked: `jsdoc/no-undefined-types` stays on, so a `{Accont}` typo in an
-annotation someone did write is still a build failure, and
-`jsdoc/check-param-names` still fails the build when a documented parameter no
-longer exists.
+Assumptions: **the obligation is now identical in both languages, and
+`jsdoc/no-types` stays off for exactly that reason.** In plain JavaScript the
+JSDoc types *are* the type system; in TypeScript they document a type the compiler
+also holds. The plugin's TypeScript preset would REJECT a `{Type}` in a `.ts`
+docstring outright, so leaving `jsdoc/no-types` on would forbid the very tags
+`jsdoc/require-param-type` and `jsdoc/require-returns-type` now require. The two
+settings are one mechanism and neither works without the other; `no-types` being
+off admits the tag, and the `require-*-type` rules oblige it.
 
-**Refactoring Rationale — an earlier wording of this section required the type
-in the tag as well, in TypeScript as in JavaScript.** Its argument was that Rule
-1 draws no distinction between a language whose signature carries the type and
-one whose signature does not. That is a fair reading, and it was withdrawn for a
-concrete rather than a stylistic reason: requiring the tag obliges the plugin's
-`jsdoc/no-types` prohibition to be lifted, which then admits type expressions
-everywhere and makes the annotation — not the signature — the thing an author
-maintains. The narrower configuration keeps the compiler as the single authority
-on types and leaves the docstring responsible for the things a compiler cannot
-state: what the parameter means and why the function exists.
+Assumptions: **the change costs the landed tree nothing, and that was measured
+before it was adopted.** `ui/src/**` already carries 90 `@param {` and 97
+`@returns {` tags and not one bare tag, so raising the three rules reports zero
+new violations today and binds every docstring written after it.
 
 **Mechanical gate — live today.** `eslint-plugin-jsdoc` rules configured in
 [`ui/eslint.config.js`](../ui/eslint.config.js), run by the `lint` script
 declared in [`ui/package.json`](../ui/package.json) as `eslint .
 --max-warnings=0`. That threshold is what makes the gate a gate: every JSDoc
 rule this document relies on is set to `error`, and even a warning would fail
-the run. The four `jsdoc/*` entries deliberately set to `off` are the type-tag
-rules discussed above, plus the `jsdoc/no-types` prohibition they replace; each
-is annotated at its line with what it admits, and none of them relaxes one of
-Rule 1's four elements. The plugin's dependency is pinned in `ui/package.json`,
+the run. Exactly ONE `jsdoc/*` entry is deliberately set to `off` —
+`jsdoc/no-types`, and only so that the `{Type}` tags the three `require-*-type`
+rules oblige are admitted at all, as the section above records. It relaxes no
+element of Rule 1. Two `linterOptions` complete the gate: `noInlineConfig` is
+`true`, so an `/* eslint-disable */` comment in a source file is ignored rather
+than honoured, and `reportUnusedDisableDirectives` is `error`, so such a comment
+cannot survive a run looking load-bearing. Every prohibited shape this paragraph
+claims is caught has a committed negative probe in
+[`ui/src/test/documentationGate.test.ts`](../ui/src/test/documentationGate.test.ts),
+which lints deliberately non-conforming sources through the ESLint Node API
+against this very configuration, so a future relaxation fails a test rather than
+passing quietly. The plugin's dependency is pinned in `ui/package.json`,
 which fixes the version the gate runs at. `.github/workflows/ui-ci.yml` invokes
 that same script as a required step, so the gate runs both locally and on every
 push.
@@ -1059,7 +1060,7 @@ decides whether prose is true.
 | Python | module, class and function docstrings; Args / Returns / Raises | docstring **presence** and formatting only, in two halves: formatting everywhere plus presence on **public** declarations — pydocstyle `D` family under `[tool.ruff.lint]` in `data-migration/pyproject.toml`; presence at **every** visibility and **every** nesting depth — `data-migration/tests/test_docstring_gate.py` | **Args / Returns / Raises completeness** (no `D` rule checks a docstring against a signature, and a presence walker cannot judge content), accuracy, `WHY` quality | **live** locally and in `.github/workflows/services-ci.yml` |
 | HCL | file header, `description` on every `variable` and `output`, why-comment per non-obvious argument | `description` presence and the declared file set — `infra/.tflint.hcl`; generated-table freshness — `infra/.terraform-docs.yml` | the file-header block and every why-comment; the prose in all sixteen module READMEs, both environment READMEs, and the bootstrap README | **live** through TFLint and terraform-docs checks in `.github/workflows/infra-ci.yml` |
 | SQL | header block, why-comment per non-obvious constraint or index | **none** | the whole obligation | review only |
-| Dockerfile | header, justification on the base-image pin and layer ordering | that the base-image pin **resolves**, and that the image builds at all — the eight service images are built by the `java-services` job under a count assertion, so a broken pin or a failed build fails the run | the header and every justification, including the pin's | **live** for the eight service Dockerfiles through `.github/workflows/services-ci.yml`; review only for `data-migration/Dockerfile`, which no workflow builds; `ui/Dockerfile` does not exist yet and is the one genuinely outstanding artifact of the ten |
+| Dockerfile | header, justification on the base-image pin and layer ordering | that the base-image pin **resolves**, and that the image builds at all — the eight service images are built by the `java-services` job under a count assertion, so a broken pin or a failed build fails the run | the header and every justification, including the pin's | **live** for the eight service Dockerfiles through `.github/workflows/services-ci.yml`; review only for `data-migration/Dockerfile` and `ui/Dockerfile`, which no workflow builds |
 | YAML | header, justification on job ordering and caching, least-privilege `permissions`, SHA-pinned actions | **none for the documentation semantics.** GitHub itself rejects a syntactically invalid workflow at dispatch, and a mistyped `uses:` reference fails the step that runs it — but neither is a gate this repository configures, and NO linter, action-pin checker or policy scanner runs over `.github/**` (measured: no `actionlint`, `zizmor`, `ratchet` or equivalent appears anywhere under `.github/`) | the header and every rationale; least-privilege review of each `permissions` block; and confirming by inspection that every `uses:` carries a 40-character commit SHA rather than a moving tag | review only — the four migration workflows exist and each carries the required header, `permissions` block and SHA pins, but nothing mechanically enforces that they keep doing so |
 
 **What the gates in that table do NOT check.** Assumptions: every gate above is a

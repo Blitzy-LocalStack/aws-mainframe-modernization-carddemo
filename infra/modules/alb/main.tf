@@ -321,16 +321,32 @@ data "aws_iam_policy_document" "access_logs" {
 #       tier, and the requirement is centralised logging rather than less of it.
 # WHY : Assumptions: the suppression's premise -- that this bucket holds no
 #       application record -- is a claim about the REQUEST TARGETS the delivered
-#       lines carry, and it is now true by construction rather than by hope. A
-#       delivered line records the request line, query string included, so the
-#       premise fails the moment any published route puts a card number in a
-#       target. None does: the card contract selects a card by an opaque
-#       server-issued token and carries its one card-number criterion in a
-#       request body, and that decision is recorded at item 8 of
-#       services/card-service/src/main/resources/openapi/card-api.yaml with this
-#       destination named as the reason for it. A route that reintroduced a card
-#       number into a path or a query would falsify this premise and invalidate
-#       the suppression, so the two must be reviewed together.
+#       lines carry. A delivered line records the request line, query string
+#       included, so the premise fails the moment any published route puts a card
+#       number in a target. None does, and the two places that would are the ones
+#       to check: the card contract addresses every single-card operation by an
+#       opaque server-issued selector, declared at
+#       components/parameters/CardSelectorPath of
+#       services/card-service/src/main/resources/openapi/card-api.yaml, and it
+#       carries its one card-number criterion in the request BODY of
+#       POST /api/v1/cards/lookup rather than in a query parameter. Item 8 of that
+#       file's header records the decision and names this destination as the
+#       reason for it, and
+#       CardApiContractTest.noOperationAcceptsACardNumberInARequestTarget asserts
+#       it against the published document so the premise is checked by a build
+#       rather than by a reading.
+# WHY : Refactoring Rationale: this premise was previously asserted here while the
+#       card contract still put a sixteen-digit number in three path parameters
+#       and one query parameter, so what is written above is a correction and not
+#       a restatement. The contract defended that arrangement on the ground that
+#       the application masks a card number before writing it to an operational
+#       record -- which it does, and which is irrelevant to this bucket: the load
+#       balancer composes and delivers these lines itself, before any application
+#       code sees the request, so no masker the services install can reach them.
+#       That asymmetry is exactly why the route contract and this suppression have
+#       to be reviewed together, and why a route reintroducing a card number into
+#       a path or a query would invalidate the suppression rather than merely
+#       widen what gets masked.
 # WHY : Trade-offs: the compensating controls carry the weight that a
 #       customer-managed key would otherwise carry, and they are named so a
 #       reviewer can check each one rather than take the set on trust: store-side
@@ -340,7 +356,7 @@ data "aws_iam_policy_document" "access_logs" {
 #       independent audit trail of key use that a customer-managed key provides;
 #       nothing else about the objects' protection changes.
 resource "aws_s3_bucket" "access_logs" {
-  #checkov:skip=CKV_AWS_145:Elastic Load Balancing supports store-managed keys as the ONLY server-side encryption option for an access-log destination, so a customer-managed key is not an available alternative here -- configuring one makes the load balancer reject the bucket and deliver no logs. The delivered lines hold no application record: no published route carries a card number in a request target, which card-api.yaml item 8 records with this destination as its reason. Store-side encryption at rest plus public-access blocking, enforced bucket ownership, versioning and the exact-source bucket policy are the compensating controls; see the rationale above this resource.
+  #checkov:skip=CKV_AWS_145:Elastic Load Balancing supports store-managed keys as the ONLY server-side encryption option for an access-log destination, so a customer-managed key is not an available alternative here -- configuring one makes the load balancer reject the bucket and deliver no logs. The delivered lines hold no application record: no published route carries a card number in a request target, because card-api.yaml addresses every single-card operation by an opaque selector (components/parameters/CardSelectorPath) and takes its one card-number criterion in the body of POST /api/v1/cards/lookup; item 8 of that file records the decision with this destination as its reason, and CardApiContractTest.noOperationAcceptsACardNumberInARequestTarget asserts it. Store-side encryption at rest plus public-access blocking, enforced bucket ownership, versioning and the exact-source bucket policy are the compensating controls; see the rationale above this resource.
   count = local.create_access_logs_bucket ? 1 : 0
 
   bucket = local.access_logs_bucket_name
@@ -550,16 +566,38 @@ resource "aws_lb" "this" {
   #       logging was mandatory but no IaC resource was responsible for the
   #       bucket or the principal grant ALB validates while enabling it.
   #       Trade-offs: an access-log record carries the full request line, so any
-  #       value a caller places in a URI PATH is persisted here verbatim. That is
-  #       the residue this module accepts in exchange for having any record of
-  #       who reached which service, and it is bounded in three ways rather than
-  #       left implicit. First, the field format is fixed by the service and this
-  #       module cannot filter or redact a field, so the bound has to be applied
-  #       upstream: the migrated services carry no unmasked primary account
-  #       number into a path they log, which is enforced in
-  #       services/common-lib/src/main/java/com/carddemo/common/error/GlobalExceptionHandler.java
-  #       where the request path is narrowed before it reaches either a log line
-  #       or a response body. Second, the destination is not a general log
+  #       value a caller places in a URI PATH or QUERY STRING is persisted here
+  #       verbatim. That is the residue this module accepts in exchange for having
+  #       any record of who reached which service, and it is bounded in three ways
+  #       rather than left implicit. First -- and this is the bound that matters --
+  #       NO PUBLISHED CONTRACT PUTS A PRIMARY ACCOUNT NUMBER IN A REQUEST LINE.
+  #       card-service is the contract that could: its single-card operations are
+  #       keyed by an opaque sealed selector, it declares no card-number query
+  #       parameter, and the one operation that accepts a card number accepts it in
+  #       a request BODY, which this log does not record. That property is asserted
+  #       by that service's own contract test, which fails the build if any
+  #       published path template or declared query parameter carries a card
+  #       number.
+  #       Refactoring Rationale: this note previously placed the bound on
+  #       services/common-lib/src/main/java/com/carddemo/common/error/GlobalExceptionHandler.java,
+  #       saying the request path is narrowed there "before it reaches either a log
+  #       line or a response body". That masking is real and is retained, but it
+  #       CANNOT bound this record and the claim was wrong on a matter of fact:
+  #       ELB composes and delivers this log itself, from the request line, inside
+  #       the process terminating the connection and before any application code
+  #       runs. A workload behind the load balancer can neither filter nor unwrite
+  #       it. The masker bounds what the SERVICE writes -- its own log lines and its
+  #       own error bodies -- which is worth having and is a different exposure. The
+  #       bound on this log therefore has to be that the value never enters the
+  #       request line, which is a contract property and not a logging one.
+  #       Trade-offs: OTHER selectors are still retained here in the clear -- an
+  #       account identifier, a customer identifier, a transaction identifier, a
+  #       user identifier. That is accepted and named rather than claimed away: none
+  #       of them is cardholder data, each is an internal identifier that confers no
+  #       access on its own, and the destination bounds who can read them. What is
+  #       refused is the one value whose retention would be a durable copy of
+  #       cardholder data.
+  #       Second, the destination is not a general log
   #       bucket: it is created above with public access blocked, bucket-owner
   #       enforced ownership, versioning, an exact-source delivery policy and no
   #       read grant to any service task, so the records are reachable only by an

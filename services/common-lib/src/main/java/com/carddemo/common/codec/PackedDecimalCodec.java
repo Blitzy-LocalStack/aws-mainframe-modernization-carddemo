@@ -8,45 +8,33 @@ import com.carddemo.common.money.Money;
  * Decodes and encodes the two computational numeric regimes of the reference records: packed decimal,
  * declared {@code COMP-3}, and binary, declared {@code COMP} or its synonym {@code BINARY}.
  *
- * <p>Both regimes are handled here because both take their physical width from the same rule -- the
- * declared usage, not the picture -- and because both must land on the identical exact fixed-point
- * representation. Zoned decimal, the third numeric regime and the one every base master uses, is
- * owned by the sibling {@code ZonedDecimalCodec} and is not handled here.</p>
+ * <p>Both regimes are handled here because both take their physical width from the declared usage
+ * rather than from the picture, and because both must land on the identical exact fixed-point
+ * representation. Zoned decimal, the third regime and the one every base master uses, is owned by the
+ * sibling {@code ZonedDecimalCodec}. The field-by-field width and column derivations summarised below
+ * are held in full in {@code docs/architecture/data-model-and-schema-mapping.md}.</p>
  *
  * <h2>Why a second numeric codec exists at all</h2>
  *
- * <p>Assumptions: this is established mechanically rather than assumed. Searching all eleven
- * base-master copybooks -- {@code CSUSR01Y}, {@code CVACT01Y}, {@code CVACT02Y}, {@code CVACT03Y},
- * {@code CVCUS01Y}, {@code CVTRA01Y}, {@code CVTRA02Y}, {@code CVTRA03Y}, {@code CVTRA04Y},
- * {@code CVTRA05Y} and {@code CVTRA06Y} -- for {@code COMP}, {@code COMP-3} or {@code OCCURS}
- * returns <b>zero</b> matches in every one of them. Every base-master money field is therefore zoned
- * decimal with a sign overpunch, exemplified by
- * {@code 05  ACCT-CURR-BAL                     PIC S9(10)V99.} at line 7 of
- * {@code app/cpy/CVACT01Y.cpy}. Nothing this class decodes appears in those records, and nothing
- * those records contain is decoded here. Two disjoint regimes, therefore two codecs.</p>
- *
- * <p>Packed decimal reaches the migration through exactly three record layouts:</p>
- *
- * <ul>
- *   <li>{@code app/cpy/CVEXPORT.cpy}, the 500-byte multi-record export layout, and the only copybook
- *       in {@code app/cpy} that declares a computational usage at all.</li>
- *   <li>{@code app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy}, the authorization summary segment,
- *       whose thirteen declarations at lines 19 to 31 sum to exactly 100 bytes.</li>
- *   <li>{@code app/app-authorization-ims-db2-mq/cpy/CIPAUDTY.cpy}, the authorization detail segment,
- *       whose 27 named elementary fields plus a 17-byte trailing filler sum to exactly 200 bytes.</li>
- * </ul>
+ * <p>Assumptions: the two regimes are disjoint, established mechanically rather than assumed --
+ * searching all eleven base-master copybooks for {@code COMP}, {@code COMP-3} or {@code OCCURS}
+ * returns zero matches in every one of them, so every base-master money field is zoned decimal with a
+ * sign overpunch, exemplified by {@code 05 ACCT-CURR-BAL PIC S9(10)V99.} at line 7 of
+ * {@code app/cpy/CVACT01Y.cpy}. Packed decimal reaches the migration through exactly three layouts:
+ * {@code app/cpy/CVEXPORT.cpy}, the 500-byte export layout and the only copybook in {@code app/cpy}
+ * declaring a computational usage at all; and the two authorization segments
+ * {@code app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy} and {@code CIPAUDTY.cpy}, of 100 and 200
+ * bytes.</p>
  *
  * <p>Assumptions: the authorization bounded context is the only place packed decimal reaches
- * <em>persisted</em> target data. The export record is a transport record -- it exists for the
- * export and import round-trip -- so its packed bytes are decoded at the loader edge and the packed
- * form is never stored. That bounds the blast radius of an error in this class, and it is the reason
- * the two authorization segments get the closer scrutiny of the three.</p>
+ * <em>persisted</em> target data. The export record is a transport record, so its packed bytes are
+ * decoded at the loader edge and the packed form is never stored -- which bounds the blast radius of an
+ * error here and is why the two authorization segments get the closer scrutiny of the three.</p>
  *
  * <h2>USAGE determines the physical width; PICTURE never does</h2>
  *
- * <p>Assumptions: {@code app/cpy/CVEXPORT.cpy} settles this in one record. Its account redefinition
- * declares three fields of the <em>same</em> picture, {@code PIC S9(10)V99}, at three different
- * physical widths, because each carries a different usage:</p>
+ * <p>{@code app/cpy/CVEXPORT.cpy} settles this in one record, declaring three fields of the
+ * <em>same</em> picture at three different physical widths because each carries a different usage:</p>
  *
  * <pre>
  * line  field                          declaration                    bytes
@@ -55,94 +43,46 @@ import com.carddemo.common.money.Money;
  *   57  EXP-ACCT-CURR-CYC-DEBIT        PIC S9(10)V99 COMP                 8
  * </pre>
  *
- * <p>The consequence is the central contract of this class, and it is stated plainly because getting
- * it wrong misaligns every field after it: <b>this codec must be told the usage. It can never infer a
- * width from the picture.</b> A caller supplies the digit geometry and selects the packed or the
- * binary entry point accordingly; the usage is a static property of the declaration, so the choice is
- * always knowable before a single byte is read.</p>
+ * <p>Assumptions: the consequence is the central contract of this class, stated plainly because
+ * getting it wrong misaligns every field after it -- <b>this codec must be told the usage and can never
+ * infer a width from the picture.</b> A caller supplies the digit geometry and selects the packed or
+ * the binary entry point; the usage is a static property of the declaration, so the choice is always
+ * knowable before a byte is read. Packed width is the ceiling of one more than the digit count halved,
+ * the extra position being the sign nibble ({@link #packedWidth(int, int)}); binary width is two bytes
+ * up to four digits, four up to nine and eight beyond, big-endian two's complement
+ * ({@link #binaryWidth(int, int)}); zoned width is one byte per digit position and is not this
+ * class's.</p>
  *
- * <p>The three width rules, one per regime, are these. Only the first two belong to this class; the
- * third is stated so the contrast above is checkable rather than asserted.</p>
+ * <p>Assumptions: {@code PIC S9(10)V99 COMP-3} occupies <b>seven</b> bytes, not six -- twelve digit
+ * positions plus one sign nibble is thirteen nibbles, whose ceiling halved is seven -- and any
+ * statement of six is defective and must not be propagated. The figure is confirmed three independent
+ * ways because this arithmetic looks plausible when it is wrong: the five 460-byte redefinitions of
+ * {@code CVEXPORT.cpy} all close exactly only at seven; {@code CIPAUDTY.cpy} reaches its declared 200
+ * bytes only when its two such amounts at lines 34 and 35 are seven each; and the reference compiler
+ * reports seven, laying the value out as twelve digit nibbles preceded by one zero pad nibble and
+ * followed by the sign nibble. {@code app/app-authorization-ims-db2-mq/ddl/AUTHFRDS.ddl} corroborates
+ * from the other side with {@code DECIMAL(12,2)} at lines 12 and 13, and the companion
+ * {@code XAUTHFRD.ddl} indexes {@code (CARD_NUM ASC, AUTH_TS DESC)} -- whose descending component is
+ * why a decoded key component has to preserve order exactly rather than approximately.</p>
  *
- * <ul>
- *   <li><b>Packed</b>: the ceiling of one more than the digit count, halved. The extra position is
- *       the sign nibble. See {@link #packedWidth(int, int)}.</li>
- *   <li><b>Binary</b>: two bytes up to four digits, four bytes up to nine, eight bytes beyond, held
- *       big-endian in two's complement. See {@link #binaryWidth(int, int)}.</li>
- *   <li><b>Zoned</b>: one byte per digit position, so {@code S9(09)V99} is eleven bytes and
- *       {@code S9(10)V99} is twelve. Not this class.</li>
- * </ul>
+ * <h2>The renderings this class owns, and those it does not</h2>
  *
- * <h2>Correction C-WIDTH: {@code PIC S9(10)V99 COMP-3} occupies seven bytes, not six</h2>
- *
- * <p>Assumptions: twelve digit positions plus one sign nibble is thirteen nibbles, and thirteen
- * nibbles occupy the ceiling of thirteen halved, which is seven. Any statement that this picture is
- * six bytes wide is defective and must not be propagated. The figure is confirmed three independent
- * ways, and all three are recorded because the arithmetic is the kind that looks plausible when it is
- * wrong:</p>
- *
- * <ul>
- *   <li><b>Arithmetically.</b> {@code app/cpy/CVEXPORT.cpy} redefines one 460-byte area five times,
- *       once per record type, and all five redefinitions close on exactly 460 bytes only when this
- *       width is seven. The account redefinition at lines 47 to 60 is the tightest of the five: it
- *       carries two such packed amounts, and at six bytes each it would sum to 458 and leave the
- *       declared area unreachable.</li>
- *   <li><b>By contradiction.</b>
- *       {@code app/app-authorization-ims-db2-mq/cpy/CIPAUDTY.cpy} sums to exactly 200 bytes only when
- *       its two {@code PIC S9(10)V99 COMP-3} amounts, at lines 34 and 35, are seven bytes each. At
- *       six they sum to 198, and the declared segment length is unreachable.</li>
- *   <li><b>Empirically.</b> The reference compiler the parity oracle builds with reports a length of
- *       seven for that picture, and lays the value out as twelve digit nibbles preceded by one zero
- *       pad nibble and followed by the sign nibble.</li>
- * </ul>
- *
- * <p>Assumptions: the target schema corroborates the same geometry from the other side.
- * {@code app/app-authorization-ims-db2-mq/ddl/AUTHFRDS.ddl} declares {@code DECIMAL(12,2)} at its
- * lines 12 and 13 for the two amounts that {@code CIPAUDTY.cpy} declares
- * {@code PIC S9(10)V99 COMP-3}, and its primary key on {@code (CARD_NUM, AUTH_TS)} closes the table
- * at line 28. Twelve digits at a scale of two is ten integer places and two decimal places, which is
- * the baseline's own confirmation of how the twelve digit positions divide. The companion
- * {@code app/app-authorization-ims-db2-mq/ddl/XAUTHFRD.ddl} is a four-line unique index on
- * {@code (CARD_NUM ASC, AUTH_TS DESC) COPY YES}, and its descending component is why a decoded key
- * component has to preserve order exactly and not merely approximately.</p>
- *
- * <h2>The six money renderings, and which two of them are this class's</h2>
- *
- * <p>Money reaches the migration in six distinct physical forms. The boundary is enumerated here so
- * that nobody extends this class into a rendering it does not own:</p>
- *
- * <ol>
- *   <li>Zoned overpunch, eleven bytes for {@code S9(09)V99} and twelve for {@code S9(10)V99}, the
- *       regime of every base master. Owned by {@code ZonedDecimalCodec}.</li>
- *   <li><b>Packed {@code COMP-3}</b>, seven bytes for {@code S9(10)V99}, six for {@code S9(09)V99},
- *       five for {@code S9(09)} and three for {@code S9(05)}. <b>Owned here.</b></li>
- *   <li><b>Binary {@code COMP} or {@code BINARY}</b>, eight bytes for {@code S9(10)V99} and two for
- *       {@code S9(04)}. <b>Owned here.</b></li>
- *   <li>Edited display text, {@code PIC +9(10).99}, fourteen characters, at line 24 of
- *       {@code app/app-authorization-ims-db2-mq/cpy/CCPAURLY.cpy}. The sign and the point are real
- *       bytes there and the implied point of the pictures above occupies none. Owned by
- *       {@code CsvAuthCodec}.</li>
- *   <li>The report edit mask {@code PIC -ZZZ,ZZZ,ZZZ.ZZ}, fifteen characters, at line 30 of
- *       {@code app/cpy/CVTRA07Y.cpy}. Not this class.</li>
- *   <li>The report edit mask {@code PIC +ZZZ,ZZZ,ZZZ.ZZ}, fifteen characters, at lines 54, 60 and 66
- *       of the same copybook. Not this class.</li>
- * </ol>
- *
- * <h2>What this class does not decide: field naming</h2>
+ * <p>Assumptions: money reaches the migration in six distinct physical forms and this class owns two
+ * of them, so the boundary is stated to stop the class being extended into a rendering it does not
+ * own. <b>Owned here:</b> packed {@code COMP-3}, and binary {@code COMP} or {@code BINARY}. <b>Not
+ * owned:</b> zoned overpunch, which is {@code ZonedDecimalCodec}'s; the edited display text
+ * {@code PIC +9(10).99} at line 24 of
+ * {@code app/app-authorization-ims-db2-mq/cpy/CCPAURLY.cpy}, where the sign and the point are real
+ * bytes and the implied point of the pictures above occupies none, which is
+ * {@code CsvAuthCodec}'s; and the two report edit masks of {@code app/cpy/CVTRA07Y.cpy}, which belong
+ * to the reporting context.</p>
  *
  * <p>Assumptions: this codec is handed a digit geometry and a byte span, and a field name only ever
- * reaches it as diagnostic text a caller supplied. It therefore has no opinion on what a field is
- * called in the target, and it performs no renaming of any kind. That boundary is worth stating
- * because one of the three field names the target deliberately spells differently from the baseline
- * lands in a segment this class decodes: {@code PA-MERCHANT-CATAGORY-CODE} at line 36 of
- * {@code app/app-authorization-ims-db2-mq/cpy/CIPAUDTY.cpy}, and the same misspelling carried with an
- * infix at line 28 of {@code app/app-authorization-ims-db2-mq/cpy/CCPAURQY.cpy} as
- * {@code PA-RQ-MERCHANT-CATAGORY-CODE}, both of which become {@code merchant_category_code} in the
- * target. Both baseline spellings are recorded here so the lineage is unambiguous from this file, but
- * neither the rename nor any other appears in this class: it happens in the mapping layer that owns
- * the anti-corruption boundary, and this package's own descriptor holds the full register of the three
- * renames. Note also that the field in question is a character field, not a computational one, so it
- * is not even a field this codec reads.</p>
+ * reaches it as diagnostic text a caller supplied, so it performs no renaming of any kind. The
+ * boundary is worth stating because one of the three names the target deliberately spells differently
+ * lands in a segment this class decodes, {@code PA-MERCHANT-CATAGORY-CODE} at line 36 of
+ * {@code CIPAUDTY.cpy}; the rename happens in the mapping layer that owns the anti-corruption
+ * boundary, and the field is in any case a character field and not one this codec reads.</p>
  *
  * <h2>The round-trip law, and its one exception</h2>
  *
@@ -151,105 +91,88 @@ import com.carddemo.common.money.Money;
  * byte for byte after timestamp normalisation, so a re-encoded field differing in one nibble is a
  * failed comparison rather than a cosmetic difference.</p>
  *
- * <p>Assumptions: there is exactly one documented exception, and it is a property of the target
+ * <p>Assumptions: there is exactly one documented exception and it is a property of the target
  * language rather than a choice made here. The decimal type this class decodes into has no negative
- * zero, so a packed zero carrying the negative sign nibble decodes to zero and re-encodes carrying
- * the positive one. The value is preserved; one nibble of the encoding is normalised. The reference
+ * zero, so a packed zero carrying the negative sign nibble decodes to zero and re-encodes carrying the
+ * positive one -- the value is preserved and one nibble of the encoding is normalised. The reference
  * codec at {@code tests/helpers/record_codec.py} preserves negative zero in its own zoned decoder,
- * which is why the difference is recorded here rather than left to be discovered by a failing
- * comparison.</p>
+ * which is why the difference is recorded here rather than left to a failing comparison.</p>
  *
  * <h2>The fixed-point contract</h2>
  *
- * <p>Assumptions: transformation rule T3 of the migration plan pins one representation per layer and
- * admits no exception -- {@code NUMERIC(p,2)} in the database, {@link BigDecimal} carried at scale 2
- * in Java, {@code Decimal} in the extract-transform-load code, and a JSON <em>string</em> on the
- * wire. Money is never carried through IEEE-754 binary arithmetic anywhere in this class: not through
- * either of the language's two binary primitive types, not through either of their wrapper types, and
- * not through a bare JSON number either. The prohibition is asserted by {@code LayeringRulesTest} in
- * this module's test tree, so a breach fails a build rather than a review.</p>
+ * <p>Assumptions: transformation rule T3 pins one representation per layer and admits no exception --
+ * {@code NUMERIC(p,2)} in the database, {@link BigDecimal} carried at scale 2 in Java, {@code Decimal}
+ * in the extract-transform-load code, and a JSON <em>string</em> on the wire. Money is never carried
+ * through IEEE-754 binary arithmetic anywhere in this class: not through either of the language's two
+ * binary primitive types, not through either of their wrapper types, and not as a bare JSON number.
+ * {@code LayeringRulesTest} asserts the prohibition, so a breach fails a build rather than a
+ * review.</p>
  *
- * <p>Trade-offs: those forbidden type names are described rather than spelled anywhere in this file.
- * Spelling them would make this file match a search for the very tokens the money path must not
- * contain, and that search is one of the checks this tree is audited with, so a literal mention would
- * produce a hit that has to be explained away on every audit. The description is unambiguous, since
- * the language has exactly two IEEE-754 binary primitive types and one wrapper type for each. The
- * convention is not invented here: the sibling {@code Money} class and this package's own descriptor
- * state the same prohibition the same way, so the three are consistent by construction.</p>
+ * <p>Trade-offs: those forbidden type names are described rather than spelled anywhere in this file,
+ * because spelling them would make it match the audit search for the very tokens the money path must
+ * not contain and produce a hit to explain away on every audit. The description is unambiguous, the
+ * language having exactly two IEEE-754 binary primitive types and one wrapper each.</p>
  *
- * <p>Every decode returns a value at a scale of exactly the declared decimal digit count, and no
- * decode normalises or strips that scale. Every encode is lossless or raises. Rounding is never
- * performed here; it is delegated to {@link Money}, whose scale and mode are the migration's one
- * rounding contract, and it happens at the point a business rule decides rounding is appropriate.</p>
+ * <p>Every decode returns a value at a scale of exactly the declared decimal digit count and no decode
+ * normalises or strips that scale; every encode is lossless or raises. Rounding is never performed
+ * here -- it is delegated to {@link Money}, whose scale and mode are the migration's one rounding
+ * contract, at the point a business rule decides rounding is appropriate.</p>
  *
  * <h2>Bytes, never characters</h2>
  *
- * <p>Assumptions: every entry point on this class takes or returns bytes, and none takes or returns
- * text. Packed decimal is binary: two decimal digits share a byte and the sign occupies the low
- * nibble of the last byte, so a packed field contains byte values that are not characters in any
- * encoding. The invariant is therefore stated as a prohibition rather than as a prediction: packed
- * bytes, sign bytes and padding low values are never routed through a whole-record text decode. What
- * such a decode does to them is a property of the charset, not a single behaviour that can be relied
- * on -- a single-byte charset maps all 256 values to some character and so mistranslates silently
- * with no replacement at all, while a multi-byte charset substitutes replacement characters whose
- * count need not equal the number of bytes consumed, which moves every following field. Both
- * outcomes are corruption and only one of them leaves the offsets intact, so neither the amount nor
- * the record geometry may be assumed to survive. The parity oracle takes the same position from the
- * other direction: it treats the mainframe-character-set datasets as opaque binary and never
- * transcodes them, and its own helper comments record that routing those bytes through a text write
- * mangles them. Binary {@code COMP} fields are the same hazard for the same reason.</p>
+ * <p>Assumptions: every entry point takes or returns bytes and none takes or returns text, because
+ * packed decimal is binary -- two decimal digits share a byte and the sign occupies the low nibble of
+ * the last byte, so a packed field contains byte values that are not characters in any encoding. The
+ * invariant is therefore a prohibition rather than a prediction: packed bytes, sign bytes and padding
+ * low values are never routed through a whole-record text decode. What such a decode does to them is a
+ * property of the charset rather than one behaviour that can be relied on -- a single-byte charset maps
+ * all 256 values to some character and mistranslates silently with no replacement at all, while a
+ * multi-byte charset substitutes replacement characters whose count need not equal the bytes consumed,
+ * which moves every following field. Both are corruption and only one leaves the offsets intact. The
+ * parity oracle takes the same position from the other direction, treating the
+ * mainframe-character-set datasets as opaque binary and never transcoding them. Binary {@code COMP}
+ * fields are the same hazard for the same reason.</p>
  */
 public final class PackedDecimalCodec {
 
-    // WHY : Assumptions: eighteen digit positions is the ceiling the language guarantees for a
-    //       computational item, and it is also the widest declaration anywhere in the corpus, since
-    //       the widest packed field is the twelve-digit PIC S9(10)V99 COMP-3 of CIPAUDTY.cpy lines 34
-    //       and 35. Rejecting beyond eighteen keeps every decoded value inside the range the eight-byte
-    //       binary form can hold, which is what lets the binary path read a span as one whole number
-    //       without an intermediate that could overflow. The sibling layout descriptor pins the same
-    //       ceiling, so a field this codec accepts is one that descriptor accepts too.
+    // Assumptions: eighteen is the ceiling the language guarantees for a computational item and is
+    //     also the widest declaration in the corpus. Rejecting beyond it keeps every decoded value
+    //     inside the range the eight-byte binary form holds, which is what lets the binary path read
+    //     a span as one whole number without an intermediate that could overflow.
     private static final int MAX_DIGITS = 18;
 
-    // WHY : Assumptions: these two thresholds divide the binary width ladder into its three rungs, and
-    //       they are named rather than written inline because the ladder is a property of the usage and
-    //       not of any one field. Every rung was confirmed against the reference compiler: PIC S9(04)
-    //       COMP reports two bytes, PIC 9(09) COMP reports four, and PIC 9(11) COMP and PIC S9(10)V99
-    //       COMP both report eight. app/cpy/CVEXPORT.cpy declares seven such fields, at its lines 16,
-    //       25, 57, 72, 87, 95 and 96, and between them they exercise all three rungs: line 96 is a
-    //       three-digit field on the two-byte rung, line 16 a nine-digit field on the four-byte rung,
-    //       and line 57 a twelve-digit field on the eight-byte rung.
+    // Assumptions: the ladder is a property of the usage rather than of any one field, so its two
+    //     thresholds are named rather than written inline. Every rung was confirmed against the
+    //     reference compiler, and the seven binary fields of app/cpy/CVEXPORT.cpy (lines 16, 25, 57,
+    //     72, 87, 95 and 96) exercise all three.
     private static final int BINARY_HALFWORD_MAX_DIGITS = 4;
     private static final int BINARY_FULLWORD_MAX_DIGITS = 9;
 
-    // WHY : Trade-offs: the widest rung is named for its role rather than for the architecture term that
-    //       normally denotes an eight-byte word. That term contains, as a substring, one of the numeric
-    //       type names the money path is audited for the absence of, so using it would put a hit in this
-    //       file that has to be explained away on every audit. The cost is a name a mainframe reader
-    //       would not have reached for first; the benefit is an audit that stays clean, and the two
-    //       narrower rungs keep their conventional names because those carry no such substring.
+    // Trade-offs: the widest rung is named for its role, not for the architecture term for an
+    //     eight-byte word, because that term contains as a substring one of the numeric type names
+    //     the money path is audited for the absence of. The cost is a name a mainframe reader would
+    //     not reach for first; the two narrower rungs keep conventional names, carrying no such
+    //     substring.
     private static final int BINARY_HALFWORD_BYTES = 2;
     private static final int BINARY_FULLWORD_BYTES = 4;
     private static final int BINARY_WIDEST_BYTES = 8;
 
-    // WHY : Assumptions: the sign occupies the low nibble of the final byte and takes one of exactly
-    //       three values in this corpus. All three were read off the reference compiler rather than
-    //       taken from documentation: a signed negative value lays down 0xD, a signed non-negative
-    //       value 0xC, and a field declared without the leading S -- PIC 9(03) COMP-3 -- lays down
-    //       0xF. That third case is why an unsigned packed field is a real shape here and not a
-    //       theoretical one.
+    // Assumptions: all three values were read off the reference compiler rather than taken from
+    //     documentation -- signed negative lays down 0xD, signed non-negative 0xC, and a field
+    //     declared without the leading S lays down 0xF. That third case is why an unsigned packed
+    //     field is a real shape here and not a theoretical one.
     private static final int SIGN_SIGNED_POSITIVE = 0x0C;
     private static final int SIGN_SIGNED_NEGATIVE = 0x0D;
     private static final int SIGN_UNSIGNED = 0x0F;
 
-    // WHY : Assumptions: 0xA, 0xB and 0xE are the alternate sign nibbles some encoders emit, and this
-    //       codec rejects all three. They are named as a threshold rather than as three values because
-    //       the test that matters is whether the nibble is a digit or a sign: anything below 0xA in the
-    //       sign position is a digit, which means the field is zoned rather than packed or the offset
-    //       is off by a nibble.
+    // Assumptions: the alternate sign nibbles 0xA, 0xB and 0xE are all rejected, and the threshold
+    //     is named rather than the three values because the test that matters is digit or sign --
+    //     anything below 0xA in the sign position means the field is zoned rather than packed, or the
+    //     offset is off by a nibble.
     private static final int LOWEST_SIGN_NIBBLE = 0x0A;
 
-    // WHY : Assumptions: the hexadecimal digits are held as a constant and indexed, so a nibble reaches a
-    //       diagnostic without passing through a locale-sensitive formatter. See nibbleDetail below.
+    // Assumptions: the hexadecimal digits are held as a constant and indexed, so a nibble reaches a
+    //     diagnostic without passing through a locale-sensitive formatter. See nibbleDetail below.
     private static final String HEX_DIGITS = "0123456789ABCDEF";
 
     private static final int NIBBLE_MASK = 0x0F;
@@ -262,13 +185,10 @@ public final class PackedDecimalCodec {
     /**
      * Prevents instantiation of this codec.
      *
-     * <p>Trade-offs: a static entry-point class was chosen over an instantiable one. Every operation
-     * here is a pure function of a byte span and a digit geometry, so an instance would carry no state
-     * worth holding and would only oblige each caller to obtain one. The compromise accepted is that
-     * an instance cannot be substituted in a test; it is accepted because there is nothing to
-     * substitute -- the functions have no collaborators and no configuration. The sibling layout
-     * descriptor and the money type in this module are shaped the same way, so the module reads
-     * consistently.</p>
+     * <p>Trade-offs: a static entry-point class was chosen over an instantiable one, because every
+     * operation here is a pure function of a byte span and a digit geometry. The cost is that an
+     * instance cannot be substituted in a test, accepted because there is nothing to substitute --
+     * the functions have no collaborators and no configuration.</p>
      *
      * @throws AssertionError always, because this constructor exists only to deny instantiation and
      *     raising is what makes a reflective call fail rather than succeed silently
@@ -280,12 +200,10 @@ public final class PackedDecimalCodec {
     /**
      * Returns the number of bytes a packed-decimal field of the given digit geometry occupies.
      *
-     * <p>Assumptions: the formula is the ceiling of one more than the digit count, halved, where the
-     * one extra position is the sign nibble that every packed field carries whether or not its picture
-     * declares a sign. The ladder it produces, every rung of which was confirmed against the reference
-     * compiler, is three digits to two bytes, five to three, nine to five, eleven to six and twelve to
-     * seven. The last rung is correction C-WIDTH, recorded in this class's own documentation: twelve
-     * digits is seven bytes and never six.</p>
+     * <p>Assumptions: the extra position the formula adds is the sign nibble, which every packed field
+     * carries whether or not its picture declares a sign. Every rung of the resulting ladder was
+     * confirmed against the reference compiler; its last rung is correction C-WIDTH, so twelve digits
+     * is seven bytes and never six.</p>
      *
      * @param intDigits the number of integer digit positions, the {@code a} of {@code S9(a)V9(d)};
      *     must not be negative
@@ -313,13 +231,10 @@ public final class PackedDecimalCodec {
      * @return the physical byte width of the field, always at least one
      */
     private static int packedWidthOf(int digits) {
-        // WHY : Assumptions: adding two before halving is integer arithmetic for the ceiling of one
-        //       more than the digit count halved, and it is written this way rather than with the
-        //       library ceiling function because that function operates on the binary approximate
-        //       types this whole class is barred from touching. Adding one and halving instead would
-        //       floor, and would return six for twelve digits, which is precisely the defective figure
-        //       correction C-WIDTH refutes. The sibling layout descriptor derives the same width with
-        //       the same integer form, so the two cannot drift arithmetically.
+        // Assumptions: adding two before halving is integer arithmetic for the ceiling, written this
+        //     way rather than with the library ceiling function because that operates on the binary
+        //     approximate types this class is barred from touching. Adding one instead would floor,
+        //     returning six for twelve digits -- the defective figure correction C-WIDTH refutes.
         return (digits + NIBBLES_PER_BYTE) / NIBBLES_PER_BYTE;
     }
 
@@ -331,11 +246,6 @@ public final class PackedDecimalCodec {
      * mis-size every field declared with the other. This method is the single width rule for both
      * spellings, which is why its name says what the storage is rather than repeating either
      * spelling.</p>
-     *
-     * <p>Assumptions: the width is a power-of-two byte count driven by the digit count rather than one
-     * byte per digit, so it does not follow the packed formula and needs a rule of its own. Two bytes
-     * hold up to four digits, four bytes up to nine, and eight bytes the remainder up to the eighteen
-     * this codec admits.</p>
      *
      * @param intDigits the number of integer digit positions; must not be negative
      * @param decDigits the number of decimal digit positions; must not be negative
@@ -388,24 +298,17 @@ public final class PackedDecimalCodec {
         int width = packedWidthOf(digits);
         requireSpan(source, offset, width, fieldName, "packed", sensitive);
 
-        // WHY : Assumptions: the pad count is derived from the geometry rather than from the parity of
-        //       the digit count, because the two are easy to state the wrong way round and the
-        //       arithmetic is not. A field occupies width times two nibbles and uses digits plus one of
-        //       them, so the surplus is whatever is left over, and it is at most one. Deriving it makes
-        //       this correct for either parity; asserting a parity would not. For the record the
-        //       surplus exists when the digit count is EVEN: twelve digits occupy seven bytes, that is
-        //       fourteen nibbles for thirteen used, so one pads; whereas eleven digits occupy six
-        //       bytes, that is twelve nibbles for twelve used, so none pads. The reference compiler
-        //       lays PIC S9(05) COMP-3 holding 12345 down as the nibbles 1 2 3 4 5 C, whose leading
-        //       nibble is a digit and not a pad, which settles the odd case by observation.
+        // Assumptions: the pad count is derived from the geometry rather than asserted from the
+        //     parity of the digit count, because the two are easy to state the wrong way round and
+        //     the arithmetic is not -- a field occupies width times two nibbles and uses digits plus
+        //     one, so the surplus is what is left over and is at most one. Deriving it is correct for
+        //     either parity; the surplus in fact exists when the digit count is even.
         int padNibbles = width * NIBBLES_PER_BYTE - (digits + 1);
 
-        // WHY : Assumptions: the pad nibble is validated rather than skipped, and it sits at the FRONT
-        //       of the field rather than the back. Checking that it is zero is the cheapest available
-        //       detector of a mis-aligned offset: a field read one nibble early presents a real digit
-        //       where the pad belongs, and accepting it would shift every digit one place and yield a
-        //       value ten times too large -- a number that is plausible, that raises nothing, and that
-        //       the golden comparison would only catch after the fact.
+        // Assumptions: the pad nibble sits at the FRONT of the field and is validated rather than
+        //     skipped, because checking it is zero is the cheapest detector of a mis-aligned offset:
+        //     a field read one nibble early presents a real digit where the pad belongs, yielding a
+        //     plausible value ten times too large that raises nothing.
         if (padNibbles > 0) {
             int pad = nibbleAt(source, offset, 0);
             if (pad != 0) {
@@ -420,11 +323,10 @@ public final class PackedDecimalCodec {
         for (int nibbleIndex = padNibbles; nibbleIndex < padNibbles + digits; nibbleIndex++) {
             int nibble = nibbleAt(source, offset, nibbleIndex);
 
-            // WHY : Assumptions: a nibble above nine in a digit position is not a tolerable variant;
-            //       it is proof that the read is wrong. Either the offset is misaligned, or the field is
-            //       not packed at all, or a sign nibble has been reached early -- and every one of those
-            //       is a defect a caller needs to be told about. Masking the nibble down into range instead
-            //       would manufacture a digit that was never written.
+            // Assumptions: a nibble above nine in a digit position proves the read is wrong -- a
+            //     misaligned offset, a field that is not packed, or a sign nibble reached early --
+            //     so it is refused rather than masked down, which would manufacture a digit that was
+            //     never written.
             if (nibble > MAX_DIGIT_NIBBLE) {
                 throw new PackedDecimalException(describe(fieldName, offset, width, "packed", sensitive)
                         + " holds a non-digit nibble at digit position "
@@ -464,25 +366,12 @@ public final class PackedDecimalCodec {
     /**
      * Encodes a value as a packed-decimal field, identifying it by name in any diagnostic raised.
      *
-     * <p>Trade-offs: this encoder is lossless or it raises, and it never rounds and never truncates.
-     * Both of the silent alternatives were rejected. Truncating an integer overflow would drop
-     * high-order digits and yield a materially smaller amount that still looks like money, and
-     * rounding a surplus decimal place would decide, inside a byte codec, a question that belongs to a
-     * business rule. Rounding is delegated to the sibling {@link Money} type, whose scale and mode are
-     * the migration's one rounding contract, and it is applied where a rule decides it is appropriate.
-     * The compromise accepted is that a caller holding a value of the wrong scale must reduce it
-     * before encoding; what is bought is that the reduction appears in the audit trail at the point
-     * the decision was taken rather than being absorbed here.</p>
-     *
-     * <p>Assumptions: zero always encodes with a positive sign nibble. The decimal type this method
-     * accepts has no negative zero to carry, so a field that arrived carrying the negative nibble over
-     * a zero value re-encodes carrying the positive one. This is the single documented departure from
-     * byte-identical round-tripping <em>on this plain pair of operations</em>, it is registered under
-     * identifier D-SIGNED-ZERO-PACKED in {@code docs/architecture/cobol-to-service-traceability.md},
-     * and it is stated at both ends -- here and in the class documentation -- so it is never met as a
-     * surprise in a failing comparison. A caller that must reproduce the field's bytes exactly uses
-     * {@link #decodePackedPreservingSign} with {@link #encodePackedPreservingSign} instead, which carry
-     * the nibble beside the value and therefore have no departure at all.</p>
+     * <p>Assumptions: zero always encodes with a positive sign nibble, because the decimal type this
+     * method accepts has no negative zero to carry. That is the single documented departure from
+     * byte-identical round-tripping <em>on this plain pair of operations</em>, registered as
+     * D-SIGNED-ZERO-PACKED in {@code docs/architecture/cobol-to-service-traceability.md}. A caller that
+     * must reproduce the bytes exactly uses {@link #decodePackedPreservingSign} with
+     * {@link #encodePackedPreservingSign}, which carry the nibble beside the value.</p>
      *
      * @param value the value to encode; must not be {@code null}, must carry a scale no greater than
      *     {@code decDigits}, and must have no more integer digits than {@code intDigits}
@@ -510,12 +399,10 @@ public final class PackedDecimalCodec {
         int padNibbles = width * NIBBLES_PER_BYTE - (digits + 1);
         byte[] target = new byte[width];
 
-        // WHY : Assumptions: the digits are laid down from the left into the nibble positions the pad
-        //       leaves free, which is the mirror of the decode loop and is what makes the round trip
-        //       reproduce the original bytes. Writing them from the right instead would be correct only
-        //       when nothing pads, so it would silently shift every even-digit-count field by one
-        //       nibble -- and PIC S9(10)V99 COMP-3, the widest money field in the authorization
-        //       segments, is exactly such a field.
+        // Assumptions: the digits are laid down from the left into the positions the pad leaves
+        //     free, mirroring the decode loop, which is what makes the round trip reproduce the
+        //     original bytes. Writing from the right would be correct only when nothing pads, so it
+        //     would shift every even-digit-count field -- PIC S9(10)V99 COMP-3 among them.
         for (int digitIndex = 0; digitIndex < digits; digitIndex++) {
             int nibble = digitText.charAt(digitIndex) - '0';
             setNibble(target, padNibbles + digitIndex, nibble);
@@ -555,13 +442,10 @@ public final class PackedDecimalCodec {
      * Carrying the nibble beside the value keeps both, which is what lets
      * {@link #encodePackedPreservingSign} reproduce the original bytes exactly.</p>
      *
-     * <p>Alternatives Considered: carrying a boolean sign rather than the nibble itself, which would be
-     * enough for the negative-zero case alone. Rejected because this codec admits three sign nibbles
-     * and not two -- {@code 0x0C} for a signed non-negative value, {@code 0x0D} for a signed negative
-     * one and {@code 0x0F} for a field declared without the leading {@code S} -- so a boolean would
-     * still leave a caller unable to say which of the two non-negative nibbles a field carried. Keeping
-     * the nibble costs four bits and makes the pair byte-exact for every field the decoder accepts
-     * rather than for one case of it.</p>
+     * <p>Alternatives Considered: carrying a boolean sign rather than the nibble, which would cover the
+     * negative-zero case alone. Rejected because this codec admits three sign nibbles and not two --
+     * {@code 0x0C}, {@code 0x0D} and {@code 0x0F} for a field declared without the leading {@code S} --
+     * so a boolean would leave a caller unable to say which non-negative nibble a field carried.</p>
      *
      * @param value the decoded value, carried at the field's declared scale, never {@code null}
      * @param signNibble the low nibble of the field's final byte exactly as it was read, one of
@@ -574,14 +458,7 @@ public final class PackedDecimalCodec {
          *
          * <p>Assumptions: the admissible nibbles are exactly the three {@code signNibbleFor} produces,
          * because a pair this record accepts must be one {@link #encodePackedPreservingSign} can lay
-         * down. The alternate sign nibbles {@code 0x0A}, {@code 0x0B} and {@code 0x0E} that some
-         * encoders emit are rejected here for the same reason the decoder rejects them, so the two ends
-         * of the round trip admit the same set rather than one being wider than the other.</p>
-         *
-         * <p>Assumptions: the nibble's sign class and the value's sign may disagree only at zero,
-         * because that is the only magnitude for which the value carries no sign of its own. A pair
-         * claiming the negative nibble over a positive magnitude is not a representable field, so it is
-         * refused here rather than producing bytes that would decode back to something else.</p>
+         * down -- so both ends of the round trip admit the same set rather than one being wider.</p>
          *
          * <p>Successful construction yields this record instance and no separate return value.</p>
          *
@@ -630,9 +507,9 @@ public final class PackedDecimalCodec {
             int decDigits, boolean signed) {
         BigDecimal value = decodePacked(source, offset, intDigits, decDigits, signed);
 
-        // WHY : Assumptions: the nibble is read AFTER the full decode above rather than during it, so
-        //       every rejection the plain decoder performs still happens first and this method can
-        //       never report the nibble of a field the codec would refuse.
+        // Assumptions: the nibble is read AFTER the full decode above rather than during it, so
+        //     every rejection the plain decoder performs still happens first and this method can
+        //     never report the nibble of a field the codec would refuse.
         int width = packedWidth(intDigits, decDigits);
         int nibble = nibbleAt(source, offset, width * NIBBLES_PER_BYTE - 1);
         return new SignedPacked(value, nibble);
@@ -664,10 +541,10 @@ public final class PackedDecimalCodec {
         }
         byte[] canonical = encodePacked(decoded.value(), intDigits, decDigits, signed);
 
-        // WHY : Assumptions: only the sign nibble is rewritten, never a digit nibble and never the pad,
-        //       because that is the only position at which the canonical encoder and the source field
-        //       can differ. Copying the source bytes wholesale instead would let a caller smuggle
-        //       digits past every geometry check the encoder just performed.
+        // Assumptions: only the sign nibble is rewritten, never a digit nibble and never the pad,
+        //     because that is the only position at which the canonical encoder and the source field
+        //     can differ. Copying the source bytes wholesale instead would let a caller smuggle
+        //     digits past every geometry check the encoder just performed.
         setNibble(canonical, canonical.length * NIBBLES_PER_BYTE - 1, decoded.signNibble());
         return canonical;
     }
@@ -675,20 +552,10 @@ public final class PackedDecimalCodec {
     /**
      * Decodes a binary field from a record, identifying it by name in any diagnostic raised.
      *
-     * <p>Trade-offs: the binary path lives in this class rather than in one of its own. The two regimes
-     * share the rule that matters -- that the declared usage and not the picture fixes the physical
-     * width -- and they share the fixed-point representation they must land on, so separating them
-     * would put one half of a single contract in each of two files and leave neither stating it whole.
-     * Keeping them together also holds this package to the five classes its own descriptor enumerates,
-     * rather than adding a sixth that carries three width thresholds and nothing else. The compromise
-     * accepted is a slightly broader class responsibility than the name alone suggests; what is bought
-     * is one place where the claim that usage determines width is expressed, tested and documented.</p>
-     *
-     * <p>Assumptions: the storage is big-endian two's complement, and the declared decimal places are
-     * an implied point applied to the whole number it holds rather than a division performed on it. The
-     * reference compiler stores {@code PIC S9(10)V99 COMP} holding {@code -1234567890.12} as the
-     * eight-byte two's complement of {@code -123456789012}, so recovering the value means reading the
-     * whole number and moving the point, never dividing.</p>
+     * <p>Trade-offs: the binary path lives in this class rather than in one of its own, because the two
+     * regimes share the rule that matters -- usage and not picture fixes the physical width -- and the
+     * fixed-point representation they land on, so separating them would put half of one contract in
+     * each of two files. The cost is a broader class responsibility than the name suggests.</p>
      *
      * @param source the record bytes to read from; must not be {@code null} and must be long enough to
      *     contain the whole field at {@code offset}
@@ -712,11 +579,6 @@ public final class PackedDecimalCodec {
         int width = binaryWidth(intDigits, decDigits);
         requireSpan(source, offset, width, fieldName, "binary", sensitive);
 
-        // WHY : Assumptions: the accumulation runs through the language's widest integral primitive
-        //       because eight bytes is the widest binary field the corpus declares, and the eighteen
-        //       digit positions this codec admits cannot exceed what that primitive holds. The sign is
-        //       taken from the leading byte and used to seed the accumulator, which is what makes the
-        //       two's complement reading exact without a second pass or a conditional negation.
         long accumulator = signed && (source[offset] & 0x80) != 0 ? -1L : 0L;
         for (int byteIndex = 0; byteIndex < width; byteIndex++) {
             accumulator = (accumulator << BITS_PER_BYTE) | (source[offset + byteIndex] & BYTE_MASK);
@@ -729,10 +591,10 @@ public final class PackedDecimalCodec {
                     + valueDetail(Long.toString(accumulator), sensitive));
         }
 
-        // WHY : Assumptions: the point is moved rather than divided, which is exact by construction and
-        //       involves no rounding mode at all. Dividing by a power of ten would introduce a quotient,
-        //       and therefore a rounding decision, where the encoding has none. This is the same
-        //       position the sibling money type takes when it interprets a whole number of cents.
+        // Assumptions: the point is moved rather than divided, which is exact by construction and
+        //     involves no rounding mode at all. Dividing by a power of ten would introduce a quotient,
+        //     and therefore a rounding decision, where the encoding has none. This is the same
+        //     position the sibling money type takes when it interprets a whole number of cents.
         BigDecimal scaled = BigDecimal.valueOf(accumulator).movePointLeft(decDigits);
         requireIntegerDigits(scaled, intDigits, decDigits, fieldName, width, "binary", sensitive);
         return scaled.setScale(decDigits);
@@ -787,11 +649,11 @@ public final class PackedDecimalCodec {
         String digitText = requireEncodableDigits(value, intDigits, decDigits, signed, fieldName,
                 width, "binary", sensitive);
 
-        // WHY : Assumptions: the whole number is rebuilt from the validated digit text rather than taken
-        //       from the value's own unscaled form, because the digit text has already been padded to
-        //       exactly the declared decimal places. Reading the unscaled form directly would encode a
-        //       value carrying fewer decimal places than declared at the wrong magnitude -- a scale of
-        //       zero and a scale of two are the same number and different stored integers.
+        // Assumptions: the whole number is rebuilt from the validated digit text rather than taken
+        //     from the value's own unscaled form, because the digit text has already been padded to
+        //     exactly the declared decimal places. Reading the unscaled form directly would encode a
+        //     value carrying fewer decimal places than declared at the wrong magnitude -- a scale of
+        //     zero and a scale of two are the same number and different stored integers.
         long magnitude = Long.parseLong(digitText);
         long stored = value.signum() < 0 ? -magnitude : magnitude;
 
@@ -825,15 +687,10 @@ public final class PackedDecimalCodec {
      * Decodes a packed-decimal money field from a record into the module's monetary type.
      *
      * <p>Assumptions: the decimal places are fixed at the money contract's own scale rather than taken
-     * as a parameter, and a field declaring any other number of them is rejected instead of reduced.
-     * That keeps this method exact: a span decoded at the money scale already carries that scale, so
-     * handing it to the monetary factory applies no rounding whatever. Accepting a different count and
-     * reducing it would put a rounding decision inside a decoder, which is the one thing the encode
-     * contract of this class refuses to do.</p>
-     *
-     * <p>Every packed money field in the corpus satisfies this: the two amounts at lines 34 and 35 of
-     * {@code CIPAUDTY.cpy} and the six at lines 23 to 26, 29 and 30 of {@code CIPAUSMY.cpy} all declare
-     * two decimal places, as do the amounts at lines 50, 52 and 71 of {@code app/cpy/CVEXPORT.cpy}.</p>
+     * as a parameter, and any other count is rejected instead of reduced -- reducing it would put a
+     * rounding decision inside a decoder, the one thing this class's encode contract refuses. Every
+     * packed money field in the corpus declares two places, in {@code CIPAUDTY.cpy},
+     * {@code CIPAUSMY.cpy} and {@code app/cpy/CVEXPORT.cpy} alike.</p>
      *
      * @param source the record bytes to read from; must not be {@code null}
      * @param offset the zero-based byte offset of the field within {@code source}; must not be negative
@@ -1032,23 +889,12 @@ public final class PackedDecimalCodec {
     /**
      * Reads and validates the sign nibble in the low nibble of a packed field's final byte.
      *
-     * <p>Alternatives Considered: blanket tolerance of every nibble value in the sign position was
-     * evaluated and rejected, and so was accepting 0x0A, 0x0B and 0x0E as the alternate positive and
-     * negative forms some encoders emit. Neither appears in this corpus: the reference compiler lays
-     * down 0x0C for a signed non-negative value, 0x0D for a signed negative one and 0x0F for a field
-     * declared without a sign, and nothing else. An unexpected nibble here is therefore the clearest
-     * available evidence that the field offset is wrong, and treating it as positive would convert a
-     * detectable error into silent data corruption of a money value's sign. The compromise accepted is
-     * that a span produced by some other encoder would be rejected rather than decoded; that is the
-     * intended direction of failure, because such a span did not come from this baseline. The reference
-     * codec reaches the same conclusion from the zoned side, where it refuses a plain trailing digit in
-     * a signed field rather than inventing a sign for it.</p>
-     *
-     * <p>Alternatives Considered: the nibble is also cross-checked against the caller's signed flag,
-     * rather than merely being classified. A signed field carrying the unsigned nibble, or an unsigned
-     * field carrying the negative one, means the declaration the caller passed and the bytes on disk
-     * describe different fields -- so decoding either one would produce a value from a layout that does
-     * not match the data. Classifying without cross-checking would accept both and report neither.</p>
+     * <p>Alternatives Considered: blanket tolerance of every nibble value in the sign position, and
+     * accepting 0x0A, 0x0B and 0x0E as the alternate forms some encoders emit. Both rejected because
+     * neither appears in this corpus, so an unexpected nibble is the clearest available evidence that
+     * the field offset is wrong and treating it as positive would convert a detectable error into
+     * silent corruption of a money value's sign. The cost is that a span from another encoder is
+     * rejected rather than decoded, which is the intended direction of failure.</p>
      *
      * @param source the record bytes to read from
      * @param offset the zero-based byte offset of the field within {@code source}
@@ -1064,10 +910,10 @@ public final class PackedDecimalCodec {
             String fieldName, boolean sensitive) {
         int sign = source[offset + width - 1] & NIBBLE_MASK;
 
-        // WHY : Assumptions: a value below 0x0A in the sign position is a digit, and a digit here means
-        //       the field is zoned rather than packed, or the read is off by one nibble. Naming that
-        //       case separately is worth the extra branch because it points at the actual defect instead
-        //       of reporting an unrecognised sign.
+        // Assumptions: a value below 0x0A in the sign position is a digit, and a digit here means
+        //     the field is zoned rather than packed, or the read is off by one nibble. Naming that
+        //     case separately is worth the extra branch because it points at the actual defect instead
+        //     of reporting an unrecognised sign.
         if (sign < LOWEST_SIGN_NIBBLE) {
             throw new PackedDecimalException(describe(fieldName, offset, width, "packed", sensitive)
                     + " holds a digit where its sign nibble must be, so the field is either zoned rather"
@@ -1116,13 +962,11 @@ public final class PackedDecimalCodec {
     /**
      * Builds the decoded value from its digit text, its sign and its declared decimal places.
      *
-     * <p>Trade-offs: the value is built from an explicitly assembled decimal string rather than from
-     * integral arithmetic on the accumulated digits. The string costs one allocation per field, and it
-     * buys two properties that arithmetic does not. It is exact for the full twelve digits of the
-     * widest packed money field with no intermediate that could overflow, and it is independent of any
-     * ambient precision or rounding setting, so the result is deterministic for a given input. The
-     * reference codec makes the same trade for the same reason on the zoned side, noting that string
-     * construction is what keeps a decode byte-reproducible against a golden comparison.</p>
+     * <p>Trade-offs: the value is built from an assembled decimal string rather than from integral
+     * arithmetic on the accumulated digits. One allocation per field buys two properties arithmetic
+     * does not have: exactness for the full twelve digits of the widest packed money field with no
+     * intermediate that could overflow, and independence from any ambient precision or rounding
+     * setting, so the result is deterministic for a given input.</p>
      *
      * @param digitText the decoded digits in order, most significant first, of length equal to the
      *     field's total digit count
@@ -1137,10 +981,10 @@ public final class PackedDecimalCodec {
         }
         int pointAt = digitText.length() - decDigits;
 
-        // WHY : Assumptions: a leading zero is inserted when every digit position is fractional, because
-        //       a picture such as PIC SV99 leaves nothing to the left of the implied point and the
-        //       decimal string grammar requires a digit there. Emitting the point with nothing before it
-        //       would raise a parse failure rather than decode the field.
+        // Assumptions: a leading zero is inserted when every digit position is fractional, because
+        //     a picture such as PIC SV99 leaves nothing to the left of the implied point and the
+        //     decimal string grammar requires a digit there. Emitting the point with nothing before it
+        //     would raise a parse failure rather than decode the field.
         if (pointAt == 0) {
             text.append('0');
         }
@@ -1149,11 +993,11 @@ public final class PackedDecimalCodec {
             text.append('.').append(digitText, pointAt, digitText.length());
         }
 
-        // WHY : Assumptions: the scale is asserted rather than assumed. The string form fixes it by
-        //       construction, and setting it again would be redundant, but a field declaring no decimal
-        //       places yields a scale of zero from the string and callers depend on the returned scale
-        //       being exactly the declared count in every case. Naming it here keeps that contract true
-        //       for the no-decimal case without a special branch.
+        // Assumptions: the scale is asserted rather than assumed. The string form fixes it by
+        //     construction, and setting it again would be redundant, but a field declaring no decimal
+        //     places yields a scale of zero from the string and callers depend on the returned scale
+        //     being exactly the declared count in every case. Naming it here keeps that contract true
+        //     for the no-decimal case without a special branch.
         return new BigDecimal(text.toString()).setScale(decDigits);
     }
 
@@ -1191,11 +1035,11 @@ public final class PackedDecimalCodec {
                     + valueDetail(value.toPlainString(), sensitive));
         }
 
-        // WHY : Assumptions: a scale beyond the declared decimal places is refused rather than reduced,
-        //       which is the encode half of the lossless-or-raise contract. Reducing it would round, and
-        //       a rounding decision taken inside a codec never reaches the audit trail; the sibling
-        //       money type is where the scale and the mode are declared, and a caller that needs a
-        //       reduction performs it there where the decision is visible.
+        // Assumptions: a scale beyond the declared decimal places is refused rather than reduced,
+        //     which is the encode half of the lossless-or-raise contract. Reducing it would round, and
+        //     a rounding decision taken inside a codec never reaches the audit trail; the sibling
+        //     money type is where the scale and the mode are declared, and a caller that needs a
+        //     reduction performs it there where the decision is visible.
         if (value.scale() > decDigits) {
             throw new PackedDecimalException(describe(fieldName, -1, width, kind, sensitive)
                     + " declares " + decDigits + " decimal positions but the value carries a scale of "
@@ -1205,11 +1049,11 @@ public final class PackedDecimalCodec {
 
         requireIntegerDigits(value, intDigits, decDigits, fieldName, width, kind, sensitive);
 
-        // WHY : Assumptions: the scale is raised to the declared count before the digits are read, so a
-        //       value carrying fewer decimal places than declared contributes its missing places as
-        //       trailing zeros. Reading the unscaled digits without that step would encode two pounds as
-        //       though it were two pence, because a scale of zero and a scale of two hold the same digits
-        //       and mean different amounts.
+        // Assumptions: the scale is raised to the declared count before the digits are read, so a
+        //     value carrying fewer decimal places than declared contributes its missing places as
+        //     trailing zeros. Reading the unscaled digits without that step would encode two pounds as
+        //     though it were two pence, because a scale of zero and a scale of two hold the same digits
+        //     and mean different amounts.
         String digits = value.abs().setScale(decDigits).unscaledValue().toString();
         int totalDigits = intDigits + decDigits;
         if (digits.length() >= totalDigits) {
@@ -1236,12 +1080,12 @@ public final class PackedDecimalCodec {
      */
     private static void requireIntegerDigits(BigDecimal value, int intDigits, int decDigits,
             String fieldName, int width, String kind, boolean sensitive) {
-        // WHY : Assumptions: the integer digit count is measured as the precision left after the declared
-        //       decimal places are accounted for, which is exact for every value including zero. Comparing
-        //       against a power-of-ten bound instead would need that bound materialised for up to eighteen
-        //       digits and would then have to decide whether the bound itself is admissible. The bare
-        //       scale adjustment is safe rather than lucky: every caller has already established that the
-        //       value's scale does not exceed the declared count, so the adjustment only ever pads.
+        // Assumptions: the integer digit count is measured as the precision left after the declared
+        //     decimal places are accounted for, which is exact for every value including zero. Comparing
+        //     against a power-of-ten bound instead would need that bound materialised for up to eighteen
+        //     digits and would then have to decide whether the bound itself is admissible. The bare
+        //     scale adjustment is safe rather than lucky: every caller has already established that the
+        //     value's scale does not exceed the declared count, so the adjustment only ever pads.
         BigDecimal scaled = value.setScale(decDigits);
         int usedIntegerDigits = scaled.precision() - scaled.scale();
         if (usedIntegerDigits > intDigits) {
@@ -1292,13 +1136,11 @@ public final class PackedDecimalCodec {
      * Builds the leading clause of a diagnostic, identifying a field without disclosing its content.
      *
      * <p>Assumptions: for a field marked sensitive this clause is the whole of what a diagnostic may
-     * reveal -- the name, the offset, the length and the kind -- and never the bytes or a rendering of
-     * them. The reference codec at {@code tests/helpers/record_codec.py} includes the offending raw
-     * value in its own decode failure messages, which suits a test harness reading committed fixtures;
-     * this class deliberately does not for a sensitive field, because the same message here can reach a
-     * production log carrying a primary account number or a card verification value. The divergence is
-     * documented rather than silent, and it is a difference in what is reported and not in what is
-     * rejected: a sensitive field is validated exactly as strictly as any other.</p>
+     * reveal -- name, offset, length and kind -- and never the bytes. The reference codec at
+     * {@code tests/helpers/record_codec.py} quotes the offending raw value, which suits a harness
+     * reading committed fixtures; the same message here can reach a production log carrying a primary
+     * account number, so it is withheld. The difference is in what is reported, not in what is
+     * rejected.</p>
      *
      * @param fieldName the declared field name, or {@code null} when the caller supplied none
      * @param offset the zero-based byte offset of the field, or a negative value when the operation is
@@ -1318,10 +1160,10 @@ public final class PackedDecimalCodec {
         }
         text.append(" of length ").append(width);
         if (sensitive) {
-            // WHY : Assumptions: a reader who sees a diagnostic with no content cannot otherwise tell
-            //       whether the codec had nothing to report or withheld it on purpose, and would
-            //       reasonably suspect the message itself was defective. Naming the suppression makes
-            //       the omission legible and keeps anyone from adding the content back to fill the gap.
+            // Assumptions: a reader who sees a diagnostic with no content cannot otherwise tell
+            //     whether the codec had nothing to report or withheld it on purpose, and would
+            //     reasonably suspect the message itself was defective. Naming the suppression makes
+            //     the omission legible and keeps anyone from adding the content back to fill the gap.
             text.append(" (content withheld: field is marked sensitive)");
         }
         return text.toString();
@@ -1335,11 +1177,11 @@ public final class PackedDecimalCodec {
      * @return a clause naming the nibble in hexadecimal, or an empty string when {@code sensitive}
      */
     private static String nibbleDetail(int nibble, boolean sensitive) {
-        // WHY : Assumptions: the digit is indexed out of a constant rather than formatted, which keeps the
-        //       rendering independent of any ambient locale. A locale-sensitive case conversion of a
-        //       formatted hexadecimal digit produces a different character under a locale whose dotless
-        //       letter maps unexpectedly, and a diagnostic that reads differently per locale is one that
-        //       cannot be matched against a known message.
+        // Assumptions: the digit is indexed out of a constant rather than formatted, which keeps the
+        //     rendering independent of any ambient locale. A locale-sensitive case conversion of a
+        //     formatted hexadecimal digit produces a different character under a locale whose dotless
+        //     letter maps unexpectedly, and a diagnostic that reads differently per locale is one that
+        //     cannot be matched against a known message.
         return sensitive ? "" : "; found 0x" + HEX_DIGITS.charAt(nibble & NIBBLE_MASK);
     }
 
@@ -1358,30 +1200,20 @@ public final class PackedDecimalCodec {
      * Reports a packed-decimal or binary field that violates the encoding contract of this codec.
      *
      * <p>Alternatives Considered: reusing the platform's own argument exception unqualified, or
-     * declaring a checked exception. The unqualified form was rejected because a caller could then not
-     * distinguish a malformed computational field from any other rejected argument, and this exception
-     * is the one signal that a record has been read against the wrong geometry -- the most consequential
-     * failure this codec has, because the damage it prevents is silent. A checked exception was rejected
-     * because there is no recovery available at a decode site: a field that does not decode cannot be
-     * decoded a second way, so a catch block could only rethrow. It extends the platform argument
-     * exception so that a caller who reasonably catches that broader type still catches this one, which
-     * is the same relationship the reference codec establishes by deriving its own decode errors from
-     * the platform value error.</p>
-     *
-     * <p>Trade-offs: this type is nested inside the codec rather than declared in a file of its own.
-     * This package's own descriptor enumerates the five contracts it owns, and a sixth file holding one
-     * exception would add a name to that inventory without adding a contract to it. Nesting also puts
-     * the exception where its every construction site is, so the messages and the type that carries them
-     * are read together. The compromise accepted is a slightly longer file; the sibling layout
-     * descriptor nests its own geometry exception the same way, so the package is consistent.</p>
+     * declaring a checked one. The unqualified form was rejected because a caller could not then
+     * distinguish a malformed computational field from any other rejected argument, and this is the one
+     * signal that a record was read against the wrong geometry -- the failure whose damage is silent. A
+     * checked exception was rejected because a field that does not decode cannot be decoded a second
+     * way, so a catch block could only rethrow. It extends the platform argument exception so a caller
+     * catching that broader type still catches this one.</p>
      */
     public static final class PackedDecimalException extends IllegalArgumentException {
 
-        // WHY : Assumptions: the platform requires a serial version identifier on every serialisable
-        //       type, and this type inherits serialisability from the exception hierarchy. Declaring it
-        //       explicitly pins the value rather than letting the compiler derive one that changes
-        //       whenever a member is added, which is what makes a serialised instance readable across
-        //       builds.
+        // Assumptions: the platform requires a serial version identifier on every serialisable
+        //     type, and this type inherits serialisability from the exception hierarchy. Declaring it
+        //     explicitly pins the value rather than letting the compiler derive one that changes
+        //     whenever a member is added, which is what makes a serialised instance readable across
+        //     builds.
         private static final long serialVersionUID = 1L;
 
         /**

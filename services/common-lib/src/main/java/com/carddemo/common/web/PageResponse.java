@@ -116,7 +116,7 @@ import java.util.List;
  * positions and reads with {@code RIDFLD(WS-CARD-RID-CARDNUM)} and
  * {@code KEYLENGTH(LENGTH OF WS-CARD-RID-CARDNUM)} at lines 1131 to 1132, 1150 to 1151, 1201 to 1202
  * and 1276 onward -- one operand, sixteen characters, which is the primary key of the card file.
- * <b>Refactoring Rationale:</b> an earlier revision of this charter described the cursor key as a
+ * Refactoring Rationale: an earlier revision of this charter described the cursor key as a
  * twenty-seven-character composite of the card number followed by the eleven-digit account identifier,
  * taken from the communication-area group at lines 230 to 232. That reading was wrong and is corrected
  * here rather than quietly dropped, because a cursor implementation that encoded the second component

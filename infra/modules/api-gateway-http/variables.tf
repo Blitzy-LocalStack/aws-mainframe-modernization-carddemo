@@ -368,7 +368,7 @@ variable "alb_security_group_id" {
 
 
 variable "route_keys" {
-  description = "HTTP API route keys to create, each attached to the JWT authorizer AND given var.route_authorization_scopes by main.tf. Every key is versioned under the published `/api/v1` path prefix. The default exposes the SEVEN online bounded contexts, most as a matched pair of keys -- the bare collection prefix and the greedy subtree beneath it -- under path segments matching the SPA's API client modules. One context publishes a SECOND top-level segment because its own OpenAPI contract does: transaction-service serves its single bill-payment operation at `/api/v1/billpay`, which is consequently a bare key with no greedy sibling. auth-service needs no second segment -- it serves sign-on, the challenge and renewal exchanges and all five user-administration operations beneath `/api/v1/auth`, which the greedy auth key already covers. batch-service is deliberately absent: it has no ALB target to route to. An environment root may extend the list without editing the module."
+  description = "HTTP API route keys to create, each attached to the JWT authorizer AND given var.route_authorization_scopes by main.tf. Every key is versioned under the published `/api/v1` path prefix. The default exposes the SEVEN online bounded contexts, most as a matched pair of keys -- the bare collection prefix and the greedy subtree beneath it -- under path segments matching the SPA's API client modules. One context publishes a SECOND top-level segment because its own OpenAPI contract does: transaction-service serves its single bill-payment operation at `/api/v1/billpay`, which is consequently a bare key with no greedy sibling. card-service is the one context with a THIRD key beneath its own prefix rather than a pair: `/api/v1/cards/lookup` is a static sibling of the `{cardKey}` variable key, and it exists because that contract takes its one card-number input in a request body instead of in a target. auth-service needs no second segment -- it serves sign-on, the challenge and renewal exchanges and all five user-administration operations beneath `/api/v1/auth`, which the greedy auth key already covers. batch-service is deliberately absent: it has no ALB target to route to. An environment root may extend the list without editing the module. reporting-service publishes NO second top-level segment: its statement operations are declared at `/api/v1/reports/statements` and `/api/v1/reports/statements/transactions` by its own OpenAPI contract, so the greedy reports key already covers them and a separate `/api/v1/statements` key would forward a prefix no service answers."
   type        = list(string)
   nullable    = false
   default = [
@@ -377,9 +377,10 @@ variable "route_keys" {
     "ANY /api/v1/accounts",
     "ANY /api/v1/accounts/{proxy+}",
     "ANY /api/v1/cards",
-    "ANY /api/v1/cards/{cardNumber}",
+    "ANY /api/v1/cards/lookup",
+    "ANY /api/v1/cards/{cardKey}",
     "ANY /api/v1/admin/cards",
-    "ANY /api/v1/admin/cards/{cardNumber}",
+    "ANY /api/v1/admin/cards/{cardKey}",
     "ANY /api/v1/transactions",
     "ANY /api/v1/transactions/{proxy+}",
     "ANY /api/v1/billpay",
@@ -402,6 +403,31 @@ variable "route_keys" {
   #       The bare `/api/v1/billpay` key was ADDED for the first reason:
   #       transaction-service publishes one bill-payment operation at exactly that
   #       path and this list did not name it.
+  # WHY : Refactoring Rationale: the two card path-variable keys were RENAMED from
+  #       `{cardNumber}` to `{cardKey}`, and `ANY /api/v1/cards/lookup` was
+  #       ADDED, tracking a change of what the card contract addresses a card BY.
+  #       card-api.yaml now names every single-card operation by an opaque
+  #       server-issued selector and takes its one card-number criterion in the
+  #       body of a lookup POST, because a request target is recorded in full by
+  #       the load balancer's access log and by browser history while a body is
+  #       recorded by neither. The rename is not cosmetic even though a route key's
+  #       variable name is arbitrary to the router: this list is read as the
+  #       statement of what the edge publishes, and a key still spelling
+  #       `{cardNumber}` would describe an address the contract no longer has.
+  #       Assumptions: the lookup key is declared explicitly even though
+  #       `{cardKey}` would already match `/api/v1/cards/lookup` -- an HTTP
+  #       API selects a static segment over a path variable, so the two coexist and
+  #       the static one wins. Naming it keeps this list one key per published
+  #       operation, which is the property the rest of this rationale depends on;
+  #       leaving the operation to be served incidentally by a variable key would
+  #       make a reader checking coverage conclude it was unpublished.
+  #       Trade-offs: the load-balancer rules in infra/envs/dev/main.tf and
+  #       infra/envs/prod/main.tf need no matching change, because the card
+  #       patterns there are `/api/v1/cards`, `/api/v1/cards/*`,
+  #       `/api/v1/admin/cards` and `/api/v1/admin/cards/*` -- a sealed-selector
+  #       segment and the lookup segment both match the same wildcards a card
+  #       number matched. That is worth stating so a reviewer does not go looking for a
+  #       fifth pattern and find the four unchanged.
   # WHY : Refactoring Rationale: the `/api/v1/admin/cards` pair was ADDED, and the
   #       card subtree's greedy key WITHDRAWN, for those same two reasons in turn.
   #       card-service's contract publishes its administrative card-detail operation
@@ -409,11 +435,37 @@ variable "route_keys" {
   #       rule-ordering dependency a suffix beneath the card subtree placed on that
   #       service's authority table -- so the prefix had to be named here or the
   #       operation would have been unreachable. The greedy
-  #       `/api/v1/cards/{cardNumber}/{proxy+}` key went the other way: with the
+  #       `/api/v1/cards/{cardKey}/{proxy+}` key went the other way: with the
   #       administrative read moved out from under the card, that contract publishes
   #       nothing beneath a single card at all, so the key published a subtree with
   #       nothing behind it. The load-balancer rules in infra/envs/dev/main.tf and
   #       infra/envs/prod/main.tf carry the matching four patterns.
+  # WHY : Refactoring Rationale: the two single-card keys are spelled `{cardKey}`
+  #       and were spelled `{cardNumber}`. The rename tracks a change of VALUE and
+  #       not merely of label: card-service's contract no longer accepts a card
+  #       number in a path or a query string at all, because the load balancer
+  #       writes the request line into a durable access-log object from inside
+  #       itself, before any application code runs, and access logging is mandatory
+  #       in this deployment -- so the redaction that bounds that service's own logs
+  #       and error bodies never reached that record. The segment now carries an
+  #       opaque sealed selector the service mints and every card response publishes.
+  #       A card number a user typed travels in the body of
+  #       `POST /api/v1/cards/lookup`, which IS named above as a key of its own.
+  #       Assumptions: that lookup key is a LITERAL segment sitting beside a
+  #       parameterised sibling, which the API resolves unambiguously because a literal
+  #       is more specific than a parameter -- and the two could not collide in any
+  #       case, since a selector is exactly fifty-nine characters and `lookup` is six.
+  #       Omitting it would have left the one operation that accepts a card number
+  #       unreachable at the edge, which would have forced every client back to putting
+  #       the number in a path.
+  #       Alternatives Considered: leaving it unnamed, on the ground that `{cardKey}`
+  #       already matches the literal segment and an HTTP API selects a literal
+  #       segment ahead of a variable one, so the two coexist and the literal wins.
+  #       Rejected because this list is read as the statement of what the edge
+  #       publishes, one key per published operation, and an operation served
+  #       incidentally by a variable key would make a reader checking coverage
+  #       conclude it was unpublished.
+
   # WHY : Refactoring Rationale: a `/api/v1/users` pair was WITHDRAWN for the
   #       second reason. auth-service serves its five user-administration
   #       operations at `/api/v1/auth/users` and `/api/v1/auth/users/{userId}` --
@@ -559,10 +611,18 @@ variable "route_keys" {
   #       ui/src/api/{auth,accounts,cards,transactions,reference,authorization,
   #       reporting}.ts, so a path is written once and reads the same way on
   #       both sides of the edge. The correspondence is one-to-one for five of
-  #       the seven and one-to-two for the other two, because auth-service also
-  #       serves `/api/v1/users` and transaction-service also serves
+  #       the seven and one-to-two for the other two, because card-service also
+  #       serves `/api/v1/admin/cards` and transaction-service also serves
   #       `/api/v1/billpay`; a client module is the unit of ownership, not of
   #       path prefix.
+  #       Refactoring Rationale: those two second prefixes were formerly given as
+  #       auth-service's `/api/v1/users` and transaction-service's
+  #       `/api/v1/billpay`. The count of two was right and the attribution was
+  #       stale: the `/api/v1/users` pair was withdrawn and the
+  #       `/api/v1/admin/cards` pair added by the same correction recorded above,
+  #       which moved second-prefix ownership from auth-service to card-service.
+  #       auth-service owns exactly one prefix, because its user-administration
+  #       operations are a subtree of it at `/api/v1/auth/users`.
   #       (5) Refactoring Rationale: each context now carries a BARE key
   #       alongside its greedy one, because a greedy `{proxy+}` matches one or
   #       more trailing segments and therefore does NOT match the collection
@@ -673,13 +733,25 @@ variable "route_keys" {
   #       label that appears in this inventory and nowhere else, while an access log
   #       retains the VALUE a client sent, under whatever label the template gave the
   #       segment. Renaming the label therefore changed what this file says and
-  #       nothing about what any log holds. The value-side exposure is answered where
-  #       the value exists -- common-lib's CardNumberMasker redacts a sixteen-digit
-  #       run embedded anywhere in a path, and card-service's contract test builds a
-  #       concrete URL from every published template and asserts the masker leaves no
-  #       full number in it. Prohibiting the label additionally blocked the card
-  #       contract from publishing its primary key, which is what forced that contract
-  #       into an opaque selector plus a POST carrying the number in a body.
+  #       nothing about what any log holds, which is why the labels above now read
+  #       `{cardKey}` for a DIFFERENT reason: they track what the card contract
+  #       addresses a card by, not what a log retains.
+  # WHY : Assumptions: the value-side exposure is answered where the value is
+  #       decided -- in the CONTRACT, which no longer accepts a card number in any
+  #       path or query, asserted by
+  #       CardApiContractTest.noRequestLineCanCarryACardNumber. That is
+  #       the only tier at which it CAN be answered for an access log: a log line at
+  #       this edge or at the load balancer is composed before any application code
+  #       runs, so common-lib's CardNumberMasker -- which does redact a
+  #       sixteen-digit run embedded in a path -- reaches the records the SERVICE
+  #       writes and none of the records these tiers write. An earlier revision of
+  #       this rationale offered that masker as the answer here, and additionally
+  #       held that prohibiting the label "blocked the card contract from publishing
+  #       its primary key, which is what forced that contract into an opaque
+  #       selector plus a POST carrying the number in a body". The selector and the
+  #       POST are now that contract's deliberate design rather than a cost forced
+  #       on it, and the primary key is still published -- in the response body of
+  #       the administrative read, where authority governs the disclosure.
   # WHY : Assumptions: what IS checkable at this layer is a literal. A route key is a
   #       committed constant, so a long digit run in one is a real card number pasted
   #       into the route inventory, where no masker will ever reach it -- it is in the
@@ -739,18 +811,31 @@ variable "route_keys" {
 #       selects the MOST SPECIFIC matching route, and a greedy `{proxy+}` key is
 #       the least specific of all, so a concrete method with a literal final
 #       segment always wins over `ANY /api/v1/auth/{proxy+}` without the two
-#       contending. Note that the user administration endpoints are NOT among the
-#       paths this reasoning has to cover: they are published at `/api/v1/users`,
-#       a segment no key in this list touches, so their authorization does not
-#       depend on specificity ordering at all -- it depends only on their own
-#       authorized keys in var.route_keys. What is given up is three
-#       internet-reachable paths with no credential check at the edge; what is
-#       bought is a system that can be signed in to, that can complete a forced
-#       credential change, and that can renew a session. The residual is bounded
-#       three ways: the validation below refuses any key that is not one of those
-#       exact three paths, each route is given its own tighter throttle rather
-#       than inheriting the account-level allowance, and auth-service itself is
-#       what decides whether the credentials are good.
+#       contending. The user administration endpoints are the case that makes
+#       this concrete rather than an exception to it: auth-api.yaml publishes them
+#       INSIDE this subtree, at `/api/v1/auth/users` and
+#       `/api/v1/auth/users/{userId}`, so the greedy authorized key is what
+#       reaches them, and they stay behind the authorizer for exactly one reason
+#       -- neither path is one of the three literals this input admits, and the
+#       validation below refuses a fourth. Their protection is therefore a
+#       property of a closed public list plus specificity ordering, not of living
+#       at some address this list cannot name.
+#       What is given up is three internet-reachable paths with no credential
+#       check at the edge; what is bought is a system that can be signed in to,
+#       that can complete a forced credential change, and that can renew a
+#       session. The residual is bounded three ways: the validation below refuses
+#       any key that is not one of those exact three paths, each route is given
+#       its own tighter throttle rather than inheriting the account-level
+#       allowance, and auth-service itself is what decides whether the
+#       credentials are good.
+#       Refactoring Rationale: this passage formerly said those endpoints were
+#       NOT among the paths the reasoning has to cover, on the ground that they
+#       sit at a top-level `/api/v1/users` no key here touches. That was the
+#       riskier kind of stale comment: it declared a set of authenticated paths
+#       out of scope for the one analysis that establishes why the public
+#       exceptions cannot widen into them, so a later author adding a public key
+#       would have read that user administration was unaffected when in fact it
+#       shares this subtree.
 #       (4) Alternatives Considered: putting the sign-on route on the same
 #       for_each as the authorized routes and switching the authorizer per key with
 #       a conditional. Rejected because it makes the presence or absence of

@@ -83,6 +83,24 @@
  * which is why {@code spring-cloud-aws-starter-sqs} is a dependency of this
  * module and not only of the messaging contexts.</p>
  *
+ * <p>Assumptions: that surface is <b>delivered</b>, and the count is stated so a reader can check the
+ * claim rather than take it. The document declares <b>nineteen</b> operations and seven controllers
+ * answer for all nineteen: five over transaction types, five over transaction categories, one rate
+ * lookup, six over the three seeded address allow-lists, one date evaluation and one maintenance batch.
+ * {@code ReferenceApiRoutingContractTest} compares the document and the handlers in BOTH directions and
+ * asserts that count, so an operation declared without a handler, a handler added without an operation,
+ * or a silent narrowing of the surface each fail the build rather than review. The asynchronous entry
+ * point is delivered as the queue listener on
+ * {@code com.carddemo.reference.service.DateConversionMessageListener}, which shares its evaluation
+ * member with the synchronous read so the two routes cannot report different verdicts for one input.</p>
+ *
+ * <p>Refactoring Rationale: the section above described this surface before any of it existed, and the
+ * description was left unrevised while the packages filled in. Stating what is present, with a count a
+ * test enforces, is what makes the difference between a charter a reader can rely on and one that has to
+ * be verified against the directory. Every one of the seven subpackages listed below now holds
+ * implementation rather than only its own descriptor; where a type is genuinely still planned it is
+ * marked so at its own entry in that subpackage's charter, never by a blanket statement here.</p>
+ *
  * <h2>Layering</h2>
  *
  * <p>Every type sits in one of these subpackages, and each has one job:

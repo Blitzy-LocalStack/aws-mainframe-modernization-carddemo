@@ -17,7 +17,8 @@
     "format": "prettier --check .",
     "format:write": "prettier --write .",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "contracts": "vitest run src/api/contracts.test.ts"
   },
   "dependencies": {
     "@ant-design/icons": "6.3.2",
@@ -36,6 +37,7 @@
     },
     "scripts": {
       "Assumptions:": "typecheck runs tsc twice because this package holds TWO disjoint TypeScript projects, and `tsc -p` checks exactly one. tsconfig.json covers the browser sources under src; tsconfig.node.json covers vite.config.ts and vitest.config.ts, which execute under Node and are granted @types/node that browser code is deliberately denied. Checking only the app project left both build-configuration files unchecked by any compiler: eslint gives them type-aware LINT rules, but eslint does not report compiler diagnostics, so a genuine type error in either one failed nothing and surfaced later as a confusing build or test failure far from its cause.",
+      "Refactoring Rationale:": "contracts was ADDED as a script of its own even though `npm test` already runs the file it targets, and the duplication is deliberate. src/api/contracts.test.ts is the only build step in this repository that compares this package's typed API client layer with the six service-held OpenAPI documents it is written against, and docs/adr/ADR-006-api-and-ui.md now cites it by name as the mechanism that makes contract drift a build failure. A named script gives .github/workflows/ui-ci.yml a step whose title says what it enforces, so a reader of a failed run sees `Check API contract agreement` rather than a generic test failure among 33 others, and it gives a developer changing a service contract one command to run without waiting for jsdom to start for every screen test. Trade-offs: the path is written twice, here and in the workflow's own step, which is the cost accepted for that legibility; the file itself asserts a measured operation count so a rename that broke one caller would not leave the other silently asserting nothing.",
       "Trade-offs:": "build delegates to `npm run typecheck` instead of repeating the two tsc invocations inline. The extra npm process is accepted because a repeated command string in a file that admits no comments is a drift hazard: an editor who extends typecheck and forgets build would silently return the bundle to the unchecked state this entry exists to close. Type-checking still precedes vite build, which is the property that matters, because esbuild strips types without checking them and a bare `vite build` will happily emit a bundle containing type errors."
     },
     "react-router": {

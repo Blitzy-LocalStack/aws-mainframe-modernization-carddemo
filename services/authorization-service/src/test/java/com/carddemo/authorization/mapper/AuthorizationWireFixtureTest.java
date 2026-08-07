@@ -20,46 +20,17 @@ import org.junit.jupiter.api.Test;
 /**
  * Consumes the two committed authorization request wire fixtures and asserts what each one proves.
  *
- * <p>These two files are a MATCHED PAIR and neither is meaningful alone. Together they pin the one
- * numeric decision in the request contract that a reader is most likely to reverse: whether the money
- * token is emitted at fourteen characters or thirteen.
- * {@link CsvAuthCodec#REQUEST_WIRE_LENGTH} is 169 and its own Javadoc records why 170 -- the figure
- * the copybook arithmetic gives -- is deliberately not adopted:
- * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} line 63 declares the receiving field
- * {@code WS-TRANSACTION-AMT-AN PIC X(13)}, line 364 hands request ordinal nine into it, and lines 376
- * and 377 evaluate {@code FUNCTION NUMVAL} over it -- so a fourteen-character token loses its LAST
- * character, the second cents digit, and the consumer computes the amount sent divided by ten.</p>
- *
- * <p>Assumptions: a constant asserting that the codec emits 169 characters cannot by itself show that
- * a 170-character payload is REFUSED rather than quietly truncated, because the constant is not on the
- * decode path. That is what {@code auth-request-copybook-wire170-decode-only.csv} is for, and it is the reason a
- * fixture that the contract rejects is committed on purpose rather than by mistake.</p>
- *
- * <p>Alternatives Considered: building both payloads as string literals inside this class, which is
- * how every other test in this module supplies its input. Rejected for these two only, because their
- * entire content is a length: a literal wraps across source lines under the project's line-length
- * limit, and a wrapped 170-character literal is exactly as unreadable as a file while additionally
- * being editable without anyone noticing the length changed. A committed file has one authoritative
- * byte count that {@link #fixtureRowsCarryTheLengthsTheirNamesClaim()} re-measures on every run.</p>
- *
- * <p>Fixture geometry, measured on the branch:</p>
- *
- * <table>
- *   <caption>The two request wire fixtures</caption>
- *   <tr><th>File</th><th>Bytes</th><th>Rows</th><th>Row length</th><th>Money token</th></tr>
- *   <tr><td>{@code auth-request-copybook-wire170-decode-only.csv}</td><td>171</td><td>1</td><td>170</td>
- *       <td>14 characters -- the form the contract refuses</td></tr>
- *   <tr><td>{@code auth-request-amount-variants.csv}</td><td>510</td><td>3</td><td>169</td>
- *       <td>13 characters -- the form the contract accepts</td></tr>
- * </table>
- *
- * <p>Both files are LF terminated with exactly one trailing newline, so bytes are rows times row
- * length plus one per row. Every row carries the eighteen comma-separated fields
- * {@code cpy/CCPAURQY.cpy} declares at lines 19 to 36, in declaration order, with seventeen interior
- * delimiters and no trailing one.</p>
+ * <p>These files are a matched pair and neither is meaningful alone. Together they pin the one numeric
+ * decision in the request contract that a reader is most likely to reverse: the width of the money
+ * token. {@code PA-RQ-TRANSACTION-AMT PIC +9(10).99} at line 27 of {@code cpy/CCPAURQY.cpy} declares
+ * fourteen characters and that declaration is the contract, so
+ * {@link CsvAuthCodec#REQUEST_WIRE_LENGTH} is 170. The reference consumer copies the token into
+ * {@code WS-TRANSACTION-AMT-AN PIC X(13)} at line 63 of {@code cbl/COPAUA0C.cbl} before converting it,
+ * so a producer that emitted the narrower form is still read; that is the tolerance the second fixture
+ * exists to demonstrate, and it is not a second contract.</p>
  *
  * <p>Assumptions: the three rows of the variants file differ from one another in the amount field and
- * in the transaction identifier ONLY. Holding the other sixteen fields constant is what makes the
+ * in the transaction identifier only. Holding the other sixteen fields constant is what makes the
  * amount the independent variable; a row that also changed the merchant or the card would not isolate
  * it.</p>
  *
@@ -80,30 +51,23 @@ import org.junit.jupiter.api.Test;
 class AuthorizationWireFixtureTest {
 
     /**
-     * The classpath resource holding the single 170-character declared-width request row.
-     *
-     * <p>Refactoring Rationale: this named {@code fixtures/auth-request-canonical-wire170.csv} and no
-     * such resource exists. The file was renamed to the name below when the 169-character wire was
-     * settled as canonical, and "canonical" moved to the 169-character vector -- so keeping the old
-     * name here would have been a class that could not run, and calling the 170-character form
-     * canonical would have contradicted the file that now holds that word.</p>
+     * The classpath resource holding the single row whose money token is at the receiver's width.
      */
-    private static final String DECLARED_WIDTH_RESOURCE =
-            "fixtures/auth-request-copybook-wire170-decode-only.csv";
+    private static final String RECEIVER_WIDTH_RESOURCE =
+            "fixtures/auth-request-receiver-wire169-decode-only.csv";
 
     /**
-     * The classpath resource holding the single canonical 169-character request row.
+     * The classpath resource holding the single canonical request row.
      *
-     * <p>Assumptions: this is the ENCODE ORACLE. The fixtures README calls it byte-for-byte what
-     * {@code CsvAuthCodec.encodeRequest} emits for the same amount, and until this class read it that
-     * claim rested on nothing -- no test resolved the file at all. Comparing the re-emitted payload
-     * against it is what turns the claim into an assertion.</p>
+     * <p>Assumptions: this is the encode oracle -- byte for byte what
+     * {@code CsvAuthCodec.encodeRequest} emits for the same amount -- so the re-emitted payload is
+     * compared against it rather than against a length alone.</p>
      */
     private static final String CANONICAL_WIRE_RESOURCE =
-            "fixtures/auth-request-canonical-wire169.csv";
+            "fixtures/auth-request-canonical-wire170.csv";
 
     /**
-     * The classpath resource holding the three 169-character request rows the contract accepts.
+     * The classpath resource holding the three canonical-width request rows the contract accepts.
      */
     private static final String VARIANTS_RESOURCE = "fixtures/auth-request-amount-variants.csv";
 
@@ -144,15 +108,16 @@ class AuthorizationWireFixtureTest {
      *
      * <p>Assumptions: the length is the whole point of these two files, so it is re-measured here
      * rather than trusted. A silent edit that added or removed one character would otherwise change
-     * which side of the 169-versus-170 decision each file demonstrates while every other assertion in
-     * this class continued to pass.</p>
+     * which side of the width decision each file demonstrates while every other assertion in this
+     * class continued to pass.</p>
      */
     @Test
     @DisplayName("both fixtures carry the row lengths their names and geometry claim")
     void fixtureRowsCarryTheLengthsTheirNamesClaim() {
-        List<String> declaredWidth = readRows(DECLARED_WIDTH_RESOURCE);
-        assertEquals(1, declaredWidth.size(), "the declared-width fixture holds exactly one row");
-        assertEquals(170, declaredWidth.get(0).length(), "the declared-width fixture row is 170 characters");
+        List<String> receiverWidth = readRows(RECEIVER_WIDTH_RESOURCE);
+        assertEquals(1, receiverWidth.size(), "the receiver-width fixture holds exactly one row");
+        assertEquals(CsvAuthCodec.REQUEST_WIRE_LENGTH - 1, receiverWidth.get(0).length(),
+                "the receiver-width fixture row is one character short of the wire");
 
         List<String> variants = readRows(VARIANTS_RESOURCE);
         assertEquals(3, variants.size(), "the variants fixture holds exactly three rows");
@@ -175,7 +140,7 @@ class AuthorizationWireFixtureTest {
     @Test
     @DisplayName("every fixture row carries the eighteen fields CCPAURQY declares")
     void everyFixtureRowCarriesEighteenFields() {
-        for (String row : readRows(DECLARED_WIDTH_RESOURCE)) {
+        for (String row : readRows(RECEIVER_WIDTH_RESOURCE)) {
             assertEquals(
                     CsvAuthCodec.REQUEST_FIELD_COUNT,
                     row.split(",", -1).length,
@@ -214,15 +179,15 @@ class AuthorizationWireFixtureTest {
      * one.</p>
      */
     @Test
-    @DisplayName("the 170-character row decodes at full precision and re-emits at 169 characters")
+    @DisplayName("the receiver-width row decodes at full precision and re-emits at the wire width")
     void theOverlongMoneyTokenDecodesAndNarrowsOnEmission() {
-        String row = readRows(DECLARED_WIDTH_RESOURCE).get(0);
+        String row = readRows(RECEIVER_WIDTH_RESOURCE).get(0);
 
         AuthRequest decoded = CsvAuthCodec.decodeRequest(row);
         assertEquals(
                 0,
                 new BigDecimal("250.00").compareTo(decoded.transactionAmount().amount()),
-                "the fourteen-character token decodes to the amount sent, not to one tenth of it");
+                "an unsigned token decodes as the positive amount it spells");
         assertEquals(
                 CsvAuthCodec.MONEY_SCALE,
                 decoded.transactionAmount().amount().scale(),
@@ -232,7 +197,7 @@ class AuthorizationWireFixtureTest {
         assertEquals(
                 CsvAuthCodec.REQUEST_WIRE_LENGTH,
                 reemitted.length(),
-                "emission narrows the payload to REQUEST_WIRE_LENGTH characters");
+                "emission widens the payload to REQUEST_WIRE_LENGTH characters");
         assertEquals(
                 CsvAuthCodec.REQUEST_MONEY_WIDTH,
                 reemitted.split(",", -1)[CsvAuthCodec.REQUEST_AMOUNT_ORDINAL].length(),
@@ -240,21 +205,15 @@ class AuthorizationWireFixtureTest {
         assertEquals(
                 0,
                 new BigDecimal("250.00").compareTo(CsvAuthCodec.decodeRequest(reemitted).transactionAmount().amount()),
-                "narrowing the token changes the width and not the amount");
+                "widening the token changes the width and not the amount");
 
-        // WHY : Assumptions: the re-emitted payload is compared against the committed canonical
-        //       fixture FIELD BY FIELD, not only by length and amount. The length assertions above
-        //       would hold for an emission that narrowed the money token and also transposed two
-        //       other fields, and a positional consumer cannot survive that; the canonical vector is
-        //       the only artifact in the tree that pins every field's position at once.
-        // WHY : Assumptions: the transaction identifier is excluded from that comparison, and its
-        //       exclusion is required rather than convenient. The two vectors deliberately carry
-        //       DIFFERENT identifiers -- TXN000000000100 on the declared-width row and
-        //       TXN000000000169 on the canonical row -- because the last test in this class asserts
-        //       that all four committed rows are distinguishable by identifier. Comparing that field
-        //       too would put this assertion and that one in direct conflict, so the comparison
-        //       covers the seventeen fields whose positions the wire agreement fixes and the
-        //       identifier is asserted separately, by value, on both sides.
+        // Assumptions: the re-emitted payload is compared against the committed canonical fixture
+        //   field by field, not only by length and amount, because the length assertions above would
+        //   hold for an emission that also transposed two other fields and a positional consumer
+        //   cannot survive that.
+        // Assumptions: the transaction identifier is excluded from that comparison because the two
+        //   vectors deliberately carry different identifiers, so that every committed row stays
+        //   distinguishable; it is asserted separately by value on both sides.
         String[] emitted = reemitted.split(",", -1);
         String[] canonical = readRows(CANONICAL_WIRE_RESOURCE).get(0).split(",", -1);
         assertEquals(
@@ -268,11 +227,11 @@ class AuthorizationWireFixtureTest {
                     "emitted field at ordinal " + ordinal + " matches the canonical vector");
         }
         assertEquals(
-                "TXN000000000100",
-                emitted[CsvAuthCodec.REQUEST_FIELD_COUNT - 1],
-                "emission echoes the declared-width row's own identifier");
-        assertEquals(
                 "TXN000000000169",
+                emitted[CsvAuthCodec.REQUEST_FIELD_COUNT - 1],
+                "emission echoes the receiver-width row's own identifier");
+        assertEquals(
+                "TXN000000000100",
                 canonical[CsvAuthCodec.REQUEST_FIELD_COUNT - 1],
                 "the canonical vector carries its own distinct identifier");
     }
@@ -358,7 +317,7 @@ class AuthorizationWireFixtureTest {
     void rowsShareTheSyntheticCardNumberAndCarryDistinctIdentifiers() {
         List<String> allRows =
                 java.util.stream.Stream.concat(
-                                readRows(DECLARED_WIDTH_RESOURCE).stream(), readRows(VARIANTS_RESOURCE).stream())
+                                readRows(RECEIVER_WIDTH_RESOURCE).stream(), readRows(VARIANTS_RESOURCE).stream())
                         .toList();
         assertEquals(4, allRows.size(), "the two fixtures hold four rows between them");
 

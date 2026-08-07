@@ -57,18 +57,18 @@ class AuthRequestWireFixtureTest {
     /** Classpath location of the payloads that conform to the published wire. */
     private static final String CONFORMING_FIXTURE = "/fixtures/auth-request-amount-variants.csv";
 
-    /** Classpath location of the payload whose amount is at the copybook's declared width. */
-    private static final String DECLARED_WIDTH_FIXTURE =
-            "/fixtures/auth-request-copybook-wire170-decode-only.csv";
+    /** Classpath location of the payload whose amount is at the reference receiver's narrower width. */
+    private static final String RECEIVER_WIDTH_FIXTURE =
+            "/fixtures/auth-request-receiver-wire169-decode-only.csv";
 
     /**
-     * The wire length a payload built at the copybook's declared amount width reaches.
+     * The wire length a payload built at the reference receiver's amount width reaches.
      *
-     * <p>Assumptions: one more byte than the published length, because exactly one field differs and it
+     * <p>Assumptions: one byte fewer than the published length, because exactly one field differs and it
      * differs by exactly one character. Stating it as an offset from the published constant rather than
-     * as a bare 170 keeps the two figures from being read as independent facts.
+     * as a bare 169 keeps the two figures from being read as independent facts.
      */
-    private static final int DECLARED_WIDTH_WIRE_LENGTH = CsvAuthCodec.REQUEST_WIRE_LENGTH + 1;
+    private static final int RECEIVER_WIDTH_WIRE_LENGTH = CsvAuthCodec.REQUEST_WIRE_LENGTH - 1;
 
     /**
      * Confirms every conforming fixture line is exactly the published wire length and decodes.
@@ -121,58 +121,53 @@ class AuthRequestWireFixtureTest {
     }
 
     /**
-     * Confirms the declared-width fixture is one byte longer than the wire and reads in full.
+     * Confirms the receiver-width fixture is one byte shorter than the wire and still reads.
      *
      * <p>Assumptions: both halves are asserted together because either alone would be misleading. That
-     * the payload is 170 bytes records the copybook derivation; that it decodes to the value it spells
-     * records the tolerant read. A fixture asserting only the first would look like a claim that 170 is
-     * the wire length, which is the claim its former file name made and this test exists to retire.</p>
+     * the payload is 169 bytes records the width of the intermediate the reference consumer copies the
+     * token into; that it decodes to the value it spells records the tolerance a producer emitting that
+     * narrower form is given.</p>
      *
      * @throws IOException if the fixture cannot be read, which means it is absent from the classpath
      */
     @Test
-    @DisplayName("the declared-width payload is one byte longer than the wire and reads in full")
+    @DisplayName("the receiver-width payload is one byte shorter than the wire and still reads")
     void declaredWidthPayloadReadsInFull() throws IOException {
-        List<String> payloads = readLines(DECLARED_WIDTH_FIXTURE);
+        List<String> payloads = readLines(RECEIVER_WIDTH_FIXTURE);
 
         assertThat(payloads).hasSize(1);
-        String declaredWidth = payloads.get(0);
+        String receiverWidth = payloads.get(0);
 
-        assertThat(declaredWidth.length()).isEqualTo(DECLARED_WIDTH_WIRE_LENGTH);
-        assertThat(declaredWidth.split(",", -1)[CsvAuthCodec.REQUEST_AMOUNT_ORDINAL].length())
-                .as("the amount token is the copybook's declared width, one character wider than the"
-                        + " receiving item at line 63 of COPAUA0C.cbl can hold")
-                .isEqualTo(CsvAuthCodec.MONEY_EDITED_WIDTH);
-        assertThat(CsvAuthCodec.decodeRequest(declaredWidth).transactionAmount().amount())
-                .as("every character of the token is parsed, so the producer's intent survives")
+        assertThat(receiverWidth.length()).isEqualTo(RECEIVER_WIDTH_WIRE_LENGTH);
+        assertThat(receiverWidth.split(",", -1)[CsvAuthCodec.REQUEST_AMOUNT_ORDINAL].length())
+                .as("the amount token is one character narrower than PIC +9(10).99 declares")
+                .isEqualTo(CsvAuthCodec.MONEY_EDITED_WIDTH - 1);
+        assertThat(CsvAuthCodec.decodeRequest(receiverWidth).transactionAmount().amount())
+                .as("an unsigned token is read as positive, so the producer's intent survives")
                 .isEqualByComparingTo(new BigDecimal("250.00"));
     }
 
     /**
-     * Confirms a token the reference receiver would have truncated is read whole here or refused, never
-     * silently misread.
+     * Confirms a token that lost its final cents digit is refused rather than silently misread.
      *
-     * <p>Refactoring Rationale: this is the assertion that makes the divergence measurable instead of
-     * merely asserted, and running it corrected the expectation it was written with. The reference hands
-     * ordinal nine into a thirteen-character item and then applies {@code FUNCTION NUMVAL}, which
-     * accepts one fraction digit as readily as two -- so a token whose fourteenth character was a
-     * non-zero cents digit is received as a DIFFERENT, plausible amount. This codec cannot reach that
-     * outcome from either direction: at full width it parses every character, and at the truncated width
-     * it REFUSES the token by name, because its inner geometry requires exactly
-     * {@value CsvAuthCodec#MONEY_SCALE} fraction digits. Both arms are asserted, because it is the pair
-     * that rules out the silent misread rather than either one alone.</p>
+     * <p>Assumptions: the reference consumer copies ordinal nine into a thirteen-character item and then
+     * applies {@code FUNCTION NUMVAL}, which accepts one fraction digit as readily as two, so a token
+     * whose fourteenth character was dropped is received there as a different but plausible amount. This
+     * codec cannot reach that outcome from either direction: at full width it parses every character,
+     * and at the truncated width it refuses the token by name, because its inner geometry requires
+     * exactly {@value CsvAuthCodec#MONEY_SCALE} fraction digits.</p>
      *
-     * <p>Assumptions: the token used is one whose final character is a NON-ZERO cents digit, because a
+     * <p>Assumptions: the token used is one whose final character is a non-zero cents digit, because a
      * trailing zero would truncate to a numerically equal value and the assertion would pass while
      * demonstrating nothing.</p>
      */
     @Test
-    @DisplayName("a token the reference would truncate is read whole or refused, never misread")
+    @DisplayName("a token that lost its final cents digit is refused, never misread")
     void truncatedAmountIsRefusedRatherThanMisread() {
         String declaredWidthToken = "+0000000100.99";
-        String truncatedToken = declaredWidthToken.substring(0, CsvAuthCodec.REQUEST_MONEY_WIDTH);
+        String truncatedToken = declaredWidthToken.substring(0, declaredWidthToken.length() - 1);
 
-        assertThat(declaredWidthToken).hasSize(CsvAuthCodec.MONEY_EDITED_WIDTH);
+        assertThat(declaredWidthToken).hasSize(CsvAuthCodec.REQUEST_MONEY_WIDTH);
         assertThat(CsvAuthCodec.parseMoney(declaredWidthToken, "PA-RQ-TRANSACTION-AMT").amount())
                 .as("at full width every character is parsed")
                 .isEqualByComparingTo(new BigDecimal("100.99"));
@@ -185,27 +180,27 @@ class AuthRequestWireFixtureTest {
     }
 
     /**
-     * Confirms re-emitting a decoded declared-width payload yields the canonical wire, not the wider one.
+     * Confirms re-emitting a decoded receiver-width payload yields the copybook's declared wire.
      *
-     * <p>Assumptions: this is what makes 169 the canonical length rather than merely the preferred one.
-     * A payload accepted at 170 is re-emitted at
-     * {@value CsvAuthCodec#REQUEST_WIRE_LENGTH} with a {@value CsvAuthCodec#REQUEST_MONEY_WIDTH}-character
-     * amount, so nothing this service sends can be truncated by the reference receiver even when what it
-     * received was wider.</p>
+     * <p>Assumptions: this is what makes the published length the emission contract rather than merely
+     * the preferred one. A payload accepted at the narrower receiver width is re-emitted at
+     * {@value CsvAuthCodec#REQUEST_WIRE_LENGTH} with a
+     * {@value CsvAuthCodec#REQUEST_MONEY_WIDTH}-character amount, so what this service sends always
+     * spells the picture the copybook declares.</p>
      *
      * @throws IOException if the fixture cannot be read, which means it is absent from the classpath
      */
     @Test
-    @DisplayName("re-emitting a declared-width payload produces the canonical wire length")
+    @DisplayName("re-emitting a receiver-width payload produces the declared wire length")
     void reEmissionProducesTheCanonicalWireLength() throws IOException {
         String reEmitted = CsvAuthCodec.encodeRequest(
-                CsvAuthCodec.decodeRequest(readLines(DECLARED_WIDTH_FIXTURE).get(0)));
+                CsvAuthCodec.decodeRequest(readLines(RECEIVER_WIDTH_FIXTURE).get(0)));
 
         assertThat(reEmitted.length()).isEqualTo(CsvAuthCodec.REQUEST_WIRE_LENGTH);
         assertThat(reEmitted.split(",", -1)[CsvAuthCodec.REQUEST_AMOUNT_ORDINAL].length())
                 .isEqualTo(CsvAuthCodec.REQUEST_MONEY_WIDTH);
         assertThat(CsvAuthCodec.decodeRequest(reEmitted).transactionAmount().amount())
-                .as("the round trip through the narrower emission preserves the value")
+                .as("the round trip through the declared emission preserves the value")
                 .isEqualByComparingTo(new BigDecimal("250.00"));
     }
 

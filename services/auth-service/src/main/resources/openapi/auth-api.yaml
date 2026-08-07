@@ -329,19 +329,28 @@ paths:
 
 
         Two behavioural divergences from the baseline are documented rather than
-        hidden. First, comparison is case-sensitive on the password. The baseline
-        pushed both submitted fields through FUNCTION UPPER-CASE before it read
-        the file and before it compared
+        hidden, and each is registered by identifier in
+        docs/architecture/cobol-to-service-traceability.md section 7.4.
+
+
+        D-SIGNON-CASE-SENSITIVE-PASSWORD: comparison is case-sensitive on the
+        password. The baseline pushed both submitted fields through
+        FUNCTION UPPER-CASE before it read the file and before it compared
         (app/cbl/COSGN00C.cbl lines 132 to 136, where the password fold's target
         WS-USER-PWD sits on line 136), which made it case-insensitive in both
         fields; the identity provider that now performs the comparison is
         case-sensitive on the password, and folding the password to restore the
         old behaviour would weaken the credential rather than preserve a feature.
-        Second, an unknown user and a wrong password are no longer publicly
-        distinguishable: both return the 401 below carrying
-        "Wrong Password. Try again ...". The baseline told them apart, and that
-        distinction is given up deliberately because the pool is configured to
-        return uniform user-existence errors.
+        The identifier keeps its fold, because that one normalises a key rather
+        than weakening a credential.
+
+
+        D-SIGNON-EXISTENCE-UNIFORM: an unknown user and a wrong password are not
+        distinguishable, and cannot be made so. Both return the 401 below
+        carrying "Wrong Password. Try again ...". The baseline told them apart,
+        and that distinction is given up deliberately because the pool fixes
+        PreventUserExistenceErrors to ENABLED and the module publishes no input
+        that could relax it.
       security: []
       x-required-authority: none
       parameters:
@@ -441,21 +450,34 @@ paths:
           #   could learn whether a user identifier existed. What is bought by
           #   merging them is that user enumeration through this endpoint stops;
           #   what is given up is a diagnostic the baseline showed the operator.
-          #   The second literal is retained in this contract rather than deleted
-          #   because it remains reachable under an explicitly selected legacy
-          #   provider posture, and because deleting it would lose the
-          #   traceability link to line 249.
+          #   The divergence is registered as D-SIGNON-EXISTENCE-UNIFORM.
+          # Refactoring Rationale: this comment and the description below used to
+          #   say the second literal "remains reachable under an explicitly
+          #   selected legacy provider posture". No such posture exists. The app
+          #   client fixes PreventUserExistenceErrors to ENABLED at line 609 of
+          #   infra/modules/cognito/main.tf, and lines 603 to 608 of that file
+          #   record the deliberate refusal to expose it as a module input --
+          #   because a reachable legacy value would put the enumeration channel
+          #   one tfvars line away. A contract advertising a posture no operator
+          #   can select is not documenting an option; it is stating something
+          #   untrue about the system, so both claims are withdrawn.
+          # Assumptions: the traceability link to line 249 survives the
+          #   withdrawal. The literal is cited by the register entry above and is
+          #   carried in the browser application's message catalogue, so nothing
+          #   is lost by declining to advertise it as a response of this
+          #   operation -- which it is not.
           description: >-
             The credential was refused. The message is
             "Wrong Password. Try again ..." (app/cbl/COSGN00C.cbl lines 242 to
             243, where the literal continues onto line 243) for both an unknown
             user identifier and an incorrect password, because the pool returns
-            uniform user-existence errors. Under an explicitly selected legacy
-            provider posture that distinguishes the two, an unknown identifier
-            instead returns "User not found. Try again ..." (line 249). No
-            fieldErrors entry accompanies either message, because attributing the
-            failure to one of the two submitted fields is the disclosure this
-            status exists to withhold.
+            uniform user-existence errors. It is the only message this status
+            carries: the baseline's "User not found. Try again ..." (line 249) is
+            not reachable through this operation, and the divergence is
+            registered as D-SIGNON-EXISTENCE-UNIFORM. No fieldErrors entry
+            accompanies the message, because attributing the failure to one of
+            the two submitted fields is the disclosure this status exists to
+            withhold.
           headers:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
@@ -782,7 +804,6 @@ paths:
         #   row ahead of the cursor -- which is the enumeration this design exists
         #   to avoid.
         - $ref: "#/components/parameters/PagingDirection"
-        - $ref: "#/components/parameters/CorrelationIdHeader"
       responses:
         "200":
           # Assumptions: a cursor naming a row that no longer exists is NOT a
@@ -888,10 +909,13 @@ paths:
       summary: Create one user row.
       description: >-
         Migrated from app/cbl/COUSR01C.cbl. Requires the carddemo-admin
-        authority. The body carries the five values the auth schema's users table
-        holds; it carries no password, because this service creates no credential
-        -- see the create-request schema for the full rationale. On success the
-        response is 201 with the created row and a Location header naming it.
+        authority. The body carries the four values the create screen validates;
+        it carries no password, because this service creates no credential, and it
+        carries no Cognito subject, because this service creates the pool account
+        itself and reads the subject back from the provider -- see the
+        create-request schema for the full rationale on both. On success the
+        response is 201 with the created row, including the subject the row was
+        bound to, and a Location header naming it.
 
 
         The success message the baseline composed --
@@ -944,10 +968,18 @@ paths:
           #   name, last name, user identifier, then user type -- and the
           #   create-request schema's property order reproduces exactly that
           #   sequence.
+          # Refactoring Rationale: the key list below named a fifth field,
+          #   cognitoSub, which the create-request schema no longer carries. It
+          #   never had a baseline literal to report either -- the four literals
+          #   quoted here have always been exactly four -- so naming it promised a
+          #   fieldErrors entry that could not be produced. A body that still names
+          #   it is refused by additionalProperties: false, which is a schema
+          #   violation rather than a field-level validation failure and so reports
+          #   no logical field at all.
           description: >-
             A required value was absent or outside its domain. Each fieldErrors
-            entry is keyed by the logical field -- firstName, lastName, userId,
-            userType or cognitoSub -- and carries the baseline literal for that
+            entry is keyed by the logical field -- firstName, lastName, userId or
+            userType -- and carries the baseline literal for that
             field: "First Name can NOT be empty..."
             (app/cbl/COUSR01C.cbl line 120),
             "Last Name can NOT be empty..." (line 126),
@@ -1252,8 +1284,6 @@ paths:
         #   affirmative parameter reconstructs the two-step act from the
         #   information a single request carries -- the caller must have decided
         #   to delete in order to have sent it.
-        - $ref: "#/components/parameters/CorrelationIdHeader"
-
         # Alternatives Considered: carrying the confirmation in a request body,
         #   which was rejected because a body on DELETE has no defined semantics
         #   and intermediaries are permitted to drop it, so the safeguard could
@@ -1988,13 +2018,16 @@ components:
     #   three that survive. Deriving one schema from the other with a composition
     #   keyword would merge two orders into one and silently change which fault a
     #   caller is told about first on one of the two screens.
-    # Alternatives Considered: a single request schema with the identifier and
-    #   subject marked optional, used by both operations. Rejected on two counts
-    #   beyond the ordering above: it would make the identifier optional on create
-    #   where it is mandatory, and it would make it accepted on update where the
-    #   path already carries it, so a body could name a different user than the
-    #   path and the contract would have to say which wins. Two schemas cannot
-    #   express that contradiction at all.
+    # Alternatives Considered: a single request schema with the identifier
+    #   marked optional, used by both operations. Rejected on one count beyond the
+    #   ordering above: it would make the identifier optional on create where it
+    #   is mandatory, and accepted on update where the path already carries it, so
+    #   a body could name a different user than the path and the contract would
+    #   have to say which wins. Two schemas cannot express that contradiction at
+    #   all. Refactoring Rationale: this note used to name the subject alongside
+    #   the identifier as the second optional property such a schema would need.
+    #   Neither request schema carries a subject now, so only the identifier
+    #   remains, and the count in the sentence was corrected with it.
 
     CreateUserRequest:
       type: object
@@ -2005,36 +2038,69 @@ components:
         app/cbl/COSGN00C.cbl line 223, and wrote it back onto the update screen at
         app/cbl/COUSR02C.cbl line 169, and the migrated design ends all three by
         making the Cognito user pool the sole holder of the credential. This
-        service therefore creates no credential; provisioning creates the pool
-        account and supplies its subject as cognitoSub below, and the sibling
-        migration db/migration/V1__auth.sql has no column any password property
-        here could be stored in.
+        service therefore creates no credential, and the sibling migration
+        db/migration/V1__auth.sql has no column any password property here could
+        be stored in.
+
+
+        There is also deliberately no cognitoSub property. This service creates
+        the pool account and its group membership from the four values below and
+        reads the subject out of the provider's response, so the subject is an
+        output of creating a user rather than an input to it; it appears on the
+        201 response and nowhere in this schema. additionalProperties is false, so
+        a body that names it is refused with 400 rather than silently ignored.
       additionalProperties: false
-      required: [firstName, lastName, userId, userType, cognitoSub]
+      required: [firstName, lastName, userId, userType]
+      # Refactoring Rationale: the three character properties below carry
+      #   pattern "\\S" and an earlier revision of this schema did not. Each
+      #   declared minLength: 1 alone and each said in prose that it must not be
+      #   blank, so a value of twenty spaces was schema-VALID and service-INVALID:
+      #   CreateUserRequest annotates all three @NotBlank, which refuses it. A
+      #   caller generating a request from this document could therefore build a
+      #   body this document accepts and the service answers 400, which is exactly
+      #   the disagreement a published contract exists to prevent. The prose said
+      #   the right thing; nothing machine-readable said it.
+      # Assumptions: the pattern is UNANCHORED, the JSON Schema default, so "\\S"
+      #   as a partial match reads "contains at least one non-whitespace
+      #   character" -- precisely what @NotBlank asserts. Anchoring it would demand
+      #   the whole value be one non-whitespace character and would refuse every
+      #   real name. This is the same form and the same reasoning the sign-on
+      #   schema above already uses, stated once per schema because a generator
+      #   reads each schema independently.
+      # Assumptions: userType needs no pattern. Its enum admits exactly "A" and
+      #   "U", neither of which is blank, so the domain constraint already refuses
+      #   every whitespace value and a pattern beside it would restate a rule the
+      #   enum states more precisely.
       properties:
         firstName:
           type: string
           minLength: 1
           maxLength: 20
+          pattern: "\\S"
           description: >-
             The new user's given name, at most twenty characters. Must not be
-            blank; validated first, per app/cbl/COUSR01C.cbl line 120.
+            blank; validated first, per app/cbl/COUSR01C.cbl line 120. A value of
+            only whitespace is refused by the pattern, matching that check.
         lastName:
           type: string
           minLength: 1
           maxLength: 20
+          pattern: "\\S"
           description: >-
             The new user's family name, at most twenty characters. Must not be
-            blank; validated second, per app/cbl/COUSR01C.cbl line 126.
+            blank; validated second, per app/cbl/COUSR01C.cbl line 126. A value of
+            only whitespace is refused by the pattern, matching that check.
         userId:
           type: string
           minLength: 1
           maxLength: 8
+          pattern: "\\S"
           description: >-
             Identifier for the new row and its primary key, at most eight
-            characters. Must not be blank, per app/cbl/COUSR01C.cbl line 132, and
-            must not already exist -- a duplicate is refused with 409 rather than
-            overwriting the existing row.
+            characters. Must not be blank, per app/cbl/COUSR01C.cbl line 132 -- a
+            value of only whitespace is refused by the pattern, matching that
+            check -- and must not already exist: a duplicate is refused with 409
+            rather than overwriting the existing row.
         userType:
           type: string
           minLength: 1
@@ -2043,25 +2109,37 @@ components:
           description: >-
             The new user's role, A for administrator or U for ordinary user, the
             whole domain per app/cpy/COCOM01Y.cpy lines 26 to 28. Must not be
-            blank, per app/cbl/COUSR01C.cbl line 144. Choosing A grants that user
+            blank, per app/cbl/COUSR01C.cbl line 144; the enum carries that,
+            because neither admitted value is blank. Choosing A grants that user
             the carddemo-admin authority at sign-on, including the authority to
             reach these operations.
-        # Assumptions: this property has no baseline counterpart at all -- it
-        #   exists because identity moved to a managed user pool, and it is what
-        #   makes the mapping between a pool account and a local row total and
-        #   one-to-one. The users table declares it NOT NULL UNIQUE, so a row
-        #   without one could never be authenticated and two rows sharing one would
-        #   resolve a single token to conflicting identities; both are refused by
-        #   the database rather than only by this contract.
-        cognitoSub:
-          type: string
-          format: uuid
-          description: >-
-            The subject identifier of the already-provisioned Cognito account this
-            row represents, as a UUID. Supplied by whatever provisioned that
-            account, because this service does not create pool accounts; it is
-            required, must be unique across rows, and is the only link between a
-            presented token and this row.
+        # Refactoring Rationale: a fifth property, cognitoSub, stood here and has
+        #   been withdrawn. It was declared required and described as "the subject
+        #   identifier of the already-provisioned Cognito account this row
+        #   represents ... supplied by whatever provisioned that account, because
+        #   this service does not create pool accounts". The subject is the ONLY
+        #   link between a presented token and a row -- auth.users declares the
+        #   column NOT NULL UNIQUE -- so a caller able to nominate it was a caller
+        #   able to decide which pool identity a new row authenticates as. An
+        #   administrator could bind a row to another person's subject, or to a
+        #   subject whose pool account holds the administrator group while the row
+        #   records 'U'; the signed group claim wins every authorization decision,
+        #   so the row's own type would be decoration. A well-formed UUID was the
+        #   whole of what the schema could check, so neither case was detectable.
+        # Assumptions: the withdrawal is only half the fix. The service now creates
+        #   the pool account and its group membership from the four properties
+        #   above and reads the subject back from the provider's own response, so
+        #   the row and the pool identity are established by one act and cannot
+        #   drift. The subject is returned on the 201 as part of UserResponse, so a
+        #   caller learns which subject its row was bound to.
+        # Alternatives Considered: keeping the property and validating it against
+        #   the pool -- reading the named subject back and refusing one that does
+        #   not exist or whose group disagrees with userType. Rejected because it
+        #   answers a question that should not be asked: it costs a round trip per
+        #   request against a value the service can produce, it still admits a real
+        #   subject belonging to a different person, and it leaves an account
+        #   provisioned by some unnamed other party as a precondition of using this
+        #   operation at all.
 
     UpdateUserRequest:
       type: object
@@ -2079,21 +2157,36 @@ components:
         to look overlooked.
       additionalProperties: false
       required: [firstName, lastName, userType]
+      # Refactoring Rationale: the two name properties carry pattern "\\S" for the
+      #   same reason the create body's do, and the correction is made here as well
+      #   even though the record implementing this body is not yet authored. The
+      #   defect being closed is INTERNAL to this document and does not depend on a
+      #   Java class existing: each description asserted the value must not be
+      #   blank while the constraints beside it admitted a value of twenty spaces,
+      #   so the document contradicted itself. Leaving it until the record lands
+      #   would guarantee the disagreement is reintroduced at that moment, because
+      #   the baseline branch cited on each property is a not-blank check and the
+      #   record will annotate it @NotBlank.
       properties:
         firstName:
           type: string
           minLength: 1
           maxLength: 20
+          pattern: "\\S"
           description: >-
             The user's given name, at most twenty characters. Must not be blank;
-            validated first among the three, per app/cbl/COUSR02C.cbl line 188.
+            validated first among the three, per app/cbl/COUSR02C.cbl line 188. A
+            value of only whitespace is refused by the pattern, matching that
+            check.
         lastName:
           type: string
           minLength: 1
           maxLength: 20
+          pattern: "\\S"
           description: >-
             The user's family name, at most twenty characters. Must not be blank;
-            validated second, per app/cbl/COUSR02C.cbl line 194.
+            validated second, per app/cbl/COUSR02C.cbl line 194. A value of only
+            whitespace is refused by the pattern, matching that check.
         userType:
           type: string
           minLength: 1
@@ -2101,9 +2194,10 @@ components:
           enum: ["A", "U"]
           description: >-
             The user's role, A for administrator or U for ordinary user. Must not
-            be blank; validated third, per app/cbl/COUSR02C.cbl line 206. Changing
-            it grants or removes that user's carddemo-admin authority at their
-            next sign-on, so it is the one field here with an authorisation
+            be blank; validated third, per app/cbl/COUSR02C.cbl line 206, and the
+            enum carries that because neither admitted value is blank. Changing it
+            grants or removes that user's carddemo-admin authority at their next
+            sign-on, so it is the one field here with an authorisation
             consequence.
 
     UserResponse:
