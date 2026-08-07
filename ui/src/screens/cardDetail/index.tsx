@@ -275,15 +275,20 @@ export function CardDetailScreen(): ReactElement {
        * so the descriptions below jumped down the moment a retrieval failed --
        * whereas row 23 of the 3270 screen this replaces always existed whether
        * or not it held text, which is the invariant MessageBand encodes and
-       * asserts. And it bypassed the 75-character content contract of
-       * CCARD-ERROR-MSG / CCARD-RETURN-MSG (app/cpy/CVCRD01Y.cpy L28-L29) that
-       * the band is the single enforcement point for.
+       * asserts. And it bypassed the message contract of CCARD-ERROR-MSG /
+       * CCARD-RETURN-MSG (app/cpy/CVCRD01Y.cpy L28-L29) that the band is the
+       * single enforcement point for.
        * Assumptions: no `severity` is passed. The band defaults to "error",
        * which is the only appearance the source field ever had -- COLOR=RED on
        * 21 of 21 mapsets -- and passing it explicitly would restate a default
        * this screen has no reason to vary.
+       * Assumptions: the mapset IS passed, and this screen is one of the two
+       * where it changes the rendering. app/cpy-bms/COCRDSL.CPY L102/L194 declare
+       * ERRMSGI/ERRMSGO at PIC X(80) rather than the X(78) nineteen mapsets use,
+       * so omitting the name here would render this screen's message five
+       * characters narrower than the terminal did.
        */}
-      <MessageBand message={error} />
+      <MessageBand mapset="COCRDSL" message={error} />
       {card === null ? null : (
         <Descriptions bordered column={2}>
           {/*

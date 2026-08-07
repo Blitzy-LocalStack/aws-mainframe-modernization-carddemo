@@ -45,21 +45,34 @@ import org.springframework.context.annotation.Configuration;
  *
  * <h2>Why the metadata is restated in code at all</h2>
  *
- * <p>Refactoring Rationale: this class is authored because the package charter beside it declared a
- * CLOSED SET OF THREE configuration types -- {@code SecurityConfig}, this class and
- * {@code DataSourceConfig} -- while the directory held only the first, and the charter carried no
- * target-versus-census disclaimer to mark the difference. A closed roster naming a type that does not
- * exist is indistinguishable from a roster describing a type that was deleted, so the gap was closed by
- * authoring the two named types rather than by weakening the roster.</p>
+ * <p>Refactoring Rationale: without this class the generator publishes a document assembled purely
+ * from its own defaults -- the placeholder title {@code OpenAPI definition}, a placeholder version and
+ * no security scheme whatever -- so the generated document would describe a service sharing not one
+ * member with the contract committed beside it, and a reader inspecting the running service would find
+ * nothing in it stating that a bearer credential is required at all. The package charter in this
+ * directory carries a measured census of four configuration types and marks each one landed;
+ * {@code SecurityConfig} enforces the authority the contract declares, {@code CognitoIdentityConfig}
+ * supplies the provider client, {@code DataSourceConfig} pins the schema, and this is the entry that
+ * supplies the document-level members. It supplies them by restating the committed contract rather
+ * than by minting a second identity for one service.</p>
  *
- * <p>Trade-offs: two documents therefore describe this service's document-level metadata, and only one
- * of them is the contract of record. The hand-authored contract decides on any disagreement, because it
- * is what the browser application's typed client is written against; the document this class
- * contributes to is a CHECK on it. The compromise accepted is that the two can drift apart quietly,
- * since no build step compares them; the offsetting benefit is that a drift becomes discoverable at
- * all, which a single generated document could never be. {@code AuthApiContractTest} narrows that
- * exposure by asserting the values below against the committed contract rather than against literals
- * restated in a test.</p>
+ * <p>Trade-offs: two artifacts therefore describe this service's document-level metadata, and only one
+ * of them is the contract of record. The committed {@code openapi/auth-api.yaml} decides every
+ * disagreement, because the browser client is authored against that file rather than against whatever
+ * the generator emits -- {@code ui/src/api/auth.ts} names the contract as its source in its own header
+ * and enumerates the operations that contract publishes -- so a client compiled against the committed
+ * contract and then served a document that has drifted from it fails at the first call touching the
+ * drifted member, and it fails inside the client, where nothing on this side of the boundary has logged
+ * a cause. Drift is a defect in whichever artifact moved; it is not a variation to tolerate and not
+ * something to reconcile at run time. The reference suite binds itself with the same shape of rule at
+ * {@code tests/README.md} lines 5 to 6, which name the runner script rather than the prose documenting
+ * it as the authority whenever the two disagree, and ask for the disagreement to be fixed rather than
+ * worked around. What is accepted in exchange is the duplication itself: title, version, summary,
+ * description, license, origin and scheme are each written twice, so an edit to one is an edit that has
+ * to reach the other. What is bought is that the duplication is CHECKED rather than trusted --
+ * {@code AuthConfigPackageTest} builds the bean below and compares its information block, its server
+ * entry and its security scheme against the committed document read off the class path, so a divergence
+ * fails the build instead of reaching a client.</p>
  *
  * <p>Alternatives Considered: generating the whole document from annotations and deleting the committed
  * contract. Rejected because the contract is a cross-boundary artifact consumed by a separately built
@@ -71,6 +84,14 @@ import org.springframework.context.annotation.Configuration;
  * service would then describe itself using a file it does not enforce, so a contract edit would change
  * what the service claims about itself without changing anything the service does.</p>
  */
+// Alternatives Considered: leaving proxyBeanMethods at its default of true, which is what the
+//       annotation does when the attribute is omitted. Rejected because the default exists to make a
+//       direct call from one bean method to another return the singleton, and it buys that by having
+//       the container generate a CGLIB subclass of this class at start-up. Nothing here makes such a
+//       call: the three builders below are deliberately private and static rather than further bean
+//       methods, so the proxy would be generated and never used. Turning it off also removes the
+//       option of a later bean-to-bean call whose singleton semantics would depend on the proxy
+//       silently being there, which is a coupling that is easier to prevent than to notice.
 @Configuration(proxyBeanMethods = false)
 public class OpenApiConfig {
 
@@ -233,6 +254,11 @@ public class OpenApiConfig {
      * @return the title, version, summary, description and license of the contract; never {@code null}
      */
     private static Info contractInfo() {
+        // Trade-offs: every value assembled here is a restatement of a member of the committed
+        //       openapi/auth-api.yaml, and the contract wins on any disagreement because the browser
+        //       client is generated from it. A member edited here and not there therefore fails
+        //       AuthConfigPackageTest, which is the point of accepting the duplication: the
+        //       alternative is a client compiled against one spelling and served the other.
         return new Info()
                 .title(CONTRACT_TITLE)
                 .version(CONTRACT_VERSION)

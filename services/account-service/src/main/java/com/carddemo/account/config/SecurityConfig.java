@@ -5,6 +5,7 @@ import com.carddemo.common.security.CognitoAccessTokenValidator;
 import com.carddemo.common.security.JwtRoleConverter;
 import java.time.Clock;
 import java.util.List;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -15,7 +16,6 @@ import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.oauth2.core.DelegatingOAuth2TokenValidator;
-import org.springframework.security.oauth2.core.OAuth2TokenValidator;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.JwtValidators;
@@ -28,12 +28,22 @@ import org.springframework.security.web.access.intercept.RequestAuthorizationCon
 /**
  * Configures who may reach this context's endpoints, and which tokens are accepted at all.
  *
- * <p>This is the migrated form of the authorization check the baseline performs by reading the user type
- * out of the session structure it echoes between screen turns, declared at
- * {@code app/cpy/COCOM01Y.cpy} lines 19 to 44 with its two condition names for the administrator and
- * the ordinary user. That structure is storage the CLIENT hands back, so a client could in principle
- * assert its own user type; here the equivalent claim is signed by the identity provider and validated
- * on every request, so it cannot be asserted by the caller at all.</p>
+ * <p>Refactoring Rationale: this is the migrated form of the authorization check the baseline performs by
+ * reading the user type out of the session structure it echoes between screen turns, declared at
+ * {@code app/cpy/COCOM01Y.cpy} lines 19 to 44. The identity fields are the eight-character user
+ * identifier at line 25 and the one-character user type at line 26, whose two condition names at lines 27
+ * and 28 carry the administrator and ordinary-user values that map onto this application's two group
+ * names. What was wrong with the old arrangement is structural rather than cosmetic: that structure is
+ * storage the CLIENT hands back, so a client could in principle assert its own user type. Here the
+ * equivalent claim is SIGNED by the identity provider and validated on every request, so the caller
+ * cannot assert its own privilege at all. This is a genuine security improvement rather than a change of
+ * transport, and it is the reason every rule below is written against an authority derived from the claim
+ * instead of against any value the caller supplied.</p>
+ *
+ * <p>Assumptions: the two user-type values at lines 27 and 28 are QUOTED character literals, whereas the
+ * two re-entry values of the very next field at lines 30 and 31 are BARE numerics. Anything deriving from
+ * that record has to preserve the distinction rather than normalising the four onto one form, because a
+ * quoted digit is not the number it resembles and it goes wrong quietly in either direction.</p>
  *
  * <p>Assumptions: this class has the same three responsibilities in every context of this repository --
  * a filter chain, the group-to-authority conversion, and the decoder that installs the token checks the
@@ -92,6 +102,66 @@ import org.springframework.security.web.access.intercept.RequestAuthorizationCon
  * path patterns are separate lists, and the narrower of the two is the better place to stop a request that
  * has no business reaching the edge: the environment roots forward these paths on the INTERNAL load
  * balancer only, and {@code infra/modules/api-gateway-http} publishes no route key for either of them.</p>
+ *
+ * <p>Assumptions: this chain does NOT register the shared correlation filter, and the omission is the
+ * contract rather than an oversight. That filter reaches this context through
+ * {@code com.carddemo.common.CardDemoCommonAutoConfiguration}, which the framework loads from the shared
+ * module's registration resource and which places one instance across every request path at an order
+ * ahead of this chain. Ordering ahead of the chain is exactly what makes the identifier present on an
+ * authentication failure and an authorization denial as well as on a success, so the property this chain
+ * relies on is already guaranteed by a registration it does not own. Its width is not arbitrary either:
+ * the baseline analogue captures a 24-byte correlation identifier at
+ * {@code app/app-vsam-mq/cbl/COACCT01.cbl} line 55 and echoes it back on the reply at line 470, and the
+ * HTTP filter carries the same width. Declaring a second registration here would give one filter two
+ * registrations whose relative order is settled by bean ordering rather than by anything written down,
+ * which is why this package's charter forbids it.</p>
+ *
+ * <p>Assumptions: this context is a resource server ONLY. It mints no token, runs no sign-on exchange and
+ * holds no credential of any kind. The baseline's sign-on comparison at {@code app/cbl/COSGN00C.cbl} line
+ * 223, and the plaintext field it compares against, belong to the authentication context and are out of
+ * scope here; the branch that comparison guards is at lines 230 to 239 of that file. All this chain does
+ * is accept a token another component minted, which is why the only credential-shaped things it names are
+ * property placeholders.</p>
+ *
+ * <p>Assumptions: every issuer, client, group and scope value this class needs arrives from configuration
+ * rather than from a literal, so nothing deployment-specific is committed. The baseline is a partial
+ * precedent rather than a full one, and it is cited honestly: {@code app/app-vsam-mq/cbl/COACCT01.cbl}
+ * declares all four of its queue names as blank-initialised fields at lines 92 to 96, but only the input
+ * name is genuinely injected at run time, at lines 191 to 192 and line 197, while the reply and error
+ * names are hard-coded at lines 198 and 294. Externalising every value is therefore an improvement on
+ * that arrangement rather than a port of it.</p>
+ *
+ * <p>Alternatives Considered: neither a retry nor a circuit breaker is configured on this chain. The
+ * application framework moved retry into its own core, so a declarative retry was available here with no
+ * added library at all, and it was still rejected: a filter chain performs no outbound call, so there is
+ * nothing on this path for a retry to re-attempt or for a breaker to open around, and adding either would
+ * introduce a failure mode without removing one. The wider prohibition is asserted mechanically rather
+ * than by agreement -- rule A5 of
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java} fails
+ * the build if any CardDemo class so much as references a resilience library.</p>
+ *
+ * <p>Trade-offs: no cross-origin policy is declared here either, which to a reader expecting a
+ * browser-facing service looks like an omission. It is deliberate. This service is reached through the
+ * edge and the internal load balancer rather than directly from a browser origin, so the preflight a
+ * cross-origin request would send never reaches this chain, and the component the browser actually
+ * negotiates with is the edge. Declaring a policy here would additionally require naming an origin, and a
+ * deployment-specific origin is precisely the kind of value this file keeps out of source. The cost
+ * accepted is that the cross-origin posture has to be read at the edge rather than beside the rules it
+ * would appear to accompany.</p>
+ *
+ * <p>Assumptions: no fifth configuration class joins this package on account of this chain, and no
+ * chunk-oriented batch wiring belongs here at all. That starter is version-managed centrally but is
+ * deliberately not declared by this module -- {@code services/account-service/pom.xml} records the
+ * exclusion in prose at line 612 -- so the types such a class would reference are absent from this
+ * module's compile classpath and the omission is enforced by the compiler rather than by convention.</p>
+ *
+ * <p>Trade-offs: the patterns below are stated as subtrees rather than as an enumeration of published
+ * operations, and they have to be revisited in lockstep with this context's controllers and its published
+ * contract at {@code services/account-service/src/main/resources/openapi/account-api.yaml}, neither of
+ * which this file may author. A subtree pattern cannot express which verbs exist beneath it, so a route
+ * added later inherits its rule silently. The compensating control is the catch-all: because it demands a
+ * group authority rather than mere authentication, the rule a new route inherits is the safe one rather
+ * than the permissive one.</p>
  *
  * @see CognitoAccessTokenValidator
  * @see InternalApiSecurityConfig
@@ -314,7 +384,17 @@ public class SecurityConfig {
      * already hold a validly signed token for this pool and reveals nothing about which paths exist,
      * which is a smaller cost than admitting an unauthorized principal to every published route.</p>
      *
+     * <p>Assumptions: the end-user decoder is injected by NAME and handed to the resource server
+     * explicitly, rather than left to be resolved by type. This context holds TWO beans of that type --
+     * this class's own {@link #jwtDecoder} for end-user tokens and {@link InternalApiSecurityConfig}'s
+     * {@code internalTokenDecoder} for the machine token -- and the resource-server configurer resolves
+     * an unspecified decoder by type alone, which with two candidates and no primary among them fails
+     * while the context is being built. Naming it here is what keeps this deployable startable, and it
+     * matches what the internal chain already does with its own qualified decoder.</p>
+     *
      * @param http the chain builder; must not be {@code null}
+     * @param endUserTokenDecoder the decoder validating an END-USER token, named so it is never confused
+     *     with the internal chain's machine-token decoder; must not be {@code null}
      * @param authenticationConverter the token-to-authentication translation; must not be {@code null}
      * @param clock the clock the rendered refusal bodies read their failure instant from; must not be
      *     {@code null}
@@ -323,6 +403,7 @@ public class SecurityConfig {
      */
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http,
+            @Qualifier("jwtDecoder") JwtDecoder endUserTokenDecoder,
             JwtAuthenticationConverter authenticationConverter, Clock clock) throws Exception {
         return http
                 .csrf(csrf -> csrf.disable())
@@ -358,7 +439,8 @@ public class SecurityConfig {
                         //       status, which every published contract of this service contradicts.
                         .authenticationEntryPoint(ApiErrorSecurityHandlers.entryPoint(clock))
                         .accessDeniedHandler(ApiErrorSecurityHandlers.accessDeniedHandler(clock))
-                        .jwt(jwt -> jwt.jwtAuthenticationConverter(authenticationConverter)))
+                        .jwt(jwt -> jwt.decoder(endUserTokenDecoder)
+                                .jwtAuthenticationConverter(authenticationConverter)))
                 // WHY : Refactoring Rationale: the shared handlers render the ApiError body that this
                 //       service's OpenAPI document declares for 401 and 403. Without them the framework
                 //       default answers with a status and a WWW-Authenticate header and no body at all,

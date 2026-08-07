@@ -2299,7 +2299,7 @@ a register of this size stays true.
   one PF key, so the resulting state is a function of the state already stored and of
   nothing the operator supplied. Pressing the key twice returns the row to where it began.
 * **Target behaviour.** `PUT /api/v1/authorizations/{key}/fraud` carries
-  `FraudMarkRequest.action`, whose closed domain is the same `'F'`/`'R'` pair, and the
+  `FraudMarkRequest.fraudAction`, whose closed domain is the same `'F'`/`'R'` pair, and the
   write sets the column to **the state the body names**. Two identical requests therefore
   leave the row in the state the first one produced; they do not return it to its original
   state.

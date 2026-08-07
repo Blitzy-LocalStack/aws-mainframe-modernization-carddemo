@@ -282,6 +282,17 @@
  * revision of one of those records read this rule as forbidding the override and declined it, accepting
  * that an incidental stringification would print a name and a full account identifier.
  *
+ * <p>Assumptions: this rule governs the DATA PATH, and a DIAGNOSTIC RENDERING is not on it. Two records
+ * here override {@code toString()} to substitute a placeholder for the components that carry a
+ * cardholder's name or link one to an account, and that is consistent with this rule rather than an
+ * exception to it. The two alternatives rejected above -- normalising a value in a constructor, rendering
+ * one behind an accessor -- would each move a disclosure decision out of the mapper, because a response is
+ * written from the accessors. A string form produces no component value and reaches no wire, so the mapper
+ * still decides everything a caller receives; what the override decides is what a LOG LINE receives, which
+ * the mapper never had a view on. Refactoring Rationale: the distinction is stated here because an earlier
+ * revision of one of those records read this rule as forbidding the override and declined it, accepting
+ * that an incidental stringification would print a name and a full account identifier.
+ *
  * <p><b>6. No record here carries money, and none carries a timestamp.</b> Assumptions: the absence
  * is recorded rather than left silent, because silence in a package derived from a financial record
  * reads as an oversight. The card layout declares exactly seven items and no more:

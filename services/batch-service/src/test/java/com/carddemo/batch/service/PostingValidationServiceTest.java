@@ -36,19 +36,28 @@ class PostingValidationServiceTest {
     private static final String CARD_NUMBER = "4111111111111111";
 
     /**
-     * Builds an account with the balance, limit and expiration date a case needs.
+     * Builds an account carrying the cycle credit, limit and expiration date a case needs.
      *
-     * @param currentBalance the current balance
+     * <p>Assumptions: the first argument is placed in the CYCLE CREDIT accumulator and the current
+     * balance is left at zero, because the projection the credit-limit guard compares is formed at
+     * {@code app/cbl/CBTRN02C.cbl:403-405} from {@code ACCT-CURR-CYC-CREDIT} minus
+     * {@code ACCT-CURR-CYC-DEBIT} plus the transaction amount, and not from
+     * {@code ACCT-CURR-BAL}. Placing it in the current balance instead would leave the projection at
+     * the transaction amount alone, which would quietly stop the boundary cases below exercising any
+     * boundary at all -- they would still pass, while asserting nothing about the limit.</p>
+     *
+     * @param cycleCredit the cycle credit total the account has already accumulated toward its limit,
+     *     which the projection adds the transaction amount to
      * @param creditLimit the credit limit the projected balance is compared against
      * @param expirationDate the expiration date the originating date is compared against
      * @return the account, never {@code null}
      */
-    private static Account account(String currentBalance, String creditLimit,
+    private static Account account(String cycleCredit, String creditLimit,
             LocalDate expirationDate) {
-        return new Account(ACCOUNT_ID, "Y", new BigDecimal(currentBalance),
+        return new Account(ACCOUNT_ID, "Y", BigDecimal.ZERO,
                 new BigDecimal(creditLimit), new BigDecimal("500.00"),
                 LocalDate.of(2020, 1, 1), expirationDate, LocalDate.of(2024, 1, 1),
-                BigDecimal.ZERO, BigDecimal.ZERO, "98101", "DEFAULT");
+                new BigDecimal(cycleCredit), BigDecimal.ZERO, "98101", "DEFAULT");
     }
 
     /**
@@ -82,7 +91,7 @@ class PostingValidationServiceTest {
                 transaction("100.00", LocalDate.of(2022, 7, 18)), resolved(),
                 Optional.of(account("0.00", "1000.00", LocalDate.of(2030, 1, 1))));
 
-        assertThat(outcome.mayPost()).isTrue();
+        assertThat(outcome.isAccepted()).isTrue();
         assertThat(outcome.rejectReason()).isEmpty();
     }
 
@@ -116,7 +125,7 @@ class PostingValidationServiceTest {
                 transaction("100.00", LocalDate.of(2022, 7, 18)), resolved(),
                 Optional.of(account("900.00", "1000.00", LocalDate.of(2030, 1, 1))));
 
-        assertThat(outcome.mayPost()).isTrue();
+        assertThat(outcome.isAccepted()).isTrue();
     }
 
     /** One cent beyond the credit limit reports reason 102. */
@@ -138,7 +147,7 @@ class PostingValidationServiceTest {
                 transaction("100.00", LocalDate.of(2022, 7, 18)), resolved(),
                 Optional.of(account("0.00", "1000.00", LocalDate.of(2022, 7, 18))));
 
-        assertThat(outcome.mayPost()).isTrue();
+        assertThat(outcome.isAccepted()).isTrue();
     }
 
     /** One day past the expiration date reports reason 103. */
@@ -178,12 +187,19 @@ class PostingValidationServiceTest {
     @Test
     @DisplayName("keep the precedence in the result type, not in its caller")
     void precedenceIsOwnedByTheResultType() {
-        assertThat(PostingValidationResult.of(false, false, true, true).rejectReason())
+        // WHY : Assumptions: the arguments state which conditions FAILED, all four in the same
+        //       polarity, so a reader does not have to track that some mean "found" and others mean
+        //       "failed". The projection is null on the first two because a lookup failure means none
+        //       was computed, and required on the last two because both reached the boundary tests.
+        assertThat(PostingValidationResult.resolve(true, true, true, true, null).rejectReason())
                 .contains(RejectReason.CARD_NUMBER_NOT_IN_CROSS_REFERENCE);
-        assertThat(PostingValidationResult.of(true, false, true, true).rejectReason())
+        assertThat(PostingValidationResult.resolve(false, true, true, true, null).rejectReason())
                 .contains(RejectReason.ACCOUNT_NOT_FOUND_ON_READ);
-        assertThat(PostingValidationResult.of(true, true, true, true).rejectReason())
+        assertThat(PostingValidationResult
+                .resolve(false, false, true, true, new BigDecimal("1000.01")).rejectReason())
                 .contains(RejectReason.RECEIVED_AFTER_ACCOUNT_EXPIRATION);
-        assertThat(PostingValidationResult.of(true, true, false, false).mayPost()).isTrue();
+        assertThat(PostingValidationResult
+                .resolve(false, false, false, false, new BigDecimal("100.00")).isAccepted())
+                .isTrue();
     }
 }

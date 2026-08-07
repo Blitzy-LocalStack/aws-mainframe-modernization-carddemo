@@ -121,6 +121,39 @@ public final class CardNumberMasker {
     private static final int CARD_NUMBER_LENGTH = 16;
 
     /**
+     * The regular expression a fully masked card number matches, and no unmasked one does.
+     *
+     * <p>Refactoring Rationale: this is published so that a response type carrying a masked rendering can
+     * constrain it, which is what stops an unmasked primary account number from satisfying a member
+     * declared to hold a masked one. Before it existed, the card response shapes bounded that member by
+     * WIDTH alone -- and a raw sixteen-digit number is exactly sixteen characters wide, so it satisfied
+     * every such bound and nothing in the type system said otherwise.</p>
+     *
+     * <p>Alternatives Considered: writing the expression into each response shape that needs it. Rejected
+     * because it copies two constants this class owns -- the mask character and the number of visible
+     * trailing positions -- into types that do not own them, so a change here would leave each copy a
+     * stale second definition of the masking rule while still compiling. Deriving the expression from the
+     * same constants {@link #mask(String)} renders with means the rule has one definition and the
+     * constraint cannot drift from the renderer.</p>
+     *
+     * <p>Assumptions: the expression is built from constant expressions alone, so it remains a
+     * compile-time constant and can be used as a constraint annotation's value, which is the whole point
+     * of publishing it rather than a compiled {@code Pattern}. The mask character is wrapped in a literal
+     * quotation so that a character with meaning in a regular expression -- which an asterisk is -- cannot
+     * change what the expression means if the constant is ever changed.</p>
+     *
+     * <p>Assumptions: this describes a FULL-WIDTH masked rendering only, that is
+     * {@value #CARD_NUMBER_LENGTH} characters of which the last {@value #VISIBLE_TAIL_LENGTH} are digits.
+     * {@link #mask(String)} also renders a short value entirely masked, and such a value does not match
+     * this expression. That is intended: a card number is a declared sixteen-position field, so a
+     * response carrying anything narrower is reporting a row that could not have been stored, and the
+     * expression refusing it is the correct answer rather than a gap.</p>
+     */
+    public static final String MASKED_FORM_PATTERN =
+            "[\\Q" + MASK_CHARACTER + "\\E]{" + (CARD_NUMBER_LENGTH - VISIBLE_TAIL_LENGTH)
+                    + "}[0-9]{" + VISIBLE_TAIL_LENGTH + "}";
+
+    /**
      * The characters a separated card number may be written with.
      *
      * <p>Assumptions: the three punctuation marks are exactly the set

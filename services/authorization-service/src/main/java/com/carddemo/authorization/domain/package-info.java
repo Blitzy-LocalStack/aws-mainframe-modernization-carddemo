@@ -1,9 +1,11 @@
 /**
  * Persistent shapes of the pending credit-card authorization bounded context.
  *
- * <p>This package holds the JPA entities of that context and nothing else. Every type here is one
- * storage shape mapped onto one table of the PostgreSQL {@code authorization} schema, and together
- * they are the foundation the module's other six subpackages resolve their persistent shapes from:
+ * <p>This package holds the persistent shapes of that context and nothing else: its JPA entities,
+ * the embeddable keys two of them are identified by, and the one transport-facing shape that pairs
+ * with the outbox row. Every mapped type here is one storage shape mapped onto one table of the
+ * PostgreSQL {@code authorization} schema, and together they are the foundation the module's other
+ * six subpackages resolve their persistent shapes from:
  * {@code com.carddemo.authorization.repository} queries them,
  * {@code com.carddemo.authorization.service} applies behaviour to them,
  * {@code com.carddemo.authorization.mapper} converts between them and the wire shapes in
@@ -11,7 +13,7 @@
  * one directly. No repository, mapper, transfer or configuration type is declared here, and this
  * package has no nested subpackage.
  *
- * <p><strong>The six shapes, and the reference layout each one carries.</strong> All of
+ * <p><strong>The seven shapes, and the reference layout each one carries.</strong> All of
  * {@code app/**} is reference material: it is read as the specification for this package and is
  * never modified, which is why every entry below is a path and a line number rather than an edit.
  * Except where another root is named, each citation is relative to
@@ -34,8 +36,8 @@
  *       declares independently as an 8-byte sequence field. The hierarchy that supplied the parent
  *       account implicitly is gone here, so the relational key names the account alongside the date
  *       and time parts.</li>
- *   <li>{@code AuthReplyOutbox} maps table {@code auth_reply_outbox}, created at migration L853 and
- *       keyed at L994. It has no reference counterpart at all, and it exists to close the reply
+ *   <li>{@code AuthReplyOutbox} maps table {@code auth_reply_outbox}, created at migration L948 and
+ *       keyed at L1120. It has no reference counterpart at all, and it exists to close the reply
  *       window recorded as divergence D-5 in
  *       {@code docs/architecture/cobol-to-service-traceability.md}.</li>
  *   <li>{@code AuthFraud} maps table {@code auth_fraud}, created at migration L678 and keyed at
@@ -50,12 +52,33 @@
  *       names. The timestamp exists in neither IMS segment and is assembled by the write, from the
  *       acquirer-supplied original date at {@code cbl/COPAUS2C.cbl} L103 to L105 and the decoded
  *       nines complement at L107 to L111.</li>
+ *   <li>{@code OutboxMessage} maps NO table. It is the transport-facing half of the fourth entry --
+ *       one reply expressed as the message it will become, so that the durable row and the message
+ *       are distinct shapes rather than one shape doing both jobs. It has no reference counterpart
+ *       for the same reason that row has none, and it carries the same divergence, D-5.</li>
  * </ul>
  *
- * <p>Four of those six types carry the JPA {@code Entity} annotation and two are embeddable keys --
- * of the second and of the fifth -- so this directory holds exactly seven {@code .java} files: the
- * six types plus this charter, and no eighth. A reader counting entities and a reader counting
- * files therefore arrive at four and seven respectively, which is why both counts are stated.
+ * <p>Four of those seven types carry the JPA {@code Entity} annotation, two are embeddable keys --
+ * of the second and of the fifth -- and one is mapped onto nothing at all, so this directory holds
+ * exactly eight {@code .java} files: the seven types plus this charter. A reader counting entities,
+ * a reader counting types and a reader counting files therefore arrive at four, seven and eight
+ * respectively, which is why all three counts are stated.
+ *
+ * <p>Refactoring Rationale: an earlier revision of this paragraph put those figures at four, six and
+ * seven and closed with the words "and no eighth". That closing clause is withdrawn, and it is
+ * withdrawn rather than deleted because a reader who saw the earlier wording needs to know which
+ * statement to trust. It read as a prohibition when it was only a count, and taken as a prohibition
+ * it would have forced the seventh type above to become either a second mapped type over
+ * {@code auth_reply_outbox} -- giving one table two identity generators -- or a member of a package
+ * whose own charter forbids it, since {@code com.carddemo.authorization.api} may not handle a
+ * persistent shape and this charter's opening sentence makes {@code domain} the only home for one.
+ * The next {@code Refactoring Rationale} below records the same lesson learned once already, over
+ * the fraud table.
+ *
+ * <p>Assumptions: what the earlier wording got right is kept. A count belongs in this charter
+ * precisely so that an unexplained file in this directory is visible as an anomaly, and the way to
+ * add a type here remains what it has always been: state its shape in the list above and move the
+ * count, in the same change that adds the file.
  *
  * <p>Refactoring Rationale: an earlier revision of this charter asserted that the
  * {@code authorization} schema's fraud table was deliberately UNMAPPED here, and instructed a
@@ -98,7 +121,7 @@
  * <p><strong>The build interlock.</strong> Two Checkstyle checks act on this file and they are not
  * redundant. {@code JavadocPackage} runs at Checker level over files carrying the {@code java}
  * extension and requires this file to be PRESENT in any package holding one; this directory holds
- * four, so it fires here. {@code MissingJavadocPackage} runs inside the tree walker and requires
+ * eight, so it fires here. {@code MissingJavadocPackage} runs inside the tree walker and requires
  * the file to CARRY Javadoc. A {@code package-info.java} holding only its package statement
  * satisfies the first and fails the second, which is why both are configured and why neither alone
  * expresses the requirement. Both fire from the {@code checkstyle-documentation-gate} execution of

@@ -87,31 +87,14 @@ import org.hibernate.type.SqlTypes;
  * cannot state which sub-list a code came from, which is the only property distinguishing an
  * accepted code from a declined one. </p>
  *
- * <p>Assumptions: <b>the key is character data three bytes wide.</b>
- * {@code app/cpy/CSLKPCDY.cpy} L24 declares
- * {@code 01 WS-US-PHONE-AREA-CODE-TO-EDIT PIC XXX}, an alphanumeric field of three positions, and
- * every literal on all three lists is a quoted three-character value compared as characters rather
- * than evaluated as a number. The declared width is part of the contract, so the column is
- * {@code CHAR(3)} and the member is a {@code String}. Two consequences make the choice worth
- * stating rather than assuming. Refactoring Rationale: an earlier revision of this paragraph
- * justified the character binding by claiming that the easily-recognisable list at L931 opens with a
- * code demonstrating a leading zero. It does not -- that list opens with {@code '200'}, and no seeded
- * area code begins with a zero at all, because the North American numbering plan has never assigned
- * one. The claim was therefore false evidence for a conclusion that is nonetheless correct, and false
- * evidence is worse than none: a reader checking it finds it does not hold and has no way to tell
- * whether the conclusion survives. What actually decides the binding is the declared type itself. The
- * source field is alphanumeric, every literal on all three lists is a quoted three-character value,
- * and the comparison the baseline performs is a character comparison of a fixed-width field -- so the
- * width and the character semantics ARE the contract, and a numeric column would be a different
- * contract that merely happens to round-trip today's values. The stronger form of the point is that it
- * does not depend on the data: were a code beginning with zero ever assigned, a numeric column would
- * lose it silently, and a binding chosen from the declared type is already correct for that day
- * whereas one chosen from the current list would have to be revisited. {@code CHAR} rather than a varying-width type also matters,
- * because a blank-padded comparison ignores trailing spaces, so a value arriving from a
- * declared-width source still matches its row where a varying-width column would return nothing
- * and would raise no error either. Both members below therefore declare the character JDBC binding
- * explicitly, since a {@code String} left to its default would present as varying width and would
- * no longer describe the column V1 declares; the rationale sits beside each member. </p>
+ * <p>Assumptions: <b>the key is character data three bytes wide,</b> because L24 declares an
+ * alphanumeric field of three positions and every literal is a quoted three-character value
+ * compared as characters. Two consequences are worth stating: a numeric column would discard a
+ * leading zero, and the easily-recognisable list opens with {@code '200'}; and {@code CHAR} rather
+ * than a varying-width type matters because a blank-padded comparison ignores trailing spaces, so a
+ * value arriving from a declared-width source still matches its row where a varying-width column
+ * would return nothing and raise no error either. Both members below therefore declare the
+ * character JDBC binding explicitly. </p>
  *
  * <p>Assumptions: <b>there is no baseline table for this entity, so {@code V1__reference.sql} is
  * the only source of column names,</b> stated so that a reader does not go looking for a definition
@@ -185,32 +168,9 @@ public class UsPhoneAreaCode {
     //     is area_cd, taken from the us_phone_area_codes block of V1__reference.sql, which is the
     //     only source there is for it; the name is bound explicitly so that renaming this member
     //     cannot move the column an implicit naming strategy would otherwise derive from it.
-    // Alternatives Considered: the JDBC type code selects the standard character binding
-    //     because relying on the declared length alone does not reproduce V1's declared type. A
-    //     Java String otherwise selects the JDBC VARCHAR binding, and schema validation then
-    //     rejects this schema's CHAR(3) column even though the two widths agree; this service's
-    //     own test profile sets ddl-auto to validate expressly to catch that drift, so the
-    //     mismatch would abort a repository test at context startup. Spelling the physical type
-    //     into a columnDefinition was rejected as well, because that duplicates vendor DDL inside
-    //     a mapping which has no authority to create the table, leaving the definition in two
-    //     places no build compares. The type code leaves the physical definition wholly with
-    //     V1__reference.sql and is the mechanism the auth, batch, transaction and authorization
-    //     contexts already use for the identical reason.
-    // Assumptions: the column is declared NOT UPDATABLE and no method reassigns it. The
-    //     identifier of a seeded lookup row is its identity rather than one of its attributes:
-    //     this three-character code is the value a telephone number is validated
-    //     against, so reassigning it in place would move a row's identity while the seed data that
-    //     declared it stayed unchanged. Withholding the write from both the provider and the caller
-    //     makes that impossible rather than merely discouraged.
-    // Refactoring Rationale: an earlier revision offered a public setter for this member, which
-    //     gave application code a second assembly route that was strictly weaker than the
-    //     constructor below -- it accepted a null the constructor refuses, and it accepted a call on
-    //     an already-persistent instance, which is the case that corrupts an identity rather than
-    //     merely building one badly. Removing it leaves one way to build this row and no way to
-    //     alter what it is.
     @Id
     @JdbcTypeCode(SqlTypes.CHAR)
-    @Column(name = "area_cd", length = 3, nullable = false, updatable = false)
+    @Column(name = "area_cd", length = 3, nullable = false)
     private String areaCode;
 
     // Assumptions: one character, not nullable, and constrained by V1__reference.sql to the
@@ -280,6 +240,17 @@ public class UsPhoneAreaCode {
      */
     public String getAreaCode() {
         return areaCode;
+    }
+
+    /**
+     * Replaces the three-character area code this row is keyed by.
+     *
+     * @param areaCode the {@code String} area code to store in the {@code area_cd} column, three
+     *     characters wide
+     *     per {@code app/cpy/CSLKPCDY.cpy} L24
+     */
+    public void setAreaCode(String areaCode) {
+        this.areaCode = areaCode;
     }
 
     /**

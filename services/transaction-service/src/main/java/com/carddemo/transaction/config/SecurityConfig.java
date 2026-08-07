@@ -120,7 +120,7 @@ import org.springframework.security.web.access.intercept.RequestAuthorizationCon
  * group-to-authority conversion and the decoder, and nothing else, so the four files of this package do
  * not overlap and a reader looking for one of those beans has exactly one place to look.</p>
  *
- * <h2>Assumptions: the two starters this class needs are not inherited</h2>
+ * <h2>Assumptions: the starters this class needs are not inherited, and the two declarations differ</h2>
  *
  * <p>{@code common-lib} marks four starters {@code optional} -- web, validation, security and
  * oauth2-resource-server -- and an optional dependency is not transitive, so none of them reaches this

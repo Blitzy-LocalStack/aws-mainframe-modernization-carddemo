@@ -7,11 +7,13 @@
  * These cases assert one structural property per screen and nothing about the
  * screen's data: that the band element is present in BOTH states, and that a
  * failure reaches it as text. The property matters because the band is the one
- * place the 75-character message contract of `CCARD-ERROR-MSG` and
- * `CCARD-RETURN-MSG` (`app/cpy/CVCRD01Y.cpy` L28-L29) is enforced and the one
- * place the always-reserved row-23 space is guaranteed. A screen that rendered
- * its own alert would satisfy every visible expectation while silently opting
- * out of both.
+ * place the message contract of `CCARD-ERROR-MSG` and `CCARD-RETURN-MSG`
+ * (`app/cpy/CVCRD01Y.cpy` L28-L29) is enforced, the one place the per-mapset
+ * display width is applied -- 80 characters on `COCRDSL` and `COCRDUP`, 78 on the
+ * other nineteen, asserted in `ui/src/layout/MessageBand.test.tsx` -- and the one
+ * place the always-reserved row-23 space is guaranteed. A screen that rendered its
+ * own alert would satisfy every visible expectation while silently opting out of
+ * all three.
  *
  * Refactoring Rationale: the assertion is written against
  * `MESSAGE_BAND_TEST_ID` rather than against the message text or an alert role.

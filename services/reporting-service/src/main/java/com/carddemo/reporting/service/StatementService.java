@@ -23,8 +23,8 @@ import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.data.domain.Limit;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -270,14 +270,26 @@ public class StatementService {
                 .orElseThrow(() -> new NoSuchElementException(
                         "no account row for account " + xref.getAccountId()));
 
-        // WHY : Assumptions: the read is keyed on the masked rendering rather than on the whole
-        //       relation, because a card later in the card-first ordering would otherwise fall outside
-        //       the first page and the response would report a statement with no activity -- which a
-        //       reader cannot tell from a genuine one. The repository records the same reasoning at
-        //       the method it belongs to.
-        List<StatementTransactionView> forCard =
-                transactions.findByKeyCardNumberOrderByKeyTransactionIdAsc(
-                        maskedCard, Limit.of(MAX_STATEMENT_TRANSACTIONS));
+        // WHY : Assumptions: the cursor is opened for the masked rendering rather than over the whole
+        //       relation, because a card sitting late in the card-first ordering would otherwise be
+        //       reached only after traversing every row ahead of it, and bounding that traversal would
+        //       report a statement with no activity -- which a reader cannot tell from a genuine one.
+        //       The repository records the same reasoning at the method it belongs to.
+        // WHY : Assumptions: the cursor requires an enclosing transaction rather than starting one of
+        //       its own, so that it outlives the call that opened it; this method already declares the
+        //       read-only transaction that satisfies it. The rows are collected inside that scope
+        //       because the total, the count and the rendered lines below each traverse them, and a
+        //       forward-only cursor can be traversed only once.
+        // WHY : Trade-offs: the ceiling is applied to the traversal rather than dropped now that the
+        //       read is a cursor, so the number of rows this method can total is unchanged at
+        //       MAX_STATEMENT_TRANSACTIONS. What is given up is that the ceiling no longer reaches the
+        //       relation as part of the query, so the traversal stops here after that many rows rather
+        //       than the relation being asked for no more than that many; the accepted cost is at most
+        //       one retrieval batch read beyond the ceiling before the cursor is abandoned.
+        List<StatementTransactionView> forCard;
+        try (Stream<StatementTransactionView> rows = transactions.streamByCardNumber(maskedCard)) {
+            forCard = rows.limit(MAX_STATEMENT_TRANSACTIONS).toList();
+        }
         requireSingleCard(forCard);
 
         Money total = Money.ZERO;

@@ -112,16 +112,23 @@ import org.hibernate.type.SqlTypes;
  * analogue, allocated as {@code AWS.M2.CARDDEMO.DALYREJS(+1)} at
  * {@code app/jcl/POSTTRAN.jcl:34-38} and defined at {@code LIMIT(5) SCRATCH} by
  * {@code app/jcl/DALYREJS.jcl:24-28} -- and by the {@code batch.batch_run} ledger.</p>
+ *
+ * <h2>What the three mapped columns are, and what the reason code can hold</h2>
+ *
+ * <p>The three columns reconstitute the 430-byte reject record as 350 characters of verbatim
+ * rejected transaction, then a four-digit reason code, then a 76-character description. The width
+ * derivation is given three independent ways above.</p>
+ *
+ * <p>The reason-code domain this module can PERSIST is exactly {@code {100, 101, 102, 103}}. A
+ * fifth value, 109, is assigned by the baseline at {@code app/cbl/CBTRN02C.cbl:556} on a path that
+ * cannot reach the write, so it is not part of the domain; the reachability analysis sits on
+ * {@link #getReasonCode()}.</p>
+ *
+ * <p>Assumptions: reason 101 and the unreachable 109 carry BYTE-IDENTICAL text -- {@code ACCOUNT
+ * RECORD NOT FOUND} at {@code app/cbl/CBTRN02C.cbl:398} and {@code :557} respectively -- so a
+ * description does not identify a reason. That is a further reason the code is its own queryable
+ * column rather than something a reader derives from the text beside it.</p>
  */
-// WHAT: the three columns this type maps reconstitute a 430-byte record as 350 characters of
-//       verbatim rejected transaction, then a four-digit reason code, then a 76-character
-//       description. The class Javadoc above derives that width three independent ways.
-// WHAT: the reason-code domain this module can persist is exactly {100, 101, 102, 103}. A fifth
-//       value, 109, is assigned by the baseline at app/cbl/CBTRN02C.cbl:556 on a path that cannot
-//       reach the write, so it is not part of the domain; the analysis is on getReasonCode().
-// WHAT: reason 101 and the unreachable 109 carry byte-identical text, ACCOUNT RECORD NOT FOUND, at
-//       app/cbl/CBTRN02C.cbl:398 and :557 respectively. The description therefore does not identify
-//       the code, which is a further reason the code is its own queryable column.
 @Entity
 // WHY : Alternatives Considered: reusing transaction-service's mapping of this same table instead of
 //       declaring a local one. Rejected on three independent grounds. The migration plan forbids a

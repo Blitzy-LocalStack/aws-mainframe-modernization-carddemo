@@ -366,6 +366,51 @@
       <artifactId>s3</artifactId>
     </dependency>
 
+    <!-- Refactoring Rationale: the coordinate above puts the object-store
+               client CLASS on the compile classpath but contributes no client
+               BEAN, and the module had no other source of one, so
+               com.carddemo.batch.service.DatasetGenerationService could compile
+               and unit-test while failing at container start on an unsatisfied
+               constructor dependency. The evidence is the autoconfiguration's own
+               condition: io.awspring.cloud.autoconfigure.s3.S3AutoConfiguration is
+               annotated @ConditionalOnClass on BOTH
+               software.amazon.awssdk.services.s3.S3Client and
+               io.awspring.cloud.s3.S3OutputStreamProvider, and the second of those
+               ships in io.awspring.cloud:spring-cloud-aws-s3, which only this
+               starter brings. With one of the two classes absent the
+               autoconfiguration never applied and no client bean was defined
+               anywhere in the reactor.
+         Alternatives Considered: declaring the bean on a configuration class
+               of this module instead. Rejected because the configuration package
+               charter closes its roster at exactly three classes (DataSourceConfig,
+               BatchConfig and SqsConfig) and states there is no fourth, so a
+               hand-built client would either need a fourth class the charter
+               forecloses or would have to be attached to a class whose stated
+               ownership is the data source or the step infrastructure.
+         Alternatives Considered: constructing the client inside the service
+               through the software development kit's own builder. Rejected because
+               it would put credential and region resolution inside a business
+               class, bypass the region property this module already declares under
+               spring.cloud.aws, and leave no seam for the emulator endpoint the
+               repository integration tests point at.
+         Trade-offs: the starter also brings a template, an output-stream
+               provider and a protocol resolver this module never references, and
+               that unused surface is the accepted cost of obtaining a client
+               configured from the same region, credential and endpoint properties
+               the queue and parameter-store starters already read. The alternative
+               costs a configuration class the charter refuses and a second, divergent
+               place where AWS connection settings are interpreted.
+         Assumptions: no version element appears here because
+               io.awspring.cloud:spring-cloud-aws-dependencies, imported by the
+               reactor parent, manages this artifact at its own project version, so
+               the coordinate stays in lockstep with the two sibling starters above
+               and the enforcer's ban on dynamic versions is satisfied without a
+               pin of its own. -->
+    <dependency>
+      <groupId>io.awspring.cloud</groupId>
+      <artifactId>spring-cloud-aws-starter-s3</artifactId>
+    </dependency>
+
     <!-- ====================================================================
          OBSERVABILITY
          ==================================================================== -->

@@ -1,33 +1,91 @@
 # =============================================================================
-# authorization-service -- base configuration.
+# services/authorization-service/src/main/resources/application.yml
+# -----------------------------------------------------------------------------
+# Purpose:
+#   Base runtime configuration for authorization-service, the PENDING
+#   AUTHORIZATION bounded context. It settles the values every environment
+#   shares: the HTTPS listener, the Aurora PostgreSQL datasource and its
+#   connection pool, Flyway schema migration and the identity that applies it,
+#   JPA behaviour, resource-server identity, the published API contract, the
+#   Actuator surface, log levels, and the queue, outbox, account-context and
+#   internal-identity settings this context alone carries.
 #
+#   This file is the property-key contract for the module: the classes under
+#   com.carddemo.authorization.config and com.carddemo.authorization.service
+#   bind against the keys declared here, and application-dev.yml and
+#   application-prod.yml override their VALUES without adding a key, removing a
+#   key, or changing the shape of one.
 #
-# WHY : (1) Assumptions: this context is the migrated form of
-#       app/app-authorization-ims-db2-mq -- the queue-driven consumer COPAUA0C
-#       plus the three online programs COPAUS0C, COPAUS1C and COPAUS2C. It is
-#       therefore the ONLY context in this repository that is simultaneously a
-#       web service and a message consumer, which is why this document carries
-#       both a `server:` block and a `spring.cloud.aws:` block where its peers
-#       carry one or the other.
-#       (2) Assumptions: no value below is a secret and no value below is an
-#       endpoint. Credentials, queue locations and the issuer are all injected as
-#       environment variables by the ECS task definition, which resolves them
-#       from Parameter Store and Secrets Manager at task start. The framework's
-#       relaxed binding maps an injected SPRING_DATASOURCE_URL onto
-#       spring.datasource.url unaided, so no client library is needed to read
-#       them and nothing here has to be templated at build time.
-#       (3) Trade-offs: the placeholders below carry NO defaults. An absent
-#       datasource URL or issuer stops startup rather than falling back to
-#       something locally plausible, because a service that starts against the
-#       wrong database is far harder to notice than one that does not start.
+#   The behaviour being configured is migrated from the eight REFERENCE-ONLY
+#   programs under app/app-authorization-ims-db2-mq/cbl, which are read and
+#   never modified: COPAUA0C.cbl (the queue-driven request consumer), COPAUS0C
+#   .cbl (pending authorization summary), COPAUS1C.cbl (detail), COPAUS2C.cbl
+#   (fraud marking), CBPAUP0C.cbl (purge), and PAUDBLOD.CBL, PAUDBUNL.CBL and
+#   DBUNLDGS.CBL (segment load and unload). Their record layouts are
+#   cpy/CIPAUSMY.cpy and cpy/CIPAUDTY.cpy, their message payloads are
+#   cpy/CCPAURQY.cpy and cpy/CCPAURLY.cpy, and the fraud table is ddl/AUTHFRDS
+#   .ddl with its index ddl/XAUTHFRD.ddl. Three CICS transactions name the
+#   online programs: TRANSACTION(CPVD) at csd/CRDDEMO2.csd L39, TRANSACTION
+#   (CPVS) at L49 and TRANSACTION(CP00) at L59.
+#
+#   This module owns the PostgreSQL schema "authorization" and its four tables
+#   -- pending_auth_summary, pending_auth_detail, auth_fraud and
+#   auth_reply_outbox -- created by db/migration/V1__authorization.sql. Those
+#   four replace segments the baseline split across an IMS database and a Db2
+#   table joined by two-phase commit, so the second resource manager is REMOVED
+#   here rather than emulated, and no distributed-transaction or XA setting
+#   appears anywhere below.
+#
+#   NO SECRET, CREDENTIAL, HOSTNAME, ENDPOINT, QUEUE URL, KEY IDENTIFIER OR
+#   ACCOUNT IDENTIFIER APPEARS ANYWHERE IN THIS FILE. Every deployment-specific
+#   value is a ${...} placeholder resolved at run time from an environment
+#   variable that the ECS task definition sets from Parameter Store or from a
+#   Secrets Manager container secret.
+#
+#   Documentation convention: docs/CODE_DOCUMENTATION_STANDARD.md. YAML has no
+#   docstring construct, so this header block is the module-entry-point
+#   equivalent, and every non-obvious key below carries an adjacent rationale
+#   naming at least one of Alternatives Considered, Refactoring Rationale,
+#   Assumptions or Trade-offs, as the project's single user-specified rule,
+#   Rule 1 "Explainability", requires at its validation gate. No mechanical gate
+#   reads this file: config/checkstyle/checkstyle.xml narrows its Checker to
+#   fileExtensions="java" at L185, and the plan declares no linter that parses
+#   YAML comments. Review carries the obligation, and the discipline is applied
+#   here at the rigour it is applied where a build would fail without it.
+# -----------------------------------------------------------------------------
+# WHY (non-obvious design decisions):
+#
+#   Assumptions: this is the ONLY context in the repository that is
+#     simultaneously a web service and a message consumer, which is why this
+#     document carries both a `server:` block and a `spring.cloud.aws:` block
+#     where its peers carry one or the other.
+#   Trade-offs: the placeholders below carry NO defaults, apart from the four
+#     that name a value this service derives rather than receives. An absent
+#     datasource URL, issuer or queue reference stops startup rather than
+#     falling back to something locally plausible, because a service that starts
+#     against the wrong database writes authorization decisions into it, and
+#     that is far harder to notice than a service that does not start at all.
+#   Assumptions: no client library reads Parameter Store or Secrets Manager from
+#     this file, and the sibling POM is why. It declares neither the
+#     parameter-store nor the secrets-manager starter, so a non-optional
+#     `aws-parameterstore:` import here would abort startup on a config location
+#     no resolver claims. The framework maps an injected SPRING_DATASOURCE_URL
+#     onto spring.datasource.url by relaxed binding unaided, and the
+#     per-environment Parameter Store overlay is declared as an `optional:`
+#     import in application-dev.yml and application-prod.yml, where the
+#     parameter path can name the environment it belongs to.
 # =============================================================================
 
 server:
-  # WHY : Assumptions: 8080 is fixed by three other artifacts -- the Dockerfile's
-  #       EXPOSE, the ecs-service module's container_port, and the security group
-  #       rule that admits the load balancer -- so this restates a shared
-  #       contract rather than choosing a value. Changing it here alone would
-  #       leave every probe pointed at a closed port.
+  # WHY : Assumptions: 8080 is pinned by three other artifacts, so this key
+  #       restates a shared contract rather than choosing a value. The image's
+  #       HEALTHCHECK probes https://127.0.0.1:8080/actuator/health at
+  #       services/authorization-service/Dockerfile L223-L226 beside its EXPOSE
+  #       8080 at L169; the load balancer's target group health-checks the same
+  #       port and path; and the security group admits ONLY the load balancer to
+  #       it. Changing the port here alone leaves all three pointed at a closed
+  #       port, which presents as a task that never turns healthy rather than as
+  #       a configuration mistake.
   port: 8080
 
   ssl:
@@ -121,11 +179,28 @@ spring:
     name: authorization-service
 
   config:
-    # WHY : Assumptions: it carries the single console log pattern that emits the
-    #       correlation identifier and the platform request identifier from the
+    # WHY : (1) Assumptions: it carries the single console log pattern that emits
+    #       the correlation identifier and the platform request identifier from the
     #       logging context, which CorrelationIdFilter and the message consumer
     #       both populate. Restating the pattern per service is what let the two
     #       drift apart before this import existed.
+    #       (2) Assumptions: this is the ONLY import in the base document, and the
+    #       Parameter Store overlay is declared per profile instead --
+    #       `optional:aws-parameterstore:/carddemo/<env>/authorization/` in
+    #       application-dev.yml and application-prod.yml -- because the parameter
+    #       path has to name the environment it reads, which a shared base document
+    #       cannot know. Terraform module outputs reach the running service through
+    #       that overlay and through environment variables the ECS task definition
+    #       sets from Parameter Store and from Secrets Manager container secrets;
+    #       nothing here holds a resolved endpoint.
+    #       Alternatives Considered: declaring the parameter-store import here
+    #       without the `optional:` prefix so a missing overlay failed loudly.
+    #       Rejected on a measured consequence: the sibling POM declares no
+    #       parameter-store starter, so no resolver claims that location prefix and
+    #       startup would abort on the config location itself rather than on any
+    #       value being absent -- which is the wrong failure to report, because the
+    #       values it would have supplied are already delivered as environment
+    #       variables.
     import: "classpath:/carddemo-common-defaults.yml"
 
   lifecycle:
@@ -136,21 +211,61 @@ spring:
     timeout-per-shutdown-phase: 20s
 
   datasource:
+    # WHY : (1) Assumptions: all three arrive as environment variables the ECS
+    #       task definition sets -- the writer endpoint from Parameter Store, the
+    #       credential pair from a Secrets Manager container secret -- and the
+    #       framework's relaxed binding maps SPRING_DATASOURCE_URL,
+    #       SPRING_DATASOURCE_USERNAME and SPRING_DATASOURCE_PASSWORD onto these
+    #       three keys unaided. None of them is expressible here as a literal, so
+    #       no endpoint and no credential is in this file or in the image.
+    #       (2) Assumptions: this credential is the RUNTIME role,
+    #       carddemo_authorization, which holds USAGE on the schema plus SELECT,
+    #       INSERT and UPDATE and has CREATE explicitly revoked. It is NOT the
+    #       credential that applies migrations; that one is declared separately
+    #       under spring.flyway below, and the reason the two are not
+    #       interchangeable is argued there.
+    #       (3) Trade-offs: none of the three carries a default. Alternatives
+    #       Considered: a localhost fallback so a developer could start the
+    #       service without configuring anything. Rejected on the concrete
+    #       consequence: this context WRITES authorization decisions and fraud
+    #       marks, so a service that silently started against a plausible wrong
+    #       database would persist them there, and the damage would be discovered
+    #       from the data rather than from the startup log. An unresolved
+    #       placeholder fails immediately and names the variable it wanted.
     url: ${SPRING_DATASOURCE_URL}
     username: ${SPRING_DATASOURCE_USERNAME}
     password: ${SPRING_DATASOURCE_PASSWORD}
 
     hikari:
+      # WHY : Assumptions: the pool is named so that a connection-leak or
+      #       pool-exhaustion log line, and the pool's own metrics, identify this
+      #       context on a dashboard shared with seven peers. Left unset the pool
+      #       reports as HikariPool-1, which is what every service would report.
       pool-name: authorization-pool
 
-      # WHY : (1) Assumptions: the schema name is QUOTED, and it has to be.
-      #       `authorization` is a reserved word in this database, so an unquoted
-      #       occurrence is a syntax error rather than a wrong lookup -- a failure
-      #       mode data-migration/sql/V0__schemas_and_roles.sql documents at lines
-      #       471 to 493 after hitting it. Because this one setting resolves every
-      #       unqualified name, the quoting concern lives here and nowhere else:
-      #       no entity annotation and no repository query has to repeat it.
-      #       (2) Alternatives Considered: currentSchema on the JDBC URL. Rejected
+      # WHY : (1) Assumptions: this is the SINGLE authoritative mechanism that
+      #       pins the schema, and it is deliberately the only one. This module
+      #       owns exactly one schema, so resolving every unqualified identifier
+      #       inside it is what stops a stray query reaching another bounded
+      #       context's tables on a cluster that holds all eight schemas. No
+      #       second overlapping mechanism is set -- config/DataSourceConfig.java
+      #       reads this property and declares no schema of its own -- because two
+      #       mechanisms leave a reader unable to tell which one decided.
+      #       (2) Assumptions: the schema name is QUOTED here, and it has to be.
+      #       `authorization` is a PostgreSQL reserved keyword, so an unquoted
+      #       occurrence in SQL TEXT is a syntax error rather than a wrong lookup;
+      #       data-migration/sql/V0__schemas_and_roles.sql records the failure and
+      #       its misleading message at L716-L737 and quotes the name at every SQL
+      #       occurrence of its own from L738. Because this one setting resolves
+      #       every unqualified name, the quoting concern lives here and nowhere
+      #       else: no entity annotation and no repository query repeats it.
+      #       (3) Alternatives Considered: qualifying every identifier in every
+      #       query instead, whether through a schema attribute on each entity or
+      #       a prefix in each JPQL string. Rejected because it copies the schema
+      #       name into every repository method and every annotation, where a
+      #       single omission still resolves -- against whatever the search path
+      #       happened to be -- so the drift is silent rather than loud.
+      #       (4) Alternatives Considered: currentSchema on the JDBC URL. Rejected
       #       because the URL arrives from Parameter Store, so the schema would
       #       become an infrastructure value that a reader of this file could not
       #       see. Trade-offs: this runs one extra statement per new connection,
@@ -210,14 +325,45 @@ spring:
     #       resolve, so both are set. Setting only one can place migration state in
     #       `public` while tables land in the authorization schema, making a repeated
     #       run report the wrong history.
-    #       (3) Assumptions: create-schemas is false and baseline-on-migrate is
-    #       false because the schema and its role grants are created by
-    #       data-migration/sql/V0__schemas_and_roles.sql, which runs first and is
-    #       owned elsewhere. Letting Flyway create the schema would give it an
-    #       owner and a grant set that V0 did not choose.
+    #       (3) Assumptions: create-schemas is false because the schema, the three
+    #       roles that own and use it, and their grants are all bootstrapped
+    #       elsewhere and earlier: data-migration/sql/V0__schemas_and_roles.sql
+    #       issues CREATE SCHEMA "authorization" AUTHORIZATION
+    #       carddemo_authorization_owner at L738 with the matching ALTER SCHEMA
+    #       OWNER TO at L739, and grants USAGE while REVOKEing CREATE from the
+    #       runtime role at L940-L946. db/migration/V1__authorization.sql owns the
+    #       TABLES ONLY -- four CREATE TABLE and three CREATE INDEX, with no
+    #       CREATE SCHEMA, no CREATE ROLE and no GRANT anywhere in it.
+    #       Alternatives Considered: letting Flyway create the schema, which is
+    #       one fewer bootstrap step. Rejected because Flyway would then create it
+    #       owned by whichever role connected and with the default grant set,
+    #       so schema ownership would be decided in two places that no mechanism
+    #       keeps in agreement, and the ALTER DEFAULT PRIVILEGES clauses V0 keys
+    #       on carddemo_authorization_owner would never fire.
     schemas: authorization
     default-schema: authorization
+
+    # WHY : Assumptions: baseline-on-migrate is false because the bootstrap
+    #       provisions an EMPTY schema, so there is never pre-existing state to
+    #       baseline over. Alternatives Considered: setting it true, which is the
+    #       usual accommodation for a database that predates Flyway. Rejected
+    #       because it converts the one failure this setting can report -- a
+    #       non-empty schema with no history table, which here means the V1
+    #       migration did not reach the classpath -- into a silent success that
+    #       writes a baseline row and then applies nothing, leaving a service
+    #       running against tables no migration in this module created.
     baseline-on-migrate: false
+
+    # WHY : Assumptions: create-schemas is false because the schema is created and
+    #       owned by the bootstrap, as argued in full at the `schemas` key above --
+    #       V0 L738-L739 create it AUTHORIZATION carddemo_authorization_owner, and
+    #       V1 in this module creates tables only. Alternatives Considered: leaving
+    #       it at the default true, which would let Flyway create the schema when
+    #       it is missing. Rejected because Flyway would create it owned by the
+    #       connecting role and with the default grant set, so ownership would be
+    #       decided in two places and the ALTER DEFAULT PRIVILEGES clauses V0 keys
+    #       on carddemo_authorization_owner would never fire, leaving the runtime
+    #       role with no grants on the tables it must read.
     create-schemas: false
 
     # WHY : Trade-offs: clean is disabled unconditionally, in every profile. It
@@ -293,9 +439,22 @@ spring:
 
   jpa:
     hibernate:
-      # WHY : Assumptions: the provider never emits schema changes. Flyway owns
-      #       every object, so an inferred change would silently diverge the
-      #       running schema from the migration history that describes it.
+      # WHY : Assumptions: the provider never emits schema changes, because Flyway
+      #       owns every object absolutely. The column types in
+      #       db/migration/V1__authorization.sql are derived byte-exactly from
+      #       app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy and cpy/CIPAUDTY
+      #       .cpy and from ddl/AUTHFRDS.ddl -- packed-decimal money at NUMERIC
+      #       scale 2, the five-slot status array as five discrete columns, the
+      #       composite packed key as two integer columns.
+      #       Alternatives Considered: `update`, or `validate`. Both rejected.
+      #       `update` lets the provider infer and apply a change from the entity
+      #       mapping, which would widen or re-type a column the record layout
+      #       pinned and would diverge the running schema from the migration that
+      #       is the contract, with nothing recording that it happened. `validate`
+      #       rejects a mismatch but ties startup to the provider's own idea of
+      #       type equivalence, which differs from PostgreSQL's for NUMERIC and
+      #       CHAR, so it would refuse to start on a schema the migration built
+      #       correctly.
       ddl-auto: none
 
     # WHY : Trade-offs: no default_schema property is set, deliberately, which is
@@ -305,17 +464,66 @@ spring:
     #       a schema name, that property turns every generated statement into a
     #       syntax error. Resolution through the pinned search_path avoids the
     #       problem rather than working around it.
+
+    # WHY : Trade-offs: open-in-view is false, and the framework's default is
+    #       true. Left at the default, the persistence session is held open for
+    #       the whole request INCLUDING response rendering, so every in-flight
+    #       request keeps a pooled connection until its body has been written.
+    #       This context reaches the account context over HTTP inside a deciding
+    #       transaction, so a held session there would add response-serialisation
+    #       time to a connection already waiting on a network hop, and the pool
+    #       sized at ten would exhaust under load the load balancer treats as
+    #       ordinary. The accepted cost is that a mapper touching an unfetched
+    #       association raises rather than lazily loading, which is why the
+    #       repositories return fully populated projections.
     open-in-view: false
+
+    # WHY : Trade-offs: statement logging is OFF here and turned on only in
+    #       application-dev.yml. The parameters bound by this context's statements
+    #       are primary account numbers and authorization amounts, so enabling it
+    #       in a shared base file would put them in a log stream every operator
+    #       can read. The cost is that reproducing a query in a deployed
+    #       environment needs a profile change rather than a log filter.
     show-sql: false
 
   security:
     oauth2:
       resourceserver:
         jwt:
-          # WHY : Assumptions: the issuer is a user-pool URI resolved at run time
-          #       from a Terraform output, never a literal here. Naming it makes
-          #       the filter chain verify the signature and the issuer of every
-          #       bearer token before SecurityConfig's path rules are consulted.
+          # WHY : (1) Assumptions: the issuer is a user-pool URI resolved at run
+          #       time from a Terraform output, never a literal here. Naming it
+          #       makes the filter chain verify the signature and the issuer of
+          #       every bearer token before SecurityConfig's path rules are
+          #       consulted.
+          #       (2) Assumptions: what the verified token then AUTHORIZES is
+          #       decided by config/SecurityConfig.java, which converts the
+          #       `cognito:groups` claim into authorities through common-lib's
+          #       com.carddemo.common.security.JwtRoleConverter. The fraud
+          #       state-setting route is guarded by the carddemo-admin group alone
+          #       -- FRAUD_PATH_PATTERN with hasAuthority(ADMIN_AUTHORITY) -- while
+          #       the read routes admit carddemo-admin or carddemo-user, and the
+          #       chain ends in denyAll() so an unnamed path is refused rather
+          #       than merely authenticated.
+          #       (3) Assumptions: that guard is an INTENTIONAL DOCUMENTED
+          #       IMPROVEMENT and is stated as one rather than as a port, because
+          #       the baseline carries no resource-level security to port. All
+          #       three of this context's transactions are defined
+          #       RESSEC(NO) CMDSEC(NO) --
+          #       app/app-authorization-ims-db2-mq/csd/CRDDEMO2.csd L46 for
+          #       TRANSACTION(CPVD), L56 for TRANSACTION(CPVS) and L66 for
+          #       TRANSACTION(CP00) -- so the region performed no resource and no
+          #       command check at all, and reaching the fraud program was gated
+          #       only by which menu an operator navigated from. The target adds a
+          #       check the baseline did not have; the divergence is recorded in
+          #       docs/architecture/security-and-identity.md rather than presented
+          #       as parity.
+          #       (4) Refactoring Rationale: in the baseline the user type
+          #       travelled in the COMMAREA as CDEMO-USER-TYPE, storage the
+          #       terminal echoed back on every turn, so the claim of being an
+          #       administrator was carried in a field the client held. Here the
+          #       group claim is inside a signed token this service verifies, so a
+          #       client cannot assert its own authority -- which is what makes a
+          #       stateless handler safe to expose without a session store.
           issuer-uri: ${SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI}
 
   cloud:
@@ -365,10 +573,18 @@ management:
         include: health,prometheus
   endpoint:
     health:
-      # WHY : Trade-offs: never show details. The detail payload names the
-      #       database and the queues this context depends on, and the health path
-      #       is deliberately unauthenticated so the load balancer can poll it, so
-      #       details here would be an unauthenticated topology disclosure.
+      # WHY : Trade-offs: never show details, in every environment, and neither
+      #       profile relaxes it. The detail payload names the database and the
+      #       queues this context depends on and reports their reachability, and
+      #       the health path is deliberately unauthenticated so the load balancer
+      #       can poll it -- so details here would be an unauthenticated topology
+      #       disclosure at the edge. Alternatives Considered: `when-authorized`,
+      #       which would show detail to a bearer-token holder and hide it from the
+      #       probe. Rejected because the probe is the only caller this endpoint
+      #       exists for, so the setting would add an authorization path that
+      #       nothing uses while still answering the unauthenticated probe from the
+      #       same handler. The accepted cost is that diagnosing which dependency
+      #       is down needs the log stream rather than the probe response.
       show-details: never
 
 # WHY : Refactoring Rationale: this whole block was absent, so nothing in this
@@ -527,26 +743,143 @@ carddemo:
       admin-group-name: ${CARDDEMO_COGNITO_ADMIN_GROUP_NAME:carddemo-admin}
       user-group-name: ${CARDDEMO_COGNITO_USER_GROUP_NAME:carddemo-user}
 
+
   messaging:
-    # WHY : (1) Assumptions: the queue is named by an injected value rather than
-    #       a literal, because the same image runs against the dev and prod
-    #       queues. It is a FIFO queue whose message group is one group PER CARD --
-    #       carried as the keyed opaque derivation described under hmac-key below,
-    #       never as the card number itself -- so requests for one card arrive in
-    #       order and requests for different cards arrive in parallel, which is what
-    #       lets the consumer take a row lock on one account's summary without
-    #       serialising the whole service.
-    #       (2) Assumptions: the three polling values below are the migrated form
-    #       of the baseline's own discipline, not new tuning.
-    #       COPAUA0C reads with a five-second wait, so poll-timeout-seconds is 5;
-    #       it stops after five hundred messages, and the two bounds below are the
-    #       continuous equivalent of that batch limit. Expressing them as
-    #       properties rather than in the annotation is what lets an operator lower
-    #       concurrency during a batch window without a rebuild.
+    # WHY : (1) Assumptions: the queue is named by an injected value rather than a
+    #       literal, because one image runs against every environment's queues.
+    #       The variable holds the reference to a FIFO queue following the pattern
+    #       carddemo-pauth-request-<env>.fifo, and its reply counterpart follows
+    #       carddemo-pauth-reply-<env>.fifo; the reply destination itself is chosen
+    #       per request -- COPAUA0C copies MQMD-REPLYTOQ off the request at
+    #       app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl L413-L414 -- so it is
+    #       constrained here by reply-queue-allowlist below rather than by one
+    #       static destination key.
+    #       (2) Assumptions: the queue is FIFO, and its message group is one group
+    #       PER CARD, carried as the keyed opaque derivation described under
+    #       hmac-key below and never as the card number itself. Requests for one
+    #       card therefore arrive in order while requests for different cards
+    #       arrive in parallel, which is what lets the consumer take a row lock on
+    #       one account's summary without serialising the whole service.
+    #       Deduplication is by transaction identifier, so a redelivered put of the
+    #       same transaction is accepted once within the queue's deduplication
+    #       window regardless of whether its bytes are identical.
+    #       Alternatives Considered: a standard queue, which costs less per message
+    #       and has no throughput ceiling per group. Rejected on two concrete
+    #       consequences rather than on preference: it offers no ordering guarantee
+    #       at all, so two authorizations for one card could be decided against a
+    #       summary row in the wrong order and produce a different available
+    #       credit than the baseline's serial reads produce; and it offers no
+    #       deduplication window, so a duplicate put would be decided twice and
+    #       two replies would be sent for one transaction identifier.
     pauth-request-queue: ${CARDDEMO_MESSAGING_PAUTH_REQUEST_QUEUE}
+
+    # WHY : (1) Assumptions: five SECONDS, converted from the baseline rather than
+    #       chosen. COPAUA0C sets MOVE 5000 TO WS-WAIT-INTERVAL at L242 and passes
+    #       it as MQGMO-WAITINTERVAL at L393 under MQGMO-WAIT at L389, and that
+    #       field is expressed in MILLISECONDS -- so the literal 5000 is 5 s, not
+    #       5000 s. The conversion is spelled out because a reader who takes the
+    #       literal for seconds would configure a wait three orders of magnitude
+    #       too long, and the symptom would be a consumer that appears to have
+    #       stopped rather than one that is waiting.
+    #       (2) Assumptions: an empty receive after this wait is NORMAL and is not
+    #       an error. The baseline treats MQRC-NO-MSG-AVAILABLE at L416 by setting
+    #       its no-more-messages flag at L417, which ends the loop opened at L326
+    #       cleanly; the listener likewise completes its poll cycle and polls
+    #       again, so an idle queue produces no error log and no failed health
+    #       check.
     poll-timeout-seconds: 5
+
+    # WHY : Assumptions: 10 is the SQS service maximum for a single ReceiveMessage
+    #       call, so this is a ceiling the transport fixes rather than a tuning
+    #       choice. It must not be confused with request-process-limit below: this
+    #       key bounds ONE receive, while that one bounds the count of messages
+    #       handled across many receives within a processing window. Conflating
+    #       them would either request a batch the transport rejects or shrink the
+    #       window to a tenth of the baseline's.
     max-messages-per-poll: 10
+
+    # WHY : Trade-offs: ten messages in flight against a pool of ten connections.
+    #       Each in-flight message holds one connection for the length of its own
+    #       transaction, so raising this above the pool size converts contention
+    #       for connections into connection-timeout failures that look like
+    #       database trouble. Expressing it as a property rather than in the
+    #       listener annotation is what lets an operator lower concurrency during a
+    #       batch window without a rebuild.
     max-concurrent-messages: 10
+
+    # WHY : (1) Assumptions: this is the count of requests one processing window
+    #       handles before intake closes and reopens, and the value is the
+    #       baseline's DECLARED bound: 05 WS-REQSTS-PROCESS-LIMIT PIC S9(4) COMP
+    #       VALUE 500 at COPAUA0C.cbl L40.
+    #       (2) Assumptions: the baseline's own control flow admits 501, and the
+    #       arithmetic is spelled out because 500 is the number a reader expects
+    #       and the off-by-one is invisible without it. The counter is
+    #       POST-incremented -- ADD 1 TO WS-MSG-PROCESSED at L332, after the
+    #       message has been processed -- and then tested with a STRICT greater-than
+    #       at L339, IF WS-MSG-PROCESSED > WS-REQSTS-PROCESS-LIMIT. Counts 1
+    #       through 500 all fail that test and read another request, so the loop
+    #       ends only once the 501st has been handled.
+    #       (3) Trade-offs: the declared 500 is enforced here and the observed 501
+    #       is not reproduced, because the extra message is an artifact of the
+    #       order of increment and comparison rather than a rule any part of the
+    #       baseline states. That is a behavioural divergence and it is registered
+    #       as D-AUTH-REQUEST-WINDOW in
+    #       docs/architecture/cobol-to-service-traceability.md, with the same
+    #       entry in docs/adr/ADR-004-messaging.md and
+    #       docs/architecture/messaging-contracts.md, rather than being taken
+    #       silently. Alternatives Considered: configuring 501 here to match the
+    #       observed loop exactly. Rejected because it would contradict a
+    #       divergence already registered in three documents and asserted by
+    #       AuthorizationRequestListenerTest, so the register and the running
+    #       system would disagree about which number is enforced.
+    request-process-limit: 500
+
+    # WHY : (1) Assumptions: no per-message expiry setting appears here, and its
+    #       absence is a transport fact rather than an omission. The baseline sets
+    #       MOVE 50 TO MQMD-EXPIRY at COPAUA0C.cbl L750, and that field is
+    #       expressed in TENTHS OF A SECOND, so 50 is 5.0 s and not 50 s; the
+    #       reply beside it is MQPER-NOT-PERSISTENT at L749, so the baseline asks
+    #       the queue manager to discard a reply no requester is still waiting for.
+    #       SQS HAS NO PER-MESSAGE TIME TO LIVE. Queue-level retention exists and
+    #       applies to every message alike, so there is no configuration here that
+    #       reproduces MQMD-EXPIRY.
+    #       (2) Assumptions: the semantic is preserved in three parts instead. The
+    #       producer carries the expiry INSTANT as an expiresAt message attribute,
+    #       so the value survives queue time and clock differences; the consumer
+    #       honours it by DROPPING the message and LOGGING the drop --
+    #       service/AuthorizationRequestListener.java does this through common-lib's
+    #       com.carddemo.common.messaging.MessageExpiry, logging
+    #       event=auth.request.dropped with reason=expired, and treats an
+    #       unparseable attribute as a drop too so a corrupted attribute cannot
+    #       fail open; and reply-queue retention is kept short by
+    #       infra/modules/sqs, mirroring L749 and L750. The five-second window a
+    #       reply carries when a requester named none is a parity constant in that
+    #       class, derived from L750.
+    #       (3) Trade-offs: ENFORCEMENT MOVES FROM THE BROKER TO THE CONSUMER.
+    #       Under the baseline the queue manager discarded an expired message and
+    #       no program could act on one; here every consumer must check the
+    #       attribute, and one that did not would act on a message the baseline
+    #       would have discarded. Alternatives Considered: exposing the window as a
+    #       property of this file so a deployment could tune it. Rejected because
+    #       the value exists solely to reproduce L750: a deployment that widened it
+    #       would change when a reply is considered worth sending with no entry in
+    #       any divergence register, and a deployment that shortened it would drop
+    #       replies the baseline delivered. The reasoning and the two rejected
+    #       broker alternatives are recorded in docs/adr/ADR-004-messaging.md.
+    #       (4) Assumptions: no maxReceiveCount key appears here either, for the
+    #       same class of reason. Redelivery is bounded at FIVE receives by the
+    #       redrive policy on the queue, provisioned by infra/modules/sqs, so it is
+    #       queue infrastructure and not a client setting. The consequence for the
+    #       listener is that it keeps NO retry counter of its own: two independent
+    #       retry budgets would multiply into as many as twenty-five attempts, and
+    #       a message would reach its dead-letter queue long after an operator
+    #       expected it.
+    #       (5) Assumptions: the unit of work is per message. The listener runs
+    #       each message in its own REQUIRES_NEW transaction, which is the migrated
+    #       form of the baseline's per-message syncpoint -- the EXEC CICS /
+    #       SYNCPOINT / END-EXEC block at L334-L336, taken once per message inside
+    #       the loop. A transaction shared across a poll batch would let one
+    #       malformed message roll back its neighbours' committed decisions.
 
     # WHY : (1) Trade-offs: a one-second poll rather than a commit-time trigger.
     #       A trigger would publish sooner in the ordinary case and would publish
@@ -672,6 +1005,19 @@ carddemo:
     #       deployed environment they are pinned to each other rather than to this
     #       default.
     approved-origin: ${CARDDEMO_ACCOUNT_CONTEXT_APPROVED_ORIGIN:${CARDDEMO_ACCOUNT_CONTEXT_BASE_URL}}
+
+    # WHY : Trade-offs: both timeouts are deliberately short, and the reason is
+    #       what the calls run inside rather than what the network usually costs.
+    #       Each runs within the deciding transaction, which by the second call is
+    #       holding a row lock on the account's summary, so an unbounded read would
+    #       hold that lock and a pooled connection for as long as the dependency
+    #       stayed silent. Three seconds is well beyond the in-network latency of a
+    #       keyed read and well inside the queue's own visibility timeout, so a
+    #       stalled dependency surfaces as a redelivered message rather than as an
+    #       exhausted connection pool. Alternatives Considered: leaving them at the
+    #       client default, which is no timeout at all -- rejected because the
+    #       failure it produces is a service that looks healthy while every
+    #       connection is parked on one unresponsive dependency.
     connect-timeout-ms: 2000
     read-timeout-ms: 3000
 

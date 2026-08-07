@@ -500,6 +500,108 @@ levels are given separately and each is labelled.
 > vectors pin positive, negative, zero and non-zero-cent values so a symmetric but
 > byte-wrong encoder/decoder pair cannot pass by round-tripping itself.
 
+### The 500-byte receive buffer is retired as transport, retained as an input shape
+
+A fourth length exists beside the three above and belongs to neither the
+declaration nor the wire: the **capacity of the area the baseline reads a message
+into**. It is listed here because it is the one quantity a naive port carries
+across as though it were a payload length. The eighteen ordinals referred to
+below are the ones
+[`CCPAURQY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CCPAURQY.cpy)
+declares at L19–L36, whose widths sum to the 153 in the table above.
+
+| Quantity | Value | Location | What it is |
+|---|---|---|---|
+| Receive buffer capacity | **500** | [`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl) L103, `01 W01-GET-BUFFER PIC X(500).` | Fixed working-storage capacity, unrelated to how many bytes arrived |
+| Buffer length passed to the get | **500** | L398, `MOVE LENGTH OF W01-GET-BUFFER TO W01-BUFFLEN` | The capacity, told to the queue manager |
+| Bytes actually received | **variable** | L102, `01 W01-DATALEN PIC S9(9) BINARY.` | The declared payload length, returned separately at L406 |
+| Bytes the parse reads | **`W01-DATALEN`** | L354, `UNSTRING W01-GET-BUFFER(1:W01-DATALEN)`, `DELIMITED BY ','` at L355, closed by `END-UNSTRING` at L374 | The reference modification bounds the parse to the declared length |
+| Pad the parse never sees | **500 − `W01-DATALEN`** | — | Blank, because an alphanumeric working-storage item is space-initialised |
+
+> Assumptions: **the baseline never sees the padding, so the hazard is in a port
+> rather than in the COBOL.** The reference modification `(1:W01-DATALEN)` at L354
+> restricts the `UNSTRING` source to the first `W01-DATALEN` bytes, which is why the
+> declared length and the capacity being different numbers costs the baseline
+> nothing. A port that reads the whole frame instead — because a buffer's length is
+> the number lying closest to hand — hands the trailing pad to the parse and makes
+> the last field's recovered value depend on the capacity of an area that has no
+> business influencing it.
+
+> Assumptions: **the pad is blank and not NUL, and that is checkable rather than
+> incidental.** An alphanumeric working-storage item is conventionally
+> space-initialised, so a partially filled `W01-GET-BUFFER` holds blanks past its
+> data, and blanks are also what a padded external producer would emit because this
+> wire is character data throughout. Alternatives Considered: a NUL-filled pad, which
+> was rejected on two counts — it is not what either the reference buffer or a
+> character-format producer would contain, and it would invite the
+> null-terminated-read failure mode, which the packed segment fixtures in the same
+> directory already cover from a different angle. `CsvAuthCodec` closes that door in
+> any case: its decoder refuses **any** ISO control character anywhere in a payload,
+> so a NUL-padded frame decoded at its full length would be rejected by name rather
+> than silently shortened at the first zero byte.
+
+> Assumptions: **the fixed buffer is retired as a transport mechanism and retained
+> only as an accepted input shape.** A queue message body in the target is exactly
+> sized: the body length *is* the payload length, there is no capacity to over-read
+> and no separate length field to honour, so a padded frame does not arise from the
+> transport at all. The tolerance is nonetheless worth having, because an external
+> point-of-sale integration written against the mainframe contract would plausibly
+> still emit a blank-padded fixed frame — so the target *accepts* that shape without
+> *implementing* it. Trade-offs: the tolerance lives in `CsvAuthCodec` and nowhere
+> else. No fixed receive buffer may be introduced into the transport layer, which is
+> why `AuthorizationRequestListener` hands the exactly-sized body straight to
+> `CsvAuthCodec.decodeRequest(String)` and the byte-array entry point
+> `decodeRequest(byte[] buffer, int payloadLength)` takes the payload length as a
+> **separate argument** rather than measuring the array it was given.
+
+> Alternatives Considered: **right-trimming the pad to find the payload boundary was
+> evaluated and rejected; honouring the declared length was chosen.** Right-trimming
+> is the obvious reading and it is unsafe, because a trailing blank inside the last
+> field is byte-for-byte indistinguishable from a pad byte after it. Five of the
+> eighteen request fields carry trailing blanks legitimately in the canonical
+> record — ordinal 6 `PA-RQ-MESSAGE-TYPE` (2), ordinal 7 `PA-RQ-MESSAGE-SOURCE` (3),
+> ordinal 14 `PA-RQ-MERCHANT-NAME` (9), ordinal 15 `PA-RQ-MERCHANT-CITY` (6) and
+> ordinal 17 `PA-RQ-MERCHANT-ZIP` (4) — so the shape is routine rather than
+> hypothetical. A right-trim happens to land on the boundary only while ordinal 18
+> `PA-RQ-TRANSACTION-ID` fills all fifteen of its characters; the moment it is
+> shorter, the trim eats the field's own blanks, and if it were wholly blank the trim
+> would continue through the comma at offset 154 and into ordinal 17, producing a
+> shorter string with a **wrong comma count** that a lenient parser might split into
+> seventeen fields without complaint. Slicing to the declared length is exact, is the
+> direct analogue of `(1:W01-DATALEN)`, and cannot be fooled by in-field padding.
+> Left-trimming is forbidden outright: ordinal 1 begins at offset 0 with a digit, so
+> a leading blank would be data corruption rather than framing.
+
+> Assumptions: **a frame is read as a fixed number of bytes, never as text and never
+> as lines, and the reason differs by fixture family — three distinct reasons now
+> exist in this directory and only one of them applies here.** The packed segment
+> fixtures require it because `0x0A`, `0x0D` and `0x00` occur *inside* their data;
+> `auth-request-encode-oracle-170.bin` requires it because the *absence* of a
+> terminator is itself the contract it pins; and a padded frame requires it because
+> **the payload boundary is not discoverable from the bytes at all** — it can only
+> come from a declared length. That last case is the one this section is about, and it
+> is why the tolerance is expressed as a length parameter rather than as a scan.
+> Trade-offs: declaring a length that spans the whole frame is accepted rather than
+> refused, and what that must never do is keep only the first fifteen characters of
+> ordinal 18 and discard the rest, which is exactly what an alphanumeric `MOVE` into a
+> `PIC X(15)` receiver would do — the same truncation already recorded above for
+> ordinal 9's 13-character intermediate. `CsvAuthCodec` instead treats the run of
+> blanks as that field's own trailing pad and returns the value whole, so no character
+> a producer sent is ever dropped without a named failure.
+
+> `auth-request-buffer500.bin` in
+> `services/authorization-service/src/test/resources/fixtures/` makes all of the
+> above executable. It is the canonical 170-byte payload at offsets 0–169 followed by
+> **330** blank bytes at offsets 170–499, with no terminator anywhere, and its first
+> 170 bytes are byte-identical to `auth-request-encode-oracle-170.bin` so the two
+> cannot drift apart. Its trailing blanks are **content, not whitespace**: truncating
+> the file to 170 bytes would merely duplicate that oracle and would delete the only
+> decode-tolerance vector in the family. Like every fixture in this section it is
+> **contract-derived** rather than recorded — `COPAUA0C` is a `CO*` CICS program and
+> the runner has no CICS runtime, and no request producer exists in the repository to
+> observe, so the pad length is derived from the buffer declaration at L103 rather
+> than measured off a captured frame.
+
 ### The delimiter is a literal comma
 
 Proven on both directions of the conversation, so there is no inference involved.

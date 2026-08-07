@@ -658,12 +658,12 @@ public final class ExportRecordMapper {
          * charter above states that the value is deliberately never decoded to a number. Bytes in and
          * bytes out keeps the cleartext confined to the span it was read from.</p>
          *
-         * @param rawBytes the bytes of the verification span, which must be exactly
-         *     {@value #CARD_CVV_WIDTH} long; they are copied on the way in, so the caller may zero its
+         * @param rawBytes the bytes of the verification span, whose length must be exactly
+         *     {@link #VALUE_WIDTH}; they are copied on the way in, so the caller may zero its
          *     own array afterwards without emptying the carrier
          * @return a carrier holding a private copy of those bytes, never {@code null}
-         * @throws ExportRecordException if {@code rawBytes} is {@code null} or is not exactly
-         *     {@value #CARD_CVV_WIDTH} bytes long
+         * @throws ExportRecordException if {@code rawBytes} is {@code null} or its length is not
+         *     exactly {@link #VALUE_WIDTH}
          */
         public static OpaqueSensitiveValue of(byte[] rawBytes) {
             if (rawBytes == null) {

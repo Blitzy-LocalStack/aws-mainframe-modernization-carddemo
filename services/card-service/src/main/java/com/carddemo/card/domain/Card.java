@@ -8,6 +8,7 @@ import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 import java.time.LocalDate;
 import java.util.Objects;
+import java.util.UUID;
 
 /**
  * The one persistent card record of this bounded context.
@@ -335,6 +336,28 @@ public class Card {
     @Column(name = "version", nullable = false)
     private int version;
 
+    // WHY : Refactoring Rationale: this member has NO copybook counterpart. It was ADDED so that a
+    //       published route can address one card without carrying that card's number in the request
+    //       target. The baseline had no need of it: COCRDLIC keeps each rendered row's identity in
+    //       its own WORKING-STORAGE and, on a row selection, moves WS-ROW-CARD-NUM(I-SELECTED)
+    //       directly into the COMMAREA before transferring control (app/cbl/COCRDLIC.cbl:532-534
+    //       and :560-562). A COMMAREA is region storage that no user, browser or intermediary
+    //       reads; an HTTP path is retained by load-balancer access logs and browser history alike.
+    //       A surrogate selector therefore reproduces the baseline's arrangement more faithfully
+    //       than the number itself would.
+    // WHY : Assumptions: the value is assigned in the constructor below rather than left to the
+    //       column DEFAULT. Both generators produce a random version-4 value and V1__card.sql
+    //       declares gen_random_uuid() for the bulk load, but an entity that relied on the DEFAULT
+    //       could not report the selector of a row it had just inserted without re-reading it,
+    //       because the provider writes what the member holds and would send null.
+    // WHY : Trade-offs: updatable = false. A selector is a row's stable address, and the one thing
+    //       an address must not do is change while something holds it: a re-issued selector would
+    //       silently 404 a list row a caller was still looking at. There is no operation that
+    //       rotates one, and the mapping refuses the attempt rather than relying on no caller
+    //       making it.
+    @Column(name = "card_selector", nullable = false, updatable = false)
+    private UUID cardSelector;
+
     /**
      * Creates an empty instance for the persistence provider to populate.
      *
@@ -386,6 +409,17 @@ public class Card {
         this.embossedName = embossedName;
         this.expirationDate = expirationDate;
         this.activeStatus = activeStatus;
+        // WHY : Assumptions: generated here and not accepted as a parameter, because a selector a
+        //       caller chose would let that caller pick the address a card answers on, and two
+        //       callers choosing the same one would collide on uq_cards_selector rather than being
+        //       refused as bad input. Nothing outside this constructor decides the value.
+        // WHY : Alternatives Considered: deriving it from the card number with the HMAC minter in
+        //       common-lib, which would make it deterministic and reproducible. Declined because
+        //       rows also arrive through the bulk load, which writes with COPY and never
+        //       instantiates this type, so the derivation would have to be repeated in the ETL and
+        //       the keying material handed to it. A random value needs no key anywhere and
+        //       discloses strictly less, since there is no function from it back to a card number.
+        this.cardSelector = UUID.randomUUID();
     }
 
     /**
@@ -541,6 +575,26 @@ public class Card {
      */
     public int getVersion() {
         return this.version;
+    }
+
+    /**
+     * Returns this card's opaque row selector.
+     *
+     * <p>Assumptions: the value is a random version-4 identifier assigned when the card was
+     * constructed, or by the {@code gen_random_uuid()} default in {@code V1__card.sql} when the row
+     * arrived through the bulk load. It is not derived from the card number, so nothing recovers a
+     * card number from it.</p>
+     *
+     * <p>Trade-offs: this is the value a published route carries, and it is deliberately NOT a
+     * secret. It cannot be guessed, but holding one authorises nothing -- the route authority table
+     * in {@code com.carddemo.card.config.SecurityConfig} decides that, and the administrative read
+     * that discloses a full card number sits behind its own authority. Recorded here because a
+     * reader who mistook the selector for a capability might build a gate out of it.</p>
+     *
+     * @return the row selector, never null on a persisted card
+     */
+    public UUID getCardSelector() {
+        return this.cardSelector;
     }
 
     /**

@@ -28,10 +28,18 @@ import org.springframework.stereotype.Service;
  * strict NEGATION of its guard, derived from the guard rather than written as a second comparison, so the
  * two cannot drift apart.</p>
  *
- * <p>Assumptions: the projected balance is the current balance PLUS the transaction amount, computed in
- * exact fixed point through the shared money type. Transformation rule T3 forbids the money path leaving
- * exact fixed point at any hop, and a comparison is a hop: a projected balance computed in binary floating
- * point can land one representable step either side of the limit, which is precisely the distinction the
+ * <p>Assumptions: <b>the projected balance is formed from the CYCLE accumulators and not from the
+ * account's current balance.</b> {@code app/cbl/CBTRN02C.cbl:403-405} computes it as
+ * {@code ACCT-CURR-CYC-CREDIT - ACCT-CURR-CYC-DEBIT + DALYTRAN-AMT}, and {@code ACCT-CURR-BAL} appears
+ * nowhere in that statement. The account record declares all three fields, at
+ * {@code app/cpy/CVACT01Y.cpy:7}, {@code :13} and {@code :14}, so substituting the current balance
+ * compiles perfectly well and yields over-limit decisions that look entirely reasonable while being
+ * wrong on every account whose cycle totals differ from its balance.</p>
+ *
+ * <p>Assumptions: the projection is computed in exact fixed point through the shared money type.
+ * Transformation rule T3 forbids the money path leaving exact fixed point at any hop, and a comparison
+ * is a hop: a projection carried in a binary radix cannot represent every two-place decimal exactly, so
+ * it can land one representable step either side of the limit, which is precisely the distinction the
  * inclusive guard turns on.</p>
  */
 @Service
@@ -63,16 +71,46 @@ public class PostingValidationService {
         //       would require inventing a balance and a date, and the result type would then be deciding
         //       between a real finding and a fabricated one.
         if (!cardResolved || account.isEmpty()) {
-            return PostingValidationResult.of(cardResolved, account.isPresent(), false, false);
+            // WHY : Assumptions: no projection is passed on this path, because none could have been
+            //       computed. The reference forms WS-TEMP-BAL at app/cbl/CBTRN02C.cbl:403-405 from
+            //       fields of the account record, inside the account read's NOT INVALID KEY branch,
+            //       which a cross-reference failure never reaches -- the guard at :372 stops the
+            //       account lookup running at all -- and which an account read that found nothing
+            //       does not enter. Supplying a zero here instead would assert that a projection was
+            //       computed and came to nothing, which is a different claim from "there was none".
+            return PostingValidationResult.resolve(!cardResolved, account.isEmpty(), false, false,
+                    null);
         }
 
         Account read = account.get();
-        Money projected = Money.of(read.getCurrBal()).plus(Money.of(transaction.getAmount()));
+
+        // WHY : Assumptions: the two operands are the CYCLE accumulators, matching
+        //       app/cbl/CBTRN02C.cbl:403-405, which reads ACCT-CURR-CYC-CREDIT - ACCT-CURR-CYC-DEBIT
+        //       + DALYTRAN-AMT. The account's current balance is a separate field, declared at
+        //       app/cpy/CVACT01Y.cpy:7 and used by the reference only when it posts the amount at
+        //       :547, and it takes no part in this comparison.
+        // WHY : Alternatives Considered: projecting from the current balance, which reads as the more
+        //       natural meaning of "the balance this transaction would bring the account to".
+        //       Rejected because it is not the quantity the reference compares: on any account whose
+        //       cycle credit and debit totals do not happen to sum to its balance the two projections
+        //       differ, so the inclusive guard at :407 lands on the other side of the limit and the
+        //       transaction is rejected where the reference posts it, or posted where the reference
+        //       rejects it. Both outcomes are individually plausible, which is what makes the
+        //       substitution hard to notice without the byte-for-byte reject comparison.
+        Money projected = Money.of(read.getCurrCycCredit())
+                .minus(Money.of(read.getCurrCycDebit()))
+                .plus(Money.of(transaction.getAmount()));
         boolean overCreditLimit = projected.exceeds(Money.of(read.getCreditLimit()));
 
         LocalDate originatingDate = transaction.getOrigTs().toLocalDate();
         boolean afterExpiration = read.getExpirationDate().isBefore(originatingDate);
 
-        return PostingValidationResult.of(true, true, overCreditLimit, afterExpiration);
+        // WHY : Assumptions: the two boundary findings are reported side by side and the choice
+        //       between them is left to the result type, which resolves them as the reference does.
+        //       Selecting one here would require restating a precedence that the reference expresses
+        //       only as a missing guard between :413 and :414, and a rule restated in a second place
+        //       is a rule that can disagree with the first.
+        return PostingValidationResult.resolve(false, false, overCreditLimit, afterExpiration,
+                projected.amount());
     }
 }

@@ -3,6 +3,8 @@ package com.carddemo.authorization.fixtures;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.carddemo.authorization.domain.AuthReplyOutbox;
+import com.carddemo.authorization.service.AuthorizationDecisionService;
 import com.carddemo.common.codec.CopybookLayout;
 import com.carddemo.common.codec.CopybookLayout.RecordSpec;
 import com.carddemo.common.codec.CsvAuthCodec;
@@ -10,11 +12,13 @@ import com.carddemo.common.codec.CsvAuthCodec.AuthRequest;
 import com.carddemo.common.codec.FixedWidthCodec;
 import com.carddemo.common.codec.PackedDecimalCodec;
 import com.carddemo.common.money.Money;
+import com.carddemo.common.security.OpaqueIdentifier;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -29,13 +33,13 @@ import org.junit.jupiter.params.provider.ValueSource;
  * Enrolls every fixture in this module and asserts the contract each one carries.
  *
  * <p>Purpose: a fixture with no executable consumer is a file whose bytes can change while the whole
- * suite stays green. This class enrolls all thirty resources under
+ * suite stays green. This class enrolls all thirty-three resources under
  * {@code src/test/resources/fixtures} as a closed set, and asserts for each one what
  * {@code src/test/resources/fixtures/README.md} states about it: the record width, the field values,
  * the final record, and the failure path where one exists.
  *
  * <p>Assumptions: enrolment and assertion are named apart, and the README's per-file table is what
- * says which each resource receives. Twenty-eight of the thirty reach a contract assertion; the
+ * says which each resource receives. Thirty-one of the thirty-three reach a contract assertion; the
  * remaining two -- the README itself and the 206-byte prefixed unload form, whose record length no
  * registry layout declares -- reach the inventory alone, and the README labels them so. Refactoring
  * Rationale: the distinction is drawn here because this summary previously said the class "consumes
@@ -82,6 +86,8 @@ class AuthorizationFixtureContractTest {
     private static final List<String> EVERY_FIXTURE = List.of(
             "README.md",
             "auth-reply-approved-wire63.csv",
+            "auth-reply-declined-reasons.csv",
+            "auth-reply-encode-oracle-63.bin",
             "auth-request-amount-variants.csv",
             "auth-request-canonical-wire170.csv",
             "auth-request-encode-oracle-170.bin",
@@ -95,6 +101,7 @@ class AuthorizationFixtureContractTest {
             "pautdtl-purge-children.bin",
             "pautdtl1-amount-ten-integer-digits.bin",
             "pautdtl1-auth-fraud-domain.bin",
+            "pautdtl1-auth-fraud-invalid.bin",
             "pautdtl1-canonical.bin",
             "pautdtl1-match-status-domain.bin",
             "pautdtl1-merchant-name-notrim.bin",
@@ -182,6 +189,74 @@ class AuthorizationFixtureContractTest {
     private static final int REPLY_MONEY_FIELD_WIDTH = 14;
 
     /**
+     * The fixture carrying one reply per decline reason the baseline can send.
+     *
+     * <p>Assumptions: the resource is CONTRACT-DERIVED and is not a recorded output, so nothing in this
+     * directory or in {@code tests/golden} can be regenerated to reproduce it. Two independent reasons
+     * make a recording impossible rather than merely absent. {@code tests/README.md} section 1.1 records
+     * that the online {@code CO*} programs cannot run end to end without a CICS runtime the runner does
+     * not have, and {@code COPAUA0C} -- the program whose selection supplies these seven codes -- is
+     * itself a {@code CO*} program; and the external requester that would elicit a decline is not
+     * supplied by the baseline at all, only the decision stub at {@code tests/mocks/mq_request_stub.py}.
+     * The codes are therefore read from the selection branches and the surrounding bytes are derived
+     * from the copybook, which is why the guarded golden-update gate at {@code tests/README.md} section
+     * 12 has no authorization golden to regenerate.</p>
+     */
+    private static final String DECLINED_REPLY_FIXTURE = "auth-reply-declined-reasons.csv";
+
+    /**
+     * The number of records the declined-reason fixture carries, one per decline reason.
+     *
+     * <p>Assumptions: seven is a CLOSED count rather than a current one, because the selection at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} lines 700 to 717 has seven reason
+     * branches and no eighth. Naming the count here and asserting the enum's arity against it is what
+     * makes a code added to one place without the other fail: a fixture gaining a record and an
+     * enumeration gaining a constant are separate edits, and only a stated count couples them.</p>
+     */
+    private static final int DECLINE_REASON_COUNT = 7;
+
+    /**
+     * The file offsets at which the declined-reason fixture's reason field begins, one per record.
+     *
+     * <p>Assumptions: these are ABSOLUTE file offsets and not offsets within a line, and they are the
+     * arithmetic {@code ordinal * 64 + 43} rather than a transcribed list -- 43 being the reason's
+     * position inside the record, from the widths 16, 15, 6 and 2 plus the four delimiters preceding it,
+     * and 64 being the 63-character payload plus the single line feed. They are held as a literal list
+     * anyway so that the assertion reading them is a second, independent statement of the geometry: a
+     * list computed from the same widths the assertion walks could not disagree with a fixture whose
+     * field boundaries had all shifted together.</p>
+     */
+    private static final List<Integer> DECLINE_REASON_FILE_OFFSETS =
+            List.of(43, 107, 171, 235, 299, 363, 427);
+
+    /**
+     * The line-feed offsets the declined-reason fixture must carry, one ending each record.
+     *
+     * <p>Assumptions: the terminator positions are asserted from this list rather than inferred from a
+     * line count, because a line count cannot distinguish a file whose terminators fall in the wrong
+     * places from one whose records are the wrong width. Each value is {@code ordinal * 64 + 63}.</p>
+     */
+    private static final List<Integer> DECLINE_REPLY_TERMINATOR_OFFSETS =
+            List.of(63, 127, 191, 255, 319, 383, 447);
+
+    /**
+     * The edited money token every declined reply carries, being zero rendered by the reply mask.
+     *
+     * <p>Assumptions: this is ten spaces then {@code 0.00}, which is what
+     * {@code WS-APPROVED-AMT-DIS PIC -zzzzzzzzz9.99} at {@code COPAUA0C.cbl} line 66 emits for zero --
+     * a blank sign-control position because the value is not negative, nine suppressed digit positions,
+     * and the forced tenth digit that suppression cannot reach, which is why the field is never blank.
+     * It is deliberately NOT {@code +0000000000.00}: that is what {@code PIC +9(10).99} would emit and
+     * what {@link CsvAuthCodec#formatRequestMoney} does emit for the REQUEST, whereas line 720 moves the
+     * approved amount into the edit mask and line 727 joins THAT field, not
+     * {@code PA-RL-APPROVED-AMT}, into the reply buffer. Only the mask reaches a consumer. Trade-offs:
+     * the zero-padded signed form is still accepted on decode, and this fixture does not carry it,
+     * because a fixture is an encode oracle first: a vector no COBOL program could have produced would
+     * become the cited precedent for re-emitting one.</p>
+     */
+    private static final String DECLINED_REPLY_MONEY_TOKEN = "          0.00";
+
+    /**
      * Supplies every binary fixture name paired with the layout it is written against.
      *
      * @return one argument row per binary fixture: the resource name and its layout name
@@ -241,6 +316,18 @@ class AuthorizationFixtureContractTest {
                 //       instead, which measures the prefix and the segment stride directly.
                 org.junit.jupiter.params.provider.Arguments.of("pautdtl1-canonical.bin", "PAUTDTL"),
                 org.junit.jupiter.params.provider.Arguments.of("pautdtl1-auth-fraud-domain.bin",
+                        "PAUTDTL"),
+                // WHY : Assumptions: the fixture below is enrolled here even though its fraud byte is
+                //       DELIBERATELY outside the domain the target column admits, because the two
+                //       claims are independent. Geometry and byte-identical round-tripping are
+                //       properties of the record's layout and of the codec, and both hold for a value
+                //       no database would accept -- indeed the round trip is what proves the codec
+                //       does not silently repair such a value on the way through. Whether the value is
+                //       ADMISSIBLE is a database question, asserted against a real engine by
+                //       PendingAuthFraudDomainRepositoryIT, and its byte-level contract is asserted by
+                //       PendingAuthDetailFraudDomainFixtureTest. Leaving it out of this generic check
+                //       on the grounds of being invalid would have left its 200 bytes free to change.
+                org.junit.jupiter.params.provider.Arguments.of("pautdtl1-auth-fraud-invalid.bin",
                         "PAUTDTL"),
                 org.junit.jupiter.params.provider.Arguments.of("pautdtl1-match-status-domain.bin",
                         "PAUTDTL"),
@@ -357,7 +444,7 @@ class AuthorizationFixtureContractTest {
         for (String name : EVERY_FIXTURE) {
             assertThat(bytesOf(name)).as("fixture %s", name).isNotEmpty();
         }
-        assertThat(EVERY_FIXTURE).doesNotHaveDuplicates().hasSize(30);
+        assertThat(EVERY_FIXTURE).doesNotHaveDuplicates().hasSize(33);
     }
 
     /**
@@ -460,6 +547,920 @@ class AuthorizationFixtureContractTest {
         byte[] requestOracle = bytesOf("auth-request-encode-oracle-170.bin");
         assertThat((char) requestOracle[requestOracle.length - 1]).isNotEqualTo(',');
         assertThat(payload.charAt(payload.length() - 1)).isEqualTo(',');
+    }
+
+    /**
+     * Confirms the declined-reason fixture is the geometry and the encode oracle of a declined reply.
+     *
+     * <p>Purpose: this case is the carrier of everything the fixture's own bytes cannot say. A
+     * {@code .csv} resource has no function, class or module entry point for a docstring to attach to,
+     * and a comment row would corrupt the very record count and offsets the file exists to fix, so the
+     * project's Explainability rule places the obligation on the Javadoc of the test that reads it. What
+     * follows is therefore the fixture's documentation, not a narration of the assertions below.
+     *
+     * <p>Assumptions: the layout is
+     * {@code app/app-authorization-ims-db2-mq/cpy/CCPAURLY.cpy} lines 19 to 24 -- card {@code X(16)},
+     * transaction identifier {@code X(15)}, authorization identifier {@code X(06)}, response code
+     * {@code X(02)}, response reason {@code X(04)} and approved amount {@code PIC +9(10).99} -- whose
+     * declared widths sum to 57. Four numbers follow from that and conflating any two of them shifts a
+     * field: 57 is the width sum, 63 is the payload, being 57 plus six delimiters, 64 is one LINE, being
+     * the 63-character payload plus its single line feed, and 448 is the file, being 64 times seven.
+     * Content is therefore always measured on the STRIPPED line and never on a byte count.
+     *
+     * <p>Assumptions: the 64 in this file is {@code 63 + LF} and is NOT the transmitted length, even
+     * though the transmitted length is also 64. That coincidence arises independently:
+     * {@code WS-RESP-LENGTH} is declared {@code PIC S9(4) VALUE 1} at {@code COPAUA0C.cbl} line 46, is
+     * used as the {@code WITH POINTER} cursor of the outbound {@code STRING} at line 730 so that it
+     * finishes addressing the position one past the last character written, and is then moved straight
+     * into {@code W02-BUFFLEN} at line 756 and passed to {@code CALL 'MQPUT1'} at line 758 -- so the
+     * baseline puts 64 bytes for the 63 it built, the sixty-fourth being a pad byte from the 200-byte
+     * buffer at line 108. A 64 cited from this file would therefore look like a claim about the put and
+     * be a claim about a newline.
+     *
+     * <p>Assumptions: the TRAILING comma is data. The {@code STRING} at {@code COPAUA0C.cbl} lines 722
+     * to 727 pairs a {@code ','} literal with every one of the six values, the sixth AFTER
+     * {@code WS-APPROVED-AMT-DIS}, and closes with {@code DELIMITED BY SIZE} at line 728, so the payload
+     * is {@code 57 + 6 = 63}. {@code docs/architecture/messaging-contracts.md} gives 62, the ordinary
+     * {@code fields - 1} arithmetic, and that figure is SUPERSEDED: the emitting statement outranks the
+     * arithmetic that predicts it, and the document is what should be corrected. Splitting a record on
+     * the delimiter consequently yields SEVEN parts whose seventh is empty, which is a property to
+     * assert rather than a count to trust.
+     *
+     * <p>Assumptions: the seven reasons are the complete selection at {@code COPAUA0C.cbl} lines 700 to
+     * 717 -- {@code 3100} card, account or customer not found, {@code 4100} insufficient funds,
+     * {@code 4200} card not active, {@code 4300} account closed, {@code 5100} card fraud, {@code 5200}
+     * merchant fraud and {@code 9000} other -- and the approval value {@code 0000} set at line 698
+     * belongs to {@code auth-reply-approved-wire63.csv} and is asserted absent here. The set is CLOSED
+     * at seven, which is why both the file's record count and
+     * {@link AuthorizationDecisionService.DeclineReason}'s arity are asserted: a code added to one
+     * without the other then fails, whereas a one-sided assertion would let an eighth code ship
+     * unexercised.
+     *
+     * <p>Assumptions: {@code 9000} is the selection's {@code WHEN OTHER} branch and is load-bearing
+     * rather than filler, so an unmapped decline condition must emit it -- not {@code null}, not a blank
+     * field, not an exception and not a newly invented code. It is the one branch a hand-written mapper
+     * omits, and {@link #theDeclinedReasonSetIsClosedAndMatchesTheDecisionEnum()} drives it.
+     *
+     * <p>Assumptions: the reason is {@code X(04)} TEXT and is compared as a string. The approval value
+     * {@code 0000} shares the field, so reading it as a number would collapse that value to integer
+     * zero and make it indistinguishable from an unset or absent field, and would drop a leading zero
+     * from any future code that carried one.
+     *
+     * <p>Assumptions: the apparent numeric families -- {@code 31xx} not-found, {@code 41xx} to
+     * {@code 43xx} account and card state, {@code 51xx} and {@code 52xx} fraud, {@code 9000} catch-all
+     * -- are an INFERENCE. {@code CIPAUDTY.cpy} line 32 declares
+     * {@code PA-AUTH-RESP-REASON PIC X(04)} with no {@code 88} level beneath it and the COBOL asserts no
+     * such grouping anywhere, so no range predicate such as "a leading five means fraud" may stand in
+     * for an exact value match.
+     *
+     * <p>Assumptions: the response code {@code 05} on every record is SYNTHETIC.
+     * {@code CIPAUDTY.cpy} line 31 declares {@code 88 PA-AUTH-APPROVED VALUE '00'} and enumerates no
+     * decline code at all, so the only baseline-defined test is equality with {@code '00'} for approval
+     * and everything else is a decline. The decline test is therefore asserted as
+     * {@code !"00".equals(respCode)} and never as {@code "05".equals(respCode)}, so no logic becomes
+     * accidentally dependent on this fixture's arbitrary choice. The same synthetic {@code 05} appears
+     * in the detail fixtures for the same reason and with the same caveat.
+     *
+     * <p>Assumptions: the approved amount is zero on every record because nothing was approved, and its
+     * text is the reply mask rather than the copybook picture -- see
+     * {@link #DECLINED_REPLY_MONEY_TOKEN}. The sign position is BLANK rather than {@code -}, which is
+     * the mask's rendering for a non-negative value and is also why {@link java.math.BigDecimal}'s lack
+     * of a negative zero is invisible on this wire: zero and negative zero render identically, so
+     * {@code -} can never appear and a negative-zero record would not be a distinct vector. The
+     * zero-padded signed forms are decode tolerance, asserted in
+     * {@link #theDeclinedReplyToleratesTheZeroPaddedMoneyFormsWithoutEmittingThem()} rather than added
+     * as an eighth record. Trade-offs: the packed rendering of this same zero would be
+     * {@code 00 00 00 00 00 00 0C}, six consecutive NUL bytes before the sign nibble and the most
+     * NUL-dense field the format produces, which is why a NUL-trimming read corrupts money -- but this
+     * file is text, and asserting packed bytes here would assert a representation it does not carry.
+     *
+     * <p>Assumptions: populating the authorization identifier on a decline is a FIXTURE CHOICE, made so
+     * that the six-character boundary and the delimiter at offset 39 are exercised on every record. A
+     * six-BLANK identifier is equally admissible and is asserted separately in
+     * {@link #theDeclinedReplyAcceptsABlankAuthIdAndRefusesALostDelimiter()}; an EMPTY field is not,
+     * because it would shift every offset after it. The width is the contract, not the content.
+     *
+     * <p>Assumptions: section 3.4 of {@code tests/fixtures/README.md} is INAPPLICABLE to this file. That
+     * section governs zoned-decimal sign overpunch, where the sign shares the final byte with a digit;
+     * here the sign is a leading CHARACTER of an edited display field, so no overpunch table and no
+     * {@code ZonedDecimalCodec} belongs on this path. Sections 3.2 and 3.3 do apply, which is why the
+     * file is LF-only with a single trailing newline and {@code wc -l} equals the record count.
+     *
+     * <p>Assumptions: the full primary account number on this wire is the baseline's own contract and
+     * must not be cited to justify an unmasked number at the API boundary, where masking to the last
+     * four digits applies. The reply carries no card verification value in any field, so none appears
+     * here.
+     *
+     * <p>Assumptions: the transactional outbox is a SECOND consumer of these same payloads.
+     * {@code V1__authorization.sql} declares {@code auth_reply_outbox} with the payload, the correlation
+     * identity, the reply destination and an expiry, and it exists because the baseline puts its reply
+     * outside the database transaction -- {@code MQPMO-NO-SYNCPOINT} at line 753 with the commit at line
+     * 335 -- leaving a window in which a committed decision has no reply. That coupling is asserted in
+     * {@link #everyDeclinedReplyPayloadSurvivesAnOutboxRowUnchanged()}.
+     *
+     * <p>Assumptions: these records are SELF-DESCRIBING and their order is not a contract. Each carries
+     * its own transaction identifier and reason, so the set is asserted by reason rather than by line
+     * index. That is the opposite of {@code unload-gsam-detail-200.bin}, whose bare segments carry no
+     * parent key and whose file order IS a contract; two fixtures in one directory with opposing
+     * ordering properties is exactly where a reader generalises wrongly, so this one states which it
+     * has.
+     *
+     * <p>Assumptions: the carriage-return check runs off the raw bytes and INDEPENDENTLY of every length
+     * assertion. A carriage return would be absorbed at the trailing-comma position and push a record's
+     * content to 64 characters, which is length-indistinguishable from a correct 63-character record
+     * plus its line feed; and {@link #linesOf(String)} strips a trailing {@code \r}, so a line-oriented
+     * read cannot see one at all.
+     */
+    @Test
+    @DisplayName("the declined-reason fixture carries seven 63-character replies the encoder reproduces")
+    void theDeclinedReplyFixtureIsTheDeclineEncodeOracle() {
+        byte[] image = bytesOf(DECLINED_REPLY_FIXTURE);
+
+        // WHY : Assumptions: the file length is asserted as the ARITHMETIC of a record and a terminator
+        //       rather than against a bare 448, so a reader finds every term named: the payload the
+        //       copybook's widths and delimiters produce, plus one line feed, times the closed record
+        //       count. A literal would be equally true and would explain nothing.
+        int lineLength = CsvAuthCodec.REPLY_WIRE_LENGTH + 1;
+        assertThat(image).hasSize(lineLength * DECLINE_REASON_COUNT);
+        assertThat(CsvAuthCodec.REPLY_DECLARED_WIDTH_SUM + CsvAuthCodec.REPLY_FIELD_COUNT)
+                .isEqualTo(CsvAuthCodec.REPLY_WIRE_LENGTH);
+        assertThat(CsvAuthCodec.REPLY_FIELD_WIDTHS.stream().mapToInt(Integer::intValue).sum())
+                .isEqualTo(CsvAuthCodec.REPLY_DECLARED_WIDTH_SUM);
+        assertThat(CsvAuthCodec.REPLY_FIELD_WIDTHS.get(5)).isEqualTo(REPLY_MONEY_FIELD_WIDTH);
+
+        List<String> payloads = linesOf(DECLINED_REPLY_FIXTURE);
+        assertThat(payloads).hasSize(DECLINE_REASON_COUNT);
+
+        List<String> reasons = new ArrayList<>();
+        for (int ordinal = 0; ordinal < payloads.size(); ordinal++) {
+            String payload = payloads.get(ordinal);
+            assertThat(payload).as("record %s content, terminator stripped", ordinal)
+                    .hasSize(CsvAuthCodec.REPLY_WIRE_LENGTH);
+
+            // WHY : Assumptions: the delimiter positions are walked from the declared widths, so this
+            //       tests the LAYOUT rather than the tokenisation. A split-based check passes for a
+            //       payload holding the right values at the wrong widths, which is exactly what a
+            //       fixed-width producer on the other side of the queue would emit if it disagreed by a
+            //       character; and it is the sixth delimiter, at offset 62, that a reader working from
+            //       the superseded 62-byte arithmetic would expect not to exist.
+            List<String> spans = new ArrayList<>();
+            int cursor = 0;
+            for (int field = 0; field < CsvAuthCodec.REPLY_FIELD_COUNT; field++) {
+                int width = CsvAuthCodec.REPLY_FIELD_WIDTHS.get(field);
+                spans.add(payload.substring(cursor, cursor + width));
+                assertThat(payload.charAt(cursor + width))
+                        .as("delimiter after field %s of record %s", field, ordinal)
+                        .isEqualTo(CsvAuthCodec.DELIMITER);
+                cursor += width + 1;
+            }
+            assertThat(cursor).isEqualTo(CsvAuthCodec.REPLY_WIRE_LENGTH);
+            assertThat(payload.charAt(CsvAuthCodec.REPLY_WIRE_LENGTH - 1))
+                    .as("offset 62 of record %s IS the sixth delimiter", ordinal)
+                    .isEqualTo(CsvAuthCodec.DELIMITER);
+
+            // WHY : Assumptions: the seventh split element is asserted EMPTY rather than absent. The
+            //       trailing delimiter guarantees one, and a consumer that treated it as a field would
+            //       read a seven-field reply from a six-field contract.
+            String[] tokens = payload.split(String.valueOf(CsvAuthCodec.DELIMITER), -1);
+            assertThat(tokens).as("record %s splits into six fields and one empty tail", ordinal)
+                    .hasSize(CsvAuthCodec.REPLY_FIELD_COUNT + 1);
+            assertThat(tokens[CsvAuthCodec.REPLY_FIELD_COUNT]).isEmpty();
+
+            // WHY : Assumptions: every decoded member is compared against the SPAN it was read from
+            //       rather than against a second set of literals, so a field decoded into the wrong
+            //       member cannot pass by agreeing with an expectation written for that member. The
+            //       identity of the record -- which card, which reason -- is asserted separately below,
+            //       where a literal is the only thing that can establish it.
+            CsvAuthCodec.AuthReply decoded = CsvAuthCodec.decodeReply(payload);
+            assertThat(decoded.cardNum()).isEqualTo(spans.get(0));
+            assertThat(decoded.transactionId()).isEqualTo(spans.get(1));
+            assertThat(decoded.authIdCode()).isEqualTo(spans.get(2));
+            assertThat(decoded.authRespCode()).isEqualTo(spans.get(3));
+            assertThat(decoded.authRespReason()).isEqualTo(spans.get(4));
+            assertThat(spans.get(5)).isEqualTo(DECLINED_REPLY_MONEY_TOKEN);
+
+            // WHY : Assumptions: the reason is asserted to be a four-character STRING, because the type
+            //       is the property at risk. A four-digit token read as a number is still four digits
+            //       long and still compares equal to its own value, so only the declared type catches a
+            //       parse that would have collapsed the approval 0000 to integer zero.
+            assertThat(decoded.authRespReason()).isInstanceOf(String.class)
+                    .hasSize(CsvAuthCodec.REPLY_FIELD_WIDTHS.get(4));
+            reasons.add(decoded.authRespReason());
+
+            // WHY : Assumptions: the decline is recognised by INEQUALITY with the sole enumerated code,
+            //       CIPAUDTY.cpy line 31's '00', and not by equality with this fixture's synthetic 05.
+            //       Writing it the other way would pass here and would leave the production predicate
+            //       free to be the narrower one.
+            assertThat("00".equals(decoded.authRespCode()))
+                    .as("record %s is a decline under the only baseline-defined test", ordinal)
+                    .isFalse();
+            assertThat(decoded.authRespCode())
+                    .isEqualTo(AuthorizationDecisionService.RESP_CODE_DECLINED);
+
+            // WHY : Assumptions: the amount is asserted by VALUE, scale and signum rather than only by
+            //       token, because the token is text in an edit mask while the member is exact fixed
+            //       point. Scale two is asserted explicitly because a zero that arrived at scale zero
+            //       would compare equal by value and re-emit a different number of decimals.
+            assertThat(decoded.approvedAmount().amount()).isEqualByComparingTo(BigDecimal.ZERO);
+            assertThat(decoded.approvedAmount().amount().scale())
+                    .isEqualTo(CsvAuthCodec.MONEY_SCALE);
+            assertThat(decoded.approvedAmount().amount().signum()).isZero();
+            assertThat(decoded.approvedAmount().amount().toPlainString()).doesNotStartWith("-");
+
+            // WHY : Assumptions: byte equality against a freshly encoded payload is what makes this file
+            //       an ORACLE rather than a decodable example. A field-by-field comparison passes for a
+            //       payload whose delimiter changed or whose two adjacent identifier fields swapped
+            //       content, because both survive a decode into the members they were read into.
+            assertThat(CsvAuthCodec.encodeReply(decoded)).isEqualTo(payload);
+            assertThat(new String(CsvAuthCodec.encodeReplyBytes(decoded), StandardCharsets.US_ASCII))
+                    .isEqualTo(payload);
+            assertThat(CsvAuthCodec.encodeReplyBytes(decoded))
+                    .hasSize(CsvAuthCodec.REPLY_WIRE_LENGTH);
+        }
+
+        // WHY : Assumptions: the card and the response code are asserted INVARIANT so that a failure
+        //       isolates to the reason path. With six of the seven fields identical across the records,
+        //       a diff between two of them names the reason and nothing else.
+        assertThat(payloads.stream().map(line -> line.substring(0, 16)).distinct())
+                .containsExactly("4000123456789010");
+        assertThat(payloads.stream().map(line -> line.substring(40, 42)).distinct())
+                .containsExactly("05");
+        assertThat(reasons).containsExactly("3100", "4100", "4200", "4300", "5100", "5200", "9000");
+
+        // WHY : Assumptions: the reason is ALSO read at its absolute file offset, which is the one check
+        //       that does not go through the line reader. A file that had lost a terminator would still
+        //       yield decodable lines of some width; reading offset 43 of each 64-byte line proves the
+        //       records are where the arithmetic puts them.
+        String text = new String(image, StandardCharsets.US_ASCII);
+        for (int ordinal = 0; ordinal < DECLINE_REASON_FILE_OFFSETS.size(); ordinal++) {
+            int start = DECLINE_REASON_FILE_OFFSETS.get(ordinal);
+            assertThat(start).isEqualTo(ordinal * lineLength + 43);
+            assertThat(text.substring(start, start + CsvAuthCodec.REPLY_FIELD_WIDTHS.get(4)))
+                    .as("reason at file offset %s", start)
+                    .isEqualTo(reasons.get(ordinal));
+        }
+    }
+
+    /**
+     * Confirms the fixture's terminators are line feeds alone, checked apart from any length.
+     *
+     * <p>Assumptions: this is deliberately a separate case from the geometry above, because a carriage
+     * return is length-INDISTINGUISHABLE from correct content: absorbed at the trailing-comma position
+     * it pushes a record to 64 characters, exactly the width of a correct record plus its line feed. A
+     * check folded into a length assertion would therefore be satisfied by the corruption it is meant to
+     * detect. Sections 3.2 and 3.3 of {@code tests/fixtures/README.md} mandate the line feed alone and a
+     * single trailing newline, so that {@code wc -l} equals the record count.</p>
+     */
+    @Test
+    @DisplayName("the declined-reason fixture holds seven line feeds, no carriage return and no NUL")
+    void theDeclinedReplyFixtureCarriesLineFeedTerminatorsOnly() {
+        byte[] image = bytesOf(DECLINED_REPLY_FIXTURE);
+
+        List<Integer> lineFeeds = new ArrayList<>();
+        int carriageReturns = 0;
+        int nulls = 0;
+        for (int offset = 0; offset < image.length; offset++) {
+            byte value = image[offset];
+            if (value == '\n') {
+                lineFeeds.add(offset);
+            } else if (value == '\r') {
+                carriageReturns++;
+            } else if (value == 0) {
+                nulls++;
+            }
+        }
+
+        assertThat(lineFeeds).isEqualTo(DECLINE_REPLY_TERMINATOR_OFFSETS);
+        assertThat(carriageReturns).as("a carriage return anywhere in the image").isZero();
+        assertThat(nulls).as("a NUL anywhere in the image").isZero();
+
+        // WHY : Assumptions: the LAST byte is asserted to be the terminator, which is what forbids both
+        //       a missing final newline and a second one. A trailing blank line would be a zero-length
+        //       record, and section 3.3 rules it out precisely so that a line count stays a record
+        //       count.
+        assertThat(image[image.length - 1]).isEqualTo((byte) '\n');
+        assertThat(image[image.length - 2]).isEqualTo((byte) CsvAuthCodec.DELIMITER);
+    }
+
+    /**
+     * Confirms the fixture's reason set is closed at seven and equals the decision enumeration's.
+     *
+     * <p>Assumptions: SET equality is asserted in both directions and the enumeration's own arity is
+     * asserted too, which is what makes the closure meaningful. Containment alone would pass for an
+     * enumeration that had grown an eighth constant, and a count alone would pass for a fixture that had
+     * duplicated one reason and dropped another -- so distinctness is asserted as well. Trade-offs: five
+     * of the seven constants are unreachable in the baseline and this migration does not start setting
+     * them, so this case asserts the MAPPING rather than the reachability; the reachability of the
+     * catch-all is asserted below, where the baseline's own behaviour is the expectation.</p>
+     */
+    @Test
+    @DisplayName("the seven fixture reasons are distinct and are exactly the decline enumeration")
+    void theDeclinedReasonSetIsClosedAndMatchesTheDecisionEnum() {
+        List<String> fixtureReasons = linesOf(DECLINED_REPLY_FIXTURE).stream()
+                .map(payload -> payload.substring(43, 47))
+                .toList();
+        List<String> enumReasons =
+                java.util.Arrays.stream(AuthorizationDecisionService.DeclineReason.values())
+                        .map(AuthorizationDecisionService.DeclineReason::responseReason)
+                        .toList();
+
+        assertThat(AuthorizationDecisionService.DeclineReason.values())
+                .as("the selection at COPAUA0C.cbl lines 700 to 717 has seven branches")
+                .hasSize(DECLINE_REASON_COUNT);
+        assertThat(fixtureReasons).hasSize(DECLINE_REASON_COUNT).doesNotHaveDuplicates();
+        assertThat(enumReasons).doesNotHaveDuplicates()
+                .containsExactlyInAnyOrderElementsOf(fixtureReasons);
+
+        // WHY : Assumptions: the approval reason is asserted ABSENT here and is asserted present in the
+        //       approved fixture, because the two files partition one field's value domain. A vector
+        //       carrying both would leave nothing proving that a decline never ships 0000.
+        assertThat(fixtureReasons).doesNotContain("0000");
+        assertThat(linesOf("auth-reply-approved-wire63.csv").get(0).substring(43, 47))
+                .isEqualTo("0000");
+
+        // WHY : Assumptions: 9000 is asserted to be the enumeration's LAST constant, matching the
+        //       WHEN OTHER position at line 715 rather than merely being present somewhere. A catch-all
+        //       declared before a specific branch would be selected in its place, so its position is
+        //       part of what makes it the default.
+        assertThat(enumReasons.get(enumReasons.size() - 1)).isEqualTo("9000");
+        assertThat(AuthorizationDecisionService.DeclineReason.UNSPECIFIED.responseReason())
+                .isEqualTo("9000");
+
+        // WHY : Assumptions: the reasons are compared as STRINGS and the leading character carries no
+        //       meaning of its own. The grouping by first digit is an inference with no 88 level behind
+        //       it -- CIPAUDTY.cpy line 32 declares the field bare -- so this asserts only that each
+        //       value is four characters of digits, which is the whole of what the picture guarantees.
+        assertThat(fixtureReasons).allSatisfy(reason -> assertThat(reason).hasSize(4)
+                .containsOnlyDigits());
+        assertThat(AuthorizationDecisionService.RESP_CODE_DECLINED)
+                .isNotEqualTo(AuthorizationDecisionService.RESP_CODE_APPROVED);
+    }
+
+    /**
+     * Confirms the zero-padded money forms decode without ever being emitted.
+     *
+     * <p>Assumptions: this is where the {@code +0000000000.00} and {@code -0000000000.00} tokens belong.
+     * Both decode to the same zero, because {@link CsvAuthCodec#parseMoney} accepts either sign
+     * character and strips the pad the reply mask can produce; and both RE-EMIT as the mask's
+     * {@code "          0.00"}, because the encoder has one correct answer. Adding either as an eighth
+     * record would have made the fixture carry a payload no COBOL program produces, and a fixture is
+     * cited as precedent far more often than a test is. Assumptions: the superseded 62-character form is
+     * exercised here too, and its real guard is the RE-EMISSION rather than a rejection --
+     * {@code decodeReply} accepts a producer that omits the trailing delimiter, by documented tolerance,
+     * and re-emits at 63 with six delimiters, so the 62 can never propagate.</p>
+     */
+    @Test
+    @DisplayName("the zero-padded and 62-character reply forms decode but re-emit as the reply mask")
+    void theDeclinedReplyToleratesTheZeroPaddedMoneyFormsWithoutEmittingThem() {
+        String canonical = linesOf(DECLINED_REPLY_FIXTURE).get(0);
+        String prefix = canonical.substring(0, canonical.length() - REPLY_MONEY_FIELD_WIDTH - 1);
+
+        for (String tolerated : List.of("+0000000000.00", "-0000000000.00", "0.00")) {
+            String variant = prefix + tolerated + CsvAuthCodec.DELIMITER;
+            CsvAuthCodec.AuthReply decoded = CsvAuthCodec.decodeReply(variant);
+
+            assertThat(decoded.approvedAmount().amount()).isEqualByComparingTo(BigDecimal.ZERO);
+            assertThat(decoded.approvedAmount().amount().scale())
+                    .isEqualTo(CsvAuthCodec.MONEY_SCALE);
+            assertThat(CsvAuthCodec.encodeReply(decoded))
+                    .as("the tolerated token %s re-emits as the reply mask", tolerated)
+                    .isEqualTo(canonical);
+        }
+
+        // WHY : Assumptions: the 62-character form is built by DROPPING the trailing delimiter from the
+        //       fixture's own record, so the vector is derived from the oracle rather than retyped and
+        //       cannot drift from it. Its acceptance is the tolerance the reference program's own
+        //       traffic requires; its re-emission at 63 is what makes the superseded figure harmless.
+        String withoutTrailingDelimiter = canonical.substring(0, canonical.length() - 1);
+        assertThat(withoutTrailingDelimiter).hasSize(CsvAuthCodec.REPLY_WIRE_LENGTH - 1);
+        assertThat(CsvAuthCodec.encodeReply(CsvAuthCodec.decodeReply(withoutTrailingDelimiter)))
+                .isEqualTo(canonical);
+
+        // WHY : Assumptions: the transmitted form is the fixture's record plus ONE pad byte, which is
+        //       the byte the put's pointer-derived length appends. Accepting it here is what lets this
+        //       codec read the baseline's own traffic; re-emitting 63 is the registered divergence.
+        assertThat(CsvAuthCodec.encodeReply(CsvAuthCodec.decodeReply(canonical + ' ')))
+                .isEqualTo(canonical);
+
+        // WHY : Assumptions: a seventh token carrying CONTENT is refused, and the refusal is what stops
+        //       the empty-tail tolerance above from being mistaken for accepting a seven-field reply.
+        assertThatThrownBy(() -> CsvAuthCodec.decodeReply(canonical + "X"))
+                .isInstanceOf(CsvAuthCodec.AuthMessageFormatException.class)
+                .hasMessageContaining(String.valueOf(CsvAuthCodec.REPLY_FIELD_COUNT));
+    }
+
+    /**
+     * Confirms a six-blank authorization identifier is admissible and a lost delimiter is not.
+     *
+     * <p>Assumptions: the field's WIDTH is the contract and its content is not, which is why a six-blank
+     * identifier decodes with every following offset intact while a record that has lost an interior
+     * delimiter is refused. Assumptions: the decoded value of a six-blank field is the EMPTY string
+     * rather than six spaces, because the codec removes trailing pad from every character field -- so
+     * this case asserts the six on the wire, through the delimiter position, rather than on the decoded
+     * member, where the pad no longer exists.</p>
+     */
+    @Test
+    @DisplayName("a six-blank authorization identifier decodes and a lost interior delimiter is refused")
+    void theDeclinedReplyAcceptsABlankAuthIdAndRefusesALostDelimiter() {
+        String canonical = linesOf(DECLINED_REPLY_FIXTURE).get(0);
+        int authIdWidth = CsvAuthCodec.REPLY_FIELD_WIDTHS.get(2);
+
+        assertThat(canonical.substring(33, 33 + authIdWidth)).hasSize(authIdWidth)
+                .isEqualTo("A00300");
+        String blanked = canonical.substring(0, 33) + " ".repeat(authIdWidth)
+                + canonical.substring(33 + authIdWidth);
+        assertThat(blanked).hasSize(CsvAuthCodec.REPLY_WIRE_LENGTH);
+        assertThat(blanked.charAt(39)).isEqualTo(CsvAuthCodec.DELIMITER);
+
+        CsvAuthCodec.AuthReply decoded = CsvAuthCodec.decodeReply(blanked);
+        assertThat(decoded.authIdCode()).isEmpty();
+        assertThat(decoded.authRespReason()).isEqualTo("3100");
+        assertThat(decoded.transactionId()).isEqualTo("TXN000000000300");
+
+        // WHY : Assumptions: the delimiter is removed rather than a field being shortened, so the
+        //       resulting record is 62 characters with five delimiters -- the same length as the
+        //       superseded interior-delimited form and a different thing entirely. Asserting the refusal
+        //       is what distinguishes them: one is a tolerated producer variant, the other is corruption.
+        String lostDelimiter = canonical.substring(0, 42) + canonical.substring(43);
+        assertThat(lostDelimiter).hasSize(CsvAuthCodec.REPLY_WIRE_LENGTH - 1);
+        assertThatThrownBy(() -> CsvAuthCodec.decodeReply(lostDelimiter))
+                .isInstanceOf(CsvAuthCodec.AuthMessageFormatException.class);
+    }
+
+    /**
+     * Confirms each reply payload survives an outbox row unchanged and yields a distinct identity.
+     *
+     * <p>Assumptions: the outbox is asserted as a SECOND consumer of these payloads because it is what
+     * closes the baseline's lost-reply window. {@code COPAUA0C.cbl} commits its database work at line
+     * 335 and puts the reply with {@code MQPMO-NO-SYNCPOINT} at line 753, so a failure between the two
+     * loses a reply the data says was produced; writing the payload into
+     * {@code auth_reply_outbox} inside the same transaction and publishing from there afterwards removes
+     * that window. The column is {@code TEXT}, so a 63-character payload is carried without truncation,
+     * and this case asserts the payload is returned character-for-character rather than merely
+     * persisted.
+     *
+     * <p>Assumptions: the correlation identity is the card and the transaction identifier ADJACENT, 16
+     * plus 15 characters and hence {@link CsvAuthCodec#CORRELATION_COMPOSITE_LENGTH} of them, and it is
+     * TOKENISED before it reaches a queue attribute or a database column. The token is what the
+     * deduplication identity uses, so distinctness is asserted on the token as well as on the composite:
+     * seven records sharing one card must still deduplicate as seven messages, which they do only
+     * because the transaction identifier participates.</p>
+     */
+    @Test
+    @DisplayName("every declined reply round-trips an outbox row and yields a distinct dedup identity")
+    void everyDeclinedReplyPayloadSurvivesAnOutboxRowUnchanged() {
+        OpaqueIdentifier tokeniser = new OpaqueIdentifier(fixedTokeniserKey());
+        List<String> composites = new ArrayList<>();
+        List<String> deduplicationKeys = new ArrayList<>();
+
+        for (String payload : linesOf(DECLINED_REPLY_FIXTURE)) {
+            CsvAuthCodec.AuthReply reply = CsvAuthCodec.decodeReply(payload);
+            String composite = payload.substring(0, 16) + payload.substring(17, 32);
+            assertThat(composite).hasSize(CsvAuthCodec.CORRELATION_COMPOSITE_LENGTH);
+            composites.add(composite);
+
+            String deduplicationKey = reply.deduplicationKey(tokeniser);
+            assertThat(deduplicationKey).hasSize(OpaqueIdentifier.TOKEN_LENGTH)
+                    .doesNotContain(reply.cardNum());
+            deduplicationKeys.add(deduplicationKey);
+
+            AuthReplyOutbox row = new AuthReplyOutbox("https://sqs.invalid/carddemo-pauth-reply",
+                    reply.correlationKey(tokeniser), reply.orderGroup(tokeniser), deduplicationKey,
+                    payload, LocalDateTime.parse("2022-07-18T03:00:05"),
+                    LocalDateTime.parse("2022-07-18T03:00:00"));
+
+            assertThat(row.getPayload()).isEqualTo(payload);
+            assertThat(row.getPayload()).hasSize(CsvAuthCodec.REPLY_WIRE_LENGTH);
+            assertThat(row.getContentType()).isEqualTo(AuthReplyOutbox.CONTENT_TYPE_CSV);
+            assertThat(row.getExpiresAt()).isNotNull();
+            assertThat(row.getReplyQueueUrl()).isNotBlank();
+
+            // WHY : Assumptions: the row is decoded BACK from the column value rather than compared as
+            //       text alone, because the property that matters is that the payload is still a
+            //       well-formed reply after the round trip. A column that had trimmed the trailing
+            //       delimiter would still look almost right as a string.
+            assertThat(CsvAuthCodec.decodeReply(row.getPayload()).authRespReason())
+                    .isEqualTo(reply.authRespReason());
+        }
+
+        assertThat(composites).hasSize(DECLINE_REASON_COUNT).doesNotHaveDuplicates();
+        assertThat(deduplicationKeys).hasSize(DECLINE_REASON_COUNT).doesNotHaveDuplicates();
+    }
+
+    /**
+     * Builds deterministic tokeniser key material of the minimum admissible length.
+     *
+     * <p>Assumptions: a fixed key is correct HERE and would not be in production, where the key comes
+     * from the secret store, because nothing in this class asserts that a token is unguessable -- only
+     * that it is derived, stable across the seven records and free of the card number.</p>
+     *
+     * @return the key material, exactly {@link OpaqueIdentifier#MIN_KEY_LENGTH} bytes, never
+     *     {@code null}
+     */
+    private static byte[] fixedTokeniserKey() {
+        byte[] material = new byte[OpaqueIdentifier.MIN_KEY_LENGTH];
+        for (int index = 0; index < material.length; index++) {
+            material[index] = (byte) (index + 1);
+        }
+        return material;
+    }
+
+    /**
+     * Confirms the reply encode oracle is 63 terminator-free bytes whose final byte is the sixth comma.
+     *
+     * <p>Purpose: this fixture pins the reply's PAYLOAD LENGTH and the fact that the encoder emits no
+     * terminator, and it is the only reply fixture that can pin either. Nothing else in the directory
+     * can: consolidating it into {@code auth-reply-approved-wire63.csv} would cost exactly those two
+     * assertions, for the reasons set out below.
+     *
+     * <p>Assumptions: the layout source is {@code app/app-authorization-ims-db2-mq/cpy/CCPAURLY.cpy}
+     * lines 19 to 24 -- {@code PA-RL-CARD-NUM X(16)}, {@code PA-RL-TRANSACTION-ID X(15)},
+     * {@code PA-RL-AUTH-ID-CODE X(06)}, {@code PA-RL-AUTH-RESP-CODE X(02)},
+     * {@code PA-RL-AUTH-RESP-REASON X(04)} and {@code PA-RL-APPROVED-AMT PIC +9(10).99} -- whose
+     * declared widths sum to 57. Every width and offset below is computed from
+     * {@link CsvAuthCodec#REPLY_FIELD_WIDTHS} rather than restated, so this case cannot drift from the
+     * copybook it verifies.
+     *
+     * <p>Assumptions: three reply fixtures exist, they carry three different numbers, and none is
+     * redundant:
+     *
+     * <pre>
+     * fixture                            bytes  final byte  what it and only it pins
+     * auth-reply-approved-wire63.csv         64  0x0A LF     the text form under the house newline rule
+     * auth-reply-encode-oracle-63.bin        63  0x2C comma  the payload length, and no terminator
+     * the transmitted frame (assembled)      64  0x20 blank  the DECLARED transmitted length, payload+1
+     * </pre>
+     *
+     * <p>Assumptions: the {@code .csv} and the transmitted frame are BOTH 64 bytes and differ only in
+     * byte 63, {@code 0x0A} against {@code 0x20}. Length alone therefore cannot distinguish them, so
+     * they are told apart here by byte 63 and never by length. This file is the only reply fixture
+     * whose byte count equals its content length, which makes it the only one where {@code wc -c}
+     * legitimately asserts the content -- 63 with no newline allowance, and {@code wc -l} reporting 0
+     * as the clean positive proof that no terminator is present.
+     *
+     * <p>Assumptions: asserting {@link CsvAuthCodec#encodeReplyBytes} against the 64-byte
+     * {@code .csv} instead leaves two options and BOTH are bad, which is the whole reason this third
+     * file exists. Comparing the raw 64 bytes fails spuriously on a terminator the encoder must never
+     * emit. Stripping the terminator, or reaching for a trimming or whitespace-tolerant matcher,
+     * silently tolerates trailing whitespace -- and would then also pass for an encoder emitting 64
+     * bytes with a trailing blank, which is precisely the transmitted frame, a DIFFERENT artifact. The
+     * one comparison that most needs to stay strict would become the one that had been loosened.
+     *
+     * <p>Assumptions: the trailing comma is verified, not inferred. The {@code STRING} at lines 722 to
+     * 727 of {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} pairs a {@code ','} literal
+     * with every one of the six values including the sixth, and it is delimited by {@code SIZE} at
+     * line 728, so the built buffer is {@code 57 + 6 = 63}. This file is the cleanest available proof
+     * of that, because its final byte is unambiguously the sixth comma with NOTHING after it; in the
+     * {@code .csv} that comma is followed by an LF, so what terminates the record is ambiguous by
+     * construction. Asserting 63 bytes and a comma at byte 62 together refutes the 62 that
+     * {@code docs/architecture/messaging-contracts.md} publishes: 62 follows from the ordinary
+     * {@code fields - 1} delimiter rule, that rule does not hold for this format, the COBOL wins, and
+     * the document is SUPERSEDED and is what should be corrected.
+     *
+     * <p>Assumptions: the two payloads disagree about {@code n - 1} and the asymmetry is the single
+     * easiest thing to get wrong across them, so both halves are asserted here rather than assumed.
+     * {@code auth-request-encode-oracle-170.bin} ends at offset 169 with a DIGIT and carries 17 commas
+     * for 18 fields, obeying {@code n - 1}; this file ends at offset 62 with a COMMA and carries 6
+     * commas for 6 fields, NOT obeying it.
+     *
+     * <p>Assumptions: {@code DELIMITED BY SIZE} is why every field is emitted blank-padded to its full
+     * declared width rather than trimmed, and therefore why the comma offsets are fixed at 16, 32, 39,
+     * 42, 47 and 62. That is what makes this a POSITIONAL oracle and not merely a delimited one: a
+     * trimmed payload would still split into six tokens, so the offsets are asserted and not just the
+     * token count. A count of 5 or of 7 is rejected by name, 5 being the superseded form.
+     *
+     * <p>Assumptions: field 4 {@code '00'} is the approval contract, the sole value enumerated by
+     * {@code 88 PA-AUTH-APPROVED VALUE '00'} at line 31 of {@code cpy/CIPAUDTY.cpy}, and field 5
+     * {@code '0000'} is its default, set at line 698 of {@code cbl/COPAUA0C.cbl} before the decline
+     * branch may overwrite it. Field 5 is {@code X(04)} TEXT and is compared as a string, because
+     * handling it numerically collapses {@code '0000'} to integer zero and makes it indistinguishable
+     * from unset. The leading zeros of both are significant.
+     *
+     * <p>Assumptions: field 6 is EDITED NUMERIC TEXT of invariant 14-character width whose sign
+     * occupies a leading CHARACTER position -- not a zoned overpunch and not a packed nibble -- so
+     * section 3.4 of {@code tests/fixtures/README.md} at lines 186 to 211 is inapplicable and
+     * {@code ZonedDecimalCodec} is not the codec for this payload. The mask is
+     * {@code WS-APPROVED-AMT-DIS PIC -zzzzzzzzz9.99}, declared at line 66 of {@code COPAUA0C.cbl},
+     * moved into at line 720 and joined at line 727; it is NOT {@code PA-RL-APPROVED-AMT PIC +9(10).99}
+     * from {@code CCPAURLY.cpy} line 24, which holds the value while the mask emits it. The two agree
+     * on the width and disagree on every position's content, so a non-negative value emits a SPACE in
+     * the sign position rather than a {@code +} and leading zeros emit SPACES rather than zeros. Zero
+     * therefore renders {@code "          0.00"}, never with a {@code -}, and negative zero renders
+     * identically because {@link BigDecimal} has no negative zero. The value never touches a
+     * {@code double}, a {@code float} or a JSON number, which would lose exactness at the boundary a
+     * reader actually sees; {@code LayeringRulesTest} enforces that architecturally and the decoded
+     * type is asserted here as well.
+     *
+     * <p>Assumptions: the full primary account number on the queue wire is the baseline contract and
+     * must NOT be read as licence for an unmasked number at the API boundary, where masking to the last
+     * four digits applies. The reply carries no card verification value field at all, so none can leak
+     * through this payload.
+     *
+     * <p>Assumptions: the file contains no {@code 0x0A}, no {@code 0x0D} and no {@code 0x00}, and every
+     * byte is printable ASCII -- digits, capitals, {@code '.'}, {@code ','} and space. It is
+     * nevertheless read as a fixed-length byte stream, and this directory now has THREE distinct
+     * reasons that discipline is mandatory, of which this file is an instance of the second. The packed
+     * {@code pautsum0-*} and {@code pautdtl-*} fixtures need byte reads because terminator- and
+     * NUL-shaped bytes occur legitimately INSIDE their data. The two encode oracles need byte reads
+     * because the ABSENCE of a terminator is itself the contract, and {@link #linesOf(String)} -- which
+     * splits on {@code \n} and strips {@code \r} -- cannot express absence, so it is deliberately not
+     * used on this file. A transport frame needs byte reads because its payload boundary is not
+     * discoverable from the bytes. Since no comment may appear inside a file carrying nothing but
+     * record bytes, the {@code .bin} extension is the only in-band signal of that discipline available.
+     *
+     * <p>Assumptions: section 3.3 of {@code tests/fixtures/README.md} mandates a single trailing
+     * newline and this file deliberately diverges. Section 3.2's escape hatch -- document the
+     * divergence in that scenario's own README -- is CLOSED for this family, because a Java fixture
+     * directory documents itself through the Javadoc of the tests that read it, which Checkstyle
+     * polices, rather than through a README that nothing attaches to a data file. The divergence is
+     * therefore recorded here.
+     *
+     * <p><b>Provenance.</b> CONTRACT-DERIVED from {@code cpy/CCPAURLY.cpy}, {@code cpy/CIPAUDTY.cpy}
+     * and the {@code STRING} in {@code cbl/COPAUA0C.cbl}; it is NOT a recorded output and no golden
+     * master for it exists or could. Lines 83 to 85 of {@code tests/README.md} record that the online
+     * {@code CO*} CICS programs cannot run end to end without a CICS runtime the runner does not have,
+     * and {@code COPAUA0C} -- the program that builds this very reply -- is itself a {@code CO*}
+     * program. The external request producer that would elicit a reply is not supplied by the baseline
+     * at all, only the stub at {@code tests/mocks/mq_request_stub.py}, so no recorded reply message
+     * exists anywhere to copy. Every value is synthetic: {@code 4000123456789010} is a test-range
+     * primary account number appearing in no seed extract.
+     */
+    @Test
+    @DisplayName("the reply encode oracle is 63 terminator-free bytes ending in the sixth comma")
+    void replyEncodeOracleIsTheTerminatorFreeByteImage() {
+        byte[] image = bytesOf("auth-reply-encode-oracle-63.bin");
+
+        // WHY Assumptions: the width table comes from the codec's own list rather than being restated,
+        //     because a second transcription of CCPAURLY.cpy in a test is free to disagree with the
+        //     codec it verifies, and then both would have to be wrong in the same way to fail.
+        List<Integer> declaredWidths = new ArrayList<>(CsvAuthCodec.REPLY_FIELD_WIDTHS);
+        assertThat(declaredWidths).hasSize(CsvAuthCodec.REPLY_FIELD_COUNT);
+        assertThat(declaredWidths.get(CsvAuthCodec.REPLY_AMOUNT_ORDINAL))
+                .isEqualTo(CsvAuthCodec.MONEY_EDITED_WIDTH);
+
+        int declaredWidthSum = declaredWidths.stream().mapToInt(Integer::intValue).sum();
+        assertThat(declaredWidthSum)
+                .as("CCPAURLY.cpy lines 19 to 24 declare 57 characters of fields")
+                .isEqualTo(CsvAuthCodec.REPLY_DECLARED_WIDTH_SUM);
+
+        // WHY Assumptions: 63 is asserted as the ARITHMETIC 57 + 6 as well as against the constant, so
+        //     the trailing delimiter is shown to be structural. With only five separators the payload
+        //     would be 62 -- the figure messaging-contracts.md publishes -- so proving 63 and a comma
+        //     at byte 62 together is what supersedes that document rather than merely disagreeing.
+        assertThat(image)
+                .as("57 declared characters plus one delimiter per field is 63, not 62")
+                .hasSize(declaredWidthSum + CsvAuthCodec.REPLY_FIELD_COUNT);
+        assertThat(image)
+                .as("wc -c legitimately asserts CONTENT here: this is the only reply fixture whose "
+                        + "byte count equals its payload length")
+                .hasSize(CsvAuthCodec.REPLY_WIRE_LENGTH);
+
+        // WHY Assumptions: absence of a terminator is asserted four ways because each catches a
+        //     different mistake -- a stray LF anywhere, a CR from a Windows checkout, a NUL, and a
+        //     final byte that is an LF, a blank pad or a digit rather than the sixth delimiter.
+        assertThat(image).doesNotContain((byte) 0x0A).doesNotContain((byte) 0x0D)
+                .doesNotContain((byte) 0x00);
+        assertThat(image[image.length - 1]).isEqualTo((byte) 0x2C);
+        assertThat(image[image.length - 1]).isNotIn((byte) 0x0A, (byte) 0x20);
+        assertThat(image[image.length - 1] >= (byte) 0x30 && image[image.length - 1] <= (byte) 0x39)
+                .as("the reply's final byte is a delimiter, where the request's is a digit")
+                .isFalse();
+
+        for (byte value : image) {
+            assertThat(value).isBetween((byte) 0x20, (byte) 0x7E);
+        }
+
+        // WHY Assumptions: the delimiters are asserted at fixed OFFSETS, which is what distinguishes a
+        //     positional contract from a merely delimited one: DELIMITED BY SIZE contributes each
+        //     field's full declared size including its blanks, so a trimmed payload would still split
+        //     into six tokens while every offset moved.
+        List<Integer> delimiterOffsets = new ArrayList<>();
+        for (int offset = 0; offset < image.length; offset++) {
+            if (image[offset] == (byte) 0x2C) {
+                delimiterOffsets.add(offset);
+            }
+        }
+        assertThat(delimiterOffsets)
+                .as("expected exactly %d delimiters, one per field including the sixth; %d would be "
+                        + "the superseded interior-only form", CsvAuthCodec.REPLY_FIELD_COUNT,
+                        CsvAuthCodec.REPLY_FIELD_COUNT - 1)
+                .containsExactly(16, 32, 39, 42, 47, 62)
+                .hasSize(CsvAuthCodec.REPLY_FIELD_COUNT);
+        assertThat(delimiterOffsets.size())
+                .as("expected %d delimiters, never 5 and never 7", CsvAuthCodec.REPLY_FIELD_COUNT)
+                .isNotIn(CsvAuthCodec.REPLY_FIELD_COUNT - 1, CsvAuthCodec.REPLY_FIELD_COUNT + 1);
+        assertThat(delimiterOffsets).contains(image.length - 1);
+
+        // WHY Assumptions: the sibling is pinned to this file byte for byte so the two cannot drift.
+        //     The .csv is read as bytes and truncated at 63 rather than read through linesOf, because
+        //     the property under test is that the ONLY difference between them is that one terminator.
+        byte[] terminated = bytesOf("auth-reply-approved-wire63.csv");
+        assertThat(terminated).hasSize(CsvAuthCodec.REPLY_WIRE_LENGTH + 1);
+        assertThat(terminated[CsvAuthCodec.REPLY_WIRE_LENGTH]).isEqualTo((byte) 0x0A);
+        assertThat(image).isEqualTo(java.util.Arrays.copyOf(terminated, CsvAuthCodec.REPLY_WIRE_LENGTH));
+
+        // WHY Alternatives Considered: committing the transmitted frame as a fourth fixture file was
+        //     rejected. It would be this payload plus one blank, so the two could drift apart into
+        //     disagreeing about the payload while each stayed internally consistent, and a reader would
+        //     face three near-identical files instead of two. Assembling it here makes the pad byte's
+        //     provenance visible at the point of use and proves the 64 is a DECLARED length rather than
+        //     an encoder output. WS-RESP-LENGTH is declared PIC S9(4)
+        //     VALUE 1 at line 46 of COPAUA0C.cbl, serves as the WITH POINTER cursor of the STRING at
+        //     line 730 -- so after the transfer it addresses one past the last character written -- and
+        //     is then moved straight into the put's buffer length at line 756 and passed at line 762.
+        //     The sixty-fourth byte is a blank from W02-PUT-BUFFER PIC X(200) at line 108.
+        byte[] transmitted = java.util.Arrays.copyOf(image, CsvAuthCodec.REPLY_WIRE_LENGTH + 1);
+        transmitted[CsvAuthCodec.REPLY_WIRE_LENGTH] = (byte) 0x20;
+
+        // WHY Assumptions: the two 64-byte forms are told apart by BYTE 63 and never by length, which
+        //     this trio of assertions makes structural: their lengths are asserted EQUAL, so a future
+        //     reader cannot mistake a length check for a discriminator, and only the final bytes differ.
+        assertThat(transmitted).hasSameSizeAs(terminated);
+        assertThat(transmitted[CsvAuthCodec.REPLY_WIRE_LENGTH]).isEqualTo((byte) 0x20);
+        assertThat(terminated[CsvAuthCodec.REPLY_WIRE_LENGTH]).isEqualTo((byte) 0x0A);
+        assertThat(image).hasSize(CsvAuthCodec.REPLY_WIRE_LENGTH);
+
+        // WHY Assumptions: the cross-format asymmetry is asserted in the same case, because the request
+        //     obeying n - 1 while the reply does not is the property most likely to be "corrected" into
+        //     a single rule by someone reading either file alone.
+        byte[] requestOracle = bytesOf("auth-request-encode-oracle-170.bin");
+        byte requestFinal = requestOracle[requestOracle.length - 1];
+        assertThat(requestFinal >= (byte) 0x30 && requestFinal <= (byte) 0x39)
+                .as("the request encode oracle ends at offset 169 with a digit")
+                .isTrue();
+        int requestDelimiters = 0;
+        for (byte value : requestOracle) {
+            if (value == (byte) 0x2C) {
+                requestDelimiters++;
+            }
+        }
+        assertThat(requestDelimiters).isEqualTo(CsvAuthCodec.REQUEST_FIELD_COUNT - 1);
+        assertThat(delimiterOffsets).hasSize(CsvAuthCodec.REPLY_FIELD_COUNT);
+    }
+
+    /**
+     * Confirms the reply encode oracle is what the encoder emits and what a decode re-emits.
+     *
+     * <p>Purpose: this is the fixture's reason for existing. The assertion is byte equality against a
+     * freshly encoded payload, with no {@code trim}, no case folding and no whitespace-insensitive
+     * matcher anywhere in the comparison, because that tolerance is precisely what the terminator-free
+     * image removes -- and a tolerant matcher would admit the 64-byte transmitted frame, a different
+     * artifact.
+     *
+     * <p>Assumptions: the two directions of this contract are NOT interchangeable, matching the
+     * baseline's own asymmetry, and they are asserted separately. Encode authority is the
+     * {@code STRING ... DELIMITED BY SIZE} at lines 722 to 728 of {@code cbl/COPAUA0C.cbl}, which is
+     * strict: every field at its full declared width, six delimiters, 63 characters. Decode authority
+     * is the {@code UNSTRING ... DELIMITED BY ','} at lines 354 to 374, which is tolerant. A
+     * successful decode of the 64-byte transmitted frame therefore proves NOTHING about the encoding,
+     * which is exactly why the byte-exact re-emission is asserted here too, and why it is asserted to
+     * produce 63 bytes rather than the 64 that came in.
+     *
+     * <p>Assumptions: the transmitted 64 is a DECLARED length and never an encoder output, so it is
+     * sourced here from the pointer semantics of {@code WS-RESP-LENGTH} -- cursor at line 730, buffer
+     * length at line 756 -- and never from {@code encodeReplyBytes(...).length}, which is asserted to
+     * be 63.
+     *
+     * <p>Assumptions: field 6 is carried as {@link Money} over {@link BigDecimal} at
+     * {@link Money#SCALE}, and the encoder's contract at the edges is asserted rather than assumed: a
+     * scale-0 input normalises to scale 2, a scale-3 input is refused rather than silently rounded
+     * because rounding is a business decision and this is a transport boundary, and zero renders with
+     * a blank sign position that negative zero cannot be distinguished from.
+     *
+     * <p>Trade-offs: the fixture fills every declared width exactly, deliberately, so that a padding
+     * defect cannot hide behind a coincidence. What is given up is that it does not itself exercise
+     * reply-side blank padding, and the alternative -- widening a field's value so the fixture covered
+     * padding as well -- was rejected because a fixture that pads is one in which a wrong declared
+     * width and a right one can produce the same bytes. Padding is proved instead with an in-test
+     * reply whose authorization identification code is shorter than its declared six, asserting the
+     * encoder blank-pads it per {@code DELIMITED BY SIZE} while the total stays 63 and every delimiter
+     * offset stays put. The fixture is not loosened to cover it.
+     *
+     * <p>Assumptions: the 31-byte correlation identity is the card number at its declared 16 followed
+     * by the transaction identifier at its declared 15, which
+     * {@link CsvAuthCodec#CORRELATION_COMPOSITE_LENGTH} declares. Those two fields are ADJACENT here,
+     * at offsets 0 to 15 and 17 to 31 with only the delimiter at 16 between them, and they are
+     * SCATTERED in the request, at ordinals 3 and 18. Both derivations are required to agree, because
+     * that agreement is what lets a consumer pair a reply with its request, and the same value doubles
+     * as the FIFO deduplication identifier. The tokenised form is compared rather than the raw pair,
+     * because a correlation value is written to message metadata, queue telemetry and logs, all of
+     * which sit outside the boundary that masks a card number.
+     *
+     * <p>Assumptions: the transactional outbox that {@code V1__authorization.sql} defines stores
+     * exactly these 63 bytes in its {@code payload} column, alongside {@code correlation_id},
+     * {@code order_group_token}, {@code deduplication_token}, {@code reply_to_queue_url} and
+     * {@code expires_at}, and publishes them unchanged -- not the 64-byte frame and not a re-serialised
+     * variant. That column is declared as the delimited text the wire carries rather than as structured
+     * columns precisely so that re-encoding at publication time cannot become a second place for the
+     * field order and delimiter to be got wrong. The outbox is what closes the baseline's lost-reply
+     * window, in which the reply is put outside the database transaction that committed the decision.
+     */
+    @Test
+    @DisplayName("the reply encode oracle bytes are what the encoder emits and a decode re-emits")
+    void replyEncodeOracleBytesEncodeDecodeAndReEmitByteForByte() {
+        byte[] image = bytesOf("auth-reply-encode-oracle-63.bin");
+
+        // WHY Assumptions: the reply is built from literals because the fixture's identity -- which
+        //     card, which transaction, which approval -- is the one thing a derived expectation could
+        //     not establish. The amount is a String-argument BigDecimal so the scale is declared in the
+        //     source rather than arriving from a decimal literal's parsed precision.
+        CsvAuthCodec.AuthReply reply = new CsvAuthCodec.AuthReply("4000123456789010",
+                "TXN000000000100", "A00001", "00", "0000", Money.of(new BigDecimal("250.00")));
+
+        assertThat(CsvAuthCodec.encodeReplyBytes(reply))
+                .as("this file is the byte-exact encode oracle for the six-field reply")
+                .isEqualTo(image);
+        assertThat(CsvAuthCodec.encodeReplyBytes(reply))
+                .as("the encoder emits the payload and never the transmitted frame")
+                .hasSize(CsvAuthCodec.REPLY_WIRE_LENGTH)
+                .doesNotContain((byte) 0x0A)
+                .doesNotContain((byte) 0x0D);
+
+        // WHY Assumptions: the payload length is passed EXPLICITLY, mirroring the reference program's
+        //     W01-DATALEN at line 354 rather than inferring a length from the buffer it arrived in.
+        CsvAuthCodec.AuthReply decoded = CsvAuthCodec.decodeReply(image, image.length);
+        assertThat(decoded.cardNum()).isEqualTo("4000123456789010");
+        assertThat(decoded.transactionId()).isEqualTo("TXN000000000100");
+        assertThat(decoded.authIdCode()).isEqualTo("A00001");
+
+        // WHY Assumptions: these two are compared as STRINGS. Field 5 is X(04) text, so handling it
+        //     numerically would collapse '0000' to integer zero and make an approval default
+        //     indistinguishable from an unset field; field 4's leading zero is significant for the
+        //     same reason, being the sole value CIPAUDTY.cpy line 31 enumerates.
+        assertThat(decoded.authRespCode()).isEqualTo("00");
+        assertThat(decoded.authRespReason()).isEqualTo("0000");
+
+        assertThat(decoded.approvedAmount().amount()).isEqualByComparingTo("250.00");
+        assertThat(decoded.approvedAmount().amount().scale()).isEqualTo(Money.SCALE);
+        assertThat(decoded.approvedAmount().amount()).isInstanceOf(BigDecimal.class);
+        assertThat(CsvAuthCodec.encodeReplyBytes(decoded)).isEqualTo(image);
+
+        // WHY Assumptions: the frame is assembled from the fixture so the two cannot drift, and the
+        //     property under test is that a tolerated 64-byte input re-emits at the DECLARED 63 --
+        //     the codec is interoperable in both directions without being byte-idempotent over every
+        //     variant a producer might send.
+        byte[] transmitted = java.util.Arrays.copyOf(image, CsvAuthCodec.REPLY_WIRE_LENGTH + 1);
+        transmitted[CsvAuthCodec.REPLY_WIRE_LENGTH] = (byte) 0x20;
+        CsvAuthCodec.AuthReply fromFrame =
+                CsvAuthCodec.decodeReply(transmitted, transmitted.length);
+        assertThat(CsvAuthCodec.encodeReplyBytes(fromFrame))
+                .as("a decode of the 64-byte frame re-encodes to 63 bytes, never to 64")
+                .isEqualTo(image)
+                .hasSize(CsvAuthCodec.REPLY_WIRE_LENGTH);
+
+        // WHY Assumptions: padding is proved with an in-test value rather than by loosening the
+        //     fixture, whose fields all fill their declared widths exactly on purpose.
+        CsvAuthCodec.AuthReply shortCode = new CsvAuthCodec.AuthReply("4000123456789010",
+                "TXN000000000100", "A1", "00", "0000", Money.of(new BigDecimal("250.00")));
+        byte[] padded = CsvAuthCodec.encodeReplyBytes(shortCode);
+        assertThat(padded).hasSize(CsvAuthCodec.REPLY_WIRE_LENGTH);
+        assertThat(new String(padded, 33, 6, StandardCharsets.US_ASCII))
+                .as("DELIMITED BY SIZE emits the field at its full declared width")
+                .isEqualTo("A1    ");
+        List<Integer> paddedOffsets = new ArrayList<>();
+        for (int offset = 0; offset < padded.length; offset++) {
+            if (padded[offset] == (byte) 0x2C) {
+                paddedOffsets.add(offset);
+            }
+        }
+        assertThat(paddedOffsets).containsExactly(16, 32, 39, 42, 47, 62);
+
+        // WHY Assumptions: the money span is asserted on the RAW slice as well as on the decoded
+        //     value, because the wire carries the zero-suppressed edited mask while the member holds
+        //     exact fixed point -- the two are equal in value and not in text, so checking only the
+        //     value would pass for a payload whose sign position or suppression had changed.
+        assertThat(new String(image, 48, CsvAuthCodec.MONEY_EDITED_WIDTH, StandardCharsets.US_ASCII))
+                .isEqualTo("        250.00")
+                .hasSize(CsvAuthCodec.MONEY_EDITED_WIDTH)
+                .doesNotContain("+");
+        assertThat(CsvAuthCodec.formatReplyMoney(new BigDecimal("250"), "PA-RL-APPROVED-AMT"))
+                .as("a scale-0 input normalises to scale 2 rather than shortening the field")
+                .isEqualTo("        250.00");
+        assertThat(CsvAuthCodec.formatReplyMoney(BigDecimal.ZERO, "PA-RL-APPROVED-AMT"))
+                .as("zero keeps a blank sign position; the forced 9 means the field is never blank")
+                .isEqualTo("          0.00")
+                .doesNotContain("-");
+        assertThat(CsvAuthCodec.formatReplyMoney(new BigDecimal("-0.00"), "PA-RL-APPROVED-AMT"))
+                .as("BigDecimal has no negative zero, so negative zero renders as zero does")
+                .isEqualTo(CsvAuthCodec.formatReplyMoney(BigDecimal.ZERO, "PA-RL-APPROVED-AMT"));
+        assertThatThrownBy(() ->
+                CsvAuthCodec.formatReplyMoney(new BigDecimal("1.234"), "PA-RL-APPROVED-AMT"))
+                .isInstanceOf(CsvAuthCodec.AuthMessageFormatException.class);
+
+        // WHY Assumptions: the correlation identity is recomputed from the ADJACENT spans of this
+        //     payload and from the SCATTERED ordinals of the request, and the two are required to
+        //     agree. Deriving both is the point: a single derivation would pass even if one side had
+        //     silently trimmed a field, which is exactly what would break pairing in production.
+        String replyIdentity = new String(image, 0, CsvAuthCodec.CARD_NUM_WIDTH,
+                StandardCharsets.US_ASCII)
+                + new String(image, CsvAuthCodec.CARD_NUM_WIDTH + 1,
+                        CsvAuthCodec.TRANSACTION_ID_WIDTH, StandardCharsets.US_ASCII);
+        assertThat(replyIdentity).hasSize(CsvAuthCodec.CORRELATION_COMPOSITE_LENGTH);
+
+        AuthRequest request = CsvAuthCodec.decodeRequest(
+                bytesOf("auth-request-encode-oracle-170.bin"),
+                CsvAuthCodec.REQUEST_WIRE_LENGTH);
+        assertThat(replyIdentity).isEqualTo(request.cardNum() + request.transactionId());
     }
 
     /**

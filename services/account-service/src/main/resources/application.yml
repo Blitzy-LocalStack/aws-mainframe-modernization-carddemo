@@ -1241,6 +1241,7 @@ carddemo:
       admin-group-name: ${CARDDEMO_COGNITO_ADMIN_GROUP_NAME:carddemo-admin}
       user-group-name: ${CARDDEMO_COGNITO_USER_GROUP_NAME:carddemo-user}
 
+
   account:
     inquiry:
       # WHY : (1) Assumptions: all three names arrive from the environment and none

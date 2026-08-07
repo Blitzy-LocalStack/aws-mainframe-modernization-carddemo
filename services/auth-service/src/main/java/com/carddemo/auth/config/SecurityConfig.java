@@ -31,19 +31,36 @@ import org.springframework.web.util.pattern.PathPatternParser;
  * Configures who may reach this context's endpoints, which of them require the administrator
  * authority, and which two are reachable with no token at all.
  *
- * <p>This is the migrated form of the authorization split the baseline performs by reading the user
- * type out of the session structure it passes between screen turns, declared at
- * {@code app/cpy/COCOM01Y.cpy} lines 19 to 44 with its two condition names for the administrator and
- * the ordinary user. That structure is storage the CLIENT echoes back, so a client could in principle
- * assert its own user type; here the equivalent claim is signed by the identity provider and
- * validated on every request, so it cannot be asserted by the caller at all. The improvement is
- * deliberate and is recorded in {@code docs/architecture/security-and-identity.md}.</p>
+ * <p>Refactoring Rationale: what this replaces is not a role lookup but a byte the caller handed
+ * back, and that is the whole reason the chain below reads a claim instead. The baseline decides the
+ * same split by reading a one-character user type out of the communication area it passes between
+ * screen turns: the field is declared at line 26 of {@code app/cpy/COCOM01Y.cpy}, inside the
+ * 160-byte area declared at line 19 of that copybook and shared by all eighteen online programs, and
+ * it is populated in exactly one place -- the five consecutive moves at lines 224 to 228 of
+ * {@code app/cbl/COSGN00C.cbl}, of which line 226 moves the signed-on identifier into the area and
+ * line 228 clears the re-entry discriminator. That area is storage the CLIENT echoes back on the next
+ * turn, so the party whose privilege is being decided is in possession of the value that decides it.
+ * Here the equivalent value is a claim the identity provider signed: a claim the caller altered fails
+ * signature validation before this class is reached, so the caller can no longer assert its own user
+ * type at all. That is a security property rather than a change of transport, and it is recorded in
+ * {@code docs/architecture/security-and-identity.md}.</p>
+ *
+ * <p>Refactoring Rationale: one contract of the baseline security record is declined rather than
+ * carried across, and the omission is deliberate. Line 21 of {@code app/cpy/CSUSR01Y.cpy} declares an
+ * eight-character plaintext password field and line 223 of {@code app/cbl/COSGN00C.cbl} compares it
+ * directly against what was typed. The baseline stores and compares a plaintext credential; the
+ * migrated form delegates the comparison to the managed identity provider, retains only a subject
+ * reference, and reaches this class holding a validated token; and the divergence is recorded in the
+ * migration's traceability matrix rather than being applied to the baseline, which stays
+ * byte-identical because it is the behavioural oracle this migration is verified against. Nothing in
+ * this class holds, compares or names a credential, and nothing here may take on that
+ * responsibility.</p>
  *
  * <h2>Why the route-to-authority table is a value rather than only a chain</h2>
  *
  * <p>Refactoring Rationale: the rules below are declared as an inspectable, ordered list and the
  * filter chain is BUILT from it, rather than the chain being the only statement of them. The reason
- * is the defect this class was authored to close: five of this context's seven operations are the
+ * is the defect this class was authored to close: five of this context's eight operations are the
  * user-administration operations the baseline reached from the ADMINISTRATIVE menu only, and their
  * restriction was stated in the published contract's prose and in a tag name with nothing anywhere
  * enforcing or checking it. Prose is not a control. With the table as a value,
@@ -56,25 +73,101 @@ import org.springframework.web.util.pattern.PathPatternParser;
  * service would let two services disagree about one claim, and the disagreement would surface as an
  * authorization gap rather than as a compile error.</p>
  *
+ * <h2>Which authority predicate this chain must use, and why the choice is not this file's</h2>
+ *
+ * <p>Assumptions: the contract source is
+ * {@code services/common-lib/src/main/java/com/carddemo/common/security/JwtRoleConverter.java}, and
+ * its finished API settles the predicate rather than leaving it to each consumer. That converter emits
+ * the identity provider's group name VERBATIM -- {@link JwtRoleConverter#ADMIN_AUTHORITY} and
+ * {@link JwtRoleConverter#USER_AUTHORITY} are the group names themselves -- and adds no framework role
+ * prefix. Its own documentation records the prefixing alternative as evaluated and rejected, and names
+ * the consequence for callers: an authority-family predicate must be used and the ROLE-family
+ * predicate must not. This chain therefore gates on authorities, and it names them through those two
+ * constants rather than as string literals, so the compiler ties the rule to the converter that
+ * produces the value.</p>
+ *
+ * <p>Trade-offs: getting that pairing wrong is silent in exactly the direction that matters, which is
+ * why it is recorded here rather than left to be inferred. The ROLE-family predicate looks for a
+ * prefixed authority this converter never produces, so it would match nothing, refuse every
+ * administrative request with a forbidden response, and do so with a context that starts cleanly and a
+ * test suite that stays green wherever it does not exercise an administrative route. The accepted cost
+ * of pinning the pairing here is one paragraph that has to be revisited if the shared converter ever
+ * changes its emission; the alternative was discovering the mismatch from behaviour in a deployed
+ * environment.</p>
+ *
  * <h2>Why the correlation filter is NOT registered here</h2>
  *
  * <p>Refactoring Rationale: this class previously declared the shared correlation filter as a bare
  * {@code @Bean} of the filter type, and that declaration is withdrawn. The shared kernel's
- * {@code CardDemoCommonAutoConfiguration} already contributes a registration bean for it over every
- * request path at a fixed order, and its condition tests for the NAME of its own registration bean --
- * which a differently named bean here did not satisfy -- so both registrations survived and the filter
- * sat in the chain twice.</p>
+ * {@link com.carddemo.common.CardDemoCommonAutoConfiguration} already contributes a registration bean
+ * for it over every request path at a fixed order, and its condition tests for the NAME of its own
+ * registration bean -- which a differently named bean here did not satisfy -- so both registrations
+ * survived and the filter sat in the chain twice.</p>
+ *
+ * <p>Alternatives Considered: three registration arrangements were available here and two are
+ * rejected. A {@code FilterRegistrationBean<CorrelationIdFilter>} declared in this file would give
+ * explicit ordering control, and is rejected because the shared kernel already declares one and a
+ * second registration of one filter is what produced the duplicate described above. Adding a non-bean
+ * instance to this chain with {@code addFilterBefore} would avoid a duplicate container registration,
+ * and is rejected because it would cover only the requests this chain matches: a refusal produced
+ * before the chain is entered, and a container-level error page, would then carry no correlation
+ * identity, which is the one class of failure the identity is most needed for. Delegating to the
+ * shared registration is the third option and the one taken, and the argument that decides it is not
+ * brevity but ownership -- the shared filter's own documentation records that requiring a registration
+ * in each of the eight services was rejected there, because a registration a service must remember is
+ * one a service can omit, and omitting it yields a service that starts and serves requests while
+ * silently emitting no correlation identity in any log line.</p>
+ *
+ * <p>Assumptions: the ordering position this class depends on is
+ * {@link com.carddemo.common.CardDemoCommonAutoConfiguration#CORRELATION_FILTER_ORDER}, which is the
+ * highest available precedence, and depending on it is what makes this file's silence correct rather
+ * than merely shorter. Because that order places the filter ahead of the security filter chain, the
+ * identity is in the logging context before any security filter runs, so an authentication or
+ * authorization refusal decided below is logged with the same identity as a request that reached a
+ * handler, and {@link CorrelationIdFilter#CORRELATION_ID_HEADER} is on the response either way. This
+ * class therefore never names that header itself: re-declaring the name here would create a second
+ * spelling of one wire contract, and the two could then disagree while both compiled.</p>
  *
  * <p>Assumptions: the duplicate was harmless and is withdrawn anyway, and both halves of that are
- * worth stating because the harmlessness is not obvious.
- * {@code com.carddemo.common.web.CorrelationIdFilter} carries its own once-per-request guard -- a
- * request attribute keyed on the class name, set on entry and removed only by the pass that set it --
- * so its second pass delegates and returns without reading a header, minting an identity, touching the
- * logging context or writing a response header. One identity is minted per request however many times
- * the filter is registered. What the duplicate did cost is ownership and legibility: two beans
- * describing one filter, a second ordering position decided in a per-service file, and a redundant
- * filter in the chain of every request. Withdrawing it leaves one mechanism, one order and one file to
- * read, which is the arrangement the card context already relies on.</p>
+ * worth stating because the harmlessness is not obvious. {@link CorrelationIdFilter} carries its own
+ * once-per-request guard -- a request attribute keyed on the class name, set on entry and removed only
+ * by the pass that set it -- so its second pass delegates and returns without reading a header, minting
+ * an identity, touching the logging context or writing a response header. One identity is minted per
+ * request however many times the filter is registered. What the duplicate did cost is ownership and
+ * legibility: two beans describing one filter, a second ordering position decided in a per-service
+ * file, and a redundant filter in the chain of every request. Withdrawing it leaves one mechanism, one
+ * order and one file to read.</p>
+ *
+ * <h2>What this class deliberately does not add</h2>
+ *
+ * <p>Alternatives Considered: no retry policy and no circuit breaker are placed on this chain, and
+ * both were evaluated rather than overlooked. The framework's own core retry support was the candidate
+ * for the first and is not used, because a retry belongs to a call that can be usefully repeated and
+ * this class makes no outbound call at all: it decodes a presented token against keys the resource
+ * server fetches and caches, and it decides an authorization outcome from claims already in hand. A
+ * breaker was the candidate for the second and is rejected on a sharper ground -- the only synchronous
+ * hop any operation behind this chain makes is in-VPC to a private endpoint behind an internal load
+ * balancer, so a breaker would add a failure mode, a half-open state that refuses requests the
+ * dependency would have served, without removing one. The prescribed posture is bounded connect and
+ * read timeouts on that hop, declared where the hop is made rather than here, and the durable retry
+ * tier for asynchronous work is queue redelivery with a dead-letter queue in the contexts that have
+ * queues. This one has none.</p>
+ *
+ * <p>Trade-offs: the cost of that posture is that a dependency which is slow rather than down is
+ * waited on until its read timeout expires on every request, where a breaker would have failed the
+ * later ones immediately. It is accepted because the requests being waited on are the ones a caller
+ * asked for, and because a breaker's own thresholds would then have to be tuned against a workload
+ * with no service-level objective recorded anywhere in this repository to tune them against -- an
+ * untuned breaker refusing valid requests is a worse outcome than a bounded wait. Adding either
+ * mechanism later is a decision for the class that owns the outbound call, not for this one.</p>
+ *
+ * <p>Assumptions: no client library for the identity provider is referenced by this class. A presented
+ * token is decoded from the pool's published signing keys, which is an ordinary retrieval the resource
+ * server performs from the issuer location, so nothing here calls a provider operation. The
+ * administrative provider client this context does need is declared by the sibling
+ * {@code CognitoIdentityConfig} and consumed by the service layer, which keeps the credential-bearing
+ * surface out of the class that decides authorization and lets this chain be exercised from a token
+ * assembled in memory with no provider reachable at all.</p>
  */
 @Configuration(proxyBeanMethods = false)
 @EnableWebSecurity
@@ -108,10 +201,23 @@ public class SecurityConfig {
     /**
      * The path the load balancer's health check and the container's own probe read.
      *
-     * <p>Assumptions: this path is reachable WITHOUT a token, and it has to be. The target group
-     * polls it with no credentials of any kind, so a chain that required one would fail every health
-     * check and the task would be replaced continuously while being perfectly healthy. Only the
-     * health group is opened; the remaining actuator endpoints stay behind the chain.</p>
+     * <p>Assumptions: this path is reachable WITHOUT a token because it has TWO consumers and neither
+     * can present one. The load balancer target group registers this task by polling it, and the
+     * container health check declared in this module's {@code Dockerfile} probes the same actuator
+     * health endpoint on the port that image exposes; both are infrastructure contracts rather than
+     * preferences, and neither participant holds a credential of any kind. A chain that demanded a
+     * token here would fail every poll and the task would be replaced continuously while being
+     * perfectly healthy, which is a failure that reads as an application fault rather than as an
+     * authorization rule. The exception is bounded by what the endpoint discloses: it answers with a
+     * status and, under this module's {@code show-details: never} setting, exposes no business data and
+     * no component detail at all. Only the health group is opened; the remaining actuator endpoints
+     * stay behind the chain.</p>
+     *
+     * <p>Assumptions: the pattern covers the health GROUP rather than the single health path, because
+     * this module enables the liveness and readiness probe groups, which the framework publishes as
+     * children of this path. Naming only the parent would leave both probes matched by no rule above
+     * the catch-all, and the catch-all refuses. A profile that narrows the exposed endpoint list must
+     * still publish health at this same fixed path for the same two consumers.</p>
      */
     public static final String HEALTH_PATH = "/actuator/health/**";
 
@@ -310,6 +416,32 @@ public class SecurityConfig {
      * Both rules here name the same authority, so order is not load-bearing between them; the list is
      * still ordered because {@link #requiredAuthorityFor(String)} reports the first match and a
      * reader must be able to predict which that is.</p>
+     *
+     * <p>Assumptions: EVERY user-administration route demands the administrator authority, with no
+     * read-only exception carved out for the list and detail operations, and that is a reading of the
+     * baseline rather than a preference of this migration. Three independent artefacts of the baseline
+     * agree on it. First, the four user-administration programs are reached by their OWN transaction
+     * family rather than through any screen an ordinary user reaches: lines 449 and 450 of
+     * {@code app/csd/CARDDEMO.CSD} define transaction {@code CU00} against program {@code COUSR00C},
+     * and lines 459 and 460, 469 and 470, and 479 and 480 do the same for {@code CU01}, {@code CU02}
+     * and {@code CU03} against {@code COUSR01C}, {@code COUSR02C} and {@code COUSR03C}. Second, those
+     * programs return to the ADMINISTRATIVE menu by name and not to whatever screen invoked them:
+     * {@code app/cbl/COUSR03C.cbl} moves the literal {@code 'COADM01C'} into its next-program field at
+     * line 113, as the fallback when no invoking program was supplied, and again unconditionally at
+     * line 124 on the cancel key, so the administrative menu is where these flows terminate whichever
+     * key ends them. Third, the split being enforced is the baseline's own two-value domain, declared
+     * at lines 26 to 28 of {@code app/cpy/COCOM01Y.cpy}: a one-character user type whose only two
+     * condition values are the administrator and the ordinary user. A rule admitting an ordinary user
+     * to any of these five operations would grant a privilege the baseline never granted, and on this
+     * context specifically the operations in question create, alter and delete the very rows that
+     * decide who is an administrator.</p>
+     *
+     * <p>Assumptions: the corroborating record at line 22 of {@code app/cpy/CSUSR01Y.cpy} is treated as
+     * a SECOND WITNESS to that domain and not as its authority. That field declares the stored form of
+     * the user type at the same width, but it carries no condition names -- the copybook has none
+     * anywhere -- so the two admitted values are only readable from the communication-area copybook
+     * cited above. Recording which of the two is authoritative keeps a later reader from concluding
+     * that the domain is open because the stored declaration does not close it.</p>
      */
     private static final List<AuthorityRule> AUTHORITY_RULES = List.of(
             new AuthorityRule(USER_COLLECTION_PATH_PATTERN, JwtRoleConverter.ADMIN_AUTHORITY),
@@ -358,6 +490,15 @@ public class SecurityConfig {
         /**
          * Rejects a rule that could not be enforced.
          *
+         * <p>Alternatives Considered: the check lives in the compact constructor rather than at the
+         * point the chain is built. Validating during chain assembly was the alternative and is
+         * rejected because it would run only for rules the chain happens to consume, leaving a rule
+         * that a test or a future caller constructs directly unchecked. Failing at construction means
+         * an unenforceable rule cannot exist as a value at all, so the class-initialisation of
+         * {@link SecurityConfig#AUTHORITY_RULES} is where a bad authority name surfaces -- at startup,
+         * loudly -- instead of becoming a route that refuses every caller while reading as though it
+         * authorised some.</p>
+         *
          * @param pathPattern the path pattern this rule governs, validated to be non-null and
          *     non-blank
          * @param requiredAuthority the minimum authority a caller must hold, validated to be one of
@@ -385,6 +526,13 @@ public class SecurityConfig {
     /**
      * Returns the authority rules this context enforces, in evaluation order.
      *
+     * <p>Alternatives Considered: the backing list is returned directly rather than wrapped in a
+     * defensive copy. A copy is the safer-looking option and is rejected here because
+     * {@link #AUTHORITY_RULES} is built with an immutable factory whose result already refuses
+     * mutation, so a copy would allocate on every call and, more importantly, would return a list that
+     * is no longer the same object the chain was built from -- which is exactly the identity a contract
+     * test relies on when it asserts that the rule it reads is the rule that is enforced.</p>
+     *
      * @return the ordered rules; never {@code null} and never empty, and immutable
      */
     public static List<AuthorityRule> authorityRules() {
@@ -394,6 +542,11 @@ public class SecurityConfig {
     /**
      * Returns the paths this context leaves reachable without a token.
      *
+     * <p>Assumptions: callers treat this list as the COMPLETE set of paths reachable with no token,
+     * which holds only because the chain's catch-all denies. It is returned as the backing immutable
+     * list for the same reason given on {@link #authorityRules()}: the object a test inspects is then
+     * the object the chain was built from.</p>
+     *
      * @return the exact open paths; never {@code null} and immutable
      */
     public static List<String> unauthenticatedPaths() {
@@ -402,6 +555,11 @@ public class SecurityConfig {
 
     /**
      * Returns the paths this context grants by network position, in the order the chain applies them.
+     *
+     * <p>Assumptions: the ORDER is part of what this method reports, not an incidental property of the
+     * list, because the management namespace entry is deliberately last and a caller checking that the
+     * namespace is covered needs to see where it sits. It is returned as the backing immutable list for
+     * the same reason given on {@link #authorityRules()}.</p>
      *
      * @return the ordered operator paths, the last of which is the management namespace; never
      *     {@code null} and immutable
@@ -457,18 +615,45 @@ public class SecurityConfig {
     /**
      * Builds the filter chain from the rule table.
      *
-     * <p>Assumptions: sessions are STATELESS. The baseline is pseudo-conversational and carries its
-     * continuity in a structure the client echoes; the migrated form carries identity in the token
-     * and selection context in the request path, so there is nothing left for a server-side session
-     * to hold. Permitting one would reintroduce the sticky routing that horizontal scaling exists to
-     * avoid - and on this context specifically it would also give the sign-on operation somewhere to
-     * put state, which is exactly what the migration removed.</p>
+     * <p>Refactoring Rationale: sessions are STATELESS because the state a session would hold is the
+     * state this migration removed, and naming that state precisely is what shows the policy is a
+     * consequence rather than a default. The baseline is strictly pseudo-conversational: its task ends
+     * at every screen turn, so all continuity between turns travels in one passed structure.
+     * {@code app/cbl/COSGN00C.cbl} opens its {@code LINKAGE SECTION} at line 64 and declares the
+     * inbound communication area at line 65, as a character table whose extent depends on a
+     * monitor-supplied length -- a declaration spanning lines 66 and 67. Line 80 detects a first entry
+     * by that length being zero. Lines 98 to 102 end the turn by returning to the monitor with the area
+     * echoed back to the terminal, naming it at line 100. In the migrated form that structure decomposes
+     * and nothing replaces it in this process: identity arrives as claims of a validated token,
+     * selection context arrives in the request path, and navigation is a route change made on the
+     * browser side. What that buys is concrete rather than stylistic -- with no session affinity and no
+     * server-side session store, this service runs as horizontally-scaled Fargate tasks behind a load
+     * balancer, any task can answer any request, and a task replaced mid-conversation costs a caller
+     * nothing. Permitting a session would reintroduce the sticky routing that arrangement exists to
+     * avoid, and on this context specifically it would give the sign-on operation somewhere to put
+     * state, which is the thing being removed.</p>
+     *
+     * <p>Refactoring Rationale: the re-entry discriminator has no counterpart here at all, and its
+     * absence is the clearest evidence that the policy above is not merely a configuration choice. The
+     * baseline declares it at line 29 of {@code app/cpy/COCOM01Y.cpy} with two condition values at
+     * lines 30 and 31 -- and those values are written as BARE numerals, in contrast to the QUOTED
+     * character values the user type takes at lines 27 and 28 of the same copybook, which is worth
+     * noticing by anyone transcribing either pair. A stateless handler has no first-entry-versus-
+     * re-entry distinction to draw: it answers a request that carries everything needed to decide it,
+     * and a rejected request comes back as a status with a field-error array. That severs a coupling
+     * worth recording, because the baseline gates its field-highlight logic on that same re-entry flag,
+     * whereas the migrated form drives error presentation purely from the response body.</p>
      *
      * <p>Trade-offs: cross-site request forgery protection is disabled, which for a
-     * cookie-authenticated application would be a defect. It is not one here: every authenticated
-     * request carries a bearer token that a browser does not attach automatically, so the
-     * confused-deputy condition the protection defends against cannot arise, and the two open paths
-     * are protected by a credential in the body rather than by anything ambient.</p>
+     * cookie-authenticated application would be a defect. It is not one here, and the reason is the
+     * absence of an ambient credential rather than an appeal to convention: every authenticated request
+     * carries a bearer token that a browser attaches only because this application's own client chose
+     * to, never automatically the way a cookie is sent, so the confused-deputy condition the protection
+     * defends against cannot arise. The three open paths carry no ambient credential either -- each is
+     * authorised by a value in the request body -- and the stateless policy above leaves no cookie
+     * session for a forged request to ride on. The accepted cost is that introducing any
+     * cookie-authenticated route to this service would make this line wrong, so such a route must not
+     * be added without restoring the protection alongside it.</p>
      *
      * <p>Refactoring Rationale: the catch-all DENIES rather than requiring authentication. The earlier
      * rule was {@code authenticated()}, justified on the ground that answering 403 for a path this
@@ -516,7 +701,21 @@ public class SecurityConfig {
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http,
             JwtAuthenticationConverter authenticationConverter, Clock clock) throws Exception {
+        // WHY : Trade-offs: the forgery protection is disabled because there is no ambient credential
+        //       for a forged request to ride on. Authentication is a bearer token this application's
+        //       own client attaches deliberately, never a cookie a browser sends on its own, so the
+        //       confused-deputy condition cannot arise; the three open paths are authorised by a value
+        //       in the request body. The cost is that adding any cookie-authenticated route to this
+        //       service makes this line wrong and must restore the protection alongside it.
         http.csrf(csrf -> csrf.disable())
+                // WHY : Refactoring Rationale: no session is created because the continuity a session
+                //       would carry is what this migration removed. The baseline ends its task at every
+                //       screen turn and echoes one communication area back to the terminal --
+                //       COSGN00C.cbl line 65 declares it, line 80 detects a first entry from its
+                //       length, and lines 98 to 102 return it, naming it at line 100. Identity now
+                //       arrives as token claims and selection context in the request path, so nothing
+                //       is left to hold, and the service runs as horizontally-scaled Fargate tasks
+                //       behind a load balancer with no session affinity to preserve.
                 .sessionManagement(session -> session
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(requests -> {
@@ -548,6 +747,15 @@ public class SecurityConfig {
                     for (String openPath : UNAUTHENTICATED_PATHS) {
                         requests.requestMatchers(openPath).permitAll();
                     }
+                    // WHY : Assumptions: the AUTHORITY-family predicate is required and the ROLE-family
+                    //       predicate must not be substituted for it. The contract source is
+                    //       services/common-lib/src/main/java/com/carddemo/common/security/
+                    //       JwtRoleConverter.java, whose finished API emits the identity provider's
+                    //       group name verbatim with no framework role prefix. The role predicate
+                    //       prepends that prefix on the caller's behalf, so it would look for an
+                    //       authority the converter never produces, match nothing, and refuse every
+                    //       administrative request with a forbidden response while the context started
+                    //       cleanly -- a defect visible only in behaviour.
                     for (AuthorityRule rule : AUTHORITY_RULES) {
                         requests.requestMatchers(rule.pathPattern())
                                 .hasAnyAuthority(acceptedAuthorities(rule.requiredAuthority()));
@@ -597,11 +805,37 @@ public class SecurityConfig {
      * whose groups were renamed becomes a startup failure instead of a service that authenticates
      * every request and authorizes none.</p>
      *
+     * <p>Assumptions: the shared converter is wired EXPLICITLY here because nothing else would wire it.
+     * {@code services/common-lib/src/main/java/com/carddemo/common/security/JwtRoleConverter.java}
+     * carries no stereotype annotation of any kind and lives outside this context's component-scan
+     * root, so it is not a candidate for scanning; the shared kernel's auto-configuration contributes
+     * the correlation filter, the clock, the money codec and the error advice, and deliberately not
+     * this, because which routes demand which authority is a per-context decision. Omitting this bean
+     * would leave the resource server's default converter in place, which reads a scope claim rather
+     * than the group claim, so every token would authenticate and carry none of the two authorities the
+     * rules above test for.</p>
+     *
+     * <p>Assumptions: the authorities this converter produces are the group names VERBATIM, which is
+     * what obliges the rules above to use the authority-family predicate rather than the role-family
+     * one. That emission is settled by the file named in the paragraph above and not here; the reason
+     * the pairing is load-bearing, and the silent forbidden response a mismatch produces, are recorded
+     * on this class.</p>
+     *
      * @param configuredAdminGroupName the administrator group name from runtime configuration; must
      *     equal {@link JwtRoleConverter#ADMIN_AUTHORITY}
      * @param configuredUserGroupName the ordinary-user group name from runtime configuration; must
      *     equal {@link JwtRoleConverter#USER_AUTHORITY}
-     * @return the authentication converter, never {@code null}
+     * @return the authentication converter, carrying the shared group-to-authority translation and
+     *     producing authorities the rules above test with the authority-family predicate; never
+     *     {@code null}
+     * @throws NullPointerException if either configured group name is absent, which the shared
+     *     converter raises rather than tolerating, because a missing name cannot be compared with the
+     *     compiled contract and silently skipping the comparison is the outcome this bean exists to
+     *     prevent
+     * @throws IllegalStateException if either configured group name differs from the compiled
+     *     authority contract, raised while the context is being built so that a pool whose groups were
+     *     renamed stops the service at startup instead of yielding one that authenticates every request
+     *     and authorizes none
      */
     @Bean
     public JwtAuthenticationConverter jwtAuthenticationConverter(

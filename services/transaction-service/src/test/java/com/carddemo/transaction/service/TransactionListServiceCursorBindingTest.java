@@ -219,7 +219,17 @@ class TransactionListServiceCursorBindingTest {
         ArgumentCaptor<String> lastKeyToken = ArgumentCaptor.forClass(String.class);
         verify(transactionMapper).toListPage(any(), firstKeyToken.capture(), lastKeyToken.capture(),
                 anyBoolean());
-        assertEquals(firstKeyToken.getValue(), lastKeyToken.getValue(),
+
+        // Refactoring Rationale: the two ends are compared as the KEYS THEY OPEN TO and no longer as
+        //   the sealed strings themselves. CursorToken.seal stamps each token with the epoch second it
+        //   was sealed at, so the page's two seals produce different strings whenever the pair happens
+        //   to straddle a wall-clock second -- which made this helper fail intermittently while the
+        //   property it asserts, that a one-row page names one row at both ends, was never in doubt.
+        //   Opening both tokens states that property directly and cannot be perturbed by the clock.
+        String binding = CursorToken.binding(TransactionListService.CURSOR_QUERY_NAME, subject,
+                CursorToken.SCOPE_NONE);
+        assertEquals(cursorToken.open(binding, firstKeyToken.getValue()),
+                cursorToken.open(binding, lastKeyToken.getValue()),
                 "a one-row page names the same row at both of its ends");
 
         clearInvocations(transactionRepository, transactionMapper);

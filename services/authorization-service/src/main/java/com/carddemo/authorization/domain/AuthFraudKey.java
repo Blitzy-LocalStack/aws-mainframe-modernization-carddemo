@@ -5,6 +5,8 @@ import jakarta.persistence.Embeddable;
 import java.io.Serializable;
 import java.time.LocalDateTime;
 import java.util.Objects;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 /**
  * The two-part key of a fraud row: the primary account number and the composed authorization
@@ -55,9 +57,20 @@ public class AuthFraudKey implements Serializable {
      * The sixteen-character primary account number the fraud row is filed against.
      *
      * <p>Assumptions: {@code CHAR(16)} holding the digits as characters, matching
-     * {@code ddl/AUTHFRDS.ddl} L4 and the detail row's own card column. A leading zero is data in a
-     * primary account number, so a numeric column would lose it.
+     * {@code ddl/AUTHFRDS.ddl} L2 -- the first column of that file, whose line 1 is already the
+     * {@code CREATE TABLE} because a {@code .ddl} in this tree carries no licence header -- and the detail
+     * row's own card column. A leading zero is data in a primary account number, so a numeric column
+     * would lose it.
+     *
+     * <p>Assumptions: the fixed-character JDBC type is declared explicitly, because the mapped type
+     * {@code String} otherwise resolves to {@code VARCHAR} and the column is blank-padded
+     * {@code CHAR(16)}. Schema validation against the real table rejects the mismatch outright, and
+     * without validation the disagreement is worse than an error: the provider reads and writes through a
+     * type it believes to be varying-length while the database pads to sixteen, so a comparison can turn
+     * on padding the mapping never declared. Every other fixed-width column of this table is annotated the
+     * same way on the entity, and this member is the one that carries the identity rather than the row.
      */
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "card_num", nullable = false, updatable = false, length = 16)
     private String cardNum;
 

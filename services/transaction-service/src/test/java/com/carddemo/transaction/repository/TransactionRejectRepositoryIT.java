@@ -1,6 +1,7 @@
 package com.carddemo.transaction.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.carddemo.common.time.TimestampFormatter;
 import com.carddemo.common.money.Money;
@@ -13,6 +14,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
+import org.hibernate.exception.ConstraintViolationException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -570,14 +572,22 @@ class TransactionRejectRepositoryIT {
      *
      * <p>Assumptions: nullability is asserted in the same rendered value as the type and the width,
      * because it is the third property of a column that can be got wrong without any write failing.
-     * The three payload columns are declared NULLABLE by
-     * {@code db/migration/V1__ledger.sql} -- none of them carries a {@code NOT NULL} phrase -- and the
-     * ordinal is NOT NULLABLE because it is the primary key. Both halves matter: a payload column
-     * silently tightened to {@code NOT NULL} would refuse a row the migration admits, and an ordinal
-     * loosened to nullable would admit a row with no identity at all. A separate case below stores
-     * such a row, because a catalogue reading and a successful insert are two different claims and the
-     * catalogue alone would be satisfied by a column the engine reports as nullable and a mapping that
-     * refuses one anyway.
+     * All four columns are NOT NULLABLE: the ordinal because it is the primary key, and the three
+     * payload columns because {@code db/migration/V1__ledger.sql} declares each of them
+     * {@code NOT NULL} and {@code TransactionReject} mirrors that with {@code nullable = false} on all
+     * three mappings. A payload column loosened to nullable would admit a row from which the 430-byte
+     * record cannot be reconstructed, and an ordinal loosened to nullable would admit a row with no
+     * identity at all. A separate case below attempts such a row, because a catalogue reading and a
+     * refused insert are two different claims and the catalogue alone would be satisfied by a column
+     * the engine reports as {@code NOT NULL} while a mapping quietly wrote a null past it.
+     *
+     * <p>Refactoring Rationale: this case previously asserted the three payload columns were NULLABLE
+     * and cited the absence of a {@code NOT NULL} phrase as its evidence. That phrase is present now:
+     * the migration was tightened -- and records at its own {@code raw_record} declaration that a null
+     * in any of the three makes the 430-byte record UNRECONSTRUCTABLE, since 350 plus 4 plus 76 is
+     * exactly the declared width and a null component has no width -- while this class was not
+     * updated, so the two disagreed and the disagreement surfaced as a failure here rather than as a
+     * review comment. The expectation now names what the migration and the entity both declare.
      */
     @Test
     void theFourMappedColumnsCarryTheDeclaredTypesWidthsAndNullabilityTheMigrationGivesThem() {
@@ -599,37 +609,44 @@ class TransactionRejectRepositoryIT {
                 .hasSize(MAPPED_COLUMN_COUNT)
                 .containsExactly(
                         "reject_seq:bigint:64,0:NO",
-                        "raw_record:character:350:YES",
-                        "reason_code:smallint:16,0:YES",
-                        "reason_desc:character varying:76:YES");
+                        "raw_record:character:350:NO",
+                        "reason_code:smallint:16,0:NO",
+                        "reason_desc:character varying:76:NO");
     }
 
     /**
-     * Confirms a row whose three payload columns are all absent is stored and re-read as absent.
+     * Confirms a row whose three payload columns are all absent is refused rather than stored.
      *
      * <p>Assumptions: this is the executable half of the nullability contract the catalogue reading
-     * above states, and the two halves catch different faults. The catalogue would still report YES
-     * for a column whose mapping had acquired an {@code optional = false} or a bean-validation
-     * constraint, and the insert would then fail before the engine was ever consulted; equally, a
-     * mapping that substituted a default -- an empty string, a zero code -- would let the insert
-     * succeed and hand back a value the row never carried. Asserting all three components are null
-     * after a flush and a clear is what distinguishes stored absence from either of those.
+     * above states, and the two halves catch different faults. The catalogue reports what the engine
+     * DECLARES; it would still report NO for a column that a mapping omitted from its insert
+     * statement, or that a provider filled with a substituted default -- an empty string, a zero code
+     * -- and either would put a row in the table that the declaration says cannot exist. Attempting
+     * the write is what closes that gap.
      *
-     * <p>Assumptions: the ordinal is required to be present on the same row, so the case shows the
-     * two nullability rules are enforced independently rather than uniformly. A row with no payload
-     * still has an identity, which is what makes it addressable and therefore removable.
+     * <p>Assumptions: the refusal is required to leave the table EMPTY, asserted after the attempt. A
+     * raised exception alone would be satisfied by a write that had already inserted the row and
+     * failed afterwards, and a stored row from which the 430-byte record cannot be rebuilt is the
+     * exact state these three constraints exist to prevent -- a reconstruction concatenates the padded
+     * 350-byte image, the four-digit code and the 76-character description, and a null component has
+     * no width, so every field after the gap would sit at the wrong offset and the record would parse
+     * cleanly into different data.
      *
-     * <p>Trade-offs: a row of this shape is not one the reference stream produces -- every record it
-     * writes carries all three components, because line 447 moves the image and line 448 moves the
-     * assembled trailer before the single write at line 451. It is stored here anyway because the
-     * migration's own reasoning admits the shape deliberately and a contract admitted but never
-     * exercised is a contract nobody has checked. The alternative considered was to tighten the three
-     * columns to {@code NOT NULL} so that no such row could exist; that is a change to a migration
-     * this class does not own, and it would refuse a partially assembled entry that an interrupted
-     * producer could legitimately record.
+     * <p>Assumptions: a row of this shape is not one the reference stream produces either -- every
+     * record it writes carries all three components, because line 447 moves the image and line 448
+     * moves the assembled trailer before the single write at line 451 -- so refusing it agrees with
+     * the baseline rather than restricting it.
+     *
+     * <p>Refactoring Rationale: this case previously PERSISTED such a row and asserted it round-tripped
+     * as absent, on the reasoning that the migration admitted the shape deliberately. The migration no
+     * longer admits it: all three payload columns carry {@code NOT NULL} and
+     * {@code TransactionReject} carries {@code nullable = false} on each of their mappings. The case is
+     * inverted rather than deleted, because the property worth exercising is unchanged -- what the
+     * schema does with an incomplete reject -- and deleting it would have left the tightened
+     * constraints asserted by a catalogue reading alone.
      */
     @Test
-    void aRowWhoseThreePayloadColumnsAreAllAbsentRoundTripsAsAbsent() {
+    void aRowWhoseThreePayloadColumnsAreAllAbsentIsRefused() {
         // WHY : Assumptions: the entity constructor is called directly rather than through this
         //       class's reject helper, because that helper declares its reason as a primitive short
         //       and so cannot express an absent code at all. Widening the helper instead would let
@@ -637,14 +654,25 @@ class TransactionRejectRepositoryIT {
         //       means to store a decided one.
         TransactionReject empty = new TransactionReject(null, null, null);
 
-        this.persistAndDetach(empty);
-        TransactionReject reRead = this.requireRow(empty.getRejectSeq());
+        // WHY : Assumptions: the refusal is identified by the COLUMN and the constraint kind it names
+        //       and not merely by an exception being raised. Three of this table's four columns are
+        //       NOT NULL, so an assertion that only expected a failure would pass identically had the
+        //       row been refused for a different one of them -- and the case would then prove nothing
+        //       about the column its name claims.
+        // WHY : Trade-offs: the type asserted is the provider's own, which couples this line to
+        //       Hibernate. It is accepted because the failure arrives from the explicit flush inside
+        //       persistAndDetach rather than at commit, so it propagates before the transaction manager
+        //       gets the chance to translate it into Spring's DataAccessException hierarchy; asserting
+        //       the translated type would fail against the very mechanism this class uses to write.
+        assertThatThrownBy(() -> this.persistAndDetach(empty))
+                .as("a reject missing any of its three components cannot be reconstructed")
+                .isInstanceOf(ConstraintViolationException.class)
+                .hasMessageContaining("raw_record")
+                .hasMessageContaining("violates not-null constraint");
 
-        assertThat(empty.getRejectSeq()).isNotNull();
-        assertThat(reRead.getRawRecord()).isNull();
-        assertThat(reRead.getReasonCode()).isNull();
-        assertThat(reRead.getReasonDesc()).isNull();
-        assertThat(this.rowCount()).isEqualTo(1);
+        assertThat(this.rowCount())
+                .as("the refusal left no partially written row behind")
+                .isZero();
     }
 
     /**
@@ -1434,7 +1462,7 @@ class TransactionRejectRepositoryIT {
      *     wrote means the column did not keep the value it was given
      */
     private String fixedWidthReason(Short reason) {
-        // WHY : Assumptions: the argument is the boxed type because the column is nullable, and an
+        // WHY : Assumptions: the argument is the boxed type because the entity member is boxed, and an
         //       absent value is allowed to fail loudly here rather than be rendered as 0000. A zero
         //       rendering would read as a successfully validated record, which is the one meaning this
         //       field must never acquire by accident.
@@ -1520,7 +1548,7 @@ class TransactionRejectRepositoryIT {
      * @param recordImage the rejected record retained verbatim, of type {@code String}, which the
      *     column blank-pads out to its declared width and which is never parsed
      * @param reason the reason code to carry, of type {@code short}, widened to the entity's boxed
-     *     member because the column is nullable
+     *     member, which is boxed even though the column is {@code NOT NULL}
      * @param description the reason description to carry, of type {@code String}, expected character
      *     for character as the reference program writes it
      * @return a transient entity ready to write, as a {@code TransactionReject}, carrying no assigned

@@ -8,6 +8,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -656,6 +657,62 @@ class AuthorizationRequestListenerTest {
                 Money.of("100.99")).deduplicationKey(TOKENISER),
                 reply.getValue().getDeduplicationToken());
         assertThat(reply.getValue().getDeduplicationToken()).doesNotContain(TRANSACTION_ID);
+    }
+
+    /**
+     * An approved authorization is recorded pending a match, and a declined one is recorded declined.
+     *
+     * <p>Assumptions: this is the two-branch condition at lines 902 to 906 of {@code cbl/COPAUA0C.cbl} --
+     * {@code SET PA-MATCH-PENDING} when {@code AUTH-RESP-APPROVED} holds and
+     * {@code SET PA-MATCH-AUTH-DECLINED} otherwise -- and BOTH branches are asserted in one test because
+     * the defect this closes was that they produced the same stored value. A test of the approval alone
+     * would have passed against the defective code, so the two cases only mean anything together.</p>
+     *
+     * <p>Assumptions: the decline is provoked by an OVER-LIMIT amount on a card that resolves, and not by
+     * an unresolvable card. That distinction is load-bearing: the sibling case above shows an unresolved
+     * card records nothing at all, so it could never exhibit a wrong stored status. An over-limit request
+     * against a resolvable card is the decline that reaches the write, which is the one this asserts.</p>
+     *
+     * <p>Assumptions: the summary counters are asserted beside the detail status, because they are the
+     * other half of the same decision and reading them together is what shows the row and the counter
+     * agree. A declined row with an incremented APPROVED counter would be the same class of defect.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an approval is recorded pending and a decline is recorded declined")
+    void theStoredMatchStatusFollowsTheDecision() {
+        givenResolvableCard();
+        when(this.summaries.findWithLockByAccountId(ACCOUNT_ID))
+                .thenReturn(Optional.of(summaryWithRoom()));
+
+        this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
+
+        ArgumentCaptor<PendingAuthDetail> approved =
+                ArgumentCaptor.forClass(PendingAuthDetail.class);
+        verify(this.details).save(approved.capture());
+        assertEquals(PendingAuthDetail.MATCH_STATUS_PENDING,
+                approved.getValue().getMatchStatus());
+
+        reset(this.details, this.summaries, this.outbox);
+        givenResolvableCard();
+        when(this.summaries.findWithLockByAccountId(ACCOUNT_ID))
+                .thenReturn(Optional.of(summaryWithRoom()));
+
+        this.listener.onRequest(messageFor(requestFor(Money.of("6000.00")), ALLOWED_REPLY_QUEUE));
+
+        ArgumentCaptor<PendingAuthDetail> declined =
+                ArgumentCaptor.forClass(PendingAuthDetail.class);
+        verify(this.details).save(declined.capture());
+        assertEquals(PendingAuthDetail.MATCH_STATUS_DECLINED,
+                declined.getValue().getMatchStatus());
+        assertEquals(0, BigDecimal.ZERO.compareTo(declined.getValue().getApprovedAmount()));
+
+        ArgumentCaptor<PendingAuthSummary> summary =
+                ArgumentCaptor.forClass(PendingAuthSummary.class);
+        verify(this.summaries).save(summary.capture());
+        assertEquals(1, summary.getValue().getDeclinedAuthCount().intValue());
+        assertEquals(0, summary.getValue().getApprovedAuthCount().intValue());
     }
 
     /**

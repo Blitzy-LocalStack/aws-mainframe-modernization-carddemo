@@ -31,6 +31,17 @@ since the refusal it promises is not a branch `CODATE01.cbl` contains. The contr
 rename by asserting THIS name resolves rather than that the old one does not, which is the
 direction that cannot pass or fail for reasons of build hygiene.
 
+Refactoring Rationale: the rename left the old directory standing beside this one, holding a
+README that documented a 1000-byte `date-request.txt` it did not contain -- so the old name still
+resolved for a reader, still described an executable fixture, and still pointed at a branch this
+program has no path to. The directory has now been removed rather than completed. Adding the
+record it described was considered and rejected on two grounds: the bytes would have been
+identical to this scenario's, because both READMEs specify the same function code and the same
+key, so the tree would carry two names for one fixture; and the name itself is the false claim,
+since the refusal it promises is not a branch `CODATE01.cbl` contains. The contract test pins the
+rename by asserting THIS name resolves rather than that the old one does not, which is the
+direction that cannot pass or fail for reasons of build hygiene.
+
 ---
 
 ## 2. The exact business rule it exercises

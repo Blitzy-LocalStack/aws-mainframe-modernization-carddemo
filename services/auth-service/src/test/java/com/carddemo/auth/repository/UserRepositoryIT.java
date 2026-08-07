@@ -4,6 +4,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.carddemo.auth.domain.User;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.Query;
+import jakarta.persistence.Version;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
@@ -16,6 +24,7 @@ import org.springframework.boot.persistence.autoconfigure.EntityScan;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Limit;
 import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -24,59 +33,94 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
- * Pins the alternate-key lookup of {@code auth.users} onto a real PostgreSQL engine.
+ * Pins the persistence contract of {@code auth.users} onto a real PostgreSQL engine.
  *
- * <p>This class exists for one member of {@link UserRepository}: the lookup by
- * {@code cognito_sub}, which resolves an authenticated provider subject to the local row whose
- * {@code user_type} supplies a request's authorities. Two properties decide whether that member is
- * sound, and neither can be established without an engine, which is why this is an integration test
- * and not a unit test.
+ * <p>Two separable contracts are asserted here, and both need an engine rather than a mock. The
+ * first is the KEYSET BROWSE that replaces the reference user-list transaction's file browse. The
+ * second is the PHYSICAL SHAPE of the migrated table, including one absence that no positive test
+ * can demonstrate.
  *
- * <p>The first is UNIQUENESS. The member returns a single value, and it may do so only because the
- * column admits one row per subject. That is a database constraint, not a property of the Java: a
- * test that inserted one row and read it back would pass identically against a non-unique column, so
- * the constraint is asserted by attempting the duplicate the constraint exists to refuse.
+ * <h2>The browse contract, and where it comes from</h2>
  *
- * <p>The second is the MISSING-USER outcome. A subject the identity provider has issued need not yet
- * have a local row, so absence is an ordinary state rather than a failure, and the member reports it
- * as an empty result rather than by raising. That distinction is what a caller branches on, so it is
- * asserted directly.
+ * <p>{@code app/cbl/COUSR00C.cbl} lists users by driving its {@code USRSEC} file through four
+ * paragraphs: {@code STARTBR-USER-SEC-FILE.} at line 586 whose verb spans lines 588 to 595,
+ * {@code READNEXT-USER-SEC-FILE.} at line 619 whose verb spans lines 621 to 629,
+ * {@code READPREV-USER-SEC-FILE.} at line 653 whose verb spans lines 655 to 663, and
+ * {@code ENDBR-USER-SEC-FILE.} at line 687 whose verb spans lines 689 to 691. AAP transformation
+ * rule T5 collapses that ensemble into one keyset-paginated query per direction, which is exactly
+ * the two members of {@link UserRepository} exercised below.
  *
- * <h2>What this class deliberately does not assert</h2>
+ * <p>Three measurable properties decide whether that collapse preserved behaviour, and each is
+ * asserted directly rather than inferred: the PAGE ARITY of ten, the SIZE-PLUS-ONE PROBE that
+ * discovers whether a further page exists, and the STRICT EXCLUSIVITY of the cursor comparison in
+ * both directions.
  *
- * <p>Assumptions: no case here asserts on a password, and none may be added. The target of this
- * bounded context persists none -- {@code V1__auth.sql} declares no password column, which is the one
- * point in the migration where parity is declined, recorded in AAP section 0.7.8 -- so an assertion
- * about one would describe a column that does not exist. The subject reference this class reads is
- * the whole of the link between a token and a row.
+ * <h2>What is deliberately not asserted here</h2>
  *
- * <p>Assumptions: no case re-asserts the two keyset browse queries. Their contract is the page
- * boundary rather than the engine, and the properties that decide them -- strict comparison, the
- * surplus probe row, the ordering each returns -- are stated on those members. Repeating them here
- * would add a second copy of an assertion to keep true, and the copy that still passed would hide the
- * one that should not.
+ * <p>Assumptions: no case below constructs or inspects a page envelope. The two members under test
+ * return a plain {@code List} of entities, and assembling the envelope a screen consumes is the
+ * service layer's work; asserting it here would place the same expectation in two files, and the
+ * copy that still passed would mask the one that should not.
  *
- * <p>Assumptions: the schema is created by Flyway rather than by the persistence provider, and
- * {@code src/test/resources/application-test.yml} is where that is configured -- it sets
- * {@code ddl-auto: validate}, so the provider VALIDATES the entity against the migrated table instead
- * of generating one. That has a consequence worth naming: every case below also depends on
- * {@link User} agreeing with {@code V1__auth.sql}, so a mapping that drifted from the migration would
- * fail this class at context start rather than at an assertion.
+ * <p>Assumptions: no case below asserts on a stored credential, and none may be added, because the
+ * migrated table declares no such column. That absence is the divergence this class guards
+ * mechanically rather than a gap in coverage, and the guard is
+ * {@link #noColumnOfTheIdentityTableNamesACredentialField()}.
+ *
+ * <p>Assumptions: there is no executable golden master for this bounded context to compare against,
+ * so every expectation below is transcribed from the COBOL source and the copybook by line.
+ * {@code tests/README.md} line 29 scopes its golden-master tier to the daily BATCH chain, and its
+ * lines 43 to 46 and 83 to 85 record that the eighteen online programs cannot be driven end to end
+ * without a CICS runtime. Page arity, probe arithmetic, key ordering and column shape are all
+ * directly verifiable without one, which is why they are asserted exactly.
+ *
+ * <p>Assumptions: the schema these cases run against is built by Flyway and not by the persistence
+ * provider. {@code services/auth-service/src/test/resources/application-test.yml} sets
+ * {@code ddl-auto: validate}, so the provider VALIDATES {@link User} against the migrated table
+ * instead of generating a table from it. A mapping that drifted from
+ * {@code V1__auth.sql} therefore fails this class while the context starts, before any assertion
+ * runs. That file also resolves the schema explicitly through both
+ * {@code spring.flyway.default-schema} and {@code hibernate.default_schema}, which is required
+ * because the connection URL is generated by the container and cannot carry a schema parameter.
  */
-// WHY : Alternatives Considered: asserting these two properties WITHOUT an engine was considered
-//       first, because it is cheaper -- a reflective check that the method name resolves to a mapped
-//       property, that the return type is Optional, and that the entity member carries
-//       unique = true. It was rejected because it would prove the wrong things. The annotation
-//       attribute is inert under ddl-auto: validate, so a unique = true on an entity whose table
-//       carries no unique index would satisfy such a check while the database accepted duplicates;
-//       and no reflective assertion can distinguish an empty result from a raised exception, which is
-//       the missing-user contract itself. The properties under test are properties of the SCHEMA, so
-//       they are asserted against a schema.
-// WHY : Alternatives Considered: an H2 or other in-memory engine would have removed the container
-//       dependency, and was rejected on fidelity. The column is a NATIVE uuid type and the guarantee
-//       under test is a unique index over it; an engine that emulated either would let this class
-//       pass while the deployed cluster behaved differently, which is the one way a green result here
-//       could mean nothing.
+// WHY : Assumptions: Flyway resolving a PostgreSQL database type at run time depends on a companion
+//       artifact alongside its core, because release 10 moved each engine's support out of core.
+//       This class is the one place in the module's build where a migration is actually APPLIED, so
+//       a missing companion surfaces here and nowhere else, and it surfaces as a RUN-TIME failure to
+//       resolve a database type rather than as a compilation error -- which is why it cannot be
+//       caught by building the module and must be named here.
+// WHY : Alternatives Considered: offset pagination was rejected for the two browse queries, and with
+//       it every framework shape that expresses one -- the paging request abstraction and its
+//       implementation, the paged and sliced result types, a SQL offset clause, a criteria
+//       specification wrapped around one, and any derived method taking a page ordinal. The specific
+//       damage is skip-and-repeat: an offset locates its first row by counting from the start of the
+//       ordering on every request, so a concurrent insert or delete landing ahead of that point
+//       between two page turns shifts every later row by one position, and the reader then misses a
+//       row that crossed the boundary forwards or sees one twice that crossed it backwards. A key
+//       already returned keeps its position in the ordering whatever is inserted around it. The
+//       reference program is already keyed this way: its three positioned verbs at lines 588 to 595,
+//       621 to 629 and 655 to 663 each pass RIDFLD and KEYLENGTH and never a row count, so keyset
+//       paging preserves the page boundary the source produces and offset paging would change it.
+// WHY : Refactoring Rationale: two of the four file verbs have NO counterpart to assert, and their
+//       absence is the transformation rather than an omission in this class. In the baseline the
+//       browse position lives in a CICS cursor opened against the file and in the identifier pair
+//       the program hands back to itself between screen turns, declared at lines 68 and 69, so it
+//       survives only as long as the task and its cursor do. A single SQL statement carries its
+//       position in its own predicate and releases its own result set, so there is no handle to open
+//       and none to close. ENDBR is the clearest case: its verb at lines 689 to 691 is BARE, naming
+//       only DATASET with no RESP and no RESP2, so there is not even a status a caller here could
+//       inspect. Both the call sites at lines 325 and 374 and the paragraph at line 687 disappear
+//       together, which is why no case below opens or closes anything.
+// WHY : Trade-offs: these cases read at PostgreSQL's READ COMMITTED default, which is STRICTER than
+//       the READINTEG(UNCOMMITTED) recorded at app/csd/CARDDEMO.CSD line 90. The baseline could
+//       return a row a concurrent task had written and not committed; no query below can. The
+//       compromise accepted is that this is a behavioural difference rather than a transcription, so
+//       it is registered as one -- and it is accepted because the observable effect is that a dirty
+//       read is no longer possible, and reproducing one would mean weakening the engine's default to
+//       recover a defect. The file-wide ceiling recorded as STRINGS(1) at line 91 of the same file
+//       likewise has no counterpart: it admitted one concurrent request string against the whole
+//       dataset, so two administrators listing users serialised against each other for a
+//       storage-access reason that was never a business rule. Row-level locking replaces it.
 @Testcontainers
 @SpringBootTest(
         classes = UserRepositoryIT.IdentityPersistenceTestApplication.class,
@@ -85,221 +129,1202 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 class UserRepositoryIT {
 
     /**
-     * The engine image, named by manifest digest: PostgreSQL 17.10 on Alpine, the major version the
-     * deployed cluster runs.
+     * The engine image, named by manifest digest rather than by a moving tag.
      */
-    // WHY : Assumptions: this is deliberately the SAME digest the four repository integration tests
-    //       of the transaction bounded context already name. Two integration tests pinning two
-    //       engines could disagree about one constraint, and the disagreement would surface as
-    //       whichever ran second; pinning by digest rather than by tag is what makes the reference
-    //       immutable, since a publisher may rebuild and republish a minor tag on a new base layer.
+    // WHY : Assumptions: this is deliberately the SAME digest the repository integration tests of
+    //       the transaction and reporting bounded contexts already name. Two integration tests
+    //       pinning two engines could disagree about one constraint, and the disagreement would
+    //       surface as whichever ran second; naming a digest rather than a tag is what makes the
+    //       reference immutable, because a publisher may rebuild and republish a minor tag onto a
+    //       new base layer without the tag changing.
     private static final String POSTGRES_IMAGE =
             "postgres@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193";
 
     /**
-     * The container the assertions run against, started once for this class.
-     *
-     * <p>Assumptions: the type comes from {@code org.testcontainers.postgresql} and NOT from the
-     * legacy {@code org.testcontainers.containers}. Testcontainers 2.0.5 ships both and only the
-     * legacy one is deprecated, so importing that package would carry a compile-time notice into
-     * every future build of this module for no benefit. The replacement is not generic, so the
-     * declaration carries no type argument.
+     * The container every case in this class runs against, started once for the class.
      */
+    // WHY : Alternatives Considered: an in-memory engine, H2 specifically, would have removed the
+    //       container dependency and was rejected on what it would silently stop proving. Two of the
+    //       assertions below are assertions about REFUSAL: that the engine rejects a user type
+    //       outside the two-value domain declared as CHECK (user_type IN ('A','U')), and that it
+    //       rejects a duplicate cognito_sub declared UUID NOT NULL UNIQUE. UUID is a native
+    //       PostgreSQL type rather than a portable one, and an in-memory substitute that emulated
+    //       either the type or the constraint would let both cases pass against a fiction while the
+    //       deployed cluster behaved differently -- which is the one way a green result here could
+    //       mean nothing at all.
+    // WHY : Assumptions: the type is imported from org.testcontainers.postgresql and NOT from the
+    //       legacy org.testcontainers.containers package. Both ship in the pinned Testcontainers
+    //       release and only the legacy one is deprecated, so naming that package would carry a
+    //       compile-time notice into every future build of this module for no benefit. The
+    //       replacement type is not generic, so this declaration carries no type argument.
     @Container
     @ServiceConnection
     static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer(POSTGRES_IMAGE);
 
     /**
-     * The identifier of the row every case in this class resolves, eight characters exactly.
-     *
-     * <p>Assumptions: the width is the key's declared width rather than a convenient one.
-     * {@code user_id} is {@code CHAR(8)} in {@code V1__auth.sql}, transcribed from
-     * {@code SEC-USR-ID PIC X(08)} at {@code app/cpy/CSUSR01Y.cpy} line 18, so a shorter literal
-     * would be stored blank-padded and would compare equal to itself under the type's own rules
-     * without ever exercising the full-width case.
+     * The number of rows that fill one page of the user list, transcribed from the reference screen.
      */
-    private static final String SEED_USER_ID = "ADMIN001";
+    // WHY : Assumptions: ten is a measurement from two independent artifacts rather than a
+    //       convention adopted here, which is what makes it safe to assert exactly. First,
+    //       app/cbl/COUSR00C.cbl line 56 opens 01 WS-USER-DATA and line 57 declares its screen array
+    //       as 02 USER-REC OCCURS 10 TIMES, and the forward fill loop is bounded by that same figure
+    //       -- line 298 seeds its index to one and line 300 runs UNTIL WS-IDX >= 11. Second, the
+    //       symbolic map app/cpy-bms/COUSR00.CPY declares one row of five fields per displayed user
+    //       on a strict thirty-line stride, from 02 SEL0001I at line 72 to 02 SEL0010I at line 342,
+    //       and 72 plus 30 times 9 is exactly 342, with the message field following at line 372. Two
+    //       artifacts agreeing is a measurement; one would have been an assumption about screen size.
+    //       Seven is the CARD list's arity and does not transfer to this screen.
+    private static final int PAGE_SIZE = UserRepository.PAGE_SIZE;
 
     /**
-     * The identifier of the second row, used only by the duplicate-subject case.
-     *
-     * <p>Assumptions: it differs from {@link #SEED_USER_ID} so that the insert the duplicate case
-     * attempts can only be refused by the SUBJECT constraint. Reusing one identifier would trip the
-     * primary key instead, and the case would then report a passing result while proving nothing
-     * about uniqueness of the alternate key.
+     * The row cap each browse query is issued with, being the page size plus the probe row.
      */
-    private static final String OTHER_USER_ID = "USER0001";
-
-    /** The provider subject the seeded row carries, fixed so no case depends on a generated value. */
-    private static final UUID SEED_SUBJECT = UUID.fromString("11111111-2222-3333-4444-555555555555");
-
-    /** A subject no row carries, used by the missing-user case. */
-    // WHY : Assumptions: this differs from SEED_SUBJECT in its first group rather than its last, so a
-    //       truncating or prefix-matching comparison would still distinguish the two. Two values
-    //       differing only in a trailing character would let such a defect pass.
-    private static final UUID ABSENT_SUBJECT = UUID.fromString("99999999-2222-3333-4444-555555555555");
+    // WHY : Assumptions: the surplus row is a transcription of a read the baseline actually performs
+    //       and not a heuristic. Having filled its ten slots through the loop at lines 300 to 306,
+    //       app/cbl/COUSR00C.cbl performs an ELEVENTH forward read at line 311 for no purpose other
+    //       than to discover whether anything follows, and lines 312 to 316 set its availability
+    //       indicator from that read's outcome alone -- yes at line 313, no at line 315 -- while the
+    //       exhausted branch sets no at line 318. The indicator is CDEMO-CU00-NEXT-PAGE-FLG,
+    //       declared at line 71 with its two condition names at lines 72 and 73. The BACKWARD path
+    //       is symmetric and is asserted as such below: line 352 seeds its index to ten, line 354
+    //       counts down UNTIL WS-IDX <= 0, and lines 362 to 363 then perform one further READPREV.
+    //       The probe is therefore a TWO-DIRECTION contract, which is why both directions are
+    //       exercised rather than only the forward one.
+    private static final int FETCH_LIMIT = UserRepository.FETCH_LIMIT;
 
     /**
-     * The number of links of a cause chain the diagnostic helper below will walk.
-     *
-     * <p>Assumptions: a bound is required rather than prudent. A cause chain is not guaranteed acyclic
-     * by the platform -- a throwable may return itself, or two may reference each other -- so an
-     * unbounded walk is a hang rather than a slow test. Sixteen is far beyond any chain a constraint
-     * violation produces, so the bound never truncates a real diagnosis.
+     * The number of rows seeded by the cases that page across a page boundary.
      */
+    // WHY : Assumptions: thirteen is chosen so that one seeding serves three distinct outcomes
+    //       without re-seeding between them, and each outcome is a different arm of the probe
+    //       contract. Thirteen exceeds the page size, so an opening page fills and the probe fires;
+    //       the three rows past the first ten make a SHORT final page, which is the arm on which the
+    //       baseline's own cursor capture does not fire at all; and twelve rows sit below the highest
+    //       key, so a backward query from that key returns the eleven-row probe result rather than a
+    //       short one. A count equal to the page size could not have produced the short page.
+    private static final int SPANNING_ROW_COUNT = 13;
+
+    /**
+     * The eight-character prefix shared by the ordered fixture identifiers.
+     */
+    // WHY : Assumptions: the identifiers this prefix builds are eight characters exactly and sort
+    //       lexically in insertion order, because both properties are load bearing. Eight is the
+    //       declared width -- SEC-USR-ID is PIC X(08) at app/cpy/CSUSR01Y.cpy line 18 and the column
+    //       is CHAR(8) -- so a shorter literal would be stored blank-padded and would exercise the
+    //       padding path in every case rather than only in the case written for it. Lexical ordering
+    //       is what lets a case name the exact row it expects at a boundary instead of asserting a
+    //       count alone.
+    private static final String USER_ID_PREFIX = "USER";
+
+    /** The identifier of the single administrator row the keyed-operation cases act on. */
+    private static final String ADMIN_USER_ID = "ADMIN001";
+
+    /**
+     * An identifier that is shorter than the declared key width, used only by the padding case.
+     */
+    // WHY : Assumptions: this value is deliberately SIX characters where the column is CHAR(8), so
+    //       that the engine has to pad it. It is the only fixture in the class that is not eight
+    //       characters wide, and it exists to exercise the one behaviour a full-width fixture cannot
+    //       reach: that stored width and logical value differ for a blank-padded type.
+    private static final String SHORT_USER_ID = "ADMIN2";
+
+    /** The administrator type code, the first of the two values the reference domain admits. */
+    // WHY : Assumptions: the authority for this two-value domain is app/cpy/COCOM01Y.cpy, whose line
+    //       26 declares 10 CDEMO-USER-TYPE PIC X(01) and whose lines 27 and 28 declare the condition
+    //       names for 'A' and 'U'. It is NOT app/cpy/CSUSR01Y.cpy line 22: that line declares the
+    //       field's width and nothing about its permitted values, and a census of 88-level items in
+    //       that copybook returns zero, so it cannot be the source of a domain.
+    private static final String ADMIN_TYPE = "A";
+
+    /** The ordinary-user type code, the second of the two values the reference domain admits. */
+    private static final String USER_TYPE = "U";
+
+    /**
+     * A single-character type code outside the reference domain, used only by the refusal case.
+     */
+    // WHY : Assumptions: this is one character rather than two, so that the CHECK constraint is the
+    //       only thing that can refuse it. A two-character value would overflow CHAR(1) and be
+    //       refused for a width reason instead, and the case would then report a pass while proving
+    //       nothing about the domain.
+    private static final String OUT_OF_DOMAIN_TYPE = "X";
+
+    /** The schema the migration owns, named once so every catalogue query agrees on it. */
+    // WHY : Assumptions: the schema is named as a query PARAMETER in every catalogue read below
+    //       rather than relied upon through the connection's search path. A search path decides where
+    //       an UNQUALIFIED name resolves, which is a different fact from which schema a row of the
+    //       catalogue describes; reading the catalogue without this filter would return columns of
+    //       any same-named table in any schema and would pass while describing the wrong object.
+    private static final String IDENTITY_SCHEMA = "auth";
+
+    /** The table the migration creates, named once for the same reason as the schema. */
+    private static final String IDENTITY_TABLE = "users";
+
+    /**
+     * Column-NAME fragments that a credential field would have to be named with.
+     */
+    // WHY : Assumptions: these are fragments of a column NAME and never a stored value, which is the
+    //       distinction that lets this guard exist at all -- divergence D-4 removes the value, so
+    //       there is nothing of that kind to hold here, and a fixture shaped like one would be a
+    //       liability rather than a test. Three fragments are used rather than one exact name because
+    //       a regression would not necessarily reuse the reference spelling: the reference field is
+    //       SEC-USR-PWD at app/cpy/CSUSR01Y.cpy line 21, but a re-introduction could equally arrive
+    //       spelled out or as a hashed or shadow variant, and each of those contains one of these
+    //       three. The exact-set assertion beside this one is what closes the remaining gap.
+    private static final List<String> CREDENTIAL_NAME_FRAGMENTS = List.of("pwd", "pass", "secret");
+
+    /** How far the failure-message walk follows a cause chain before giving up. */
+    // WHY : Assumptions: a bound is required rather than optional because a cause chain assembled by
+    //       a driver and rewrapped by a translation layer is not guaranteed acyclic; the walk below
+    //       additionally stops when a throwable reports itself as its own cause, and this bound
+    //       covers the case where a longer cycle exists.
     private static final int MAX_CAUSE_DEPTH = 16;
 
     /** The port under test. */
     @Autowired
     private UserRepository users;
 
+    /** Issues the catalogue queries the physical-shape cases read their expectations from. */
+    // WHY : Assumptions: the physical contract is asserted through the engine's own catalogue rather
+    //       than by reading configuration, because a CONFIGURED schema and an EFFECTIVE one are
+    //       different facts and only the second one governs what every other case in this class
+    //       touches. The repository interface cannot express these reads at all, which is why a
+    //       second collaborator is injected alongside it rather than the queries being pushed into
+    //       the port under test.
+    @Autowired
+    private EntityManager entityManager;
+
     /** Runs each write in its own committed transaction, so a constraint is evaluated per case. */
     // WHY : Alternatives Considered: annotating this class @Transactional and letting the framework
-    //       roll each case back was rejected, and the reason is specific to what is under test. A
-    //       UNIQUE constraint is evaluated when a statement executes, but a persistence context
-    //       defers its inserts until it flushes, so inside one ambient transaction the duplicate case
-    //       would either need an explicit flush to fail at all or would fail at an unpredictable
-    //       point. Committing each write through an explicit template makes the refusal arrive from
-    //       the statement that caused it.
+    //       roll each case back was rejected, for a reason specific to what is under test. A CHECK
+    //       and a UNIQUE constraint are evaluated when a statement executes, but a persistence
+    //       context defers its inserts until it flushes, so inside one ambient transaction the two
+    //       refusal cases would either need an explicit flush to fail at all or would fail at an
+    //       unpredictable point. Committing each write through an explicit template makes each
+    //       refusal arrive from the statement that caused it.
+    // WHY : Trade-offs: the commit scope expressed here is a JAVA-SIDE design decision and not a
+    //       transcription, and saying so keeps this class from implying a parity claim it cannot
+    //       support. The word SYNCPOINT appears ZERO times in each of the five reference auth
+    //       programs -- COSGN00C, COUSR00C, COUSR01C, COUSR02C and COUSR03C -- where the contrast
+    //       program COACTUPC contains two, so there is no baseline commit scope to reproduce.
+    //       app/csd/CARDDEMO.CSD strengthens that reading: JOURNAL(NO) at line 94 and RECOVERY(NONE)
+    //       at line 96 mean CICS performed no logging and no backout for this dataset, so there was
+    //       nothing to commit and nothing to roll back. The compromise accepted is that a reader
+    //       cannot infer the deployed commit scope from this file; what is bought is that each
+    //       refusal below is attributable to one statement.
     @Autowired
     private TransactionTemplate commit;
 
     /**
-     * Empties the table and inserts the single seeded row every case starts from.
+     * Empties the identity table so that each case begins from a known, seeded-by-itself state.
      *
-     * <p>Assumptions: the table is cleared rather than relied upon to be empty. The container is
-     * started once for the class, so a row committed by one case would otherwise survive into the
-     * next, and the duplicate case commits deliberately.
+     * <p>Assumptions: the table is cleared rather than assumed empty. The container starts once for
+     * the whole class and the refusal cases commit deliberately, so a row left by one case would
+     * otherwise be visible to the next and the row counts the browse cases assert would drift.
      */
+    // WHY : Trade-offs: per-case deletion against a container shared by the class was chosen over
+    //       the two alternatives, and the cost is stated rather than hidden. A fresh container per
+    //       case would give the strongest isolation but pays a full engine start and a Flyway
+    //       migration for every one of the cases below, and nothing here inspects engine state that
+    //       survives a delete. A class-level seeding shared by every case was rejected outright
+    //       because the browse cases need DIFFERENT row populations -- none, exactly the page size,
+    //       one more than it, and a spanning count -- so a single shared fixture could not serve
+    //       them. The accepted cost is that the cases are ordered-independent only because each one
+    //       seeds what it reads, which is a discipline this method enforces rather than documents.
+    // WHY : Assumptions: deletion is issued as a single statement rather than by loading each entity
+    //       and removing it, because the rows exist here only to be counted and ordered; nothing
+    //       depends on lifecycle callbacks firing. This also leaves Flyway's own history table
+    //       untouched, which matters because a cleared history would re-run the migration.
     @BeforeEach
-    void seedOneUser() {
-        this.commit.executeWithoutResult(status -> {
-            this.users.deleteAll();
-            this.users.save(new User(SEED_USER_ID, "Admin", "One", "A", SEED_SUBJECT));
-        });
+    void emptyTheIdentityTable() {
+        this.commit.executeWithoutResult(status -> this.users.deleteAllInBatch());
     }
 
     /**
-     * A subject that a row carries resolves to that row.
+     * An empty table yields no rows for the opening cursor.
      *
-     * <p>Assumptions: this asserts the identifier AND the type of the resolved row, not merely that
-     * something was found. The type is the reason the lookup exists -- it is what a request's
-     * authorities are derived from -- so a case that stopped at presence would pass against a lookup
-     * that resolved the wrong row.
+     * <p>Assumptions: this asserts an EMPTY RESULT and not a raised failure, because an empty user
+     * table is an ordinary state rather than an error. The distinction is what a caller branches on,
+     * and it is the only outcome that lets a service report an empty list rather than a fault.
+     */
+    // WHY : Assumptions: the opening request is the forward query issued with the sentinel cursor
+    //       rather than a third, unfiltered query, and the baseline is the reason. Its browse open at
+    //       lines 588 to 595 takes a seek-FROM value in RIDFLD rather than an equality filter, and
+    //       the two paging guards set that value explicitly when no cursor is held -- line 240 moves
+    //       LOW-VALUES into the key when the first-key cursor is blank, and line 263 moves
+    //       HIGH-VALUES when the last-key cursor is blank. The mechanism there is therefore one verb
+    //       fed a sentinel, not two verbs, so the opening page here is one query fed a sentinel that
+    //       orders below every storable key.
+    // WHY : Assumptions: the initial positioning the source INTENDED is greater-or-equal, and the
+    //       evidence is that its GTEQ option is present but COMMENTED OUT at line 592 of
+    //       app/cbl/COUSR00C.cbl. That is recorded separately from the sentinel decision because it
+    //       explains why an opening seek is INCLUSIVE of the lowest key while every CONTINUATION is
+    //       strictly exclusive: the sentinel is below every real key, so one strictly-greater
+    //       predicate delivers both behaviours and no second predicate is needed.
+    @Test
+    void anEmptyTableYieldsNoRowsForTheOpeningCursor() {
+        List<User> openingPage = forwardPageFrom(UserRepository.BEFORE_FIRST_USER_ID);
+
+        assertThat(openingPage)
+                .as("an empty identity table must yield an empty page, not a failure")
+                .isEmpty();
+    }
+
+    /**
+     * A population of exactly one page returns that page, because the probe row finds nothing.
+     *
+     * <p>Assumptions: the assertion is on an EXACT size of ten and not on an upper bound. Ten is the
+     * screen arity of {@code app/cbl/COUSR00C.cbl} line 57, and the eleventh row the query asks for
+     * is the probe; when the table holds exactly one page the probe must come back empty-handed, so
+     * a result of ten is what tells the service there is no following page.
      */
     @Test
-    void aKnownSubjectResolvesToItsRow() {
-        Optional<User> found = this.users.findByCognitoSub(SEED_SUBJECT);
+    void aPageOfExactlyTenReturnsTenBecauseTheProbeFindsNothing() {
+        seedOrderedUsers(PAGE_SIZE);
 
-        assertThat(found).isPresent();
-        assertThat(found.get().getUserId()).isEqualTo(SEED_USER_ID);
-        assertThat(found.get().getUserType()).isEqualTo("A");
-        assertThat(found.get().getCognitoSub()).isEqualTo(SEED_SUBJECT);
+        List<User> openingPage = forwardPageFrom(UserRepository.BEFORE_FIRST_USER_ID);
+
+        assertThat(openingPage)
+                .as("the fill loop at COUSR00C.cbl line 300 stops at ten, so a full page is ten rows")
+                .hasSize(PAGE_SIZE);
+        assertThat(userIdsOf(openingPage))
+                .as("a full page must be the ten lowest keys, in ascending order")
+                .containsExactlyElementsOf(orderedUserIds(1, PAGE_SIZE));
     }
 
     /**
-     * A subject no row carries yields an empty result rather than raising.
+     * One row beyond a full page makes the forward probe fire.
      *
-     * <p>This is the missing-user contract the member documents: a subject the identity provider has
-     * issued need not yet have a local row, so absence is reported and not thrown.
+     * <p>Assumptions: eleven is asserted exactly, because that number is the whole signal. The
+     * reference program discovers a following page by performing one further read at
+     * {@code app/cbl/COUSR00C.cbl} line 311 after its ten slots are filled, and sets its indicator
+     * from that read alone at lines 313 and 315. A result of eleven is the relational form of that
+     * read succeeding, and the service trims the surplus row before display.
+     */
+    @Test
+    void anEleventhRowMakesTheForwardProbeFire() {
+        seedOrderedUsers(FETCH_LIMIT);
+
+        List<User> probedPage = forwardPageFrom(UserRepository.BEFORE_FIRST_USER_ID);
+
+        assertThat(probedPage)
+                .as("the probe read at COUSR00C.cbl line 311 must surface as an eleventh row")
+                .hasSize(FETCH_LIMIT);
+        assertThat(userIdsOf(probedPage).get(PAGE_SIZE))
+                .as("the surplus row is the one immediately after the page, not an arbitrary row")
+                .isEqualTo(orderedUserId(FETCH_LIMIT));
+    }
+
+    /**
+     * A short final page ends on its own last row rather than on a carried-over value.
+     *
+     * <p>Assumptions: this case exists for the arm of the reference program on which its own cursor
+     * capture does NOT fire. Paging forward past the first ten of thirteen rows leaves three, so the
+     * tenth slot is never filled and the {@code WHEN 10} arm that captures the last key never runs.
+     * The assertion is therefore on the identity of the last row RETURNED, which is the value a
+     * correct implementation must publish as its cursor.
+     */
+    // WHY : Refactoring Rationale: the reference program derives its two cursor values from FIXED
+    //       SCREEN SLOTS rather than from the rows it actually read, and on a short page that leaves
+    //       one of them holding the previous page's value. Inside POPULATE-USER-DATA, whose label is
+    //       at line 384 and whose EVALUATE is at line 386, only two arms capture a cursor: lines 388
+    //       to 389 are a single multi-receiver MOVE writing the first slot AND
+    //       CDEMO-CU00-USRID-FIRST, and lines 434 to 435 are a single multi-receiver MOVE writing the
+    //       tenth slot AND CDEMO-CU00-USRID-LAST. The intervening arms capture neither -- lines 428
+    //       to 432 write the ninth slot and no cursor field at all. The consequence is bidirectional:
+    //       forward, a page of fewer than ten rows never reaches line 433, so the last-key cursor
+    //       keeps its previous value; backward, the countdown loop seeded at line 352 and bounded at
+    //       line 354 exits before its index reaches one, so line 387 never runs and the first-key
+    //       cursor keeps its previous value. The baseline captures cursors from screen slots; the
+    //       Java encodes cursors derived from the rows actually returned; the divergence is
+    //       documented. This case and the short backward case below are what stop that derivation
+    //       from silently regressing to the slot-shaped behaviour.
+    @Test
+    void aShortForwardFinalPageEndsOnItsOwnLastRow() {
+        seedOrderedUsers(SPANNING_ROW_COUNT);
+        String lastKeyOfOpeningPage = orderedUserId(PAGE_SIZE);
+
+        List<User> finalPage = forwardPageFrom(lastKeyOfOpeningPage);
+
+        assertThat(finalPage)
+                .as("thirteen rows leave three after a full page, so the probe must find nothing")
+                .hasSize(SPANNING_ROW_COUNT - PAGE_SIZE);
+        assertThat(userIdsOf(finalPage))
+                .as("a strictly-greater cursor excludes its own row, so paging starts after it")
+                .containsExactlyElementsOf(orderedUserIds(PAGE_SIZE + 1, SPANNING_ROW_COUNT))
+                .doesNotContain(lastKeyOfOpeningPage);
+        assertThat(lastReturnedKey(finalPage))
+                .as("the published cursor must be the ACTUAL last row, not the prior page's value")
+                .isEqualTo(orderedUserId(SPANNING_ROW_COUNT))
+                .isNotEqualTo(lastKeyOfOpeningPage);
+    }
+
+    /**
+     * The backward query returns its rows in descending key order.
+     *
+     * <p>Assumptions: DESCENDING is asserted as the repository's own output and is deliberately not
+     * reversed here. The reference program walks backwards and fills its screen from the tenth slot
+     * down, seeding its index at {@code app/cbl/COUSR00C.cbl} line 352 and counting down at line
+     * 354, so descending is the order the read produces. Turning that into ascending display order
+     * is the service's work, and a case that asserted ascending order here would be asserting the
+     * service's behaviour through the wrong collaborator.
+     */
+    // WHY : Assumptions: the backward probe is asserted with the same arithmetic as the forward one
+    //       because the source performs the same extra read in both directions. Lines 362 and 363 of
+    //       app/cbl/COUSR00C.cbl re-test for data and then perform one further READPREV, exactly as
+    //       lines 308 and 311 do for READNEXT. Twelve rows sit below the highest of thirteen keys, so
+    //       a limit of eleven must come back full, which is the backward arm of the same signal.
+    // WHY : Trade-offs: no previous-page indicator is derived from this result, and none is
+    //       synthesised anywhere in this class, because the source carries no such flag. Line 71 of
+    //       app/cbl/COUSR00C.cbl declares CDEMO-CU00-NEXT-PAGE-FLG with its two condition names at
+    //       lines 72 and 73, and there is NO previous-page counterpart in that overlay or anywhere
+    //       else -- a search for the overlay's own prefix across app/cpy returns zero hits, so the
+    //       block is declared inline and is complete as read. What the source has instead is a
+    //       distinction between GUARD messages, emitted when a key is pressed at a limit, at lines
+    //       251 to 252 and 273 to 274, and ARRIVAL messages, emitted when a read reaches one, at
+    //       lines 603 to 604, 637 to 638 and 671 to 672. The compromise accepted is that this class
+    //       asserts neither: message selection is a presentation concern and belongs to the api
+    //       layer, so the only thing asserted here is the row evidence that layer would need.
+    @Test
+    void theBackwardQueryReturnsRowsInDescendingKeyOrder() {
+        seedOrderedUsers(SPANNING_ROW_COUNT);
+        String highestKey = orderedUserId(SPANNING_ROW_COUNT);
+
+        List<User> backwardPage = backwardPageBefore(highestKey);
+
+        assertThat(backwardPage)
+                .as("twelve rows below the highest key must fill an eleven-row backward probe")
+                .hasSize(FETCH_LIMIT);
+        assertThat(userIdsOf(backwardPage))
+                .as("the backward read at COUSR00C.cbl lines 655 to 663 produces descending keys")
+                .isSortedAccordingTo(Comparator.reverseOrder())
+                .doesNotContain(highestKey);
+        assertThat(userIdsOf(backwardPage).get(0))
+                .as("a strictly-less cursor excludes its own row, so the walk starts just below it")
+                .isEqualTo(orderedUserId(SPANNING_ROW_COUNT - 1));
+    }
+
+    /**
+     * A short backward page begins on its own first row rather than on a carried-over value.
+     *
+     * <p>Assumptions: this is the backward counterpart of the short forward page, and it exercises
+     * the arm on which the reference program's {@code WHEN 1} capture at
+     * {@code app/cbl/COUSR00C.cbl} line 387 never runs, because the countdown loop bounded at line
+     * 354 exits before its index reaches one. The lowest key of a descending result is its LAST
+     * element, so that is the element asserted.
+     */
+    @Test
+    void aShortBackwardPageBeginsOnItsOwnFirstRow() {
+        seedOrderedUsers(SPANNING_ROW_COUNT);
+        String fourthKey = orderedUserId(4);
+
+        List<User> backwardPage = backwardPageBefore(fourthKey);
+
+        assertThat(backwardPage)
+                .as("only three rows sit below the fourth key, so the backward probe finds nothing")
+                .hasSize(3);
+        assertThat(userIdsOf(backwardPage))
+                .as("a short backward page is still descending and still excludes its cursor")
+                .containsExactly(orderedUserId(3), orderedUserId(2), orderedUserId(1))
+                .doesNotContain(fourthKey);
+        assertThat(lastReturnedKey(backwardPage))
+                .as("the published first-row cursor must be the ACTUAL lowest row returned")
+                .isEqualTo(orderedUserId(1));
+    }
+
+    /**
+     * A cursor matching no stored key positions the walk and still returns rows.
+     *
+     * <p>Assumptions: this asserts that an unmatched cursor is NOT an error and NOT an absent
+     * resource. The reference program's browse open handles exactly this outcome as a normal one: its
+     * response arm at {@code app/cbl/COUSR00C.cbl} line 600 keys on {@code DFHRESP(NOTFND)} rather
+     * than on an end-of-file condition, and continues at line 601 rather than failing. A keyset
+     * predicate reproduces that by construction, because a comparison needs no matching row to
+     * position against, and this case is what proves the reproduction rather than assuming it.
+     */
+    @Test
+    void aCursorMatchingNoStoredKeyStillReturnsRows() {
+        seedOrderedUsers(SPANNING_ROW_COUNT);
+        String unmatchedKey = USER_ID_PREFIX + "0000";
+
+        assertThat(this.users.findById(unmatchedKey))
+                .as("the cursor for this case must genuinely match no stored row")
+                .isEmpty();
+
+        List<User> pageFromUnmatchedKey = forwardPageFrom(unmatchedKey);
+
+        assertThat(pageFromUnmatchedKey)
+                .as("an unmatched cursor must position the walk, not empty it")
+                .isNotEmpty();
+        assertThat(userIdsOf(pageFromUnmatchedKey).get(0))
+                .as("a cursor below every stored key positions the walk at the lowest key")
+                .isEqualTo(orderedUserId(1));
+    }
+
+    /**
+     * The key column is fixed-width character and is the table's primary key.
+     *
+     * <p>Assumptions: {@code CHAR} is asserted rather than tolerated, because fixed width is part of
+     * the record contract this table transcribes. {@code SEC-USR-ID} is declared {@code PIC X(08)} at
+     * {@code app/cpy/CSUSR01Y.cpy} line 18, at zero-based offset 0 of an 80-byte record whose six
+     * declared widths sum to exactly 80. A variable-width column would accept the same values while
+     * discarding the padding semantics the fixed record depends on, so the distinction is asserted
+     * against the catalogue rather than left to the migration's wording.
+     */
+    // WHY : Assumptions: the primary-key index is asserted here because it is the ONLY ordering
+    //       structure the two browse queries can use. V1__auth.sql creates this table in a single
+    //       statement and declares no further index over user_id, and none is needed: a keyset
+    //       predicate over the key column is served by the key's own index. Asserting the constraint
+    //       rather than the index name keeps this independent of the identifier the engine generates.
+    @Test
+    void theKeyColumnIsFixedWidthCharacterAndThePrimaryKey() {
+        assertThat(columnDataType("user_id"))
+                .as("SEC-USR-ID is PIC X(08) at CSUSR01Y.cpy line 18, so the column is fixed width")
+                .isEqualTo("character");
+        assertThat(columnLength("user_id"))
+                .as("the declared width of the key is eight characters")
+                .isEqualTo(8);
+        assertThat(primaryKeyColumns())
+                .as("the key of the record is its only primary key, and it is single-column")
+                .containsExactly("user_id");
+    }
+
+    /**
+     * The engine itself refuses a user type outside the two-value reference domain.
+     *
+     * <p>Assumptions: the refusal asserted here comes from the DATABASE and not from a guard in
+     * Java, which is why the case reaches for a committed write rather than a validator. The domain
+     * is a two-value authorization boundary, so it has to hold for every write path that reaches the
+     * table, including a migration job or an operator statement that never runs application code.
+     *
+     * <p>Assumptions: the authority for the domain is {@code app/cpy/COCOM01Y.cpy}, whose line 26
+     * declares {@code 10 CDEMO-USER-TYPE PIC X(01)} and whose lines 27 and 28 declare the condition
+     * names selecting {@code 'A'} and {@code 'U'}. It is not the record copybook, which declares the
+     * field's width only.
+     */
+    @Test
+    void theDatabaseItselfRefusesAUserTypeOutsideTheTwoValueDomain() {
+        assertThatThrownBy(() -> this.commit.executeWithoutResult(
+                        status -> this.users.saveAndFlush(newUser(ADMIN_USER_ID, OUT_OF_DOMAIN_TYPE))))
+                .as("the CHECK constraint must reject a type outside the COCOM01Y.cpy L26-L28 domain")
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(failure -> assertThat(causeChainText(failure)).contains("user_type"));
+
+        assertThat(this.users.count())
+                .as("a refused write must leave no row behind")
+                .isZero();
+    }
+
+    /**
+     * Both values the reference domain admits are accepted.
+     *
+     * <p>Assumptions: this is the positive companion to the refusal case, and it is required rather
+     * than redundant. A constraint mistakenly written to admit one value only would satisfy the
+     * refusal case while breaking the other half of the domain, so both admitted values are stored
+     * and read back.
+     */
+    @Test
+    void bothReferenceUserTypesAreAccepted() {
+        seedUsers(newUser(ADMIN_USER_ID, ADMIN_TYPE), newUser(orderedUserId(1), USER_TYPE));
+
+        assertThat(this.users.findById(ADMIN_USER_ID))
+                .as("the administrator code from COCOM01Y.cpy line 27 must be storable")
+                .isPresent()
+                .get()
+                .satisfies(stored -> assertThat(stored.getUserType()).isEqualTo(ADMIN_TYPE));
+        assertThat(this.users.findById(orderedUserId(1)))
+                .as("the ordinary-user code from COCOM01Y.cpy line 28 must be storable")
+                .isPresent()
+                .get()
+                .satisfies(stored -> assertThat(stored.getUserType()).isEqualTo(USER_TYPE));
+    }
+
+    /**
+     * The subject column is a native UUID and refuses a duplicate value.
+     *
+     * <p>Assumptions: both halves are asserted because each can hold without the other. The TYPE is
+     * asserted from the catalogue, and the UNIQUENESS by attempting the duplicate the constraint
+     * exists to refuse -- a case that merely stored one subject and read it back would pass
+     * identically against a non-unique column. Uniqueness is what makes the alternate-key lookup
+     * able to return a single value, so a duplicate would resolve one token to conflicting
+     * authorities.
+     */
+    @Test
+    void theSubjectColumnIsUuidTypedAndRefusesADuplicate() {
+        User seeded = newUser(ADMIN_USER_ID, ADMIN_TYPE);
+        seedUsers(seeded);
+
+        assertThat(columnDataType("cognito_sub"))
+                .as("cognito_sub is declared UUID in V1__auth.sql, a native engine type")
+                .isEqualTo("uuid");
+
+        // WHY : Assumptions: the second row deliberately carries a DIFFERENT identifier so that only
+        //       the subject constraint can refuse it. Reusing the seeded identifier would trip the
+        //       primary key instead, and the case would then pass while proving nothing at all about
+        //       the alternate key.
+        assertThatThrownBy(() -> this.commit.executeWithoutResult(status -> this.users.saveAndFlush(
+                        new User(orderedUserId(1), "Second", "Subject", USER_TYPE, seeded.getCognitoSub()))))
+                .as("a duplicate cognito_sub must be refused by the unique constraint")
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(failure -> assertThat(causeChainText(failure)).contains("cognito_sub"));
+
+        assertThat(this.users.findByCognitoSub(seeded.getCognitoSub()))
+                .as("after a refused duplicate the subject must still resolve to the ORIGINAL row")
+                .isPresent()
+                .get()
+                .satisfies(stored ->
+                        assertThat(trimmedUserId(stored)).isEqualTo(ADMIN_USER_ID));
+    }
+
+    /**
+     * A subject with no local row resolves to an empty result rather than to a failure.
+     *
+     * <p>Assumptions: a subject the identity provider has issued need not yet have a row here, so
+     * absence is an ordinary state. Reporting it as an empty result rather than by raising is what a
+     * caller branches on, and no reflective check could distinguish the two, which is why it is
+     * asserted against a live engine.
      */
     @Test
     void anUnknownSubjectYieldsAnEmptyResult() {
-        Optional<User> found = this.users.findByCognitoSub(ABSENT_SUBJECT);
+        seedUsers(newUser(ADMIN_USER_ID, ADMIN_TYPE));
 
-        assertThat(found).isEmpty();
+        Optional<User> resolved = this.users.findByCognitoSub(subjectFor("no-such-subject"));
+
+        assertThat(resolved)
+                .as("an unmapped subject is an ordinary absence, not an error")
+                .isEmpty();
     }
 
     /**
-     * The table refuses a second row carrying a subject another row already holds.
+     * The two name columns are bounded at their declared width and are required.
      *
-     * <p>This is the uniqueness guarantee that makes the member's single-valued return type sound.
-     * The insert names a DIFFERENT primary key, so the only constraint it can violate is the unique
-     * index over the subject column.
+     * <p>Assumptions: the width of twenty is transcribed from {@code SEC-USR-FNAME} at
+     * {@code app/cpy/CSUSR01Y.cpy} line 19 and {@code SEC-USR-LNAME} at line 20, at offsets 8 and 28
+     * of the 80-byte record. They are asserted as VARIABLE width where the key is fixed, because the
+     * trailing blanks in the record are padding for the fixed record length rather than part of a
+     * name, so preserving them would store data the record does not carry.
      */
-    // WHY : Refactoring Rationale: this case first asserted only that SOME exception was raised, which
-    //       was too weak to be evidence. Any failure would have satisfied it -- a mis-seeded row, a
-    //       rejected user type, a closed connection -- so it could have reported a passing result while
-    //       the unique index was absent. It now asserts the TRANSLATED exception type and that the
-    //       refusal names the offending column, so the case can only pass for the reason it claims.
-    // WHY : Alternatives Considered: pinning the persistence provider's own constraint-violation type
-    //       was rejected in favour of Spring's DataIntegrityViolationException. The provider's type is
-    //       an implementation detail reached only through the cause chain, so pinning it would couple
-    //       this case to a translation table that a provider upgrade may rearrange; the Spring type is
-    //       the documented boundary a repository caller sees, so it is both the stabler assertion and
-    //       the one that describes what a caller would actually catch.
-    // WHY : Assumptions: the column name is matched case-insensitively against the WHOLE cause chain
-    //       rather than against the top-level message. The engine's own text names the violated unique
-    //       index, and Spring's wrapper carries that text through the chain rather than reproducing it
-    //       at the top, so matching only the outer message would fail on a correct refusal.
     @Test
-    void aDuplicateSubjectIsRefusedByTheDatabase() {
-        assertThatThrownBy(() -> this.commit.executeWithoutResult(status ->
-                        this.users.save(new User(OTHER_USER_ID, "User", "Two", "U", SEED_SUBJECT))))
-                .isInstanceOf(DataIntegrityViolationException.class)
-                .satisfies(failure -> assertThat(causeChainText(failure)).contains("cognito_sub"));
+    void theNameColumnsAreBoundedAtTwentyAndRequired() {
+        assertThat(columnDataType("first_name"))
+                .as("a name's trailing blanks are record padding, so the column is variable width")
+                .isEqualTo("character varying");
+        assertThat(columnDataType("last_name"))
+                .as("the second name column matches the first")
+                .isEqualTo("character varying");
+        assertThat(columnLength("first_name"))
+                .as("SEC-USR-FNAME is PIC X(20) at CSUSR01Y.cpy line 19")
+                .isEqualTo(20);
+        assertThat(columnLength("last_name"))
+                .as("SEC-USR-LNAME is PIC X(20) at CSUSR01Y.cpy line 20")
+                .isEqualTo(20);
+        assertThat(nullableColumns())
+                .as("no column of the identity record is optional")
+                .isEmpty();
     }
 
     /**
-     * After a refused duplicate, the original row is still the one the subject resolves to.
+     * Trailing blanks in the key are storage padding rather than data.
      *
-     * <p>Assumptions: this case is not a repeat of the resolve case above. It asserts that the
-     * refusal left no partial state behind -- that the subject still resolves, still resolves to ONE
-     * row, and still resolves to the ORIGINAL row rather than to the rejected one. A constraint that
-     * refused the statement but let the row land would satisfy the previous case and fail this one.
+     * <p>Assumptions: this case stores a SIX-character identifier into an eight-character column on
+     * purpose, so that stored width and logical value differ and each can be asserted separately. It
+     * then reads the row back by both the short form and the padded form, because a fixed-width
+     * comparison that ignored the padding in one direction only would break every cursor that
+     * crossed the boundary.
+     */
+    // WHY : Assumptions: the logical cursor value that crosses an API boundary is the TRIMMED one,
+    //       and the baseline right-trims this very field itself rather than this being an invention
+    //       of the migration. app/cbl/COUSR01C.cbl composes its success message with a STRING
+    //       statement spanning lines 255 to 258, whose line 256 is SEC-USR-ID DELIMITED BY SPACE --
+    //       that is, it emits the key up to its first blank. The column is nevertheless kept fixed at
+    //       CHAR(8) because the declared width at app/cpy/CSUSR01Y.cpy line 18 is part of the record
+    //       contract the ETL and the length validation both depend on; trimming is the mapper's
+    //       responsibility at the edge, which is why every comparison in this class goes through one
+    //       trimming helper rather than comparing raw column values.
+    @Test
+    void trailingBlanksInTheKeyAreStoragePaddingRatherThanData() {
+        seedUsers(new User(SHORT_USER_ID, "Admin", "Two", ADMIN_TYPE, subjectFor(SHORT_USER_ID)));
+        String paddedForm = SHORT_USER_ID + "  ";
+
+        assertThat(storedKeyWidth(SHORT_USER_ID))
+                .as("CHAR(8) blank-pads a shorter value to its declared width on storage")
+                .isEqualTo(8);
+        assertThat(this.users.findById(SHORT_USER_ID))
+                .as("the short logical form must resolve the row")
+                .isPresent();
+        assertThat(this.users.findById(paddedForm))
+                .as("the blank-padded form must resolve the SAME row, since padding is not data")
+                .isPresent();
+        assertThat(this.users.findById(SHORT_USER_ID).map(UserRepositoryIT::trimmedUserId))
+                .as("the logical value a caller sees is the trimmed one")
+                .contains(SHORT_USER_ID);
+        assertThat(forwardPageFrom(paddedForm))
+                .as("a padded cursor and its trimmed form must select the same rows")
+                .hasSameSizeAs(forwardPageFrom(SHORT_USER_ID));
+    }
+
+    /**
+     * The keyed operations the file definition grants correspond to all behave against the table.
+     *
+     * <p>Assumptions: these four are exercised together because the reference file definition grants
+     * exactly the matching set. {@code app/csd/CARDDEMO.CSD} line 93 grants {@code ADD(YES)} and line
+     * 94 grants {@code BROWSE(YES) DELETE(YES) READ(YES) UPDATE(YES)}, a five-way correspondence to
+     * the five reference programs' verbs; browse is covered by the paging cases above, and the
+     * remaining four are covered here.
      */
     @Test
-    void aRefusedDuplicateLeavesTheOriginalRowResolvable() {
-        try {
-            this.commit.executeWithoutResult(status ->
-                    this.users.save(new User(OTHER_USER_ID, "User", "Two", "U", SEED_SUBJECT)));
-        } catch (RuntimeException expected) {
-            // The refusal itself is asserted by aDuplicateSubjectIsRefusedByTheDatabase; this case is
-            // about the state it leaves behind, so the failure is swallowed here on purpose.
+    void theKeyedOperationsTheFileDefinitionGrantsCorrespondTo() {
+        User stored = newUser(ADMIN_USER_ID, ADMIN_TYPE);
+        seedUsers(stored);
+
+        assertThat(this.users.findById(ADMIN_USER_ID))
+                .as("the keyed read of COUSR02C.cbl lines 322 to 331 must resolve the row")
+                .isPresent();
+        assertThat(this.users.existsById(ADMIN_USER_ID))
+                .as("an existence probe on a stored key must report true")
+                .isTrue();
+        assertThat(this.users.existsById(orderedUserId(1)))
+                .as("an existence probe on an absent key must report false, not raise")
+                .isFalse();
+
+        this.commit.executeWithoutResult(status -> {
+            User modifiable = this.users.findById(ADMIN_USER_ID).orElseThrow();
+            modifiable.setLastName("Renamed");
+            this.users.saveAndFlush(modifiable);
+        });
+        assertThat(this.users.findById(ADMIN_USER_ID))
+                .as("the update of COUSR02C.cbl lines 360 to 366 must persist")
+                .isPresent()
+                .get()
+                .satisfies(reread -> assertThat(reread.getLastName()).isEqualTo("Renamed"));
+
+        this.commit.executeWithoutResult(status -> this.users.deleteById(ADMIN_USER_ID));
+        assertThat(this.users.existsById(ADMIN_USER_ID))
+                .as("the removal of COUSR03C.cbl lines 307 to 311 must leave no row")
+                .isFalse();
+    }
+
+    /**
+     * No column of the identity table names a credential field.
+     *
+     * <p>Purpose: this is the mechanical guard on the one point in the migration where functional
+     * parity is deliberately DECLINED, registered as divergence D-4 in
+     * {@code docs/architecture/cobol-to-service-traceability.md}. An absence cannot be demonstrated
+     * by reading a row, only by asking the catalogue which columns exist and confirming that none of
+     * them is the one in question, which is why this case queries
+     * {@code information_schema.columns} directly.
+     *
+     * <p>Refactoring Rationale: what was wrong with the reference approach is specific and is visible
+     * in the immutable source in several places. {@code app/cpy/CSUSR01Y.cpy} line 21 declares an
+     * eight-character credential field held in clear at zero-based offset 48 of the 80-byte record;
+     * {@code app/cbl/COSGN00C.cbl} line 223 compares it directly during sign-on;
+     * {@code app/cbl/COUSR01C.cbl} line 157 writes a typed value straight into it; and
+     * {@code app/cbl/COUSR02C.cbl} line 169 moves the stored value back out to the screen, so the
+     * stored value was displayed to an administrator, while its lines 227 to 230 both compare and
+     * rewrite it. {@code app/csd/CARDDEMO.CSD} compounds the exposure by declaring
+     * {@code CONFDATA(NO)} on all eighteen transaction stanzas, with zero declaring the opposite, so
+     * confidential-data suppression is explicitly switched off rather than merely unset. A managed
+     * identity pool now performs that comparison and the table retains only its subject reference.
+     * The baseline stores and compares the value; the Java encodes a schema in which there is no
+     * stored value to compare; the divergence is documented.
+     *
+     * <p>Assumptions: this asserts on column NAMES and never on a value, and the exact column set is
+     * asserted alongside the name pattern so the guard is airtight rather than pattern-dependent. A
+     * pattern alone could be defeated by a column named for the same concept in different words,
+     * while an exact set cannot admit any new column at all without failing here.
+     */
+    @Test
+    void noColumnOfTheIdentityTableNamesACredentialField() {
+        List<String> columnNames = columnNamesOfIdentityTable();
+
+        assertThat(columnNames)
+                .as("the migrated identity record is exactly these five columns and nothing more")
+                .containsExactlyInAnyOrder(
+                        "user_id", "first_name", "last_name", "user_type", "cognito_sub");
+
+        // WHY : Assumptions: the comparison is lower-cased through a fixed locale rather than the
+        //       default one, because a default locale can map an upper-case I outside ASCII and would
+        //       make this guard's outcome depend on the host it runs on.
+        for (String columnName : columnNames) {
+            String normalised = columnName.toLowerCase(Locale.ROOT);
+            assertThat(CREDENTIAL_NAME_FRAGMENTS)
+                    .as("no column may name a credential field; divergence D-4 forbids one: %s",
+                            columnName)
+                    .noneSatisfy(fragment -> assertThat(normalised).contains(fragment));
         }
-
-        Optional<User> found = this.users.findByCognitoSub(SEED_SUBJECT);
-
-        assertThat(found).isPresent();
-        assertThat(found.get().getUserId()).isEqualTo(SEED_USER_ID);
-        assertThat(this.users.count()).isEqualTo(1L);
     }
 
     /**
-     * Two rows carrying two different subjects each resolve to their own row.
+     * The identity table carries no version column and the entity declares no version property.
      *
-     * <p>Assumptions: this is what shows the lookup discriminates rather than returning whatever row
-     * it finds. With one row in the table, a member that ignored its argument entirely would pass
-     * every case above except the missing-subject one; with two rows, it cannot.
+     * <p>Purpose: both halves are asserted because a version property could be introduced on either
+     * side. The catalogue half proves the migration created no such column; the mapping half proves
+     * the entity declares no property annotated as a version, which under {@code ddl-auto: validate}
+     * would otherwise fail against the table rather than being silently ignored.
+     *
+     * <p>Refactoring Rationale: this DIVERGES DELIBERATELY from the {@code accounts},
+     * {@code customers} and {@code cards} tables of the account and card bounded contexts, which DO
+     * each carry a version column, and the difference is stated here so that a reader who knows those
+     * schemas does not read this absence as an omission. The reason is that the reference programs
+     * for this record hold it inside ONE CICS task and never across a pseudo-conversational gap:
+     * {@code app/cbl/COUSR02C.cbl} reads with {@code EXEC CICS READ} at lines 322 to 331, carrying
+     * both {@code RIDFLD (SEC-USR-ID)} at line 326 and the {@code UPDATE} option at line 328, and its
+     * paired {@code EXEC CICS REWRITE} at lines 360 to 366 carries neither a record identifier nor a
+     * key length because it rewrites the record that read already holds;
+     * {@code app/cbl/COUSR03C.cbl} does the same, reading at lines 269 to 278 with
+     * {@code RIDFLD} at line 273 and {@code UPDATE} at line 275, and deleting at lines 307 to 311
+     * with exactly three operands and so no record identifier. {@code app/cbl/COSGN00C.cbl} is the
+     * read-only contrast, reading at lines 211 to 219 with {@code RIDFLD} at line 215 and NO
+     * {@code UPDATE} option at all. {@code app/csd/CARDDEMO.CSD} corroborates from the file side with
+     * {@code RLSACCESS(NO)} at line 89 and {@code UPDATEMODEL(LOCKING)} at line 93. Each lock is
+     * taken and released inside one task, so there is no cross-turn before-image to defend.
+     *
+     * <p>Assumptions: the contrast that makes this a decision rather than an oversight is
+     * {@code app/cbl/COACTUPC.cbl}, which DOES hand-roll a before-image check across that gap. Its
+     * line 168 declares {@code 05  WS-DATACHANGED-FLAG PIC X(1).}; its line 669 opens the
+     * {@code 05 ACUP-OLD-DETAILS.} snapshot group whose members pair a display field with a numeric
+     * {@code REDEFINES}, the account identifier at lines 671 to 673 and
+     * {@code ACUP-OLD-CURR-BAL PIC X(12).} at line 675 redefined as {@code PIC S9(10)V99} at lines
+     * 676 to 677; and its lines 521 to 522 name the condition whose value IS the operator message.
+     * None of the five reference auth programs contains any equivalent construct, so introducing a
+     * version column here would add a refusal outcome the baseline cannot produce.
+     */
+    // WHY : Assumptions: the four-arm block at app/cbl/COUSR02C.cbl lines 219 to 234, and the message
+    //       at its lines 239 to 240, are deliberately NOT modelled by this case and are not optimistic
+    //       locking. That block compares submitted screen input against the record read moments
+    //       earlier at line 217 under the line 328 lock, inside a single task, so it detects whether
+    //       the OPERATOR changed anything; its message asks the operator to make a change, which is
+    //       the semantic opposite of reporting a conflicting write. Treating it as a concurrency check
+    //       would give this boundary an outcome the source has no way to reach.
+    @Test
+    void theIdentityTableCarriesNoVersionColumnAndTheEntityDeclaresNoVersionProperty() {
+        assertThat(columnNamesOfIdentityTable())
+                .as("a version column would have to be named, and none of the five columns is one")
+                .noneMatch(columnName -> columnName.toLowerCase(Locale.ROOT).contains("version"));
+
+        assertThat(Arrays.stream(User.class.getDeclaredFields())
+                        .filter(field -> field.isAnnotationPresent(Version.class))
+                        .toList())
+                .as("the entity must declare no version property, unlike accounts, customers and cards")
+                .isEmpty();
+    }
+
+    /**
+     * The migration created one table and granted nothing of its own.
+     *
+     * <p>Purpose: {@code V1__auth.sql} is a single executable statement, and this case asserts that
+     * shape from the engine rather than from the file's wording. Schema, role and grant creation
+     * belong to the bootstrap migration {@code data-migration/sql/V0__schemas_and_roles.sql}, so a
+     * privilege appearing here would mean this service's migration had taken on an ownership concern
+     * that is deliberately held elsewhere.
+     *
+     * <p>Assumptions: the only relation the migration is permitted to have added is the identity
+     * table itself. The migration tool's own history table also lives in this schema, and it is
+     * excluded by name rather than by count, because excluding it by count would let a genuinely
+     * unexpected third relation pass unnoticed.
      */
     @Test
-    void distinctSubjectsResolveToDistinctRows() {
-        UUID otherSubject = UUID.fromString("77777777-2222-3333-4444-555555555555");
-        this.commit.executeWithoutResult(status ->
-                this.users.save(new User(OTHER_USER_ID, "User", "Two", "U", otherSubject)));
-
-        assertThat(this.users.findByCognitoSub(SEED_SUBJECT))
-                .get()
-                .extracting(User::getUserId)
-                .isEqualTo(SEED_USER_ID);
-        assertThat(this.users.findByCognitoSub(otherSubject))
-                .get()
-                .extracting(User::getUserId)
-                .isEqualTo(OTHER_USER_ID);
+    void theMigrationCreatedOneTableAndGrantedNothingOfItsOwn() {
+        assertThat(tablesInIdentitySchema())
+                .as("the migration creates exactly one table beside the tool's own history table")
+                .containsExactly("users");
+        assertThat(nativeStringColumn(
+                        "select table_name from information_schema.views where table_schema = ?1",
+                        IDENTITY_SCHEMA))
+                .as("V1__auth.sql declares no view")
+                .isEmpty();
+        assertThat(nativeStringColumn(
+                        "select sequence_name from information_schema.sequences"
+                                + " where sequence_schema = ?1",
+                        IDENTITY_SCHEMA))
+                .as("V1__auth.sql declares no sequence")
+                .isEmpty();
+        assertThat(nativeStringColumn(
+                        "select trigger_name from information_schema.triggers"
+                                + " where trigger_schema = ?1",
+                        IDENTITY_SCHEMA))
+                .as("V1__auth.sql declares no trigger")
+                .isEmpty();
+        assertThat(nonOwnerGranteesOnIdentityTable())
+                .as("V1__auth.sql grants no privilege to any role other than the table's owner")
+                .isEmpty();
     }
 
     /**
-     * Flattens a throwable and every cause beneath it into one lower-cased string.
+     * Builds the fixture identifier for a given ordinal position in the ordered population.
      *
-     * <p>Assumptions: the walk is bounded and it tolerates a self-referencing cause, because a
-     * diagnostic helper that looped would turn a failed assertion into a hung build. The bound is
-     * generous relative to any real chain, so reaching it means the chain is malformed rather than
-     * merely deep.
-     *
-     * @param failure the throwable to flatten, of type {@code Throwable}, never {@code null}
-     * @return the concatenated messages of the throwable and its causes, lower-cased so a caller can
-     *     match a column name without depending on the engine's capitalisation, never {@code null}
+     * @param ordinal the one-based position in the ordered fixture population, of type {@code int};
+     *     values from 1 to 9999 produce an identifier of the declared key width
+     * @return the eight-character identifier for that position, of type {@code String}, zero-padded
+     *     so that lexical order matches numeric order, never {@code null}
      */
+    // WHY : Assumptions: the ordinal is zero-padded to four digits rather than concatenated plainly,
+    //       because the browse cases assert the IDENTITY of rows at page boundaries and a keyset
+    //       predicate orders lexically. Without padding the tenth identifier would sort between the
+    //       first and the second, and a page boundary assertion would then be checking an order the
+    //       fixture did not actually have.
+    private static String orderedUserId(int ordinal) {
+        return String.format("%s%04d", USER_ID_PREFIX, ordinal);
+    }
+
+    /**
+     * Builds the inclusive range of fixture identifiers between two ordinal positions.
+     *
+     * @param fromOrdinal the first one-based position to include, of type {@code int}
+     * @param toOrdinal the last one-based position to include, of type {@code int}; a value below
+     *     {@code fromOrdinal} yields an empty list rather than a failure
+     * @return the identifiers for that range in ascending order, of type {@code List} of
+     *     {@code String}, never {@code null}
+     */
+    private static List<String> orderedUserIds(int fromOrdinal, int toOrdinal) {
+        List<String> identifiers = new ArrayList<>();
+        for (int ordinal = fromOrdinal; ordinal <= toOrdinal; ordinal++) {
+            identifiers.add(orderedUserId(ordinal));
+        }
+        return identifiers;
+    }
+
+    /**
+     * Derives the subject reference a fixture row carries from its own identifier.
+     *
+     * @param seed the text to derive the reference from, of type {@code String}, normally a fixture
+     *     identifier
+     * @return the reference derived from that text, of type {@code UUID}, never {@code null}
+     */
+    // WHY : Alternatives Considered: a randomly generated reference per row was rejected in favour of
+    //       deriving one from the identifier. Two properties are needed at once -- distinct across
+    //       rows, so the unique constraint is never tripped accidentally, and REPRODUCIBLE, so a
+    //       failure reports the same value on a re-run and can be traced to the row that produced it.
+    //       Derivation gives both; a random value gives only the first, and a fixed literal per row
+    //       would give only the second while making the duplicate case's fixture indistinguishable
+    //       from an ordinary one.
+    private static UUID subjectFor(String seed) {
+        return UUID.nameUUIDFromBytes(seed.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * Builds an unsaved fixture row with names and a subject reference derived from its identifier.
+     *
+     * @param userId the eight-character key for the row, of type {@code String}
+     * @param userType the one-character type code for the row, of type {@code String}, normally one
+     *     of the two the reference domain admits
+     * @return the unsaved row, of type {@code User}, never {@code null}
+     */
+    private static User newUser(String userId, String userType) {
+        return new User(userId, "Given", "Family", userType, subjectFor(userId));
+    }
+
+    /**
+     * Commits the given fixture rows so that a subsequent read sees them.
+     *
+     * @param rows the rows to store, of type {@code User} varargs; an empty invocation commits an
+     *     empty transaction rather than failing
+     */
+    private void seedUsers(User... rows) {
+        this.commit.executeWithoutResult(status -> this.users.saveAll(Arrays.asList(rows)));
+    }
+
+    /**
+     * Commits an ascending run of fixture rows starting from the first ordinal position.
+     *
+     * @param count the number of rows to store, of type {@code int}; the rows carry the identifiers
+     *     that {@link #orderedUserId(int)} builds for positions 1 through this value
+     */
+    // WHY : Assumptions: the type code alternates between the two values the reference domain admits
+    //       rather than being constant across the run. A population of one type only would let a
+    //       projection that dropped or defaulted the type still satisfy every ordering assertion,
+    //       because ordering is by key alone and the type would never be observed to differ.
+    private void seedOrderedUsers(int count) {
+        List<User> rows = new ArrayList<>();
+        for (int ordinal = 1; ordinal <= count; ordinal++) {
+            rows.add(newUser(orderedUserId(ordinal), ordinal % 2 == 0 ? USER_TYPE : ADMIN_TYPE));
+        }
+        this.commit.executeWithoutResult(status -> this.users.saveAll(rows));
+    }
+
+    /**
+     * Reads the page of rows that follows a stated cursor, with the probe row included.
+     *
+     * @param cursor the key the page begins strictly after, of type {@code String}, or the
+     *     repository's opening sentinel to begin at the lowest stored key
+     * @return the rows the forward query produced, in ascending key order, of type {@code List} of
+     *     {@code User}, at most one longer than a page, never {@code null}
+     */
+    private List<User> forwardPageFrom(String cursor) {
+        return this.users.findByUserIdGreaterThanOrderByUserIdAsc(cursor, Limit.of(FETCH_LIMIT));
+    }
+
+    /**
+     * Reads the page of rows that precedes a stated cursor, with the probe row included.
+     *
+     * @param cursor the key the page ends strictly before, of type {@code String}
+     * @return the rows the backward query produced, in DESCENDING key order exactly as the query
+     *     returned them, of type {@code List} of {@code User}, at most one longer than a page, never
+     *     {@code null}
+     */
+    // WHY : Assumptions: this helper deliberately does NOT reverse the result. Reversing into display
+    //       order is the service layer's work, so a helper that did it here would make every backward
+    //       assertion below describe the service's output while reaching the repository, and the
+    //       ordering the query itself produces would then go unasserted entirely.
+    private List<User> backwardPageBefore(String cursor) {
+        return this.users.findByUserIdLessThanOrderByUserIdDesc(cursor, Limit.of(FETCH_LIMIT));
+    }
+
+    /**
+     * Extracts the logical, trimmed key of a stored row.
+     *
+     * @param row the row to read the key from, of type {@code User}
+     * @return the key with storage padding removed, of type {@code String}, never {@code null}
+     */
+    // WHY : Assumptions: trimming happens here rather than at each call site because the column is
+    //       CHAR(8) and the driver may return the value blank-padded to its declared width. The
+    //       baseline right-trims this same field itself, emitting it DELIMITED BY SPACE at
+    //       app/cbl/COUSR01C.cbl line 256, so the trimmed form is the logical value in both systems
+    //       and one helper is what keeps every comparison in this class comparing logical values.
+    private static String trimmedUserId(User row) {
+        return row.getUserId().strip();
+    }
+
+    /**
+     * Extracts the logical, trimmed keys of a list of stored rows, preserving their order.
+     *
+     * @param rows the rows to read, of type {@code List} of {@code User}, in the order a query
+     *     returned them
+     * @return their keys in the same order, of type {@code List} of {@code String}, never
+     *     {@code null}
+     */
+    private static List<String> userIdsOf(List<User> rows) {
+        return rows.stream().map(UserRepositoryIT::trimmedUserId).toList();
+    }
+
+    /**
+     * Extracts the key of the final row a query returned.
+     *
+     * @param rows the rows a query returned, of type {@code List} of {@code User}, which must not be
+     *     empty
+     * @return the trimmed key of the last element, of type {@code String}, never {@code null}
+     * @throws IndexOutOfBoundsException if the list is empty, which for the cases calling this would
+     *     mean an earlier size assertion should already have failed
+     */
+    // WHY : Assumptions: "last returned" is deliberately positional rather than computed, because
+    //       that is precisely the property the short-page cases exist to check. Deriving the value
+    //       from the fixture instead of from the result would restate the fixture and could not
+    //       detect a cursor that had been carried over from a previous page.
+    private static String lastReturnedKey(List<User> rows) {
+        return trimmedUserId(rows.get(rows.size() - 1));
+    }
+
+    /**
+     * Reads one column's declared data type from the engine's catalogue.
+     *
+     * @param columnName the column to describe, of type {@code String}
+     * @return the catalogue's name for that column's type, of type {@code String}, never
+     *     {@code null}
+     * @throws jakarta.persistence.NoResultException if the schema holds no such column, which means
+     *     the migration did not create what this class assumes it did
+     */
+    private String columnDataType(String columnName) {
+        return String.valueOf(singleNativeResult(
+                "select data_type from information_schema.columns"
+                        + " where table_schema = ?1 and table_name = ?2 and column_name = ?3",
+                IDENTITY_SCHEMA,
+                IDENTITY_TABLE,
+                columnName));
+    }
+
+    /**
+     * Reads one character column's declared maximum width from the engine's catalogue.
+     *
+     * @param columnName the column to measure, of type {@code String}
+     * @return the declared maximum number of characters, of type {@code int}
+     * @throws jakarta.persistence.NoResultException if the schema holds no such column
+     */
+    private int columnLength(String columnName) {
+        return ((Number) singleNativeResult(
+                        "select character_maximum_length from information_schema.columns"
+                                + " where table_schema = ?1 and table_name = ?2 and column_name = ?3",
+                        IDENTITY_SCHEMA,
+                        IDENTITY_TABLE,
+                        columnName))
+                .intValue();
+    }
+
+    /**
+     * Reads the names of every column the identity table declares.
+     *
+     * @return the column names in the order the table declares them, of type {@code List} of
+     *     {@code String}, never {@code null}
+     */
+    private List<String> columnNamesOfIdentityTable() {
+        return nativeStringColumn(
+                "select column_name from information_schema.columns"
+                        + " where table_schema = ?1 and table_name = ?2 order by ordinal_position",
+                IDENTITY_SCHEMA,
+                IDENTITY_TABLE);
+    }
+
+    /**
+     * Reads the names of the columns that make up the identity table's primary key.
+     *
+     * @return the key's column names in key order, of type {@code List} of {@code String}, never
+     *     {@code null}
+     */
+    // WHY : Assumptions: the key is read through its CONSTRAINT rather than by looking for an index
+    //       of a particular name, because the engine derives the index name and a test coupled to
+    //       that derivation would break on a rename that changed no behaviour.
+    private List<String> primaryKeyColumns() {
+        return nativeStringColumn(
+                "select k.column_name from information_schema.table_constraints c"
+                        + " join information_schema.key_column_usage k"
+                        + " on k.constraint_name = c.constraint_name"
+                        + " and k.table_schema = c.table_schema"
+                        + " where c.table_schema = ?1 and c.table_name = ?2"
+                        + " and c.constraint_type = 'PRIMARY KEY' order by k.ordinal_position",
+                IDENTITY_SCHEMA,
+                IDENTITY_TABLE);
+    }
+
+    /**
+     * Reads the names of any identity-table columns that permit an absent value.
+     *
+     * @return the names of the nullable columns, of type {@code List} of {@code String}, empty when
+     *     every column is required, never {@code null}
+     */
+    private List<String> nullableColumns() {
+        return nativeStringColumn(
+                "select column_name from information_schema.columns"
+                        + " where table_schema = ?1 and table_name = ?2 and is_nullable = 'YES'",
+                IDENTITY_SCHEMA,
+                IDENTITY_TABLE);
+    }
+
+    /**
+     * Measures the number of stored bytes the key of one row occupies.
+     *
+     * @param logicalKey the trimmed key of the row to measure, of type {@code String}
+     * @return the stored width of that row's key in bytes, of type {@code int}
+     * @throws jakarta.persistence.NoResultException if no row carries that key
+     */
+    // WHY : Alternatives Considered: the obvious character-length function was tried first and
+    //       rejected on measurement, not on preference. For a fixed-width character type PostgreSQL
+    //       treats trailing blanks as semantically insignificant, so that function returns the
+    //       TRIMMED length -- six for a six-character value in an eight-character column -- and
+    //       casting the column to a variable-width type strips the padding in the same way. The octet
+    //       measure is the one that reports the padded storage, so it is the only one of the three
+    //       that can demonstrate padding at all.
+    // WHY : Assumptions: octets equal characters here because every fixture identifier in this class
+    //       is ASCII. That holds by construction rather than by luck: the reference key is PIC X(08),
+    //       a fixed-width character field, and the fixtures are built from an ASCII prefix and digits.
+    private int storedKeyWidth(String logicalKey) {
+        return ((Number) singleNativeResult(
+                        "select octet_length(user_id) from auth.users where user_id = ?1", logicalKey))
+                .intValue();
+    }
+
+    /**
+     * Reads the names of the tables the identity schema holds, excluding the migration history.
+     *
+     * @return the table names in alphabetical order, of type {@code List} of {@code String}, never
+     *     {@code null}
+     */
+    // WHY : Assumptions: the migration tool's own history table is excluded by NAME rather than by
+    //       subtracting one from a count. A count-based exclusion would absorb any unexpected third
+    //       relation and let it pass, which is the opposite of what this read is for.
+    private List<String> tablesInIdentitySchema() {
+        return nativeStringColumn(
+                "select table_name from information_schema.tables"
+                        + " where table_schema = ?1 and table_name not like 'flyway%'"
+                        + " order by table_name",
+                IDENTITY_SCHEMA);
+    }
+
+    /**
+     * Reads any role holding a privilege on the identity table other than the table's own owner.
+     *
+     * @return the names of those roles, of type {@code List} of {@code String}, empty when the owner
+     *     is the only grantee, never {@code null}
+     */
+    // WHY : Assumptions: the owner is EXCLUDED rather than asserted absent, because an owner appears
+    //       as a grantee of its own object by construction and is not evidence of a grant statement.
+    //       The owner is read from the catalogue instead of being named as a literal, so this stays
+    //       correct whichever role the harness arranged for the migration to run as.
+    private List<String> nonOwnerGranteesOnIdentityTable() {
+        return nativeStringColumn(
+                "select distinct g.grantee from information_schema.role_table_grants g"
+                        + " where g.table_schema = ?1 and g.table_name = ?2"
+                        + " and g.grantee <> (select t.tableowner from pg_catalog.pg_tables t"
+                        + " where t.schemaname = ?1 and t.tablename = ?2)",
+                IDENTITY_SCHEMA,
+                IDENTITY_TABLE);
+    }
+
+    /**
+     * Runs a catalogue query expected to produce exactly one row of one column.
+     *
+     * @param sql the query to run, of type {@code String}, using positional parameters
+     * @param parameters the values to bind in positional order, of type {@code Object} varargs
+     * @return the single value that row's column held, in whatever type the driver produced for it,
+     *     of type {@code Object}, or {@code null} when the column held no value
+     * @throws jakarta.persistence.NoResultException if the query matched no row, which for a
+     *     catalogue lookup means the object being described does not exist
+     */
+    // WHY : Assumptions: the value is returned as-is rather than coerced to a string by this helper,
+    //       so that a caller expecting a number can cast and a caller expecting text can convert. A
+    //       helper that coerced here would turn an absent numeric column into the text "null" and let
+    //       a width assertion pass against a column that declares no width.
+    private Object singleNativeResult(String sql, Object... parameters) {
+        return bind(sql, parameters).getSingleResult();
+    }
+
+    /**
+     * Runs a catalogue query returning one text column and collects its values.
+     *
+     * @param sql the query to run, of type {@code String}, using positional parameters and ordered by
+     *     the caller when order is asserted
+     * @param parameters the values to bind in positional order, of type {@code Object} varargs
+     * @return the column's values in the order the query produced them, of type {@code List} of
+     *     {@code String}, never {@code null}
+     */
+    // WHY : Assumptions: rows are converted through the platform's string conversion rather than cast
+    //       to a string type, because a catalogue name arrives as a character type whose exact Java
+    //       class is the driver's choice; a cast would couple this helper to that choice for no gain.
+    private List<String> nativeStringColumn(String sql, Object... parameters) {
+        List<?> rows = bind(sql, parameters).getResultList();
+        return rows.stream().map(String::valueOf).toList();
+    }
+
+    /**
+     * Prepares a native query with its positional parameters bound.
+     *
+     * @param sql the query to prepare, of type {@code String}
+     * @param parameters the values to bind in positional order, of type {@code Object} varargs
+     * @return the prepared query, of type {@code Query}, never {@code null}
+     */
+    // WHY : Assumptions: every catalogue read binds its schema, table and column as PARAMETERS rather
+    //       than assembling them into the statement text. The values here are all constants of this
+    //       class, so the motive is not untrusted input: binding keeps one statement shape for the
+    //       engine to parse and, more usefully here, makes a mistyped name fail as an empty result
+    //       from a well-formed query rather than as a syntax error that hides which name was wrong.
+    private Query bind(String sql, Object... parameters) {
+        Query query = this.entityManager.createNativeQuery(sql);
+        for (int index = 0; index < parameters.length; index++) {
+            query.setParameter(index + 1, parameters[index]);
+        }
+        return query;
+    }
+
+    /**
+     * Flattens a failure and its causes into one lower-cased string for matching.
+     *
+     * @param failure the throwable to walk, of type {@code Throwable}
+     * @return the concatenated types and messages of the throwable and its causes, lower-cased so a
+     *     caller can match a column name without depending on the engine's capitalisation, of type
+     *     {@code String}, never {@code null}
+     */
+    // WHY : Assumptions: the refusal cases match on the CONSTRAINT'S COLUMN NAME found anywhere in
+    //       the chain rather than on the top-level message, because the translation layer's own
+    //       message names the operation while the engine's underlying message names the constraint.
+    //       Asserting only the exception type would let a write refused for an unrelated reason -- a
+    //       width overflow, say -- satisfy a case written for a domain or uniqueness refusal.
     private static String causeChainText(Throwable failure) {
         StringBuilder text = new StringBuilder();
         Throwable current = failure;
@@ -315,20 +1340,22 @@ class UserRepositoryIT {
     }
 
     /**
-     * The minimal Spring Boot configuration this suite runs against.
+     * The minimal Spring Boot configuration these cases run against.
      *
-     * <p>Assumptions: this configuration declares no component scan, and that omission is the point
-     * of it. The module's own application class scans this bounded context and registers components
-     * that read deployment properties -- an explicit token decoder among them -- whereas the
-     * container's coordinates arrive here as a connection-details bean. Naming the two persistence
-     * packages explicitly leaves the framework's own auto-configuration to build the pool from that
-     * bean, and keeps a persistence assertion from failing for a security-configuration reason.
+     * <p>Assumptions: this configuration declares no component scan, and that omission is the whole
+     * point of it. The module's own application class scans this bounded context and registers
+     * components that read deployment properties, an explicit token decoder among them, and that
+     * decoder contacts its issuer while it is built; the test profile deliberately points the issuer
+     * at an unreachable reserved name, so a context that registered it could not start and a
+     * persistence assertion would fail for a security-configuration reason. Naming the two
+     * persistence packages explicitly leaves the framework to build the pool from the container's
+     * connection-details bean and nothing else.
      *
-     * <p>Trade-offs: declaring it nested rather than as a file of its own keeps the package charter's
-     * closed file set true, at the cost of not being reusable by a future sibling integration test.
-     * That cost is accepted for the reason the sibling context's charter gives for the same choice:
-     * two tests reaching one schema through two differently configured contexts could disagree about
-     * what they reached.
+     * <p>Trade-offs: declaring this nested rather than as a file of its own keeps the package
+     * charter's closed file set true, at the cost of not being reusable by a future sibling
+     * integration test. That cost is accepted for the reason the sibling contexts give for the same
+     * choice: two tests reaching one schema through two differently configured contexts could
+     * disagree about what they reached, and the disagreement would surface as whichever ran second.
      */
     @SpringBootConfiguration
     @EnableAutoConfiguration

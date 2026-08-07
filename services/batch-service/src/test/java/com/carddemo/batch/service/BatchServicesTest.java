@@ -32,6 +32,7 @@ import java.util.Optional;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.services.s3.S3Client;
 
 /**
  * Proves the four batch business services behave as the reference paragraphs they transcribe.
@@ -230,8 +231,17 @@ class BatchServicesTest {
         /** The injected business date. */
         private final BusinessDate businessDate = new BusinessDate("2022-07-18");
 
-        /** The service under test. */
-        private final DatasetGenerationService service = new DatasetGenerationService();
+        /**
+         * The service under test.
+         *
+         * <p>Assumptions: the object-store client is a double and the bucket name is a placeholder,
+         * because every case in this nested class exercises a decision that performs no input or output:
+         * the successor rule and the retention rule both take the existing generations as an argument.
+         * Supplying a double rather than an emulator keeps these cases as fast unit tests, and the
+         * listing path that does reach the object store is covered separately against an emulator.</p>
+         */
+        private final DatasetGenerationService service =
+                new DatasetGenerationService(mock(S3Client.class), "carddemo-datasets-test");
 
         /** An empty family yields the minimum generation number. */
         @Test

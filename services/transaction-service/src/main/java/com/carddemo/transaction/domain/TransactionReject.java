@@ -157,11 +157,16 @@ import org.hibernate.type.SqlTypes;
  * {@code ddl-auto: validate} instead, so a test against a migrated database is where a width or
  * type disagreement surfaces.
  *
- * <p>Assumptions: none of the three COPYBOOK-DERIVED columns carries a not-null constraint in that
- * migration, so no {@code nullable} attribute appears on any of their mappings below. The fourth
- * column is the generated occurrence sequence, which is not null because it is the primary key, and
- * the mapping expresses that by annotating it {@code @Id} rather than by restating nullability. The
+ * <p>Assumptions: each of the three COPYBOOK-DERIVED columns carries a not-null constraint in that
+ * migration, so every one of their mappings below states {@code nullable = false}. The fourth column
+ * is the generated occurrence sequence, which is not null because it is the primary key, and the
+ * mapping expresses that by annotating it {@code @Id} rather than by restating nullability. The
  * mapping states what the migration states and nothing more.
+ *
+ * <p>Refactoring Rationale: an earlier revision of this paragraph recorded the opposite, because the
+ * three columns were once admitted as nullable and the mappings carried no such attribute. The
+ * rationale for tightening them is set out beside the record-image member below, and this paragraph is
+ * corrected here so that the type's own description cannot be read as licence to loosen them again.
  *
  * <h2>No version attribute, and the absence is recorded rather than merely left</h2>
  *
