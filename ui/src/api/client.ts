@@ -1,7 +1,8 @@
 import axios from 'axios';
-import type { AxiosInstance, InternalAxiosRequestConfig } from 'axios';
+import type { AxiosInstance, AxiosResponse, InternalAxiosRequestConfig } from 'axios';
 
 import { runtimeApiBaseUrl } from './runtimeConfig';
+import { recordServerDate } from './serverClock';
 
 const ACCESS_TOKEN_STORAGE_KEY = 'carddemo.access-token';
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -177,6 +178,43 @@ function applyRequestHeaders(config: InternalAxiosRequestConfig): InternalAxiosR
 }
 
 /**
+ * Anchors the server clock from a successful response and returns it unchanged.
+ *
+ * Assumptions: the response is returned as-is, so this interceptor is observational only. A response
+ * interceptor that altered its input would make every caller's parsing depend on this module.
+ * @param {AxiosResponse} response - Response whose `Date` header anchors the clock.
+ * @returns {AxiosResponse} The same response, unmodified.
+ */
+function anchorClockFromResponse(response: AxiosResponse): AxiosResponse {
+  recordServerDate(response.headers['date'] as string | undefined);
+  return response;
+}
+
+/**
+ * Anchors the server clock from a failed request and re-throws the original failure.
+ *
+ * WHY : Trade-offs: an ERROR response still came from the server and still carries its `Date`, so it
+ *       is used as an anchor rather than discarded. Skipping it would drop a good anchor precisely
+ *       when a session is having trouble and making the most requests.
+ * @param {unknown} failure - Whatever Axios rejected with; not necessarily an `Error`.
+ * @returns {never} Never returns normally.
+ * @throws {unknown} The original failure, unchanged, so no caller's error handling is altered.
+ */
+function anchorClockFromFailure(failure: unknown): never {
+  if (axios.isAxiosError(failure) && failure.response !== undefined) {
+    recordServerDate(failure.response.headers['date'] as string | undefined);
+  }
+  // Alternatives Considered: `Promise.reject(failure)`, and an `async` function that throws. The
+  //       first is refused by prefer-promise-reject-errors, because Axios types its reason `unknown`
+  //       and the rule will not accept a rejection whose reason is not known to be an `Error`; the
+  //       second is refused by require-await, because it would contain no `await`. A SYNCHRONOUS
+  //       throw satisfies both without an exemption for either: Axios invokes this handler inside its
+  //       own promise chain, so a throw here becomes a rejected promise carrying this exact reason --
+  //       identical observable behaviour to the rejection that was written first.
+  throw failure;
+}
+
+/**
  * Returns the singleton API client after validating build-time configuration.
  * @returns {AxiosInstance} Configured Axios client.
  * @throws {Error} If the endpoint, timeout or correlation header is invalid.
@@ -189,6 +227,15 @@ export function getApiClient(): AxiosInstance {
       headers: { Accept: 'application/json' },
     });
     client.interceptors.request.use(applyRequestHeaders);
+    // WHY : Assumptions: a RESPONSE interceptor rather than a per-call site, so the server clock is
+    //       re-anchored by every operation without any caller knowing it exists. The header band
+    //       displays a paint-time instant, and re-anchoring on each response keeps the elapsed term
+    //       small, which is what bounds the accumulated error of a long-lived tab.
+    //       Trade-offs: the error path re-anchors too. An error response is still a response from the
+    //       server and still carries a `Date`, so skipping it would discard a good anchor precisely
+    //       when a session is having trouble; the rejection is re-thrown unchanged so no caller's
+    //       error handling is altered.
+    client.interceptors.response.use(anchorClockFromResponse, anchorClockFromFailure);
   }
   return client;
 }

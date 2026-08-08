@@ -35,44 +35,76 @@
 #   rationale and for the explicitly local way to iterate without installing.
 #
 # State at this checkpoint:
-#   `src/carddemo_migration/` currently holds TWELVE Python modules: `__init__.py`,
-#   `cli.py`, `config.py`, `copybook/__init__.py`, `copybook/ebcdic_codec.py`,
-#   `copybook/layouts.py`, `copybook/packed.py`, `copybook/zoned.py`,
-#   `credentials.py`, `role_credentials.py`, `loaders/__init__.py` and
-#   `loaders/s3_stage.py`. All three copybook codecs are therefore present. The
-#   `readers/` and `verify/` packages remain later-index artifacts, and so does
-#   `loaders/aurora.py`; `cli.py` registers only the three subcommands those absent
-#   modules are not needed for.
-#   Refactoring Rationale: this list previously said ten modules and named
-#   `copybook/packed.py` and `copybook/ebcdic_codec.py` among the absent ones AFTER both
-#   had landed, and the governed-file count below said sixteen where
-#   `ruff check . --show-files` listed eighteen. A stale inventory in the file that
-#   CONFIGURES the gate is worse than a stale inventory in prose: a contributor
-#   checking whether a codec exists reads this block, and one that understates the
-#   tree invites a second implementation of a module that is already there. Both
-#   figures are now measured with
-#   `find src -name '*.py' | wc -l` and `ruff check . --show-files | wc -l`, and the two
-#   commands quoted below are how they are re-measured rather than remembered.
-#   Refactoring Rationale: `copybook` previously had no `__init__.py` where
-#   `loaders` did, and that asymmetry was left in place on the measured evidence
-#   that the built wheel included `carddemo_migration/copybook/layouts.py` as an
-#   implicit namespace child anyway. The evidence was correct and the reasoning
-#   held only while nothing else changed: discovery finds a regular package by its
-#   `__init__.py` and a namespace child only by falling back, so a later
-#   `packages` or `exclude` entry would have dropped the directory from the
-#   distribution with every test still passing. It is now a regular package.
-#   Measured consequences:
-#     - `ruff check .` and `ruff format --check .` both pass over all NINETEEN files
-#       this configuration governs -- the twelve source modules above, the six test
-#       modules below, and this file, which `ruff check --show-files` lists because it
-#       lints the configuration itself -- so the docstring gate is live for the code
-#       that exists. The figure is that command's own output and is deliberately not a
-#       count of `.py` files, which is eighteen: quoting the smaller number would make
-#       the two disagree for a reason a reader could not see.
-#     - `python -m pytest data-migration/tests` collects six test modules --
-#       test_cli, test_config_name_contract, test_database_trust, test_ebcdic_codec,
-#       test_reporting_views and test_s3_stage -- and all ONE HUNDRED AND NINETEEN
-#       tests pass with none skipped.
+#   `src/carddemo_migration/` currently holds THIRTY-TWO Python modules, measured with
+#   `find src -name '*.py' -not -path '*__pycache__*' | wc -l`: `__init__.py`, `cli.py`,
+#   `config.py`, `credentials.py`, `role_credentials.py`, `seed_datasets.py`; the four
+#   `copybook/` codec modules plus its `__init__.py` -- `ebcdic_codec.py`, `layouts.py`,
+#   `packed.py`, `zoned.py`; the `loaders/` package -- `__init__.py`, `aurora.py`,
+#   `s3_stage.py`; the `readers/` package -- `__init__.py`, `factory.py` and the eleven
+#   record readers `account.py`, `card.py`, `customer.py`, `dalytran.py`, `discgrp.py`,
+#   `export_record.py`, `tcatbal.py`, `trancatg.py`, `transaction.py`, `trantype.py`,
+#   `usrsec.py`, `xref.py`; and the `verify/` package -- `__init__.py`, `checksum.py`,
+#   `money_parity.py`, `row_counts.py`.
+#   Every package named in this distribution is now PRESENT. Nothing is a later-index
+#   artifact, so `cli.py` registers eight of the nine documented subcommands: the four
+#   read-only ones plus `load-dataset` and the three verification passes. Only
+#   `verify-all` is unregistered, and for a reason that is not about a missing module --
+#   it would need a dataset-to-source manifest this distribution does not carry.
+#   Refactoring Rationale: this list has now been wrong in three successive forms -- it
+#   said TEN modules while naming two landed copybook codecs as absent, then TWELVE while
+#   naming the `readers/` package as absent after three of its readers had landed, then
+#   SIXTEEN while naming `verify/` and `loaders/aurora.py` as absent after both had
+#   landed and while the eleven readers were complete. The entries are corrected together
+#   and each figure is quoted with the command that produced it, because the recurring
+#   fault is never one particular entry: it is a measured block that is not re-measured
+#   when something lands. A stale inventory in the file that CONFIGURES the gate is worse
+#   than a stale inventory in prose -- a contributor checking whether a module exists
+#   reads this block, and one that understates the tree invites a second implementation
+#   of something already there.
+#   Refactoring Rationale: `readers/` and `copybook/` each had no `__init__.py` at one
+#   point while `loaders/` did, so they resolved as implicit NAMESPACE packages --
+#   measured, not assumed: `importlib.import_module` reported `__file__ = None` for them
+#   and a real path for the sibling. Discovery finds a regular package by its
+#   `__init__.py` and a namespace child only by falling back, so a later `packages` or
+#   `exclude` entry would have dropped the directory from the distribution with every
+#   test still passing. All four subpackages are regular packages now, and each
+#   `__init__.py` carries the reasoning at the site.
+#   Measured consequences (re-measure with the commands quoted above before editing any
+#   figure here; every one of them has gone stale at least once):
+#     - `ruff check .` passes over all FIFTY-SIX files this configuration governs -- the
+#       thirty-two source modules above, the twenty-three test modules below (twenty-two
+#       `test_*.py` plus `conftest.py`), and this file, which `ruff check --show-files`
+#       lists because it lints the configuration itself -- so the docstring gate is live
+#       for the code that exists. The figure is that command's own output
+#       (`ruff check . --show-files | wc -l`) rather than a count of `.py` files, which
+#       is fifty-five; quoting the smaller number would make the two disagree for a
+#       reason a reader could not see.
+#     - `ruff format --check .` reports FIFTY-SIX files already formatted and none it
+#       would reformat. Refactoring Rationale: this entry previously named
+#       `src/carddemo_migration/config.py` and `tests/test_authorization_disclosure.py`
+#       as pre-existing formatter failures and recorded that the formatter was not clean
+#       over this package. Both have since been formatted, along with three others whose
+#       only defect was a missing blank-line separator, so the entry now records the
+#       stronger fact rather than the older concession.
+#     - `python -m pytest data-migration/tests` collects twenty-two test modules --
+#       test_aurora_loader, test_authorization_disclosure, test_card_protected_value,
+#       test_cli, test_config_name_contract, test_database_trust, test_docstring_gate,
+#       test_doubles, test_ebcdic_code_page_allow_list, test_ebcdic_codec,
+#       test_mask_key_material, test_master_disclosure, test_online_write_lease,
+#       test_packed, test_readers, test_reporting_views, test_s3_stage,
+#       test_seed_datasets, test_seed_user_subjects, test_shared_doubles,
+#       test_verification and test_zoned -- and SEVEN HUNDRED AND SEVENTY-EIGHT tests
+#       pass with THREE skipped. Assumptions: the three skips are stated rather than
+#       elided because "none skipped" was true of an earlier tree and is not true of
+#       this one; each names its own reason at the skip site -- `usrsec` ships in one
+#       encoding only, and `transaction` has no committed fixed-length extract.
+#     - Refactoring Rationale: the figures above have read, in succession, nineteen
+#       governed files with one hundred and nineteen tests over six test modules, then
+#       thirty-one governed files with four hundred and seventy-three tests over
+#       thirteen. Neither had been true for some time. They are corrected together
+#       rather than one at a time because they share that single cause, and because a
+#       partially corrected set of counts is harder to trust than a wholly stale one: a
+#       reader cannot tell which numbers were checked.
 #     - The distribution builds cleanly and its wheel contains every module above,
 #       so `import carddemo_migration`, `import carddemo_migration.copybook` and
 #       `import carddemo_migration.copybook.layouts` all work, and the generated

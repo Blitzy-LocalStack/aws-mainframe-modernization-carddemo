@@ -9,6 +9,7 @@ import { MessageBand } from '../../layout/MessageBand';
 import type { MessageBandSeverity } from '../../layout/MessageBand';
 import { PfKeyBar } from '../../layout/PfKeyBar';
 import { ScreenHeader } from '../../layout/ScreenHeader';
+import { useServerInstant } from '../../hooks/useServerInstant';
 import { usePfKeys } from '../../layout/usePfKeys';
 import type { PfKeyHandlerMap } from '../../layout/usePfKeys';
 import { STATUS_MESSAGES } from '../../messages/messages';
@@ -144,6 +145,12 @@ const EXPIRATION_MONTH_END = 7;
  */
 export function CardUpdateScreen(): ReactElement {
   const navigate = useNavigate();
+  // WHY : Assumptions: read here, at the top of the component and above every early return, because
+  //       the rules of hooks require an unconditional call site -- the early returns below would make
+  //       a later call conditional. Reading it during render is deliberate rather than incidental: the
+  //       band displays a PAINT-time instant, which is the property the baseline had because
+  //       `POPULATE-HEADER-INFO` re-read the clock on each `SEND MAP` rather than on a timer.
+  const paintedAt = useServerInstant();
   const { cardKey: routeIdentifier } = useParams<{
     cardKey: string;
   }>();
@@ -494,9 +501,22 @@ export function CardUpdateScreen(): ReactElement {
        * screen -- the transaction identifier and the program name rows 1 and 2 of the 3270 screen
        * painted -- and `ScreenHeaderProps` requires both, so no shell could supply them.
        */}
+      {/*
+       * WHY : Refactoring Rationale: `now` is supplied. It was omitted here, and at every other call
+       *       site, although `ScreenHeader`'s contract states that the composing caller must pass a
+       *       SERVER-derived instant -- so the band fell through to `dayjs()` and displayed the
+       *       BROWSER's clock. The baseline read one region clock for every terminal
+       *       (`FUNCTION CURRENT-DATE` at `app/cbl/COSGN00C.cbl:179`), so the omission meant two
+       *       operators looking at one record could read two different dates across midnight.
+       *       Assumptions: the value comes from a hook rather than from a shell component. Both of the
+       *       band's other inputs are this screen's own, as the note above records, so a shell could
+       *       not render the band on this screen's behalf; the hook supplies the one value that is
+       *       NOT screen-specific without inventing a component to hold it.
+       */}
       <ScreenHeader
         transactionId={CARD_UPDATE_TRANSACTION_ID}
         programName={CARD_UPDATE_PROGRAM_NAME}
+        now={paintedAt}
       />
       <Typography.Title level={3}>{CARD_UPDATE_TITLE}</Typography.Title>
       {/*

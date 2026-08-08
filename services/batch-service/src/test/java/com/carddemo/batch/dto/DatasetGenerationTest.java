@@ -309,12 +309,17 @@ class DatasetGenerationTest {
      * the pairs asserted here span the widths that would disagree without it -- one digit, two
      * digits and the full four.</p>
      *
+     * <p>Refactoring Rationale: a pair rendering generation zero was removed. Zero is no longer a
+     * coordinate this type admits, because the reference baseline's first generation is
+     * {@code G0001V00} and the sibling stager refuses to write anything below one at
+     * {@code data-migration/src/carddemo_migration/loaders/s3_stage.py:1010-1044}. The pair asserted
+     * that {@code gen=0000} renders, which is a rendering nothing may now ask for.</p>
+     *
      * @param generationNumber the generation number to render
      * @param expectedSegment the segment that number is required to render as
      */
     @ParameterizedTest
     @CsvSource({
-        "0, gen=0000",
         "1, gen=0001",
         "2, gen=0002",
         "10, gen=0010",
@@ -522,11 +527,23 @@ class DatasetGenerationTest {
      * <p>Assumptions: the ceiling is the largest value the declared width can hold, so the two are
      * one fact. Asserting the relationship rather than the literal is what keeps a later widening of
      * one from silently leaving the other behind.</p>
+     *
+     * <p>Assumptions: the floor is NOT derived from the width and is asserted as its own literal,
+     * because it is not a rendering property at all. It is one, because the reference baseline's first
+     * catalogued generation of every base is {@code G0001V00} and its first relative creation is
+     * {@code (+1)}, and because the sibling stager declares the same floor for the same reason at
+     * {@code data-migration/src/carddemo_migration/loaders/s3_stage.py:125}.</p>
+     *
+     * <p>Refactoring Rationale: this assertion required the floor to be ZERO. That let the two
+     * components disagree about what the first generation of a family is called: a Java step's first
+     * write landed at {@code gen=0000}, which the sibling refuses to write and does not count as a
+     * generation when it lists one, so a verification pass could not see the generation that had just
+     * been staged.</p>
      */
     @Test
     void acceptedGenerationRangeIsDerivedFromTheRenderedWidth() {
         assertThat(DatasetGeneration.GENERATION_DIGITS).isEqualTo(4);
-        assertThat(DatasetGeneration.MINIMUM_GENERATION_NUMBER).isZero();
+        assertThat(DatasetGeneration.MINIMUM_GENERATION_NUMBER).isOne();
         assertThat(DatasetGeneration.MAXIMUM_GENERATION_NUMBER).isEqualTo(9999);
     }
 
@@ -559,10 +576,16 @@ class DatasetGenerationTest {
      * then sorts ahead of every four-digit one, so an unchecked value produces a prefix that looks
      * valid and lists in the wrong place.</p>
      *
+     * <p>Assumptions: zero is listed first among the rejected values because it is the only one of them
+     * that a caller could arrive at by ordinary arithmetic rather than by corruption -- a
+     * highest-so-far of minus one, or a count used where an index was meant. It renders as
+     * {@code gen=0000}, a prefix that looks entirely valid and that the sibling stager does not count
+     * as a generation, so it is the rejection with the most to say.</p>
+     *
      * @param outOfRangeGeneration a generation number outside the accepted range
      */
     @ParameterizedTest
-    @ValueSource(ints = {-1, -42, 10000, 99999, Integer.MIN_VALUE, Integer.MAX_VALUE})
+    @ValueSource(ints = {0, -1, -42, 10000, 99999, Integer.MIN_VALUE, Integer.MAX_VALUE})
     void constructorRejectsAGenerationNumberOutsideTheAcceptedRange(int outOfRangeGeneration) {
         BusinessDate businessDate = new BusinessDate(SEPARATED_TOKEN);
         assertThatThrownBy(() -> new DatasetGeneration(
@@ -574,10 +597,15 @@ class DatasetGenerationTest {
     /**
      * Verifies that both ends of the accepted generation range are admitted.
      *
+     * <p>Refactoring Rationale: the floor case was zero and is now one, and the value just inside it
+     * is two. Zero moved to the rejection case below, which is where it belongs now that the floor is
+     * one -- leaving it here would have asserted that a coordinate the sibling stager refuses to write
+     * is one this type hands out.</p>
+     *
      * @param inRangeGeneration a generation number at or inside the accepted range boundary
      */
     @ParameterizedTest
-    @ValueSource(ints = {0, 1, 9998, 9999})
+    @ValueSource(ints = {1, 2, 9998, 9999})
     void constructorAcceptsBothEndsOfTheAcceptedRange(int inRangeGeneration) {
         DatasetGeneration coordinate = new DatasetGeneration(
                 DatasetFamily.SYSTRAN, new BusinessDate(SEPARATED_TOKEN), inRangeGeneration);

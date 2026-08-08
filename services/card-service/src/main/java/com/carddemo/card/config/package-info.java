@@ -1,13 +1,46 @@
 /**
  * Spring configuration for the card bounded context, covering stateless request
- * security, published API metadata, and datasource wiring.
+ * security, published API metadata, datasource wiring, and the key-management
+ * client the stored card verification value is enciphered with.
  *
- * <h2>The three configuration classes</h2>
+ * <h2>The five configuration classes</h2>
  *
- * <p>Target contract: this package is to hold exactly three classes, each with a
- * narrow and separately testable responsibility. All three are authored at later
- * indexes of the same plan, so the enumeration below is the closed set assigned to
- * this package rather than a listing of the directory.</p>
+ * <p>Assumptions: this package holds exactly five classes, each with a narrow and
+ * separately testable responsibility, and <b>all five exist</b> beside this
+ * charter -- {@code SecurityConfig}, {@code OpenApiConfig},
+ * {@code DataSourceConfig}, {@code KmsConfig} and {@code CardSelectorConfig}. The
+ * enumeration below is therefore both the closed set assigned to this package and a
+ * listing of the directory, and it is checked against the directory on every build:
+ *
+ * <pre>
+ * this directory: 6 java files = 5 classes + 1 charter
+ * </pre>
+ *
+ * <p>Refactoring Rationale: that marker line replaces a count stated in prose alone.
+ * This section has now been wrong twice in the same direction -- it closed the set at
+ * three while {@code KmsConfig} stood beside it, and then at four while
+ * {@code CardSelectorConfig} did -- and both times the error was invisible to
+ * everything except a reader comparing the paragraph with a directory listing. The
+ * marker and the enumeration under it are measured by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
+ * so a sixth class arriving without an entry here now fails the build.</p>
+ *
+ * <p>Refactoring Rationale: this section was headed "the three configuration
+ * classes" and closed the set at three, which omitted {@code KmsConfig} after it
+ * landed, and was then headed "four" while omitting {@code CardSelectorConfig}. An omission is the worst kind of error for a closed-set claim to carry:
+ * the sentence a reader takes from "exactly three, and here they are" is that
+ * anything else in the directory does not belong, so a reader could reasonably
+ * have concluded the key-management wiring had been added in the wrong place and
+ * moved or deleted it -- and deleting it would leave
+ * {@code com.carddemo.card.service.CardVerificationValueCipher} with no client to
+ * inject. The count is corrected to four and the class is described below with its
+ * own responsibility, rather than the count being softened into a range.</p>
+ *
+ * <p>Refactoring Rationale: the preamble also said all three classes were "authored
+ * at later indexes of the same plan", which was the planned-versus-delivered
+ * qualification appropriate when the directory held this charter alone. It is
+ * withdrawn because all five are present, and a stale planned marker sends a reader
+ * away from files that are there.</p>
  *
  * <ul>
  *   <li>{@code SecurityConfig} builds the resource server filter chain that
@@ -42,6 +75,30 @@
  *       Assumptions: {@code card} is the single schema this context owns, so
  *       pinning the search path is what keeps an unqualified table name in a
  *       query resolving inside this service's own schema and nowhere else.</li>
+ *   <li>{@code KmsConfig} contributes the key-management client that
+ *       {@code com.carddemo.card.service.CardVerificationValueCipher} enciphers the
+ *       stored card verification value with, and that class is its only consumer.
+ *       Assumptions: the bean exists so the cipher can take the client through its
+ *       constructor and be exercised against a mock, which is what keeps
+ *       encipherment testable without a key or an account. Region and credentials
+ *       resolve through the SDK's own default provider chains rather than being set
+ *       here, because in a deployed task the region arrives as an environment
+ *       variable and the credentials as the task role -- and the whole point of a
+ *       task role is that no credential is configurable. This class is what makes
+ *       the card context the one context in this reactor whose configuration
+ *       package reaches a cryptographic service at all, which is why the set here
+ *       is five where the sibling account and transaction contexts differ.</li>
+ *   <li>{@code CardSelectorConfig} contributes the keyed sealer that
+ *       {@code com.carddemo.card.mapper.CardMapper} mints and opens every route's opaque
+ *       card selector with, and that mapper is its only consumer. Assumptions: it is a
+ *       separate class from {@code KmsConfig} above even though both concern keys,
+ *       because the two keys have nothing in common operationally -- this one is a
+ *       symmetric signing key bound from configuration and used in process, and that one
+ *       is a managed key reached over an API -- so a single class would have made one
+ *       absent key look like the other's problem. Assumptions: the signing key is bound
+ *       with NO default, so a deployment that fails to supply it does not start; the
+ *       reasoning for refusing both a shared literal and a per-task random value is
+ *       recorded on the class.</li>
  * </ul>
  *
  * <h2>Deliberately absent from this package</h2>

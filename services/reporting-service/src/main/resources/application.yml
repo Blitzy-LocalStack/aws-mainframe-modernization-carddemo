@@ -1181,6 +1181,34 @@ carddemo:
       admin-group-name: ${CARDDEMO_COGNITO_ADMIN_GROUP_NAME:carddemo-admin}
       user-group-name: ${CARDDEMO_COGNITO_USER_GROUP_NAME:carddemo-user}
 
+  # Two properties are deliberately NOT declared in this file and are documented here instead,
+  # because api/ReportController.java takes CursorToken as a constructor argument and a
+  # bean that is not published cannot be injected:
+  #
+  #   carddemo.pagination.cursor.signing-key   base64 key material, at least 32 bytes
+  #   carddemo.pagination.cursor.lifetime      ISO-8601 duration, defaulting to PT15M
+  #
+  # CardDemoCommonAutoConfiguration publishes one CursorToken bean and publishes it only when the
+  # first property is set, so supplying it IS the wiring. The deployment supplies it from the
+  # purpose-scoped secret both Terraform roots create, as the environment variable
+  # CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY -- Spring Boot's relaxed binding maps that spelling onto
+  # the hyphenated property name, which CardDemoCommonAutoConfigurationIT asserts rather than
+  # assumes. infra/modules/ecs-service lists the name in required_secret_environment_names for this
+  # service and asserts biconditionally that exactly the four list-publishing services receive it,
+  # so a deployment that omits it fails at plan rather than at container start.
+  # Trade-offs: no key is written here even as an environment placeholder, and the second half of
+  #   that is the part worth stating. A literal default would be a signing key committed to source,
+  #   and any deployment failing to override it would accept keyset cursors minted by anyone holding
+  #   this repository. A placeholder with no default is no better: the property then EXISTS and
+  #   resolves during condition evaluation, so every context that merely imports the
+  #   auto-configuration fails on an unresolvable placeholder rather than simply doing without the
+  #   sealer -- which would break every repository integration test in this module, none of which
+  #   pages anything. Leaving the property absent withholds the bean cleanly, and a deployed task
+  #   that omits the variable still fails at startup, because the components named above require it.
+  #   This matches services/transaction-service/src/main/resources/application.yml, which reached the
+  #   same conclusion first; the reasoning is repeated rather than cross-referenced because a reader
+  #   of this file would otherwise see an undeclared property and add the placeholder that breaks it.
+
   reporting:
 
     step-functions:

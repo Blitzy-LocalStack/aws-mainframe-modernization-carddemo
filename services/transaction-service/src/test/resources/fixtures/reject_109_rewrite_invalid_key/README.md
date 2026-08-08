@@ -140,7 +140,7 @@ a preference between two readings -- discarding the writes without recording the
 leave an operator no way to learn that a record failed to post, and recording the event
 while leaving the writes would keep an inconsistency the data cannot explain. It is
 registered as `D-REJECT-109-DURABLE` in
-[`docs/architecture/cobol-to-service-traceability.md`](../../../../../../docs/architecture/cobol-to-service-traceability.md),
+[`docs/architecture/cobol-to-service-traceability.md`](../../../../../../../docs/architecture/cobol-to-service-traceability.md),
 where the accepted cost is stated: the migrated reject stream carries a row the baseline's
 stream does not, on exactly the records whose account rewrite failed.
 

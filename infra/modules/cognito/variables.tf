@@ -403,7 +403,22 @@ variable "advanced_security_mode" {
 #       any other setting says. Refresh is deliberately absent from this list:
 #       main.tf enables refresh-token rotation, and Cognito requires the auth
 #       service to call GetTokensFromRefreshToken instead of initiating the
-#       incompatible REFRESH_TOKEN_AUTH flow.
+#       incompatible REFRESH_TOKEN_AUTH flow. That is now a checkable statement
+#       rather than an assumption about code elsewhere: the call is made by
+#       CognitoIdentityService.exchangeRefreshToken, reached from its renewTokens
+#       method and served at POST /api/v1/auth/refresh, and it supplies the client
+#       secret as a request member because that is how this API proves a
+#       confidential client -- the initiated flows use a keyed digest instead.
+# WHY : Refactoring Rationale: this exclusion previously rested on a premise that
+#       was not yet true. The service implemented no renewal at all, so forbidding
+#       the flow on the grounds that another API was used in its place described an
+#       arrangement that did not exist, and a reader checking the claim would have
+#       found no such call. The renewal operation the contract had always declared
+#       is now implemented against that API, which makes the premise and the
+#       exclusion agree. The alternative -- relaxing this to admit
+#       ALLOW_REFRESH_TOKEN_AUTH -- was rejected because the provider rejects that
+#       flow alongside rotation, so it would have traded a stale comment for a
+#       combination that fails at apply.
 # WHY : Trade-offs: the default names exactly one flow and nothing else. The
 #       flows deliberately excluded are worth listing, because each is a
 #       plausible addition. ADMIN_USER_PASSWORD_AUTH performs the same

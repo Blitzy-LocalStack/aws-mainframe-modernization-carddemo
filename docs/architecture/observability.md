@@ -1143,9 +1143,28 @@ The controls that **are authored** are narrower and measurable:
    carries `date`, `time`, `x-edge-location`, `sc-bytes`, `c-ip`, `cs-method`,
    `cs(Host)`, `sc-status`, `x-edge-request-id`, `cs-protocol`, `time-taken`,
    `ssl-protocol` and `ssl-cipher`, and it **omits `cs-uri-stem`** along with the
-   query string, cookies and the referrer — because `ui/src/routes/cards.ts`
-   addresses a card by its sixteen-digit number, so a bookmark or hard refresh of
-   `/cards/:cardNumber` would otherwise write that number into a durable log object.
+   query string, cookies and the referrer. The justification is no longer that a card
+   number travels in the path: `ui/src/routes/cards.ts` declares
+   `CARD_DETAIL_ROUTE = '/cards/:cardKey'` and `CARD_EDIT_ROUTE = '/cards/:cardKey/edit'`,
+   and `cardKey` is the sealed selector — encrypted under a service-held key, carrying
+   no digit of the number it addresses — so a bookmark or hard refresh writes a token
+   rather than a primary account number. Two current properties keep the omission
+   worth its cost anyway. A selector is a durable, low-cardinality identifier for one
+   card: it is deterministic by design, so that a route is bookmarkable and cacheable,
+   which means a retained path is a stable per-card key that correlates every request
+   against that card across a log store this service does not control. And retaining
+   the field would make the omission a per-route judgement rather than a rule — the
+   field list is set once for the whole distribution, so admitting it for the paths
+   that are safe today admits it for every path added later, including any that
+   carries a raw identifier before review notices.
+
+   - Refactoring Rationale: this item justified the omission by saying the routes
+     address a card by its sixteen-digit number. That was true of the routes it was
+     written against and became false when the selector landed; leaving it would have
+     invited a reader to re-admit `cs-uri-stem` on the correct observation that the
+     stated risk no longer exists. The control is retained and its justification is
+     replaced by the two properties above, which are properties of the selector rather
+     than of the number it replaced.
    The retained `c-ip` is a client address and is classified as personal data, so the
    destination bucket is a sensitive store. **That destination's default encryption is
    SSE-S3 (`AES256`), not a customer-managed key**, because CloudFront standard log
@@ -1165,24 +1184,58 @@ The controls that **are authored** are narrower and measurable:
      rejected where the resource is declared: it would leave the SPA delivery path
      with no durable edge evidence of a 403 or a TLS negotiation failure, which is the
      only record of a request that never reaches a service.
-3. **The nginx document route has `access_log off`.** Deep-link and refresh paths
+3. **Load-balancer access logging is mandatory and its format is fixed, so the control is
+   on what enters the request line rather than on the log.** `alb/main.tf` enables
+   `access_logs` unconditionally — the policy scan gates it at HIGH severity — and an ELB
+   access record has no field allow-list: the request line is always written, in full,
+   composed by the load balancer itself before any application code runs. Neither
+   `LogSafeText`, nor `CardNumberMasker`, nor `GlobalExceptionHandler` can reach it, and a
+   previous revision of that resource credited the masker with bounding it, which is the same
+   category error recorded twice above. The only available control is therefore that a
+   prohibited value never enters a target, and it is now applied to **both** values the
+   prohibition names rather than to the primary account number alone.
+
+   No published operation carries an account or customer identifier in a path or a query
+   string. Six moved to reach that: `listCards` and `listPendingAuthorizations` take their
+   account narrowing in a request body at `/api/v1/cards/search` and
+   `/api/v1/authorizations/search`; `lookupAccountContext` and `lookupCustomerExists` replaced
+   keyed `GET`s — and, for the customer probe, a `HEAD` and a `GET` served by one handler —
+   with `/api/v1/accounts/lookup` and `/api/v1/customers/lookup`; and the account-keyed
+   cross-reference read and the bill-payment write moved their identifier into the body each
+   already carried. What remains in the clear is a transaction identifier and a user
+   identifier, neither of which the prohibition enumerates.
+
+   - Refactoring Rationale: this item did not exist, and its absence was the gap. Three edges
+     were listed here with an authored control each while the fourth — the one edge whose
+     logging is mandatory and whose format cannot be narrowed — was described only in the
+     module, where it recorded the account and customer identifiers as an accepted residue.
+     A threat model that lists the controls it has and omits the edge it has least control
+     over reads as coverage rather than as the exception it was.
+
+4. **The nginx document route has `access_log off`.** Deep-link and refresh paths
    therefore do not enter the container access log. The `/assets/` location logs
    only content-hashed filenames, and `/health` is separately suppressed for
    volume. The error log remains available and is classified as sensitive because
    failure diagnostics can include a URI; this document does not claim it is an
    identifier-free stream.
-4. **Framework value logging is held down.** Auth pins both
+5. **Framework value logging is held down.** Auth pins both
    `org.springframework.security` and `org.hibernate.orm.jdbc.bind` to `WARN`.
    Card and transaction base profiles pin bind logging to `WARN`; both development
    profiles now do the same even while `org.hibernate.SQL` is `DEBUG`. The
    transaction development health body is `when-authorized`; the card profile
    inherits `never`.
 
-The source-level assertions for the four edge controls — the gateway field boundary,
-the CloudFront delivery field allow-list, the CloudFront destination's `AES256`
-default and the nginx document-route suppression — together with the production-CMK
+The source-level assertions for the edge controls — the gateway field boundary, the
+CloudFront delivery field allow-list, the CloudFront destination's `AES256` default
+and the nginx document-route suppression — together with the production-CMK
 precondition, are published in
-[Reproducing the measurements](#reproducing-the-measurements).
+[Reproducing the measurements](#reproducing-the-measurements). The load-balancer
+control is asserted differently, and deliberately so: because that record cannot be
+narrowed, there is no infrastructure argument to assert. What is asserted instead
+lives with the operations — each service's contract test pins the published method
+and path of every operation that moved, and the browser client's
+contract-agreement test compares its own declarations against the same documents, so
+reinstating a keyed target fails a build rather than passing unnoticed.
 
 - Refactoring Rationale: **pinning the statement logger alone was not enough and
   the gap was not obvious.** The logger that emits statement text emits it with the
@@ -1270,7 +1323,7 @@ that could not be given both is not listed.
 | Receive count per message | Is one message being retried repeatedly | Identify a poison message before it exhausts its receives |
 | **Dead-letter queue depth** | Has any message failed the configured number of receives | Investigate that message; nothing else produces this signal, which is why it is the highest-signal messaging metric — see [Target alarms and notification](#target-alarms-and-notification) |
 | Batch step outcome, duration and record counts read, written and rejected | Did the nightly chain complete, and did any step read or reject a different volume than expected | Redrive the failed state, or investigate an input volume anomaly before the next run |
-| The durable step ledger's per-step status | Which steps of this execution already completed | Redrive without repeating completed work, since the ledger is the idempotency key — see [`batch-orchestration.md`](batch-orchestration.md#the-restart-story-there-is-no-baseline-checkpoint-contract-to-preserve) |
+| The durable step ledger's per-step status — **once the ledger is wired; it has no production caller yet** | Which steps of this execution already completed | Redrive without repeating completed work, the ledger being the intended idempotency key. Until it is written by a running job, decide a redrive from the step outcomes in the row above instead — see [`batch-orchestration.md`](batch-orchestration.md#the-restart-story-there-is-no-baseline-checkpoint-contract-to-preserve) |
 | **The posting reject count**, specifically | Did posting reject more records than the run should tolerate | Take the warn edge and continue, or stop the chain — the graded decision described in [The graded return code, and why warn is green](#the-graded-return-code-and-why-warn-is-green) |
 | Expired-message drops, with the correlation identifier and the elapsed time | Was a stale reply correctly declined, or was a reply lost | Distinguish four failures that otherwise look identical, as [`messaging-contracts.md`](messaging-contracts.md#the-expiry-gap) sets out |
 | Business counters: records read, records posted, records rejected | How much work did this run actually do | Compare a run against its predecessors, which is the check that catches a truncated input before its output is trusted |

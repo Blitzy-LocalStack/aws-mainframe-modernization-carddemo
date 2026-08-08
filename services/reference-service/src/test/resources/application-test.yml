@@ -274,7 +274,7 @@ spring:
     # Refactoring Rationale: `init-sqls` IS restated, and it has to be. The base
     #   file's single statement is `SET ROLE carddemo_reference_owner`, naming the
     #   NOLOGIN role data-migration/sql/V0__schemas_and_roles.sql creates and this
-    #   container has never heard of; left inherited, every test in the four
+    #   container has never heard of; left inherited, every test in the six
     #   *RepositoryIT classes failed context load with
     #   `role "carddemo_reference_owner" does not exist`.
     #

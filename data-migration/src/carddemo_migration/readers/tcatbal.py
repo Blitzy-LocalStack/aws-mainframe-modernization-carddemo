@@ -105,7 +105,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from decimal import Decimal
 from typing import Final
 
-# WHY (Assumptions): these imports are the entire reason this module has a dependency on the
+# WHY : Assumptions: these imports are the entire reason this module has a dependency on the
 #   copybook package, and they are absolute and rooted at the distribution package rather than
 #   relative. A relative import is how the single-sourcing guarantee gets broken quietly: a
 #   module moved between `readers/` and `loaders/` keeps importing successfully but against a
@@ -144,7 +144,7 @@ __all__ = [
     "render_masked_category_balance_record",
 ]
 
-# WHY (Assumptions): the decoded value type is a union of exactly two members because this
+# WHY : Assumptions: the decoded value type is a union of exactly two members because this
 #   record declares exactly three storage regimes and two of them -- character and unsigned
 #   display -- yield characters while the third yields an exact decimal. The union deliberately
 #   excludes `bytes`, which the record-oriented EBCDIC decoder can return for a packed, binary
@@ -153,7 +153,7 @@ __all__ = [
 #   else. Admitting `bytes` here would oblige every caller to narrow a case that cannot occur.
 DecodedCategoryBalance = dict[str, str | Decimal]
 
-# WHY (Assumptions): the trailing pad is identified by NAME and not by position, matching the
+# WHY : Assumptions: the trailing pad is identified by NAME and not by position, matching the
 #   pattern-setter, and the convention was measured rather than assumed: across all fourteen
 #   registered layouts every record declares exactly one pad, named either `FILLER` or, where
 #   the copybook qualified it, with that word as its final hyphenated component. Testing the
@@ -190,7 +190,7 @@ def _is_padding_field(field: FieldSpec) -> bool:
     return field.name == _PAD_FIELD_NAME or field.name.endswith(_PAD_NAME_SUFFIX)
 
 
-# WHY (Assumptions): the pad is DROPPED from every decoded record because its 22 trailing bytes
+# WHY : Assumptions: the pad is DROPPED from every decoded record because its 22 trailing bytes
 #   pad the record out to its fixed 50-byte length and carry no data -- the copybook declares
 #   them as an unnamed filler at its line 10 and no program reads them. The EBCDIC record
 #   decoder deliberately returns it, stating that dropping it is a projection decision
@@ -205,7 +205,7 @@ DROPPED_FIELD_NAMES: Final[frozenset[str]] = frozenset(
     field.name for field in TCATBAL_LAYOUT.fields if _is_padding_field(field)
 )
 
-# WHY (Assumptions): the three components of the composite key are derived by asking which
+# WHY : Assumptions: the three components of the composite key are derived by asking which
 #   declared fields fall inside the descriptor's own key span, rather than by listing their
 #   names here. Listing them would be a second statement of the key's composition that could go
 #   stale against the descriptor without anything detecting it, and it is exactly the statement
@@ -279,14 +279,14 @@ def _require_single_byte_record(record: str, number: int) -> str:
         If any character is outside the single-byte range. The record's declared width would
         then differ from its width in bytes.
     """
-    # WHY (Assumptions): a multi-byte character satisfies a CHARACTER-count check while
+    # WHY : Assumptions: a multi-byte character satisfies a CHARACTER-count check while
     #   occupying more than one byte, so it passes the shared iterator's declared-length test
     #   and then desynchronises every offset after it -- and because a record read one byte out
     #   of alignment still decodes to digits, nothing later would raise. The reference codec
     #   reaches this same conclusion for the same reason and rejects a non-single-byte record
     #   outright. Requiring single-byte characters makes the character count provably equal the
     #   byte count, which is what the offsets assume.
-    # WHY (Assumptions): this check, and every other validation in this module, is enforced by
+    # WHY : Assumptions: this check, and every other validation in this module, is enforced by
     #   an explicit `raise` and never by an `assert`. Running the interpreter with `-O` strips
     #   assert statements outright, so an assertion is not a validation at all: it is a check
     #   that silently disappears in exactly the deployment where a misaligned money value costs
@@ -299,7 +299,7 @@ def _require_single_byte_record(record: str, number: int) -> str:
     offset = next(index for index, char in enumerate(record) if not char.isascii())
     field = _field_containing(offset)
 
-    # WHY (Trade-offs): the message names the record number, the zero-based offset and the
+    # WHY : Trade-offs: the message names the record number, the zero-based offset and the
     #   containing field's geometry, and it quotes NO part of the record -- not the offending
     #   character and not its code point. That shows exactly WHERE the record failed while
     #   emitting none of its content, so the diagnostic is safe to log wherever its consumer
@@ -357,7 +357,7 @@ def _decode_text_field_value(record: str, field: FieldSpec) -> str | Decimal:
         return record[field.start : field.end]
 
     if field.kind is Kind.UINT:
-        # WHY (Trade-offs): the decimal this returns is DISCARDED and the characters are
+        # WHY : Trade-offs: the decimal this returns is DISCARDED and the characters are
         #   returned instead, which costs one parse whose result is thrown away. What it buys is
         #   the content check the picture clause states -- an unsigned display field holding
         #   letters is refused rather than passed through -- while keeping the identifier a
@@ -369,7 +369,7 @@ def _decode_text_field_value(record: str, field: FieldSpec) -> str | Decimal:
         return record[field.start : field.end]
 
     if field.kind is Kind.ZONED:
-        # WHY (Alternatives Considered): the FIELD-oriented entry point is called rather than
+        # WHY : Alternatives Considered: the FIELD-oriented entry point is called rather than
         #   the span-oriented one, which would have meant slicing here and passing the digit
         #   counts and the sign flag as three separate arguments. The field-oriented form
         #   derives all of them from this descriptor and slices by it too, so this module
@@ -377,7 +377,7 @@ def _decode_text_field_value(record: str, field: FieldSpec) -> str | Decimal:
         #   unsigned regime's `(length, 0, False)` derivation that the span-oriented call would
         #   have forced into the branch above. Passing the descriptor also lets that codec name
         #   the field in its own diagnostics.
-        # WHY (Assumptions): the result is an exact decimal at the scale the picture clause
+        # WHY : Assumptions: the result is an exact decimal at the scale the picture clause
         #   declares and is never converted to a binary floating-point type. A binary float
         #   cannot represent ten cents exactly, so a total accumulated in one drifts from the
         #   total the baseline computed, by an amount that grows with the row count. This is the
@@ -385,7 +385,7 @@ def _decode_text_field_value(record: str, field: FieldSpec) -> str | Decimal:
         #   pass aggregates, so an inexact decode would surface as a parity failure.
         return decode_zoned_field(record, field)
 
-    # WHY (Assumptions): every regime is named explicitly above and anything else raises,
+    # WHY : Assumptions: every regime is named explicitly above and anything else raises,
     #   rather than the last branch doubling as a default. A computational or mixed-regime area
     #   cannot be read from a character record at all: its bytes are packed nibbles, machine
     #   words or a differently-described overlay, and a character decode of them succeeds, keeps
@@ -424,20 +424,48 @@ def _project_decoded_fields(
 
     Raises
     ------
-    None
+    LayoutError
+        If a retained field decoded to raw bytes, which means the descriptor has acquired a
+        computational or mixed-regime area this reader publishes no representation for.
     """
-    # WHY (Assumptions): the incoming union is the record decoder's, which admits `bytes` for a
-    #   packed, binary or mixed-regime area, while the published one does not. Narrowing here is
-    #   sound rather than optimistic because this record declares no such area at all -- its
-    #   five fields are two character, two unsigned display and one signed display -- so the
-    #   decoder cannot produce a `bytes` value for it. Re-checking each value at run time would
-    #   test a case the layout makes unreachable.
-    return {
-        name: value
-        for name, value in values.items()
-        if name not in DROPPED_FIELD_NAMES
-        if not isinstance(value, bytes)
-    }
+    # WHY : Refactoring Rationale: an unexpected `bytes` value is now REJECTED where it used to
+    #   be filtered out of the result. The filter's justification was that the case is
+    #   unreachable -- this record's five fields are two character, two unsigned display and one
+    #   signed display, so the record decoder cannot produce bytes for any of them -- and that
+    #   was and remains true of today's descriptor. It was still the wrong construction, because
+    #   of what happens the moment it stops being true. A descriptor edit that changed one of
+    #   these fields to a computational regime, or a decoder change that widened what it returns,
+    #   would make the filter silently OMIT a real field, and the reader would hand a loader a
+    #   plausible partial row: four keys instead of five, every one of them well-formed. That row
+    #   would insert with a NULL where an account identifier or a balance belongs and nothing
+    #   would report it. Failing closed converts an invisible data-integrity fault into a named
+    #   one, which is the same choice the sibling card reader's narrowing helper makes.
+    # WHY : Trade-offs: the pad is dropped BEFORE the type is judged, so a pad that decoded to
+    #   bytes cannot raise. That ordering is deliberate: the pad is not published, so its regime
+    #   is not this reader's contract to enforce, and raising over a value nobody receives would
+    #   turn a harmless descriptor detail into a load failure.
+    projected: DecodedCategoryBalance = {}
+    for name, value in values.items():
+        if name in DROPPED_FIELD_NAMES:
+            continue
+        if isinstance(value, bytes):
+            # WHY : Trade-offs: the rejection names the field's GEOMETRY through the descriptor
+            #   and never renders the bytes, not even as a length-bounded excerpt. A
+            #   computational span on this record could only be the account identifier or the
+            #   balance, both of which the disclosure policy protects, so a diagnostic that
+            #   dumped an unexpected span would disclose exactly what the masking helpers exist
+            #   to withhold. Naming the field is enough to locate the defect, which is in the
+            #   descriptor rather than in the data.
+            field = TCATBAL_LAYOUT.field(name)
+            raise LayoutError(
+                f"field {field.describe()} of record {TCATBAL_LAYOUT.name} decoded to raw bytes"
+                " rather than characters or an exact decimal, so it declares a computational or"
+                " mixed-regime area; this reader publishes only the character and display"
+                " regimes, and such an area must be decoded by the codec that owns its regime"
+                " rather than dropped from the row"
+            )
+        projected[name] = value
+    return projected
 
 
 def composite_key(record: str) -> str:
@@ -468,7 +496,7 @@ def composite_key(record: str) -> str:
         If the record is not the declared width, in which case the key span would be cut short
         or would read into a neighbouring field.
     """
-    # WHY (Trade-offs): the width is re-checked here even though every caller reaching this
+    # WHY : Trade-offs: the width is re-checked here even though every caller reaching this
     #   through an iterator has already been checked, because this function is published and a
     #   caller may hand it a record it assembled itself. A short record would otherwise yield a
     #   silently truncated key, and a truncated key still looks like a key.
@@ -480,7 +508,7 @@ def composite_key(record: str) -> str:
             " short span"
         )
 
-    # WHY (Assumptions): the key's offset and width come from the descriptor's `key_offset` and
+    # WHY : Assumptions: the key's offset and width come from the descriptor's `key_offset` and
     #   `key_length` and are never written as literals here. The reader owns no geometry, and a
     #   literal width would be a SECOND declaration of this key that could go stale against the
     #   descriptor with nothing detecting it. The hazard is concrete rather than theoretical:
@@ -531,7 +559,7 @@ def decode_ascii_category_balance(record: str, *, number: int = 1) -> DecodedCat
     ZonedDecimalError
         If a display field's content violates its contract. Raised by the display codec.
     """
-    # WHY (Trade-offs): a record of the WRONG width is rejected here rather than padded or cut
+    # WHY : Trade-offs: a record of the WRONG width is rejected here rather than padded or cut
     #   to fit. Truncation would silently discard real data and padding would invent it, and
     #   either way the row would still decode to well-formed digits, so a wrong-width financial
     #   record would post a misaligned money value with nothing reporting it. The accepted cost
@@ -548,7 +576,7 @@ def decode_ascii_category_balance(record: str, *, number: int = 1) -> DecodedCat
 
     checked = _require_single_byte_record(record, number)
 
-    # WHY (Assumptions): the fields are walked in the descriptor's declaration order, which is
+    # WHY : Assumptions: the fields are walked in the descriptor's declaration order, which is
     #   the record's byte order, so the resulting mapping iterates the record left to right. The
     #   pad is excluded by iterating the published data fields rather than by decoding all five
     #   and filtering afterwards, which also avoids decoding 22 bytes of padding on every record.
@@ -591,7 +619,7 @@ def iter_ascii_category_balances(
     ZonedDecimalError
         If a display field's content violates its contract. Raised by the display codec.
     """
-    # WHY (Assumptions): the record cut is DELEGATED and not written again here, and this
+    # WHY : Assumptions: the record cut is DELEGATED and not written again here, and this
     #   dataset is the sharpest evidence in the package for why the delegated rule is the one it
     #   is. That iterator strips AT MOST ONE trailing terminator per row, testing the two-byte
     #   sequence before either single byte, and this seed is MIXED: measured at 2599 bytes over
@@ -607,7 +635,7 @@ def iter_ascii_category_balances(
     #   only the per-row rule is. A second implementation here is exactly the drift this
     #   dependency edge exists to prevent, and it would be invisible: two readers stripping
     #   terminators slightly differently both return well-formed records.
-    # WHY (Trade-offs): that iterator's tolerance for a SHORT line -- padding it on the right
+    # WHY : Trade-offs: that iterator's tolerance for a SHORT line -- padding it on the right
     #   with blanks -- is inherited deliberately rather than overridden. It exists because one
     #   shipped seed conversion lost its trailing pad entirely, and padding on the right cannot
     #   move a field that is present. Every row of this dataset's seed is already full width, so
@@ -615,7 +643,7 @@ def iter_ascii_category_balances(
     #   reader.
     records = iter_ascii_text_records(source, TCATBAL_LAYOUT.reclen)
 
-    # WHY (Trade-offs): records are YIELDED one at a time rather than collected, so memory is
+    # WHY : Trade-offs: records are YIELDED one at a time rather than collected, so memory is
     #   constant in the record count. The cost is a single forward pass -- a caller wanting a
     #   second reading must re-open the source -- and what it buys is that this reader behaves
     #   identically on the small committed seed and on a production extract many orders of
@@ -659,14 +687,14 @@ def read_ascii_category_balances(path: pathlib.Path) -> Iterator[DecodedCategory
     ZonedDecimalError
         If a display field's content violates its contract. Raised by the display codec.
     """
-    # WHY (Assumptions): the caller supplies an EXPLICIT file, and this function never globs a
+    # WHY : Assumptions: the caller supplies an EXPLICIT file, and this function never globs a
     #   directory to find one. The seed directories make that concrete: the EBCDIC directory
     #   holds a zero-byte placeholder alongside the datasets, and a pattern match over a
     #   directory would sweep it up and, on the sibling text path, would just as readily match a
     #   dataset whose name differs from the intended one by a character. A zero-byte file is
     #   legitimately a dataset with no records and is not an error -- one committed fixture of
     #   this very dataset is exactly that.
-    # WHY (Alternatives Considered): the file is decoded through a single-byte code page that is
+    # WHY : Alternatives Considered: the file is decoded through a single-byte code page that is
     #   total over all 256 byte values, rather than through a strict ASCII decode. Both reject a
     #   non-conforming file, but they differ in WHERE and HOW. A strict decode would fail inside
     #   the interpreter's reader with an encoding error, which is untyped with respect to this
@@ -674,7 +702,7 @@ def read_ascii_category_balances(path: pathlib.Path) -> Iterator[DecodedCategory
     #   page instead maps each byte to exactly one character, so the character count the shared
     #   iterator checks provably equals the byte count, and the failure surfaces as this
     #   package's own record-length error naming the offset.
-    # WHY (Assumptions): line splitting is pinned to the newline alone, matching the shared
+    # WHY : Assumptions: line splitting is pinned to the newline alone, matching the shared
     #   iterator's own whole-text scanner exactly, so streaming this handle line by line and
     #   passing the whole text produce identical records. This is also what keeps the carriage
     #   return ATTACHED to each of this seed's 49 two-byte-terminated rows so that the delegated
@@ -723,7 +751,7 @@ def decode_ebcdic_category_balance(
     ZonedDecimalError
         If a display span violates its contract. Raised by the display codec.
     """
-    # WHY (Assumptions): the conversion is DELEGATED per field and never performed on the record
+    # WHY : Assumptions: the conversion is DELEGATED per field and never performed on the record
     #   as a whole. That codec decodes each declared span on its own, so this record's signed
     #   display field has its sign overpunch converted as one field while the numeric decode
     #   stays a separate step. Decoding a whole record through a code page is the single most
@@ -771,7 +799,7 @@ def iter_ebcdic_category_balances(
         If the source is neither a byte image nor readable nor iterable, or produces a piece
         that is not a byte object.
     """
-    # WHY (Assumptions): the dataset is cut on the declared record length ALONE, and no line
+    # WHY : Assumptions: the dataset is cut on the declared record length ALONE, and no line
     #   terminator is looked for, honoured, stripped or padded on this path. The EBCDIC form of
     #   this dataset has NO terminators at all -- measured at 2500 bytes containing not one
     #   occurrence of any newline or carriage-return byte in either the ASCII or the EBCDIC
@@ -781,12 +809,12 @@ def iter_ebcdic_category_balances(
     #   onto this path would consume a DATA byte as a separator: a low-order digit or a pad byte
     #   that happens to equal a newline would split the image into pieces of wildly differing
     #   lengths, most of them cut through the middle of a field.
-    # WHY (Assumptions): the text form's tolerances must never reach here either. Right-padding
+    # WHY : Assumptions: the text form's tolerances must never reach here either. Right-padding
     #   a short piece or stripping a trailing byte would turn a genuine length failure into a
     #   plausible record, which is why this path reaches a different entry point of the layouts
     #   module and shares no code with the text one.
     for record in iter_ebcdic_records(source, TCATBAL_LAYOUT):
-        # WHY (Trade-offs): records are yielded one at a time for the same reason the text path
+        # WHY : Trade-offs: records are yielded one at a time for the same reason the text path
         #   streams -- constant memory in the record count, at the cost of one forward pass -- so
         #   a caller can compare the two corpora record by record without either side holding a
         #   dataset in memory.
@@ -824,7 +852,7 @@ def read_ebcdic_category_balances(path: pathlib.Path) -> Iterator[DecodedCategor
     ZonedDecimalError
         If a display span violates its contract. Raised by the display codec.
     """
-    # WHY (Assumptions): the caller supplies an EXPLICIT file here too, and the hazard is
+    # WHY : Assumptions: the caller supplies an EXPLICIT file here too, and the hazard is
     #   concrete rather than theoretical: the EBCDIC directory holds a zero-byte `.gitkeep`
     #   placeholder beside the thirteen datasets, and it also holds a pair of names differing by
     #   a single character. A directory pattern would sweep the placeholder in, and a
@@ -832,7 +860,7 @@ def read_ebcdic_category_balances(path: pathlib.Path) -> Iterator[DecodedCategor
     #   because a doubled image still divides by this record length with remainder zero, so the
     #   exact-division check passes, every record decodes cleanly, and the only symptom is that
     #   every money total the verification pass aggregates comes out doubled.
-    # WHY (Alternatives Considered): the path is handed to the codec rather than opened here and
+    # WHY : Alternatives Considered: the path is handed to the codec rather than opened here and
     #   passed as a stream. The codec validates the file size against the declared record length
     #   BEFORE yielding a first record, so a truncated dataset fails up front instead of part
     #   way through a load, and it owns the open, the forward-only read and the close. Opening
@@ -866,13 +894,17 @@ def render_masked_category_balance_record(record: str) -> str:
     LayoutError
         If the record is not the declared width.
     """
-    # WHY (Assumptions): this record declares NO sensitive field, so the rendering it returns
-    #   today is the record verbatim. That is stated rather than left to be discovered, because
-    #   the same call in the card and customer readers redacts a primary account number, a card
-    #   verification value and a national identifier -- so a reader who inferred from this module
-    #   that the helper is a no-op would draw exactly the wrong conclusion about those. The call
-    #   is made through the shared helper rather than skipped so that marking a field sensitive
-    #   in the layout is the ONLY change ever needed to redact it here.
+    # WHY : Refactoring Rationale: this comment used to record that the record declared NO
+    #   sensitive field, so that the rendering was the record verbatim. That described a defect
+    #   rather than justifying one: a function documented as privacy-safe returned the
+    #   eleven-digit account identifier and the S9(09)V99 running balance in clear. The fields
+    #   are now marked at the layout by _close_master_disclosure, which is the fix this comment
+    #   already prescribed.
+    # WHY : Assumptions: the account identifier and the running balance are withheld as
+    #   same-width keyed redaction tags; the transaction type code and the transaction category
+    #   code are left verbatim because the rendering rule admits a type or category code by
+    #   name and both are drawn from seeded reference tables, and they are what identify WHICH
+    #   category row a diagnostic is describing. Width is unchanged at 50 characters.
     return mask_record(record, TCATBAL_LAYOUT)
 
 
@@ -904,7 +936,7 @@ def render_masked_category_balance_field(record: str, field_name: str) -> str:
         If no field of that name is declared, or the sliced span is not the field's declared
         width, which happens when the record is short.
     """
-    # WHY (Assumptions): the field is resolved through the layout by name and then sliced by its
+    # WHY : Assumptions: the field is resolved through the layout by name and then sliced by its
     #   own declared span, so this module still states no offset of its own and an unknown name
     #   fails loudly here rather than silently rendering the wrong bytes. Resolution is scoped to
     #   THIS record's descriptor rather than to a package-wide field table, which is what keeps

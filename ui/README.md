@@ -115,6 +115,31 @@ wherever it exists. See `ui/src/api/runtimeConfig.ts`, which records the full
 reasoning, and note that the value must include the `/api/v1` prefix in either
 form because operations are addressed relatively by the client.
 
+### Container runtime configuration
+
+Assumptions: the values above are **build-time** `VITE_` variables that Vite inlines into the public
+bundle. The container image additionally reads one **runtime** variable, and it is deliberately not a
+`VITE_` value because it configures the web server rather than the bundle.
+
+| Variable                           | Read by                                   | Effect                                                                                                                |
+| ---------------------------------- | ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `CARDDEMO_API_CONNECT_SRC_ORIGINS` | `docker-entrypoint.sh` at container start | Space-separated bare `https://host[:port]` origins written into the content-security policy's `connect-src` directive |
+
+```bash
+# WHAT: run the built image with the policy narrowed to one exact API origin.
+# WHY : Assumptions: the origin is supplied at START rather than baked in at build, so one reviewed
+#       image serves every environment. The entrypoint REFUSES TO START on a wildcard, a path or a
+#       non-HTTPS scheme, and an unset variable renders `connect-src 'self'` -- which fails closed and
+#       matches what the deployed CloudFront path serves for an empty origin list.
+docker run --rm -p 8080:8080 \
+  -e CARDDEMO_API_CONNECT_SRC_ORIGINS="https://<api-host>" \
+  carddemo-ui:local
+```
+
+Note that the container is **not** the deployed delivery path — `infra/modules/cloudfront-spa`
+serves the bundle from a private S3 origin and sets the same headers itself. The image exists for
+local and container use, and the two policies are kept identical directive for directive.
+
 ## Develop
 
 ```bash

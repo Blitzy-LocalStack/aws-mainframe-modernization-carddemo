@@ -234,7 +234,6 @@ public class CardXrefMapper {
     public CardXrefResponse toCardXrefResponse(CardXref row) {
         Objects.requireNonNull(row, "row must not be null");
 
-        // WHAT: three of the record's four fields become response components.
         // WHY : Assumptions: the fourth field, FILLER PIC X(14) at app/cpy/CVACT03Y.cpy L8, is never
         //       read here and has no component to be read into. It is padding to a fixed physical record
         //       length rather than data the row carries, and the arithmetic proves it accounts for

@@ -5,6 +5,8 @@ import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
 import com.carddemo.common.security.CognitoAccessTokenValidator;
 import com.carddemo.common.security.JwtRoleConverter;
+import java.io.IOException;
+import java.io.InputStream;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
@@ -13,10 +15,16 @@ import org.springframework.security.authorization.AuthorizationResult;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.util.AntPathMatcher;
+import org.yaml.snakeyaml.Yaml;
 
 /**
  * Verifies that {@link SecurityConfig} refuses a token carrying no recognised group, keeps the health
- * probe open, and holds the management namespace to the operator authority.
+ * probe open, and refuses every management path it does not publish.
+ *
+ * <p>Refactoring Rationale: this charter described the management namespace as held "to the operator
+ * authority". It never was: no rule referenced the namespace pattern at all, so anything under it that
+ * reached a handler inherited the BUSINESS rule. The namespace is now refused outright by a rule of its
+ * own, placed after the three published endpoints have each been granted, and the description says so.</p>
  *
  * <p>Assumptions: tokens are assembled in memory because signature, issuer and time validation all happen
  * before the authority conversion this class exercises. Each assertion therefore controls only the claim
@@ -40,8 +48,14 @@ class SecurityConfigTest {
      *
      * <p>Assumptions: both the aggregate path and a probe group are asserted, because enabling the probe
      * groups publishes {@code /actuator/health/readiness} and {@code /actuator/health/liveness}
-     * alongside {@code /actuator/health} and an orchestrator check may poll any of the three with no
-     * credential.</p>
+     * alongside {@code /actuator/health}, and the pattern has to admit all three whether or not any of
+     * them is polled today. The two current consumers -- this service's container health check and the
+     * load balancer's target group -- both poll the AGGREGATE path only, and this module's
+     * {@code application.yml} records that the groups exist so a future orchestrator check can
+     * distinguish "started but not ready" from "failed". Refactoring Rationale: this paragraph read as
+     * though a check already polled the probe paths, which no configuration in this repository sets up;
+     * the reason to assert them is that they are published and unauthenticated, not that something
+     * calls them.</p>
      */
     @Test
     @DisplayName("the health group is open and the wider management namespace is not")
@@ -54,13 +68,13 @@ class SecurityConfigTest {
                     .as("%s must not be reachable through the credential-free health rule", managed)
                     .isFalse();
             assertThat(MATCHER.match(SecurityConfig.MANAGEMENT_PATH, managed))
-                    .as("%s must be covered by the operator rule", managed)
+                    .as("%s must be covered by the management namespace rule", managed)
                     .isTrue();
         }
     }
 
     /**
-     * Confirms the operator rule cannot reach a business route.
+     * Confirms the management refusal cannot reach a business route.
      *
      * <p>Assumptions: a management pattern that matched a business path would not fail open, it would fail
      * CLOSED -- every ordinary user would lose the route. That is a functional regression rather than a
@@ -68,14 +82,47 @@ class SecurityConfigTest {
      * pass.</p>
      */
     @Test
-    @DisplayName("the operator rule matches only the actuator namespace")
+    @DisplayName("the management refusal matches only the actuator namespace")
     void operatorRuleMatchesOnlyTheActuatorNamespace() {
         assertThat(MATCHER.match(SecurityConfig.MANAGEMENT_PATH, BUSINESS_PATH))
-                .as("%s must not be swept into the operator rule", BUSINESS_PATH)
+                .as("%s must not be swept into the management refusal", BUSINESS_PATH)
                 .isFalse();
         assertThat(SecurityConfig.MANAGEMENT_PATH)
-                .as("the operator rule must be scoped to the management namespace")
+                .as("the management refusal must be scoped to the management namespace")
                 .startsWith("/actuator");
+    }
+
+    /**
+     * Confirms an unpublished management endpoint is claimed by the refusal and by nothing else.
+     *
+     * <p>Purpose: the refusal is only effective if it is the ONLY rule that matches an endpoint this
+     * module does not publish. Were one of the three grants to match such a path as well, that grant
+     * would be declared first and would answer instead -- so this case asserts the coverage the chain's
+     * ordering depends on rather than the ordering itself.</p>
+     *
+     * <p>Assumptions: the paths asserted are the four the service's own configuration file names as
+     * deliberately unexposed, so each is a path a later widening of the exposure list would publish. The
+     * environment endpoint is first because that file records the concrete consequence of exposing it:
+     * this service's configuration names the datasource, the search path and the token issuer.</p>
+     */
+    @Test
+    @DisplayName("refuse an unpublished management endpoint through the namespace rule alone")
+    void anUnpublishedManagementEndpointIsRefusedByTheNamespaceRuleAlone() {
+        for (String unexposed : List.of("/actuator/env", "/actuator/configprops",
+                "/actuator/loggers", "/actuator/threaddump")) {
+
+            assertThat(MATCHER.match(SecurityConfig.MANAGEMENT_PATH, unexposed))
+                    .as("%s must be claimed by the management refusal", unexposed)
+                    .isTrue();
+            assertThat(MATCHER.match(SecurityConfig.HEALTH_PATH, unexposed))
+                    .as("%s must not be reachable through the credential-free health rule", unexposed)
+                    .isFalse();
+            assertThat(unexposed)
+                    .as("%s must not be one of the two endpoints granted by network position",
+                            unexposed)
+                    .isNotEqualTo(SecurityConfig.BUILD_IDENTITY_PATH)
+                    .isNotEqualTo(SecurityConfig.METRIC_SCRAPE_PATH);
+        }
     }
 
     /**
@@ -198,5 +245,116 @@ class SecurityConfigTest {
                 .jwtAuthenticationConverter(
                         JwtRoleConverter.ADMIN_AUTHORITY, JwtRoleConverter.USER_AUTHORITY)
                 .convert(builder.build());
+    }
+
+    /**
+     * Confirms every management endpoint the exposure list publishes has a rule of its own.
+     *
+     * <p>Assumptions: this is the guard that makes the denial of {@link SecurityConfig#MANAGEMENT_PATH}
+     * hold its value over time. The chain denies that namespace and grants three endpoints ahead of it
+     * by name, so the two halves agree only while the exposure list publishes exactly those three. This
+     * case reads the exposure list from {@code application.yml} and fails if it names a fourth.</p>
+     *
+     * <p>Refactoring Rationale: the namespace previously had no rule at all, so a fourth exposed
+     * endpoint would have inherited the business rule and become readable by every holder of a CardDemo
+     * group authority -- silently, since nothing compared the exposure list to the chain. Denying the
+     * namespace closed the leak but created a quieter failure in the other direction: a newly exposed
+     * endpoint would return 403 with no indication why. Asserting the two against each other is what
+     * makes either mistake a build failure rather than a discovery in production.</p>
+     *
+     * <p>Assumptions: the wildcard is rejected explicitly. It would publish the environment listing, the
+     * loggers and a heap dump, and it would satisfy any assertion that merely checked the three names
+     * were present.</p>
+     */
+    @Test
+    @DisplayName("every exposed management endpoint is named by a rule ahead of the namespace denial")
+    void everyExposedManagementEndpointIsNamedByARuleAheadOfTheDenial() {
+        List<String> exposed = exposedManagementEndpoints();
+
+        assertThat(exposed)
+                .as("the wildcard would publish endpoints no rule below names")
+                .doesNotContain("*");
+        assertThat(exposed)
+                .as("an endpoint added here needs a rule in the chain ahead of the namespace denial")
+                .containsExactlyInAnyOrder("health", "info", "prometheus");
+
+        for (String endpoint : exposed) {
+            String path = "/actuator/" + endpoint;
+            boolean named = MATCHER.match(SecurityConfig.HEALTH_PATH, path)
+                    || path.equals(SecurityConfig.BUILD_IDENTITY_PATH)
+                    || path.equals(SecurityConfig.METRIC_SCRAPE_PATH);
+            assertThat(named)
+                    .as("%s is exposed, so it must be granted before the namespace is denied", path)
+                    .isTrue();
+            assertThat(MATCHER.match(SecurityConfig.MANAGEMENT_PATH, path))
+                    .as("%s must also fall inside the denied namespace, so ordering is what admits it",
+                            path)
+                    .isTrue();
+        }
+    }
+
+    /**
+     * Confirms the denied namespace covers the endpoints the exposure list withholds.
+     *
+     * <p>Assumptions: the endpoints named here are the ones whose disclosure would matter most -- the
+     * environment listing, the configuration properties, the loggers, a thread dump and a heap dump.
+     * None is reachable today, and the point of the assertion is that each is covered by a DENY rule
+     * rather than by the absence of a handler, so exposing one cannot quietly grant it.</p>
+     */
+    @Test
+    @DisplayName("the denied namespace covers the endpoints the exposure list withholds")
+    void deniedNamespaceCoversTheEndpointsTheExposureListWithholds() {
+        List<String> withheld = List.of("/actuator/env", "/actuator/configprops",
+                "/actuator/loggers", "/actuator/threaddump", "/actuator/heapdump",
+                "/actuator/mappings", "/actuator/beans");
+
+        for (String path : withheld) {
+            assertThat(MATCHER.match(SecurityConfig.MANAGEMENT_PATH, path))
+                    .as("%s must be matched by the namespace rule and not reach the business rule", path)
+                    .isTrue();
+            assertThat(MATCHER.match(SecurityConfig.HEALTH_PATH, path))
+                    .as("%s must not be reachable through the credential-free health rule", path)
+                    .isFalse();
+            assertThat(path)
+                    .isNotEqualTo(SecurityConfig.BUILD_IDENTITY_PATH)
+                    .isNotEqualTo(SecurityConfig.METRIC_SCRAPE_PATH);
+        }
+    }
+
+    /**
+     * Reads the management endpoints this module's base profile publishes.
+     *
+     * @return the exposure list, one entry per endpoint identifier, trimmed; never {@code null}
+     * @throws IllegalStateException if the profile is absent, does not parse to a mapping, or declares
+     *     no exposure list, any of which would mean the assertions above were reading nothing
+     */
+    @SuppressWarnings("unchecked")
+    private static List<String> exposedManagementEndpoints() {
+        Object parsed;
+        try (InputStream stream = SecurityConfigTest.class.getResourceAsStream("/application.yml")) {
+            if (stream == null) {
+                throw new IllegalStateException("/application.yml is absent from the class path");
+            }
+            parsed = new Yaml().load(stream);
+        } catch (IOException failure) {
+            throw new IllegalStateException("could not read /application.yml", failure);
+        }
+        if (!(parsed instanceof Map)) {
+            throw new IllegalStateException("/application.yml did not parse to a mapping");
+        }
+        Object include = parsed;
+        for (String key : List.of("management", "endpoints", "web", "exposure", "include")) {
+            if (!(include instanceof Map)) {
+                throw new IllegalStateException("management.endpoints.web.exposure.include is absent");
+            }
+            include = ((Map<String, Object>) include).get(key);
+        }
+        if (include == null) {
+            throw new IllegalStateException("management.endpoints.web.exposure.include is absent");
+        }
+        return java.util.Arrays.stream(String.valueOf(include).split(","))
+                .map(String::trim)
+                .filter(entry -> !entry.isEmpty())
+                .toList();
     }
 }

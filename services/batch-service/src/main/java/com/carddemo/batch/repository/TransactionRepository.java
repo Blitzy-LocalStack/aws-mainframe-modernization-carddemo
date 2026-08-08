@@ -252,10 +252,22 @@ public interface TransactionRepository extends JpaRepository<Transaction, String
     // Assumptions: the fetch-size hint is what makes this stream actually stream. The driver opens a
     //     server-side cursor only when a positive fetch size and a non-auto-commit connection both
     //     hold; with either missing it buffers the whole result client-side, which on this table is
-    //     heap exhaustion rather than a slowdown. The value matches the module-wide
-    //     hibernate.jdbc.fetch_size in this module's application.yml deliberately, so the two cannot
-    //     disagree, and it is declared HERE as well so the streaming contract of this method does not
-    //     depend on a property another profile could change.
+    //     heap exhaustion rather than a slowdown. Only POSITIVITY carries that property, so the
+    //     streaming contract of this method rests on the value being above zero and not on which value
+    //     it is.
+    // Refactoring Rationale: this note used to say the value matches the module-wide
+    //     hibernate.jdbc.fetch_size "so the two cannot disagree". They can. The base declares 100 at
+    //     application.yml:764, which is where the numeric agreement comes from, but
+    //     application-dev.yml:215 narrows the session default to 25 and application-prod.yml:426 widens
+    //     it to 250. A query hint is a compile-time constant and cannot track either, so the sentence
+    //     asserted an invariant nothing enforces. The same correction is made at the two sibling
+    //     interfaces that carried the identical wording, so all three now describe one mechanism.
+    // Trade-offs: this hint is therefore an intentional per-query OVERRIDE. It governs the statement it
+    //     annotates, so this walk reads 100 rows per round trip under every profile regardless of the
+    //     session default. What is given up is per-environment tuning of this walk; what is bought is a
+    //     window fixed at the method, which no external property can set to zero and thereby convert
+    //     into a full client-side buffer. The constant is aligned with the base value so the default
+    //     deployment behaves identically whichever governs.
     @QueryHints(@QueryHint(name = HibernateHints.HINT_FETCH_SIZE, value = "100"))
     Stream<Transaction> findAllByOrderByTransactionIdAsc();
 

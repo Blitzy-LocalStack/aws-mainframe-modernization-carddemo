@@ -92,9 +92,11 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any
 
 import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 
 LOGGER = logging.getLogger(__name__)
 LOGGER.setLevel(logging.INFO)
@@ -128,6 +130,7 @@ def _required_environment(name: str) -> str:
 PARAMETER_NAME = _required_environment("PARAMETER_NAME")
 EXPECTED_ACTION = _required_environment("EXPECTED_ACTION")
 TARGET_VALUE = _required_environment("TARGET_VALUE").lower()
+LEASE_TABLE_NAME = _required_environment("LEASE_TABLE_NAME")
 
 if EXPECTED_ACTION not in {"quiesce", "resume"}:
     raise RuntimeError("EXPECTED_ACTION must be quiesce or resume")
@@ -137,6 +140,103 @@ if not PARAMETER_NAME.startswith("/"):
     raise RuntimeError("PARAMETER_NAME must be an absolute SSM path")
 
 SSM = boto3.client("ssm")
+DYNAMODB = boto3.client("dynamodb")
+
+#: Partition-key value of the single lease item. The bracket is global to a deployment -- there is
+#: one online-write window, not one per dataset -- so one item governs it, and the parameter path
+#: names it so two deployments sharing a table cannot collide.
+LEASE_KEY = f"online-write-gate:{PARAMETER_NAME}"
+
+#: Attribute names of the lease item. Held as constants because the condition expressions below
+#: reference them as expression-attribute names and a divergence between a write and a condition
+#: would silently make the condition test an attribute nothing sets.
+LEASE_KEY_ATTRIBUTE = "LeaseName"
+LEASE_OWNER_ATTRIBUTE = "owner"
+LEASE_EXPIRES_ATTRIBUTE = "expiresAt"
+
+#: Seconds a lease is honoured for when the caller supplies no explicit duration. The graph passes
+#: its own state-machine timeout, which is the longest a running execution can hold the bracket, so
+#: this default is only reached by a hand-run invocation.
+DEFAULT_LEASE_SECONDS = 7200
+
+
+def _conditional_check_failed(exc: BaseException) -> bool:
+    """Report whether an SDK exception is a refused conditional write.
+
+    Purpose
+    -------
+    Recognise the one service answer that is an expected outcome rather than a fault -- another
+    owner holds the lease, or the lease the caller believes it holds is not the one stored -- so
+    it can be reported as data instead of raised as an error.
+
+    Parameters
+    ----------
+    exc:
+        Exception raised by a DynamoDB call.
+
+    Returns
+    -------
+    bool
+        True when the exception is a conditional-check failure.
+
+    Raises
+    ------
+    None
+        Every lookup is defensive, because this runs while another exception is already being
+        handled and raising here would replace the original failure with a less informative one.
+    """
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return False
+    error = response.get("Error")
+    if not isinstance(error, dict):
+        return False
+    return error.get("Code") == "ConditionalCheckFailedException"
+
+
+def _stored_lease_owner() -> str:
+    """Return the owner recorded on the stored lease, or an empty string when none is stored.
+
+    Purpose
+    -------
+    Report who holds the bracket after an acquisition was refused, so an execution history records
+    which execution it lost to rather than only that it lost.
+
+    Returns
+    -------
+    str
+        The recorded owner, or ``""`` when no lease is stored or it records no owner.
+
+    Raises
+    ------
+    None
+        A read failure yields an empty string. This runs only on the refusal path, where the
+        acquisition result is already decided, so failing here would turn a correctly-refused
+        acquisition into a broken invocation.
+    """
+    try:
+        stored = DYNAMODB.get_item(
+            TableName=LEASE_TABLE_NAME,
+            Key={LEASE_KEY_ATTRIBUTE: {"S": LEASE_KEY}},
+            # WHY : Assumptions: the read is STRONGLY consistent. An eventually consistent read
+            # can return the state before the write that just refused this caller, which would
+            # report "no owner" for a lease that demonstrably exists -- the most confusing
+            # possible answer at exactly the moment an operator is reading the log to find out
+            # who holds the bracket.
+            ConsistentRead=True,
+        ).get("Item")
+    # WHY : Trade-offs: this catches the SDK's two exception families by name rather than catching
+    # every exception. It is the only swallowing handler in this module -- the two conditional-write
+    # handlers below re-raise anything that is not a refused condition -- so it is the one place a
+    # blind catch could hide a programming error in this file behind an empty owner string. Naming
+    # the families keeps a service or transport failure absorbed, as the Raises note requires, while
+    # letting a TypeError or AttributeError here surface as the fault it is.
+    except (ClientError, BotoCoreError):
+        return ""
+    if not isinstance(stored, dict):
+        return ""
+    owner = stored.get(LEASE_OWNER_ATTRIBUTE)
+    return str(owner.get("S", "")) if isinstance(owner, dict) else ""
 
 
 def _current_flag_state() -> tuple[str, int]:
@@ -162,6 +262,200 @@ def _current_flag_state() -> tuple[str, int]:
         return "", 0
     stored = parameter["Parameter"]
     return str(stored["Value"]).strip().lower(), int(stored["Version"])
+
+
+def _lease_seconds(event: dict[str, Any]) -> int:
+    """Return the lease duration this acquisition should record.
+
+    Purpose
+    -------
+    Bound how long a lease survives its owner, so an execution that stops without releasing
+    cannot hold the bracket for ever.
+
+    Parameters
+    ----------
+    event:
+        Invocation payload, read for ``leaseSeconds``.
+
+    Returns
+    -------
+    int
+        The requested duration when it is a positive integer, otherwise
+        :data:`DEFAULT_LEASE_SECONDS`.
+
+    Raises
+    ------
+    None
+        An unusable value falls back to the default rather than failing the invocation, because
+        the graph already supplies a sound value and a hand-run must not be blocked by omitting it.
+    """
+    # WHY : Assumptions: the graph passes its own state-machine timeout as leaseSeconds, which is
+    # the correct ceiling because it IS the longest a running execution can hold the bracket. A
+    # shorter value would let a still-running execution's lease expire underneath it; a longer one
+    # would leave a dead execution's lease blocking the next night.
+    requested = event.get("leaseSeconds")
+    if isinstance(requested, bool):
+        return DEFAULT_LEASE_SECONDS
+    if isinstance(requested, int) and requested > 0:
+        return requested
+    if isinstance(requested, str):
+        try:
+            parsed = int(requested.strip())
+        except ValueError:
+            return DEFAULT_LEASE_SECONDS
+        if parsed > 0:
+            return parsed
+    return DEFAULT_LEASE_SECONDS
+
+
+def _acquire_lease(event: dict[str, Any], execution_name: str) -> tuple[bool, str, str]:
+    """Attempt to take the online-write bracket with one atomic conditional write.
+
+    Purpose
+    -------
+    Let exactly one execution own the write window at a time, so an execution that starts while
+    another owns the bracket learns that it does not own it instead of taking a bracket it would
+    later release under the first execution's feet.
+
+    Parameters
+    ----------
+    event:
+        Invocation payload, read for ``leaseSeconds``.
+    execution_name:
+        Name of the execution asking for the bracket, recorded as the durable owner.
+
+    Returns
+    -------
+    tuple[bool, str, str]
+        Whether the lease was acquired, the owner now recorded, and a refusal reason. The reason
+        is empty on this edge because a refused acquisition is reported through the boolean.
+
+    Raises
+    ------
+    ValueError
+        If no execution name was supplied, since an unnamed owner cannot be verified at release.
+    botocore.exceptions.ClientError
+        For any service failure other than a refused condition.
+    """
+    # WHY : Assumptions: an acquisition REQUIRES a named execution. The owner is the only thing a
+    # later release can be checked against, so a lease recording no owner is one that any caller
+    # could clear -- which is the defect this rewrite exists to close, reintroduced by omission.
+    if not execution_name:
+        raise ValueError(
+            "A quiesce call must supply executionName; the lease owner cannot be verified at "
+            "release time without it"
+        )
+
+    now = int(time.time())
+    expires_at = now + _lease_seconds(event)
+    try:
+        DYNAMODB.put_item(
+            TableName=LEASE_TABLE_NAME,
+            Item={
+                LEASE_KEY_ATTRIBUTE: {"S": LEASE_KEY},
+                LEASE_OWNER_ATTRIBUTE: {"S": execution_name},
+                LEASE_EXPIRES_ATTRIBUTE: {"N": str(expires_at)},
+                "acquiredAt": {"N": str(now)},
+            },
+            # WHY : Alternatives Considered: the condition admits an EXPIRED lease as well as an
+            # absent one. Requiring absence alone was the simpler alternative and was rejected
+            # because it makes one crashed execution block every subsequent night for ever -- the
+            # bracket would need an operator to clear it by hand. Admitting an expired lease is
+            # what makes the mechanism self-healing, and it is safe because the expiry the graph
+            # supplies is the state machine's own timeout, so a lease can only be expired once its
+            # owner can no longer be running.
+            ConditionExpression=(
+                f"attribute_not_exists({LEASE_KEY_ATTRIBUTE}) OR {LEASE_EXPIRES_ATTRIBUTE} < :now"
+            ),
+            ExpressionAttributeValues={":now": {"N": str(now)}},
+        )
+    # Re-raised below unless it is a refused condition, which is an expected outcome.
+    except Exception as exc:
+        if not _conditional_check_failed(exc):
+            raise
+        # WHY : Alternatives Considered: RAISING on a refused acquisition instead of reporting it.
+        # Rejected because the state machine models refusal as data, not as an error: the graph
+        # tests leaseAcquired for BooleanEquals true and routes a false to its own state. Raising
+        # would collapse "another owner holds it" into the same failure shape as "the lease store
+        # is unreachable", and the graph could no longer tell a contended night from a broken one.
+        return False, _stored_lease_owner(), ""
+    return True, execution_name, ""
+
+
+def _release_lease(event: dict[str, Any]) -> tuple[str, str]:
+    """Give up the online-write bracket, only for an owner that holds it or a lease that expired.
+
+    Purpose
+    -------
+    Ensure a release can only clear the bracket the caller actually owns, so a chain that never
+    acquired it -- or a watchdog firing for a different execution -- cannot open the write window
+    while a real owner is still inside it.
+
+    Parameters
+    ----------
+    event:
+        Invocation payload, read for ``expectedLeaseOwner``.
+
+    Returns
+    -------
+    tuple[str, str]
+        The owner the caller claimed, and a refusal reason which is empty when the lease was
+        released.
+
+    Raises
+    ------
+    botocore.exceptions.ClientError
+        For any service failure other than a refused condition.
+    """
+    # WHY : Refactoring Rationale: expectedLeaseOwner is now VERIFIED, where previously it could
+    # only be recorded. The earlier code said so plainly -- the flag stores "true"/"false" and
+    # nothing else, so no owner existed to compare against and the strongest check available was
+    # "is the bracket still engaged". The lease item records the owner, so the comparison the
+    # payload always implied is now the condition on the delete.
+    # WHY : Assumptions: an ABSENT or EMPTY expectedLeaseOwner is REFUSED rather than treated as
+    # "clear it unconditionally". That reading was what let the bracket-finalizer rule open the
+    # write window while a healthy execution still held it. The rule does not need the unconditional
+    # form: its input transformer already extracts the terminating execution's name from the event,
+    # so it can name the owner it means to clear and be checked like every other caller.
+    claimed_owner = str(event.get("expectedLeaseOwner", "")).strip()
+    if not claimed_owner:
+        return "", "caller named no lease owner"
+
+    now = int(time.time())
+    try:
+        DYNAMODB.delete_item(
+            TableName=LEASE_TABLE_NAME,
+            Key={LEASE_KEY_ATTRIBUTE: {"S": LEASE_KEY}},
+            # WHY : Trade-offs: an EXPIRED lease may be cleared by any named caller, not only by
+            # its owner. The alternative -- owner match only -- was rejected for the same reason
+            # the acquisition admits an expired lease: a crashed owner would otherwise leave a
+            # bracket that only a human could clear. The cost is that a caller can clear a lease
+            # it never held once that lease has expired, which is acceptable precisely because an
+            # expired lease is one whose owner can no longer be running.
+            ConditionExpression=(
+                f"{LEASE_OWNER_ATTRIBUTE} = :owner OR {LEASE_EXPIRES_ATTRIBUTE} < :now"
+            ),
+            ExpressionAttributeValues={
+                ":owner": {"S": claimed_owner},
+                ":now": {"N": str(now)},
+            },
+        )
+    # Re-raised below unless it is a refused condition, which is an expected outcome.
+    except Exception as exc:
+        if not _conditional_check_failed(exc):
+            raise
+        # WHY : Assumptions: a refused delete covers two cases and both must leave the flag alone.
+        # Either another execution owns a live lease -- clearing the flag would open the write
+        # window underneath it -- or no lease is stored at all, in which case there is no bracket
+        # to give up. Reporting the refusal rather than raising keeps the resume edge able to run
+        # on a night this execution never acquired anything, which is the normal case for the
+        # in-graph release after a refused acquisition.
+        stored_owner = _stored_lease_owner()
+        reason = (
+            f"lease is held by {stored_owner}" if stored_owner else "no lease is held"
+        )
+        return claimed_owner, reason
+    return claimed_owner, ""
 
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
@@ -239,55 +533,21 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     current_value, current_version = _current_flag_state()
     already_at_target = current_value == TARGET_VALUE
 
-    # WHY : Assumptions: the flag doubles as the bracket's LOCK, and this block is
-    # what turns a blind overwrite into a lease. The quiesce edge acquires only when
-    # the flag is not already engaged, so an execution that starts while another
-    # execution owns the write window learns that it does not own it instead of
-    # taking a bracket it will later release under the first execution's feet.
-    # WHY : Trade-offs: acquisition is a read followed by a write and is therefore
-    # not atomic. Two executions that read within the same instant can both believe
-    # they acquired. The residual window is accepted because the schedule starts one
-    # execution per night and the alternative -- a conditional write -- is not
-    # offered by Parameter Store for a plain String parameter, so closing it would
-    # mean moving the flag into a store with a compare-and-set primitive and giving
-    # every online service a second client to read it with.
-    # WHY : Alternatives Considered: RAISING on a refused acquisition instead of
-    # reporting it. Rejected because the state machine models refusal as data, not as
-    # an error: CheckQuiesceLeaseOwnership tests leaseAcquired for BooleanEquals true
-    # behind an IsPresent guard, which is only reachable when the call SUCCEEDED and
-    # said no. Raising would collapse "another owner holds it" into the same $.failure
-    # shape as "Parameter Store is unreachable", and the graph could no longer tell a
-    # contended night from a broken one.
+    # WHY : Refactoring Rationale: acquisition and release are now CONDITIONAL WRITES against a
+    # durable lease item, replacing a read of the flag followed by a write of it. The earlier
+    # shape could not be a lease and its own comment said so: two executions reading within the
+    # same instant both concluded they had acquired, and the release edge had nothing to compare a
+    # claimed owner against because the flag stores only "true"/"false". Both gaps are closed by
+    # moving the LEASE into a store with a compare-and-set primitive while leaving the FLAG where
+    # it is. The flag remains exactly what every online service reads -- a boolean at the same
+    # parameter path -- and is now written as a CONSEQUENCE of the lease decision rather than
+    # being the lease itself. No online service gains a second client or a second thing to read.
     if EXPECTED_ACTION == "quiesce":
-        lease_acquired = not already_at_target
-        lease_owner = execution_name if lease_acquired else ""
-        write_wanted = lease_acquired
-        release_refused_reason = ""
+        lease_acquired, lease_owner, release_refused_reason = _acquire_lease(event, execution_name)
+        write_wanted = lease_acquired and not already_at_target
     else:
-        # WHY : Assumptions: expectedLeaseOwner has THREE states on the release edge
-        # and they mean different things. ABSENT is an unconditional release and is
-        # what the bracket-finalizer rule sends -- that rule exists precisely to clear
-        # a bracket whose owner stopped without releasing it, so it must not be
-        # refused for naming no owner. EMPTY is a caller that knows it does not own the
-        # lease: the quiesce call reports an empty owner when it was refused, and the
-        # in-graph release passes that value straight through, so an empty string is
-        # the graph asking to clear a bracket it never took. PRESENT is a conditional
-        # release by an owner that believes it holds the flag.
-        # WHY : Trade-offs: a PRESENT owner cannot be verified. The flag stores
-        # "true"/"false" and nothing else, so no owner is recorded to compare against,
-        # and the strongest check the stored value supports is "is the bracket still
-        # engaged". Storing the owner in the value was rejected because the value is
-        # read by every online service as a boolean and by this handler's own
-        # TARGET_VALUE validation; a second, owner-bearing parameter was rejected
-        # because it adds a resource, a grant and a module input to close a window the
-        # in-graph ownership gate already covers on the failure edge.
         lease_acquired = False
-        if "expectedLeaseOwner" in event:
-            lease_owner = str(event.get("expectedLeaseOwner", "")).strip()
-            release_refused_reason = "" if lease_owner else "caller holds no lease"
-        else:
-            lease_owner = ""
-            release_refused_reason = ""
+        lease_owner, release_refused_reason = _release_lease(event)
         write_wanted = not already_at_target and not release_refused_reason
 
     if write_wanted:

@@ -19,13 +19,27 @@
  * context. It declares one Spring Data type, {@code UserRepository}, and that
  * type reaches the {@code auth.users} table in three ways and in no fourth way.
  * The first is keyed access through the primary key: find by identifier,
- * existence check, save and delete. The second is keyset browsing: exactly two
- * queries, one reading forward from a key and one reading backward from a key.
- * The third is a single lookup by the table's one alternate key,
- * {@code cognito_sub}, returning at most one row. The exclusions are as much the
- * charter as the inclusions are, because each of them is load bearing rather
- * than an oversight: no offset pagination of any kind, no page number, no total
- * count, and no third browse direction.</p>
+ * existence check, save and delete. The second is keyset browsing: exactly three
+ * queries -- an opening read bounded only by row count, one reading forward from
+ * a key and one reading backward from a key. The third is a single lookup by the
+ * table's one alternate key, {@code cognito_sub}, returning at most one row. The
+ * exclusions are as much the charter as the inclusions are, because each of them
+ * is load bearing rather than an oversight: no offset pagination of any kind, no
+ * page number, no total count, and no third browse DIRECTION.</p>
+ *
+ * <p>Refactoring Rationale: the second way was closed at two queries and is
+ * widened here to three, by revising the charter rather than adding a member
+ * against it -- the process the ruling above prescribes. What made it necessary
+ * is that a browse has to start somewhere: both positioned queries take a key,
+ * and the first page has none, so opening the browse was expressible only by
+ * passing a value chosen to sort below every key. That works by way of a
+ * collation detail rather than by intent -- the column is {@code CHAR(8)} and
+ * trailing blanks are ignored in its comparison, so an empty string and a string
+ * of blanks compare equal and a blank identifier would be dropped from the first
+ * page while appearing on later ones. A query with no lower bound states the
+ * intent and cannot be wrong about it. The third query adds no DIRECTION, which
+ * is why that exclusion is unchanged and is now capitalised to mark the
+ * distinction: three queries, two directions.</p>
  *
  * <p>Refactoring Rationale: this charter previously closed the set at two ways
  * and named no alternate-key access, and the third way is admitted by revising

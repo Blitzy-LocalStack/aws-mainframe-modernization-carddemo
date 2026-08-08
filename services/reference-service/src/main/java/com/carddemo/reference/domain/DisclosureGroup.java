@@ -289,12 +289,21 @@ public class DisclosureGroup {
      * Creates an empty instance for the persistence provider to populate.
      *
      * <p>Assumptions: the specification requires a no-argument constructor, which the provider calls
-     * before assigning the mapped members reflectively. It is public rather than narrower because
-     * that is this package's prevailing choice, and because the guards that matter are on the
-     * assignment routes rather than on the allocation: the identity can only ever be supplied
-     * through the constructor below, and every rate assignment passes the same canonicalisation.</p>
+     * before assigning the mapped members reflectively. It is {@code protected} rather than public,
+     * which is the policy every other entity in this codebase already follows -- 30 of the 33 entity
+     * declarations across the eight services declare it protected -- so the provider reaches it while
+     * application code cannot allocate an unpopulated row and pass it on as if it were loaded.
+     *
+     * <p>Refactoring Rationale: this was public, and its note argued that public was "this package's
+     * prevailing choice" and that the guards which matter sit on the assignment routes rather than on
+     * the allocation. Both halves of that argument have been withdrawn. The prevailing choice of one
+     * package is not a policy when the other seven packages agree on the opposite, and the assignment
+     * argument rested on the identity being reachable only through the constructor below -- which was
+     * not true of every type in this package, because the area-code entity also published a setter for
+     * its own identifier. Narrowing the constructor and withdrawing that setter make the claim true
+     * rather than merely stated.
      */
-    public DisclosureGroup() {
+    protected DisclosureGroup() {
         // WHY : Assumptions: the body is empty because the provider assigns every mapped member
         //       reflectively immediately afterwards, so a default written here would be discarded.
     }

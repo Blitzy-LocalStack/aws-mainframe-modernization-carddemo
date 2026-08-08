@@ -302,11 +302,16 @@ public class TransactionType {
      *
      * <p>Assumptions: the specification requires a persistence entity to declare a constructor taking
      * no arguments, which the provider invokes before writing the mapped columns into the members
-     * above. Visibility is public rather than narrower so that a mapper or a test in a sibling
-     * package can build an instance member by member through the accessors below, which is the same
-     * assembly route the all-argument constructor offers in one step.</p>
+     * above. It is {@code protected} rather than public, which is the policy every other entity in this
+     * codebase already follows: 30 of the 33 entity declarations across the eight services declare it
+     * protected, and the five public ones were all in this package. The provider reaches a protected
+     * constructor, and application code outside this package cannot allocate an unpopulated row and
+     * pass it on as though it had been loaded.
+     *
+     * <p>Refactoring Rationale: this was public, and each of the five gave its own reason -- that a
+     * mapper or a test needs to assemble a row member by member. Narrowing costs those callers nothing: the all-argument constructor is public and is the route they already take, and this package's own tests share this package, so protected reaches them as well.
      */
-    public TransactionType() {
+    protected TransactionType() {
         // WHY : Assumptions: the body is empty by design rather than unfinished. The provider assigns
         //       every mapped member directly after construction on each load, so initialising one
         //       here would write a value that is immediately overwritten. The version member needs no

@@ -1,3 +1,42 @@
+# ===========================================================================
+# .gitignore -- the repository's single ignore file.
+#
+# Purpose: name every path that a build, a test run, a dependency install or a
+#   local developer environment PRODUCES, so that generated output, Terraform
+#   state and local environment files can never be committed. It exists to keep
+#   two classes of file out of history: artifacts that are reproducible from
+#   source and therefore worthless in it, and files that carry secrets or
+#   machine-local absolute paths and are therefore harmful in it.
+#
+# Source of truth: this file is the ONLY ignore file in the repository. No
+#   nested .gitignore exists under services/, ui/, data-migration/ or infra/,
+#   and none should be added.
+#   Alternatives Considered: a per-package ignore file beside each build, which
+#   is the conventional layout for a polyglot monorepo. Rejected because a rule
+#   split across five files cannot be reviewed as one policy, and the failure it
+#   invites is silent -- a state file or an .env under a directory whose ignore
+#   file was never created is staged with no warning, and the cost of that
+#   mistake is a published secret rather than a noisy diff.
+#
+# Scope: this file is one of exactly THREE pre-existing files the migration
+#   modifies, alongside README.md and CONTRIBUTING.md. Everything above the
+#   first titled block below predates the migration and is left byte-identical;
+#   every block after it was added by the migration and states its own reason.
+#
+# Assumptions: every rule here names a GENERATED path, so no rule can mask a
+#   source file. That narrowness is the standing policy, and it is what makes a
+#   broad pattern such as `target/` or `node_modules/` safe to leave unanchored.
+#   A rule that could match authored source belongs in .git/info/exclude on the
+#   machine that needs it, not here.
+#
+# Trade-offs: the file is ordered by ORIGIN -- pre-migration rules, then the
+#   COBOL test-suite outputs, then the per-language build outputs -- rather than
+#   alphabetically. Alphabetical order would make a single rule quicker to find
+#   and would destroy the only thing this file can otherwise explain: which tool
+#   produces the path a rule names. Each block therefore carries a heading
+#   naming its producer, and a reader looking for one rule reads its neighbours.
+# ===========================================================================
+
 mock-data-generator/node_modules/*
 sample/*
 .vscode/*
@@ -75,8 +114,24 @@ __pycache__/
 #   per-environment tfvars limited to sizing and retention values, and by having
 #   deployment authenticate through short-lived federated role assumption; the
 #   remaining pre-merge gate is the gitleaks scan in
-#   .github/workflows/infra-ci.yml, which inspects CONTENT and which `git add -f`
-#   cannot bypass.
+#   .github/workflows/infra-ci.yml, which inspects CONTENT and so still sees a
+#   file that `git add -f` forced past every rule below.
+#
+# Refactoring Rationale: that last clause used to read that the scan "cannot be
+#   bypassed", and it was not true when written. The scan stages every tracked
+#   path outside app/, tests/, scripts/ and samples/, so its CONTENT reach was
+#   never the problem -- but the workflow was triggered by an allow-list of
+#   migration-owned paths, and a revision whose only changed file was a
+#   force-added root credential matched none of them and started nothing. The
+#   trigger is now an ignore-list of exactly those four reference trees, so any
+#   other changed path starts the workflow and reaches the scan. The claim above
+#   is therefore stated as what it is -- content inspection that a forced add
+#   does not remove -- and it holds only while that trigger stays inverted.
+# Assumptions: two conditions still sit outside every mechanism named here. A
+#   secret pushed to a branch that is not `main` and never opened as a pull
+#   request reaches no gate at all, and a secret already committed before a rule
+#   or a trigger existed is not retroactively caught by either. Both are
+#   properties of pre-merge gating rather than gaps in these rules.
 # ---------------------------------------------------------------------------
 # Maven build output, one target/ per module under services/ plus one at the
 # aggregator, where the Checkstyle gate bound to `validate` writes its result files.
@@ -94,6 +149,32 @@ node_modules/
 # Vite production bundle, written by `npm run build` to ui/dist/. Unanchored for the
 # same reason as target/ above.
 dist/
+
+# setuptools distribution metadata, written to data-migration/src/carddemo_migration.egg-info/
+# by the editable install that data-migration/README.md section 4 documents as a REQUIRED
+# step -- `carddemo_migration` is a src-layout distribution, so pytest cannot import it
+# until it is installed.
+# Assumptions: the rule is needed even though `dist/` and `__pycache__/` are already
+#   ignored, because setuptools writes this metadata BESIDE the package under src/ rather
+#   than into a build directory, so neither existing rule reaches it. Without it every
+#   operator who follows the documented install acquires an untracked directory holding a
+#   generated file list and dependency set, which is build output that would then be one
+#   `git add -A` away from being committed.
+# Trade-offs: unanchored rather than scoped to data-migration/, matching target/ and
+#   node_modules/ above, so it also covers a second distribution added later.
+*.egg-info/
+
+# setuptools intermediate build tree, written to data-migration/build/lib/ when a wheel or
+# sdist is built from that package, which the migration runbook does.
+# Assumptions: this rule is UNANCHORED and is therefore distinct from the `/build/` rule near
+#   the top of this file, which is root-anchored on purpose because it names the COBOL
+#   harness's compiled-program directory. Root-anchoring reaches only the repository root, so
+#   it cannot cover a per-package build tree, and widening that existing rule instead of adding
+#   this one would have silently changed what the COBOL rule means.
+# Assumptions: verified before adding -- `git ls-files` reports NO tracked path anywhere in the
+#   repository with a `build` directory component, so an unanchored rule cannot mask a real
+#   source file. That is the narrowness policy every block in this file follows.
+build/
 
 # Provider and module cache created by `terraform init`.
 # Alternatives Considered: ignoring all of infra/. Rejected outright -- the .tf source
@@ -148,6 +229,44 @@ dist/
 !.env.example
 !**/.env.example
 
+# Private key material and credential files, which this repository never carries. Every
+# key and every credential in the target is generated at apply time into Secrets Manager
+# or issued by ACM, and the local runtime the setup notes describe keeps its TLS material
+# and its role passwords outside the working tree entirely, so nothing legitimate has one
+# of these names.
+# Refactoring Rationale: this block did not exist, and its absence was the one real gap
+#   in the accidental-staging protection above. The rules already here refuse build
+#   output, state, saved plans and .env files -- the artifacts a tool WRITES -- and refuse
+#   nothing that a person creates by hand. A key exported for a one-off test, an SSH
+#   identity copied in to reach a bastion, or an AWS shared-credentials file dropped at
+#   the root are all exactly the case `git add .` was going to stage, and none of them
+#   matched a rule.
+# Assumptions: none of these patterns can untrack a deliverable, and that was verified
+#   rather than assumed -- `git ls-files` matched against every pattern below returns
+#   nothing. The extension-less names are exact basenames, so `credentials` does not
+#   reach data-migration/src/carddemo_migration/credentials.py or role_credentials.py,
+#   and `id_ed25519` does not reach an `id_ed25519.pub` beside it. Public halves are
+#   deliberately left unignored: a public key or a certificate is meant to be readable,
+#   and ignoring one would only hide a file that is safe to commit.
+# Trade-offs: *.pem is the one broad rule here, because PEM is a container format and the
+#   name alone does not say whether the block inside is a private key or a certificate.
+#   Refusing both is the wrong-by-a-little option and refusing neither is the
+#   wrong-by-a-lot one, so a certificate that genuinely needs committing has to be named
+#   past this rule explicitly, exactly as .env.example is named past the rule above.
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+credentials
+.netrc
+_netrc
+
 # Python virtual environments. The COBOL parity harness and the data-migration ETL
 # share one interpreter created at the repository root.
 # Assumptions: data-migration/requirements.txt instructs an operator to create it there
@@ -178,7 +297,7 @@ env/
 *.tfplan.*
 
 # Scratch sources written by the SPA documentation-gate probes in
-# ui/src/test/documentationGate.test.ts. Each probe writes one deliberately
+# ui/documentationGate.test.ts. Each probe writes one deliberately
 # non-conforming module here, lints it through the ESLint Node API against
 # ui/eslint.config.js so the assertion measures the REAL gate, and removes the
 # directory again in an afterEach that runs whatever the outcome.

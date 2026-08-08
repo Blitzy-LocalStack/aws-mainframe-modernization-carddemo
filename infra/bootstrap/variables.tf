@@ -51,7 +51,9 @@
 #   error surface, and each one names the shape that IS accepted so an operator
 #   can correct the input rather than only learning that it was refused. All of
 #   them are raised during `terraform plan`, before any AWS API call, so a
-#   malformed input costs nothing but a re-run. The three nullable overrides
+#   malformed input costs nothing but a re-run. The two nullable overrides --
+#   state_bucket_name and lock_table_name, the only inputs here declared with
+#   `default = null` --
 #   validate only when a value is actually supplied: their conditions
 #   short-circuit on null, because `regex` applied to null raises a type error
 #   instead of returning false and would therefore fail every invocation that

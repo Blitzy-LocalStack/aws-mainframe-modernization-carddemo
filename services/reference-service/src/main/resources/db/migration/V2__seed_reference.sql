@@ -65,7 +65,7 @@
 --     categories, written un-parenthesised and colon-terminated:
 --     "Alternatives Considered:", "Refactoring Rationale:", "Assumptions:" and
 --     "Trade-offs:". The repository's dominant idiom is the singular
---     parenthesised form, "WHY (Assumptions):", measured across the COBOL-era
+--     parenthesised form, "WHY : Assumptions:", measured across the COBOL-era
 --     tree at 471 sites in 37 files; the two forms mean the same thing and this
 --     file uses the label form throughout rather than mixing them, matching its
 --     sibling V1__reference.sql and docs/CODE_DOCUMENTATION_STANDARD.md. The

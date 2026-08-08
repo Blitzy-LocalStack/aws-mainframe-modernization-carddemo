@@ -41,30 +41,23 @@
  * units. Each mapping is listed with the schema-qualified table it targets and the baseline
  * record that fixes its field set.
  *
- * <p>Assumptions: that nine is this package's <b>target contract</b> as the migration plan
- * assigns it, not a measurement of the directory. Measured at the checkpoint that authored this
- * paragraph, six of the eight entities have landed -- {@code BatchRun}, {@code Account},
- * {@code CardXref}, {@code DisclosureGroup}, {@code Transaction} and
- * {@code DailyTransaction} -- so the directory holds seven compilation units. The remaining two
- * are <b>planned</b>, not missing: {@code TransactionCategoryBalance} and
- * {@code TransactionReject}, each of which arrives with the job that reads or writes its table.
- * A type named in the roster below with no file beside it is therefore planned, and the roster
- * stays closed at eight so that the question "which entity owns this table" keeps a definite
- * answer while the package fills.
+ * <p>Assumptions: nine is this package's contract as the migration plan assigns it and also a
+ * measurement of the directory, because all eight entities have landed -- {@code BatchRun},
+ * {@code Account}, {@code CardXref}, {@code DisclosureGroup}, {@code Transaction},
+ * {@code DailyTransaction}, {@code TransactionCategoryBalance} and {@code TransactionReject} -- so
+ * nothing in the roster below is planned. The roster stays closed at eight, which is what keeps the
+ * question "which entity owns this table" with a definite answer.
  *
- * <p>Refactoring Rationale: this paragraph stated the count in the present tense with nothing
- * to distinguish the target from the measurement, so a reader reconciling "the directory holds
- * nine compilation units" against a listing would find seven and be unable to tell whether two
- * entities had been lost or had never been written. That is a costlier ambiguity here than in
- * most packages, because the roster below pairs each entity with a schema-qualified table and a
- * normative copybook: a reader who concluded an entity was missing would have both the table and
- * the record layout in hand and might reasonably author a duplicate under a different name. The
- * count canon is left at nine rather than lowered to today's seven, because the roster's
- * closure is what the table-ownership question relies on and lowering it would have to be undone
- * with each entity that lands. The copybook is normative -- the migration plan's
- * transformation rule T1 makes a field's {@code PICTURE} clause decide its column type, its Java
- * type and its byte offset -- so the copybook column below is the specification and not a
- * provenance note.</p>
+ * <p>Refactoring Rationale: this passage recorded that two of the eight entities were still planned,
+ * naming {@code TransactionCategoryBalance} and {@code TransactionReject}, and that the directory
+ * held seven compilation units. Both have landed and the count is now nine, so the passage is
+ * replaced rather than annotated. It mattered more here than a stale count usually would, because
+ * the roster below pairs each entity with a schema-qualified table and a normative copybook: a
+ * reader who took an entity for absent would have had both the table and the record layout in hand
+ * and could reasonably have authored a duplicate under a different name, which is the one outcome a
+ * closed roster exists to prevent. The copybook is normative -- the migration plan's transformation
+ * rule T1 makes a field's {@code PICTURE} clause decide its column type, its Java type and its byte
+ * offset -- so the copybook column below is the specification and not a provenance note.</p>
  *
  * <dl>
  *   <dt>{@code BatchRun} into {@code batch.batch_run}</dt>

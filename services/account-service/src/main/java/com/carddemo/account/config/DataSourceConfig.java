@@ -74,50 +74,43 @@ import org.springframework.context.annotation.Configuration;
  *
  * <h2>Durability and isolation against the baseline</h2>
  *
- * <p>Trade-offs: all four baseline stanzas declare journalled synchronous write with recovery as none
- * and no forward recovery log, that trio appearing verbatim at {@code app/csd/CARDDEMO.CSD} L9, L46, L59
- * and L72, and all four declare uncommitted read integrity at L3, L40, L53 and L66. The baseline
- * therefore permits a read to observe a write that has not committed and keeps no recovery log at all;
- * the target reads at the database's own default committed-read level and adds encryption at rest with
- * automated backups. That is a deliberate divergence in posture rather than a port of it, and it is
- * documented as one. The compromise is genuine: a read the baseline satisfied without regard to
- * concurrent writers can now wait on one. It is accepted because the alternative is to preserve a weaker
- * guarantee over financial record data for no reason beyond symmetry, and because no baseline behaviour
- * depends on observing a partial write.</p>
+ * <p>Trade-offs: the four baseline stanzas declare four separate attributes that are easy to read as
+ * one. Each carries {@code JNLSYNCWRITE(YES)} beside {@code RECOVERY(NONE)} and {@code FWDRECOVLOG(NO)}
+ * at {@code app/csd/CARDDEMO.CSD} L9, L46, L59 and L72, and each also carries {@code JOURNAL(NO)} at L7,
+ * L44, L57 and L70 -- so the synchronous-write discipline applies to journal records the file never
+ * produces, and nothing is written for recovery. All four additionally declare uncommitted read
+ * integrity at L3, L40, L53 and L66, so a read there may observe a write that has not committed. The
+ * baseline behaves that way; this service reads at committed-read isolation and holds its rows encrypted
+ * at rest with automated backups, and the divergence is documented rather than reconciled. The
+ * compromise is genuine: a read the baseline satisfied without regard to concurrent writers can now wait
+ * on one. It is accepted because the alternative is to preserve a weaker guarantee over financial record
+ * data for no reason beyond symmetry, and because no baseline behaviour depends on observing a partial
+ * write.</p>
  *
- * <p>Assumptions: this class nevertheless sets no isolation level and installs no locking strategy, and
- * the reason is that the concurrency contract is already owned elsewhere. The baseline implements a
- * before-image optimistic check across the pseudo-conversational gap -- {@code app/cbl/COACTUPC.cbl}
- * snapshots the pre-edit record at L669 and carries the changed-record flag at L168 -- and the migrated
- * form expresses that with a version column on the two mutable entities plus the shared advice that
- * renders a lost update as HTTP 409. A level or a lock hint set here would add a second, competing
- * concurrency mechanism whose interaction with the version column nothing documents.</p>
- *
- * <h2>How the rationale in this file is labelled</h2>
- *
- * <p>Assumptions: every rationale below is tagged with one of the four category labels the project's
- * Explainability rule enumerates at its lines 31 to 34, written in the single form fixed by
- * {@code docs/CODE_DOCUMENTATION_STANDARD.md} -- plural, unparenthesised, with an ASCII hyphen where one
- * occurs and the colon kept. The repository's older reference-only material predominantly uses a singular
- * and sometimes parenthesised idiom, so choosing between them was a real decision rather than a default;
- * the reasoning is recorded once for the whole package in this directory's {@code package-info.java} and
- * is not restated here. The forms are never mixed inside one file, and they are not mixed inside this
- * one. What that rule requires of each member -- a docstring carrying purpose, parameters and return
- * value at its line 43, with exceptions where applicable at its line 21, and a labelled adjacent comment
- * for every non-obvious choice at its line 40 -- is met member by member below rather than asserted
- * here.</p>
+ * <p>Assumptions: that committed-read level is pinned in configuration rather than by this class.
+ * {@code application.yml} names it at L644 and records its reasoning at L622 to L643, so the level is
+ * stated once, in the file that already owns every other pool setting this service varies by
+ * environment. This class therefore sets no isolation level and installs no locking strategy -- naming a
+ * level here would put one setting in two places that can disagree, and the concurrency contract is
+ * owned elsewhere in any case. The baseline implements a before-image optimistic check across the
+ * pseudo-conversational gap -- {@code app/cbl/COACTUPC.cbl} snapshots the pre-edit record at L669 and
+ * carries the changed-record flag at L168 -- and the migrated form expresses that with a version column
+ * on the two mutable entities plus the shared advice that renders a lost update as HTTP 409. A lock hint
+ * set here would add a second, competing concurrency mechanism whose interaction with the version column
+ * nothing documents.</p>
  */
 // Trade-offs: the annotation set below is the whole of this class's framework surface, and three things
 //   a datasource configuration is often expected to declare are deliberately absent from it.
-//   (1) No transaction isolation level. All four baseline stanzas declare uncommitted read integrity at
-//   app/csd/CARDDEMO.CSD L3, L40, L53 and L66, and journalled synchronous write with recovery as none and
-//   no forward recovery log at L9, L46, L59 and L72. The target reads at the database's own default
-//   committed-read level and adds encryption at rest with automated backups, so isolation is strictly
-//   stronger and durability is stronger still. That is a documented divergence, not a port, and the way
-//   to hold it is to set nothing: a level named here would either restate the default or quietly weaken
-//   it to imitate the baseline, and the second would be a behavioural regression. The compromise
-//   accepted is that a read which the baseline satisfied while a writer was mid-transaction can now wait
-//   for that writer.
+//   (1) No transaction isolation level, because configuration already owns it: application.yml pins
+//   TRANSACTION_READ_COMMITTED at L644 and records the reasoning at L622 to L643. Naming a level here
+//   would put one setting in two places that can disagree, and whichever of the two lost would do so
+//   silently. The baseline is the reason the level is stated explicitly somewhere rather than left to
+//   whatever an engine ships: all four stanzas declare READINTEG(UNCOMMITTED) at app/csd/CARDDEMO.CSD
+//   L3, L40, L53 and L66, so a read there may observe an uncommitted write, and each declares
+//   RECOVERY(NONE) with FWDRECOVLOG(NO) at L9, L46, L59 and L72 and JOURNAL(NO) at L7, L44, L57 and L70,
+//   so nothing is logged for recovery at all. The baseline behaves that way, this service reads at
+//   committed-read isolation, and the divergence is documented. The compromise accepted is that a read
+//   which the baseline satisfied while a writer was mid-transaction can now wait for that writer.
 //   (2) No locking strategy. The baseline already performs a before-image optimistic check across the
 //   pseudo-conversational gap -- app/cbl/COACTUPC.cbl snapshots the pre-edit record at L669 and carries
 //   the changed-record flag at L168 -- and the migrated form expresses that as a version column on the
@@ -137,9 +130,11 @@ import org.springframework.context.annotation.Configuration;
 //   endpoints here, not scheduled jobs, so nothing in this context needs a job repository to point at
 //   this pool.
 // Trade-offs: bean-method proxying is switched off. Every bean below is independent, so none calls
-//   another's factory method and the inter-bean proxying that setting exists to support buys nothing
-//   here; leaving it on would add a subclass proxy of this class and would forbid the static factory
-//   method that keeps the post-processor from forcing this class to be built early.
+//   another's factory method, and the inter-bean interception that setting exists to support buys nothing
+//   here while still costing a generated subclass of this class on every context refresh. The static
+//   factory method below is unaffected by the choice -- a static bean method is admissible under either
+//   setting -- so what is declined here is the redundant proxy and not any restriction on static
+//   factories.
 @Configuration(proxyBeanMethods = false)
 public class DataSourceConfig {
 
@@ -209,19 +204,10 @@ public class DataSourceConfig {
      */
     private static final String EFFECTIVE_SEARCH_PATH_QUERY = "SHOW search_path";
 
-    /**
-     * The property that supplies the pool ceiling, quoted so a diagnostic can name it.
-     */
     private static final String MAXIMUM_POOL_SIZE_PROPERTY = "spring.datasource.hikari.maximum-pool-size";
 
-    /**
-     * The property that supplies the idle floor, quoted so a diagnostic can name it.
-     */
     private static final String MINIMUM_IDLE_PROPERTY = "spring.datasource.hikari.minimum-idle";
 
-    /**
-     * The logger for this class.
-     */
     private static final Logger LOGGER = LoggerFactory.getLogger(DataSourceConfig.class);
 
     /**
@@ -424,10 +410,12 @@ public class DataSourceConfig {
         String unterminated = collapsed.endsWith(";")
                 ? collapsed.substring(0, collapsed.length() - 1).trim()
                 : collapsed;
-        // Assumptions: an invariant locale is used rather than the default one. Case folding under a
-        //   Turkish default locale maps a dotless letter differently, so a keyword would fold to a form
-        //   that no longer matches and this service would refuse a correctly pinned pool on some hosts
-        //   and accept it on others.
+        // Assumptions: the fold is locale-independent because one of the two statements it reduces is
+        //   operator-supplied. The declared statement arrives from configuration -- application.yml
+        //   declares it at L669 -- and may be written in any mixture of cases, so the comparison has to
+        //   reduce it identically wherever the task runs. Locale.ROOT fixes the mapping of every letter
+        //   regardless of the platform default locale, which is what makes acceptance a property of the
+        //   declared statement rather than of the host that happened to read it.
         return unterminated.toUpperCase(Locale.ROOT);
     }
 

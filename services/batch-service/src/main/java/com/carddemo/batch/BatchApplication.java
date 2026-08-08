@@ -1,5 +1,6 @@
 package com.carddemo.batch;
 
+import com.carddemo.batch.config.BatchConfig;
 import com.carddemo.batch.dto.BatchJobName;
 import com.carddemo.batch.dto.BatchJobParameters;
 import com.carddemo.batch.dto.BatchReturnCode;
@@ -768,8 +769,21 @@ public class BatchApplication {
         //       recognised as a repeat instead of posting the same feed twice. Adding it as
         //       non-identifying would make every run of a job the same instance, and the second run
         //       of any job would be refused whatever date it was given.
+        // WHY : Assumptions: the business date is IDENTIFYING and the run identifier is NOT, and the
+        //       asymmetry is load-bearing rather than incidental. The business date is what makes a job
+        //       instance the run of a particular day, so a second submission for the same day finds the
+        //       completed instance and is refused by the branch below -- which is the migrated form of
+        //       resubmitting a job that has already run. Were the run identifier identifying as well,
+        //       every redrive would present a NEW instance, nothing would be found to refuse, and a
+        //       redriven state machine execution would post the same day's transactions twice.
+        // WHY : Alternatives Considered: omitting the run identifier from the parameters entirely and
+        //       having each job read the container variable itself. Declined because a job would then
+        //       read process state rather than its own parameters, so the same job run twice in one
+        //       container with different variables would be indistinguishable in the job repository --
+        //       and the durable step ledger and the generation reservation both key on this value.
         JobParameters parameters = new JobParametersBuilder()
                 .addString(BUSINESS_DATE_PARAMETER, businessDate, true)
+                .addString(BatchConfig.RUN_ID_PARAMETER, runIdentifier(), false)
                 .toJobParameters();
         try {
             JobExecution execution = operator.start(job, parameters);
@@ -782,8 +796,16 @@ public class BatchApplication {
             //       An orchestration redrive resumes a failed execution from the state that failed,
             //       so a state that had in fact succeeded before the failure downstream of it gets
             //       invoked a second time. Reporting a hard failure there would fail the chain on a
-            //       step whose work is already committed and would make redrive unusable; the run
-            //       ledger this module keeps is what records that the work was done once.
+            //       step whose work is already committed and would make redrive unusable.
+            // WHY : Trade-offs: this branch is the ONLY restart authority currently operative, and the
+            //       granularity it offers is the business date rather than the step. The finer-grained
+            //       run ledger this module carries -- BatchStepLedger over batch.batch_run, keyed by
+            //       the run and step pair -- is authored but has no caller yet, because the job beans
+            //       that would call it are not authored either. So a repeat of a whole business date is
+            //       recognised here, while a mid-chain redrive of one state within a night is NOT yet
+            //       distinguishable from a first attempt at it. That is the weaker of the two
+            //       guarantees, it is the one that holds today, and stating it the other way round
+            //       would credit the module with a checkpoint it does not yet reach.
             // WHY : Refactoring Rationale: this branch now writes to the LOG as well, and previously
             //       wrote only to standard error. Standard error alone broke this class's own logging
             //       invariant in the one place it mattered most: the line carried no level, no

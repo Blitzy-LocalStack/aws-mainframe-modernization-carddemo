@@ -109,7 +109,7 @@ import org.springframework.stereotype.Repository;
  *   <dt>{@link #findByTypeCdLessThanOrderByTypeCdDesc(String, Limit)}</dt>
  *   <dd>The window before a position, descending and reversed by its caller.</dd>
  *
- *   <dt>{@link #findFilteredPageFrom(String, String, String, Limit)}</dt>
+ *   <dt>{@link #findFilteredPageAfter(String, String, String, Limit)}</dt>
  *   <dd>{@code C-TR-TYPE-FORWARD} in full, both optional arms included.</dd>
  *
  *   <dt>{@link #findFilteredPageBefore(String, String, String, Limit)}</dt>
@@ -339,13 +339,25 @@ public interface TransactionTypeRepository extends JpaRepository<TransactionType
     /**
      * Reads the page at or after a position, narrowed by either optional filter, in ascending order.
      *
-     * <p>Assumptions: this is {@code C-TR-TYPE-FORWARD} transcribed whole -- the inclusive comparison
-     * at physical line 343, both optional arms across lines 344 to 350, and the ascending order at line
-     * 351. The inclusive comparison is reproduced rather than smoothed because the key this member is
-     * handed is the FIRST key of the page being requested, which is the key the baseline moves into its
-     * start key at physical lines 711 to 712, 756, 841 to 842, 863 to 864 and 872 to 873, and at lines
-     * 768 to 769 for a forward step. Handing this member the key of a row already received would return
-     * that row again; the sibling member above is the one to hand that key to.</p>
+     * <p>Assumptions: this is {@code C-TR-TYPE-FORWARD} from physical line 343 with both optional arms
+     * across lines 344 to 350 and the ascending order at line 351, and with ONE deliberate change: the
+     * comparison is strict here where the cursor declares it inclusive. The page boundary is identical,
+     * and the measurement that establishes it is the surplus fetch at physical lines 1657 to 1673. When
+     * the fill loop reaches {@code WS-MAX-SCREEN-LINES} it provisionally stores the last displayed code
+     * in {@code WS-CA-LAST-TR-CODE} at line 1659, then fetches one more row, and when that fetch
+     * succeeds it OVERWRITES that field at line 1673 with the surplus row's code. So the value page-down
+     * moves into the start key at lines 768 to 769 is the first code of the NEXT page, not the last code
+     * of the current one, and an inclusive comparison against it selects exactly the rows a strict
+     * comparison against the last displayed code selects.
+     *
+     * <p>Refactoring Rationale: the strict form is the one adopted because the sealed position this
+     * service publishes carries the last code the caller RECEIVED -- that is what
+     * {@code service/ReferencePaging} mints, and it is what every other keyset browse in this codebase
+     * seals. Reproducing the inclusive comparison instead would have required this browse alone to seal
+     * the surplus row's code, giving one service two paging conventions and making the sealed value mean
+     * something different here from everywhere else. Alternatives Considered: keeping the inclusive form
+     * and having the service hand it the successor of the received code. Rejected because a two-digit
+     * code has no total successor function that is not itself a second encoding of the key order.
      *
      * <p>Refactoring Rationale: each optional arm is written as one predicate that an absent argument
      * satisfies, rather than as the flag-guarded disjunction the baseline needs, for the reason recorded
@@ -363,19 +375,19 @@ public interface TransactionTypeRepository extends JpaRepository<TransactionType
      * @param descriptionPattern the pattern to match, produced by
      *     {@link #descriptionFilterPattern(String)} so that the caller's own metacharacters are already
      *     escaped, or {@code null} to leave the description arm out
-     * @param startKey the first code of the page being requested, INCLUDED in the result, or
+     * @param startKey the last code the caller already received, EXCLUDED from the result, or
      *     {@code null} for the opening page, which admits every code
      * @param limit the bound on rows returned, one greater than the window the caller publishes, so
      *     that the surplus row settles the further-page flag
      * @return the bounded rows in ascending code order, empty when no row satisfies every arm
      */
     @Query("select t from TransactionType t"
-            + " where (:startKey is null or t.typeCd >= :startKey)"
+            + " where (:startKey is null or t.typeCd > :startKey)"
             + " and (:typeCd is null or t.typeCd = :typeCd)"
             + " and (:descriptionPattern is null"
             + " or t.description like :descriptionPattern escape '" + LIKE_ESCAPE + "')"
             + " order by t.typeCd asc")
-    List<TransactionType> findFilteredPageFrom(
+    List<TransactionType> findFilteredPageAfter(
             @Param("typeCd") String typeCd,
             @Param("descriptionPattern") String descriptionPattern,
             @Param("startKey") String startKey,
@@ -610,4 +622,3 @@ public interface TransactionTypeRepository extends JpaRepository<TransactionType
         return pattern.toString();
     }
 }
-

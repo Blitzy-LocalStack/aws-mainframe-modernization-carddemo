@@ -155,16 +155,19 @@ import java.util.Objects;
  * @see Customer
  */
 @Entity
-// WHY : Alternatives Considered: omitting the schema qualifier and letting the pooled connection's
-//       search path supply it, which is what the two sibling entities in this package do. The
-//       qualifier is stated instead because it makes the mapping self-describing at the point a
-//       reader is asking which table this is, and because it agrees exactly with the migration's
-//       own CREATE TABLE account.card_xref at V1__account.sql L641. Stating it is inert at runtime:
-//       the search path is already pinned to this one schema, and schema management is switched
-//       off, so no data definition is generated from it. The accepted cost is that the schema name
-//       now appears in a second place, which is the reason it is written to match the migration
-//       verbatim rather than assembled from a constant.
-@Table(name = "card_xref", schema = "account")
+// WHY : Assumptions: the table is named WITHOUT a schema qualifier, resolving through the default
+//       search path that config/DataSourceConfig pins on the pooled connection. Refactoring
+//       Rationale: this entity previously qualified it as schema = "account" while both sibling
+//       entities in this package left it unqualified and documented that choice in their own class
+//       comments -- so one package described two policies and a reader could not tell which was
+//       intended. Alternatives Considered: qualifying all three instead, which is equally consistent
+//       and was rejected on one concrete ground: the qualifier duplicates a schema name the migration
+//       already declares, so choosing it would put that name in four places rather than one and each
+//       copy is a place an environment-specific schema could fail to be renamed. Trade-offs: the cost
+//       of the unqualified form is that the mapping is not self-describing at the point a reader asks
+//       which table this is; that question is answered instead by DataSourceConfig, which is the one
+//       place the search path is set, and by the CREATE TABLE at V1__account.sql L641.
+@Table(name = "card_xref")
 public class CardXref {
 
     /**
@@ -272,22 +275,6 @@ public class CardXref {
         return this.cardNum;
     }
 
-    /**
-     * Assigns the primary account number this row is keyed on.
-     *
-     * @param cardNum the card number to hold; must not be {@code null}
-     * @throws NullPointerException if {@code cardNum} is {@code null}
-     */
-    public void setCardNum(String cardNum) {
-        // WHY : Trade-offs: this reassigns the primary key, which is supported only before the row
-        //       is persisted. It exists because the mapping contract for this type is a mutable bean
-        //       with a member per column, and withholding one accessor of the three would make that
-        //       contract partial for no gain. The compromise is real and is bounded two ways: the
-        //       argument is null-checked as the constructor's is, so the member can never become
-        //       absent, and the equality contract below is documented as resting on a key that is
-        //       assigned once at construction.
-        this.cardNum = Objects.requireNonNull(cardNum, "cardNum must not be null");
-    }
 
     /**
      * Returns the customer holding the card.
@@ -392,22 +379,39 @@ public class CardXref {
      * identify the row uniquely, so a reader diagnosing from this string alone may have to
      * disambiguate rows sharing one. That is accepted because rendering nothing identifying at all
      * would leave a string of no diagnostic use, and because the accessors above return the full
-     * value to a caller entitled to it. The two identifiers are shown in full: neither is
-     * cardholder data on its own, and the linkage they would reveal is already broken by masking the
-     * member that names the card.</p>
+     * value to a caller entitled to it. The card-number suffix is the ONE sanctioned abbreviation in
+     * this rendering, and it is sanctioned because it applies the same masking the mapping layer
+     * applies at the API boundary rather than inventing a second rule.</p>
+     *
+     * <p>Refactoring Rationale: the two identifiers were shown IN FULL, argued for on the ground that
+     * neither is cardholder data on its own and that masking the card number had already broken the
+     * linkage. Both halves of that argument are wrong. The sensitive-data logging contract in
+     * {@code docs/architecture/observability.md} names account and customer identifiers explicitly
+     * among the prohibited values, so neither is admissible on its own account; and the linkage was not
+     * broken, because a four-digit suffix plus an exact eleven-digit account identifier and an exact
+     * nine-digit customer identifier reproduces the cross-reference row for every practical purpose.
+     * The identifier that made this type the most disclosing of the three was therefore still being
+     * emitted twice. Both are now omitted rather than shortened, per the first part of that
+     * contract's rule: abbreviating a protected value is masking, and masking has one owner per
+     * bounded context.</p>
+     *
+     * <p>Trade-offs: what remains is the card-number suffix and nothing else, so this rendering no
+     * longer says which customer or which account a row links. That is accepted for the reason the
+     * contract gives -- the correlation identifier on every request-scoped line locates the event
+     * without naming a protected value -- and it is the same disposition the batch context's own
+     * cross-reference entity already reached, so the two agree rather than each choosing for
+     * itself.</p>
      *
      * <p>Assumptions: this string is a diagnostic aid and not an output contract. Nothing parses it,
      * and it is not the fixed-width rendering used for parity comparison, so narrowing or
      * reformatting it cannot disturb any compared output.</p>
      *
-     * @return a single-line rendering naming the type, the masked card number and the two
-     *     identifiers, never {@code null}
+     * @return a single-line rendering naming the type and the masked card number, and neither the
+     *     customer identifier nor the account identifier, never {@code null}
      */
     @Override
     public String toString() {
-        return "CardXref[cardNum=" + maskedCardNumber()
-                + ", customerId=" + this.customerId
-                + ", accountId=" + this.accountId + ']';
+        return "CardXref[cardNum=" + maskedCardNumber() + ']';
     }
 
     /**

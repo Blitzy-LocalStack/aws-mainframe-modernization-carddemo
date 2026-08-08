@@ -122,13 +122,40 @@ jobs:
       - name: Materialize non-secret deployment inputs
         shell: bash
         env:
+          # Refactoring Rationale: this block named SEVEN values, and six of them --
+          # ROUTE53_ZONE_ID, SPA_DOMAIN_NAME, ALB_TLS_SERVER_NAME,
+          # SERVICE_TLS_DOMAIN_NAME, BATCH_GLUE_FUNCTION_ARNS and a release_version --
+          # were written into the auto-tfvars file under names that infra/envs/*/variables.tf
+          # does not declare. Terraform WARNS on an undeclared variable in a tfvars file
+          # and then ignores it, so those six were dead plumbing wired to protected
+          # environment variables that no configuration read. Meanwhile SEVEN variables
+          # that ARE declared with no default had no producer here at all, and a required
+          # variable with no value is a hard "No value for required variable" at plan.
+          # The set below is now exactly the declared no-default variables this workflow
+          # is responsible for, and infra-ci.yml carries a static check that keeps the two
+          # in step.
           PERMISSIONS_BOUNDARY_ARN: ${{ vars.CARDDEMO_PERMISSIONS_BOUNDARY_ARN }}
-          ROUTE53_ZONE_ID: ${{ vars.CARDDEMO_ROUTE53_ZONE_ID }}
-          SPA_DOMAIN_NAME: ${{ vars.CARDDEMO_SPA_DOMAIN_NAME }}
-          ALB_TLS_SERVER_NAME: ${{ vars.CARDDEMO_ALB_TLS_SERVER_NAME }}
-          SERVICE_TLS_DOMAIN_NAME: ${{ vars.CARDDEMO_SERVICE_TLS_DOMAIN_NAME }}
           MASK_HMAC_SECRET_ARN: ${{ vars.CARDDEMO_MASK_HMAC_SECRET_ARN }}
-          BATCH_GLUE_FUNCTION_ARNS: ${{ vars.CARDDEMO_BATCH_GLUE_FUNCTION_ARNS_JSON }}
+          ALB_CERTIFICATE_ARN: ${{ vars.CARDDEMO_ALB_CERTIFICATE_ARN }}
+          INTERNAL_SERVICE_DOMAIN_NAME: ${{ vars.CARDDEMO_INTERNAL_SERVICE_DOMAIN_NAME }}
+          CLOUDFRONT_ACM_CERTIFICATE_ARN: ${{ vars.CARDDEMO_CLOUDFRONT_ACM_CERTIFICATE_ARN }}
+          # Assumptions: a list-typed variable arrives as a JSON document in one
+          # environment variable rather than as a delimited string, matching the _JSON
+          # suffix convention already used for the image-digest map. jq --argjson parses it,
+          # so a malformed value fails this step instead of reaching Terraform as a string
+          # where a list is required.
+          CLOUDFRONT_ALIASES: ${{ vars.CARDDEMO_CLOUDFRONT_ALIASES_JSON }}
+          # Assumptions: the OIDC provider is created once per account by infra/bootstrap,
+          # which is deliberately outside this workflow, so its ARN is an input here rather
+          # than something this run can discover.
+          GITHUB_OIDC_PROVIDER_ARN: ${{ vars.CARDDEMO_GITHUB_OIDC_PROVIDER_ARN }}
+          # Trade-offs: github_repository comes from the run context rather than from a
+          # protected environment variable. The variable's contract is the owner/name of the
+          # repository whose environment may assume the SPA publication role, and that IS
+          # this repository -- so reading it from the context makes the two impossible to
+          # disagree, whereas an operator-set value could name a different repository and
+          # would grant the role to it.
+          GITHUB_REPOSITORY_SLUG: ${{ github.repository }}
         run: |
           set -euo pipefail
           root="infra/envs/${{ inputs.environment }}"
@@ -143,26 +170,34 @@ jobs:
           for name in auth-service account-service card-service transaction-service reference-service batch-service authorization-service reporting-service data-migration; do
             digests="$(jq --arg name "$name" --arg digest "sha256:$placeholder" '. + {($name): $digest}' <<<"$digests")"
           done
+          # Assumptions: every key below is a variable infra/envs/*/variables.tf DECLARES.
+          # An undeclared key here is not an error Terraform stops on -- it warns and
+          # ignores the value -- so a stale name looks exactly like a working one until
+          # something downstream is unexpectedly unconfigured. The closure check in
+          # infra-ci.yml compares this object against the declared no-default set in both
+          # directions so neither drift can recur silently.
           jq -n \
             --arg boundary "$PERMISSIONS_BOUNDARY_ARN" \
-            --arg zone "$ROUTE53_ZONE_ID" \
-            --arg spa "$SPA_DOMAIN_NAME" \
-            --arg alb "$ALB_TLS_SERVER_NAME" \
-            --arg service "$SERVICE_TLS_DOMAIN_NAME" \
             --arg mask "$MASK_HMAC_SECRET_ARN" \
-            --arg release "$tag" \
-            --argjson glue "$BATCH_GLUE_FUNCTION_ARNS" \
+            --arg albcert "$ALB_CERTIFICATE_ARN" \
+            --arg internaldns "$INTERNAL_SERVICE_DOMAIN_NAME" \
+            --arg cfcert "$CLOUDFRONT_ACM_CERTIFICATE_ARN" \
+            --arg oidc "$GITHUB_OIDC_PROVIDER_ARN" \
+            --arg repository "$GITHUB_REPOSITORY_SLUG" \
+            --arg tag "$tag" \
+            --argjson aliases "$CLOUDFRONT_ALIASES" \
             --argjson digests "$digests" \
             '{
               cloudfront_api_connect_src_origins: [],
               permissions_boundary_arn: $boundary,
-              route53_zone_id: $zone,
-              spa_domain_name: $spa,
-              alb_tls_server_name: $alb,
-              service_tls_domain_name: $service,
               mask_hmac_secret_arn: $mask,
-              batch_glue_function_arns: $glue,
-              release_version: $release,
+              alb_certificate_arn: $albcert,
+              internal_service_domain_name: $internaldns,
+              cloudfront_acm_certificate_arn: $cfcert,
+              cloudfront_aliases: $aliases,
+              github_oidc_provider_arn: $oidc,
+              github_repository: $repository,
+              image_tag: $tag,
               image_digests: $digests
             }' > "$root/deployment.auto.tfvars.json"
           printf 'environment=%s\nimage_tag=%s\n' "${{ inputs.environment }}" "$tag" > deploy-reports/deployment.txt
@@ -211,7 +246,14 @@ jobs:
           terraform -chdir="$root" plan -input=false -var-file=terraform.tfvars \
             -target=module.ecr -out=ecr.tfplan
           terraform -chdir="$root" apply -input=false ecr.tfplan
-          terraform -chdir="$root" output -json ecr_repository_urls > deploy-reports/ecr-repositories.json
+          # Refactoring Rationale: this read named an output that does not exist. The roots
+          # publish ONE aggregate per module -- "registry" is the whole ecr module -- so the
+          # map of logical artifact name to registry address is registry.repository_urls, not a
+          # top-level ecr_repository_urls. A read of an absent output fails the step with
+          # "Output \"ecr_repository_urls\" not found", after the targeted apply has already run.
+          # The jq projection keeps the file shape the next step expects: a flat name-to-URL map.
+          terraform -chdir="$root" output -json registry \
+            | jq -e '.repository_urls' > deploy-reports/ecr-repositories.json
 
       # Alternatives Considered: npm install. npm ci is bound to the reviewed
       # lock and cannot silently rewrite the dependency graph.
@@ -341,8 +383,17 @@ jobs:
         run: |
           set -euo pipefail
           root="infra/envs/${{ inputs.environment }}"
-          bucket="$(terraform -chdir="$root" output -raw spa_bucket_name)"
-          distribution="$(terraform -chdir="$root" output -raw cloudfront_distribution_id)"
+          # Refactoring Rationale: these two read outputs that do not exist -- there is no
+          # top-level spa_bucket_name and no cloudfront_distribution_id. The values live in the
+          # "spa_publication" aggregate, whose own description says it exists to carry exactly
+          # the non-secret values this workflow needs, under the keys spa_bucket_name and
+          # spa_distribution_id. Note the second name differs from the one read here before:
+          # the aggregate spells it spa_distribution_id, so a mechanical rename would still
+          # have failed. One -json read feeds both, and jq -e turns a missing key into a
+          # non-zero exit rather than an empty string that would later publish to "s3:///".
+          publication="$(terraform -chdir="$root" output -json spa_publication)"
+          bucket="$(jq -er '.spa_bucket_name' <<<"$publication")"
+          distribution="$(jq -er '.spa_distribution_id' <<<"$publication")"
           aws s3 sync ui/dist "s3://${bucket}/" --delete
 
           # WHY : Assumptions: the configuration document is uploaded a second time with an explicit

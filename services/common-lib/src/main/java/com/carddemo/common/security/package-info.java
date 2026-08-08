@@ -193,7 +193,7 @@
  *
  * <h2>What this package contains, and which way the arrow points</h2>
  *
- * <p>Seven compilation units live in this directory:
+ * <p>Nine compilation units live in this directory:
  *
  * <ul>
  *   <li>{@code JwtRoleConverter} -- reading the
@@ -216,6 +216,17 @@
  *       about an audience or a scope name. It holds no key and names no key source;
  *       the caller supplies one, so either half could be re-backed by a managed key
  *       service without this class changing.</li>
+ *   <li>{@code SealedSelector} -- sealing a protected identifier into an opaque,
+ *       authenticated selector a URL may carry, and opening one again on the
+ *       service side. It is the third case the other two primitives do not cover:
+ *       reversible by the holder of the key and by nobody else, where
+ *       {@code OpaqueIdentifier} is reversible by no one and the keyset cursor is
+ *       encoded rather than encrypted.</li>
+ *   <li>{@code HtmlTextEncoder} -- encoding a value so that placing it inside a
+ *       markup document cannot change that document's structure. The migrated
+ *       statement generator assembles a markup artifact by concatenation, and three
+ *       of its cells carry client-supplied free text that was inert on a 3270
+ *       terminal and executes in a browser.</li>
  *   <li>this charter, which carries no declaration beyond the package statement
  *       itself.</li>
  * </ul>
@@ -269,31 +280,46 @@
  *
  * <h2>What this package contributes, and why no kernel-wide total is restated here</h2>
  *
- * <p>This directory holds six production classes and this charter. That is a measurement of the
- * directory, and the six are the six listed above.</p>
+ * <p>This directory holds eight production classes and this charter. That is a measurement of the
+ * directory, and the eight are the eight listed above:
  *
- * <p>Refactoring Rationale: that sentence read "five ... and the five" until the machine-identity
- * credential landed, and it is corrected here rather than left to drift for the reason the paragraph
- * below gives about the withdrawn kernel-wide canon: a figure this charter CAN verify is worth keeping
- * accurate, because it describes the one directory this file can see. The figure survived a second
- * change without moving: a bespoke workload-assertion credential occupied that entry first and was
- * withdrawn in favour of the signed token above, so one file replaced one file. Two mechanisms for one
- * hop is one too many, and the surviving one delegates its verification to audited framework code
- * instead of re-implementing expiry and message-authentication checking here.</p>
+ * <pre>
+ * this package: security 8 production + 1 charter = 9 compilation units
+ * </pre>
+ *
+ * <p>Refactoring Rationale: that sentence read "five ... and the five", then "six ... and the six", and
+ * both were behind the directory by the time they were read -- the sealed selector and the markup
+ * encoder had landed unlisted, so the census under-reported this package by two and the charter's own
+ * list omitted the two classes a reader is most likely to be looking for. A figure this charter CAN
+ * verify is worth keeping accurate, because it describes the one directory this file can see, and the
+ * figure is now re-derived from that directory by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/SharedKernelInventoryTest.java}
+ * on every build rather than maintained by hand. The entry itself survived one earlier change without
+ * moving: a bespoke workload-assertion credential occupied it first and was withdrawn in favour of the
+ * signed token above, so one file replaced one file. Two mechanisms for one hop is one too many, and
+ * the surviving one delegates its verification to audited framework code instead of re-implementing
+ * expiry and message-authentication checking here.</p>
  *
  * <p>Refactoring Rationale: a kernel-wide "count canon" stood here -- a total of 21 production classes
- * with a per-package breakdown re-deriving it -- and it is removed rather than corrected in place,
- * because every one of its figures for this package and several for others had stopped matching the
- * tree: this package held four production classes where the breakdown said three, and the kernel held
- * 27 where the total said 21. Assumptions: a total that a charter cannot verify is worse than no total,
- * and this charter cannot verify one. It can see its own directory, so it states that; it cannot see
- * the other eight packages, so restating their arithmetic made this file assert as fact a figure that
- * drifted the moment any of them gained a class. Alternatives Considered: recomputing the whole canon
- * here from a fresh count. Rejected because it would reproduce the same failure one measurement later
- * -- the next class added to any package falsifies this file again -- and because the same figures are
- * restated in three sibling charters, so a single corrected copy would make the tree inconsistent
- * instead of merely stale. Those three are recorded as a known inaccuracy rather than edited from
- * here, this charter having no standing to describe another package's contents.</p>
+ * with a per-package breakdown re-deriving it -- and it is not restated in this file, because every one
+ * of its figures for this package and several for others had stopped matching the tree: this package
+ * held four production classes where the breakdown said three, and the kernel held 27 where the total
+ * said 21. Assumptions: a total no build gate re-derives is worse than no total, because it is read as
+ * a closed inventory and drifts the moment any package gains a class. That is what happened: the
+ * kernel-wide figures went stale twice more after this paragraph was written, reaching 35 classes in 45
+ * compilation units across 10 charters.</p>
+ *
+ * <p>Alternatives Considered: recomputing the canon here by hand. Rejected, because it reproduces the
+ * same failure one measurement later. What was adopted instead is the third option this paragraph did
+ * not consider -- deriving it. The sibling charters that DO restate the canon now label every addend by
+ * package, and
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/SharedKernelInventoryTest.java}
+ * re-derives every labelled addend, both totals, each charter's own share and the kernel root's
+ * inventory table from this directory tree on every build. So the figures those charters carry are
+ * checked rather than trusted, and this file states only what it can see for itself. An earlier revision
+ * of this paragraph reported the sibling drift as "a known inaccuracy rather than edited from here" and
+ * left it standing; that is withdrawn, because reporting a false claim is not a substitute for closing
+ * it, and every one of those charters has now been corrected against the measured tree.</p>
  *
  * <p>Assumptions: what governs admission to this directory is the prohibition above on any controller,
  * service, repository, domain, transfer-object, mapper or configuration type, together with the

@@ -267,9 +267,51 @@ variable "visibility_timeout_seconds" {
   type        = number
   default     = 60
 
+  # WHY : Refactoring Rationale: the floor was 0, which admitted the exact failure
+  #       the rationale above says this input exists to prevent. At 0 a received
+  #       message is visible to another consumer immediately, so redelivery does
+  #       not merely become possible while the first attempt runs -- it becomes
+  #       certain, and every redelivery spends a receive against
+  #       max_receive_count. A queue configured that way sends messages to the
+  #       dead-letter queue having processed each one successfully every time,
+  #       which is the silent variant of the failure and the one no alarm sees.
+  #       A validation that accepts the value its own justification forbids is
+  #       not a bound, so the range now starts at the lowest value the consumer's
+  #       measured behaviour can survive rather than at the lowest value the SQS
+  #       API accepts.
+  # WHY : Assumptions: the floor is 30 because it is derived from this consumer's
+  #       processing time rather than chosen for roundness. The dominant
+  #       component is stated in the Trade-offs above: these consumers run
+  #       against an Aurora Serverless cluster whose dev capacity floor is zero,
+  #       and a paused cluster takes on the order of fifteen seconds to resume,
+  #       which the first message after an idle period pays BEFORE its
+  #       transaction begins. Below 30 that documented resume alone consumes at
+  #       least half the window and leaves the transaction itself less than the
+  #       resume it already waited through, so redelivery-during-processing stops
+  #       being an edge case. 30 is therefore the point below which the module
+  #       would be handing a caller a configuration that cannot work, and the
+  #       default of 60 remains the value both environment roots take.
+  # WHY : Assumptions: this single bound also closes a second, distinct
+  #       redelivery mode, and that is why no cross-variable condition
+  #       accompanies it. A consumer polls, then processes; if the visibility
+  #       window were shorter than its own long poll, a message could become
+  #       visible again while that same consumer sat blocked in its next receive
+  #       call, so it would receive its own in-flight message. The ceiling on
+  #       receive_wait_time_seconds below is 20 -- the longest wait SQS accepts --
+  #       and 30 exceeds it for every admissible pairing, so the invariant holds
+  #       by arithmetic and a `> var.receive_wait_time_seconds` condition would be
+  #       dead on every input this module can be given. It is recorded here
+  #       because the implication is the reason the floor may not be lowered
+  #       beneath 20: doing so would reopen a mode this bound currently closes
+  #       silently.
+  # WHY : Alternatives Considered: requiring merely > 0. Rejected because it
+  #       would satisfy the letter of "reject zero" while leaving 1 second
+  #       admissible, and a one-second window fails in precisely the way zero
+  #       does -- the difference between them is a rounding error against a
+  #       fifteen-second resume, not a difference in outcome.
   validation {
-    condition     = var.visibility_timeout_seconds >= 0 && var.visibility_timeout_seconds <= 43200
-    error_message = "visibility_timeout_seconds must be between 0 and 43200 (twelve hours) inclusive."
+    condition     = var.visibility_timeout_seconds >= 30 && var.visibility_timeout_seconds <= 43200
+    error_message = "visibility_timeout_seconds must be between 30 and 43200 (twelve hours) inclusive. It has to exceed the consumer's processing time: a paused Aurora Serverless cluster takes about fifteen seconds to resume before a transaction begins, so a window under 30 lets a message be redelivered while the first attempt is still running, which duplicates the work and spends receives against max_receive_count until the message reaches the dead-letter queue despite having succeeded every time. 0 is refused for the same reason in its most extreme form."
   }
 }
 

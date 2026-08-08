@@ -401,6 +401,14 @@ locals {
     "CARDDEMO_CONFIG_PREFIX",
     "CARDDEMO_MESSAGING_PAUTH_REQUEST_QUEUE",
     "CARDDEMO_MESSAGING_REPLY_QUEUE_ALLOWLIST",
+    # WHY : Refactoring Rationale: these two were added because the ACCOUNT context now
+    #       reads the reference context's three address allow-lists over HTTP.
+    #       service/RestReferenceAddressLookup.java binds
+    #       carddemo.reference-context.base-url through a fallback-free @Value, so an
+    #       unpublished name aborts context refresh rather than degrading one screen -- the
+    #       same failure the account-context names above were added to prevent.
+    "CARDDEMO_REFERENCE_CONTEXT_APPROVED_ORIGIN",
+    "CARDDEMO_REFERENCE_CONTEXT_BASE_URL",
     "CARDDEMO_REFERENCE_INQUIRY_ERROR_QUEUE",
     "CARDDEMO_REFERENCE_INQUIRY_REPLY_QUEUE",
     "CARDDEMO_REFERENCE_INQUIRY_REQUEST_QUEUE",
@@ -415,6 +423,14 @@ locals {
     #       precondition -- which is why it went unnoticed. It names a key ALIAS
     #       rather than key material, so Parameter Store is the correct channel.
     "CARDDEMO_SECURITY_CVV_KEY_ID",
+    # WHY : Assumptions: the account workload's counterpart of the card key alias above, and admitted
+    #       for the same reasons. config/CustomerIdentifierProtectionConfig reads
+    #       carddemo.security.customer-identifier.key-id through @Value with no default and refuses a
+    #       blank one, so an unadmitted name would abort context refresh on a placeholder. It names a
+    #       key ALIAS rather than key material, so Parameter Store is the correct channel -- the alias
+    #       appears in the key's own policy and in every audit entry the key emits, so delivering it
+    #       here discloses nothing and keeps the secret channel for values that are actually secret.
+    "CARDDEMO_SECURITY_CUSTOMER_IDENTIFIER_KEY_ID",
     "CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID",
     "SPRING_DATASOURCE_URL",
     "SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI",
@@ -459,6 +475,15 @@ locals {
     #       identities, and rotating either purpose would require a coordinated stop of
     #       an interactive consumer and a batch workload at once.
     "CARDDEMO_MESSAGING_HMAC_KEY",
+    # WHY : Assumptions: this keys the opaque selector the CARD service addresses a
+    #       row by. card-service/.../config/CardSelectorConfig.java binds
+    #       carddemo.security.card-selector.signing-key through a fallback-free
+    #       @Value, so a task without it fails to start rather than serving routes
+    #       that cannot resolve a selector. It is a SEPARATE name from the messaging
+    #       and masking keys above: those key identities in queue payloads and in
+    #       extract output, this keys a row address a browser holds, and a single
+    #       name would rotate all three together.
+    "CARDDEMO_SECURITY_CARD_SELECTOR_SIGNING_KEY",
     "CARDDEMO_SERVER_TLS_CERTIFICATE",
     "CARDDEMO_SERVER_TLS_PRIVATE_KEY",
     "SPRING_DATASOURCE_PASSWORD",
@@ -564,10 +589,34 @@ locals {
     #       and in every metric dimension the queue publishes -- so delivering it
     #       through Parameter Store discloses nothing and keeps the secret channel for
     #       values that are actually secret.
+    #       Refactoring Rationale: CARDDEMO_SECURITY_CUSTOMER_IDENTIFIER_KEY_ID is required of this
+    #       workload for exactly the reason the card entry below requires its own key alias, and it
+    #       became required at the same moment the consumer landed.
+    #       mapper/CustomerMapper declares a protected-identifier port and
+    #       config/CustomerIdentifierProtectionConfig implements it, reading this alias through @Value
+    #       with no default and refusing a blank one -- so the account context cannot refresh without
+    #       it. Requiring it here moves that failure from a crash-looping task to plan time, where it
+    #       names the missing variable. Assumptions: the wrong key is not a recoverable mistake, since
+    #       an envelope is readable only through the key that wrapped its data key, and the two columns
+    #       this protects are a national identifier and a government-issued identifier.
+    # WHY : Refactoring Rationale: the two reference-context names are REQUIRED of this
+    #       service and not merely admitted, because service/AddressValidationService.java is
+    #       an annotated component whose only constructor dependency is the reference lookup,
+    #       and service/RestReferenceAddressLookup.java resolves the address with no fallback.
+    #       An unset value therefore stops the whole account context from starting, not just
+    #       the account update path -- so requiring it here moves the failure from a
+    #       crash-looping task to plan time, where it names the missing variable.
+    #       Assumptions: the approved origin is required as well as the base address, on the
+    #       same terms as the authorization set below: the deployed comparison is then between
+    #       two values a root published from one expression rather than between a value and
+    #       itself.
     account = toset([
       "CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE",
       "CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE",
       "CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE",
+      "CARDDEMO_REFERENCE_CONTEXT_APPROVED_ORIGIN",
+      "CARDDEMO_REFERENCE_CONTEXT_BASE_URL",
+      "CARDDEMO_SECURITY_CUSTOMER_IDENTIFIER_KEY_ID",
       "CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID",
       "SPRING_DATASOURCE_URL",
       "SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI",
@@ -707,7 +756,16 @@ locals {
       "SPRING_FLYWAY_USER",
       "SPRING_FLYWAY_PASSWORD",
     ])
+    # WHY : Refactoring Rationale: CARDDEMO_SECURITY_CARD_SELECTOR_SIGNING_KEY is
+    #       required of this service, and the omission it corrects was not cosmetic.
+    #       Every single-card route in this context -- the detail read, the update and
+    #       the administrative disclosure -- addresses its row by an opaque selector
+    #       that mapper/CardMapper.java seals and opens under this key, and
+    #       config/CardSelectorConfig.java binds it with no fallback. A deployment
+    #       without it does not start, so the plan must report the omission rather
+    #       than the task discovering it.
     card = toset([
+      "CARDDEMO_SECURITY_CARD_SELECTOR_SIGNING_KEY",
       "SPRING_DATASOURCE_USERNAME",
       "SPRING_DATASOURCE_PASSWORD",
       "SPRING_FLYWAY_USER",
@@ -1585,8 +1643,24 @@ resource "aws_ecs_task_definition" "this" {
       condition = (
         (var.service_name == "data-migration") == contains(keys(var.secret_arns), "CARDDEMO_MASK_HMAC_KEY") &&
         (var.service_name == "authorization") == contains(keys(var.secret_arns), "CARDDEMO_MESSAGING_HMAC_KEY") &&
+        # WHY : Assumptions: biconditional on the CARD service alone, for the same reason
+        #       every clause here is biconditional. Only card-service mints and opens the
+        #       opaque row selector this key seals, so a task that never addresses a card by
+        #       selector has no use for it, and any other holder could mint a selector this
+        #       service would then open -- which is the capability the key exists to withhold.
+        #       The forward half is asserted from the other side by the card entry in the
+        #       required-secret map above, so omitting it in either place fails at plan time.
+        (var.service_name == "card") == contains(keys(var.secret_arns), "CARDDEMO_SECURITY_CARD_SELECTOR_SIGNING_KEY") &&
         contains(["authorization", "account", "transaction"], var.service_name) == contains(keys(var.secret_arns), "CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY") &&
         contains(["authorization", "transaction"], var.service_name) == contains(keys(var.ssm_parameter_arns), "CARDDEMO_ACCOUNT_CONTEXT_BASE_URL") &&
+        # WHY : Assumptions: biconditional on the ACCOUNT service alone. Only that context
+        #       reads the reference address allow-lists, and the reverse half matters as much
+        #       as the forward one: handing the address to a service that never calls it
+        #       widens what that task can reach for no purpose. The forward half is asserted
+        #       from the other side by the account entry in the required map above, so
+        #       omitting it in either place fails at plan time.
+        (var.service_name == "account") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_REFERENCE_CONTEXT_BASE_URL") &&
+        (var.service_name == "account") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_REFERENCE_CONTEXT_APPROVED_ORIGIN") &&
         (var.service_name == "authorization") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_MESSAGING_REPLY_QUEUE_ALLOWLIST") &&
 
         (var.service_name == "reporting") == contains(keys(var.environment_variables), "CARDDEMO_TRUSTED_PROXY_PATTERN") &&

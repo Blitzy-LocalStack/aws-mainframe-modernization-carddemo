@@ -304,7 +304,7 @@ constants:
   EC2.** Assumptions: IBM MQ is not an Amazon MQ engine — Amazon MQ offers
   ActiveMQ and RabbitMQ only — so the broker alternative was always a
   self-managed one, as
-  [ADR-004](../adr/ADR-004-messaging.md#option-2--self-managed-ibm-mq-on-ec2--the-close-call-runner-up-rejected)
+  [ADR-004](../adr/ADR-004-messaging.md#option-2--self-managed-ibm-mq-on-aws--the-protocol-fidelity-maximum-rejected)
   records. A broker running IBM MQ would have preserved the wire protocol verbatim
   and required no codec at all, which is a real advantage and the reason it was
   evaluated first. It was rejected on two specific grounds. First, the two
@@ -1168,12 +1168,14 @@ coordinate. This is a designed simplification rather than an approximation — a
 single PostgreSQL transaction preserves the baseline's atomicity without a
 heuristically-resolved mixed outcome. The schema migration
 (`db/migration/V1__authorization.sql`) and the per-message transaction boundary
-(`AuthorizationRequestListener.onRequest`, annotated `REQUIRES_NEW`) are both authored;
-the fraud write's own boundary is not, its controller not yet existing.
+(`AuthorizationRequestListener.onRequest`, annotated `REQUIRES_NEW`) are both authored,
+and so is the fraud write's own boundary: `FraudMarkingService` carries `@Transactional`
+over the mark, and `FraudController` publishes the operation that reaches it.
 
-- Refactoring Rationale: an earlier revision said neither was authored, which has
-  ceased to be true. Naming which of the two boundaries is landed and which is not is
-  what keeps this paragraph checkable, since a reader can open both files and see.
+- Refactoring Rationale: an earlier revision said neither boundary was authored, and a
+  later one said the fraud boundary was still absent "its controller not yet existing".
+  Both statements have been overtaken. Naming the classes rather than counting them is
+  what keeps this paragraph checkable, since a reader can open each file and see.
 
 **Exposing distributed transactions is explicitly out of scope**, and the target
 contract does not reintroduce a two-phase protocol. The one place a second

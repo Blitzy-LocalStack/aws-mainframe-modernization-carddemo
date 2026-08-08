@@ -192,7 +192,14 @@ import java.util.List;
  * {@code app/cpy/CSMSG02Y.cpy} whose four fields on lines 22, 24, 26 and 28 total 134 bytes, already
  * has exactly one Java home inside {@link ApiError}, and two homes for one contract are worse than
  * one. A version or entity-tag component was rejected because the optimistic-lock version is
- * transport metadata and belongs in a header rather than in a body a client may hand back. An
+ * transport metadata rather than body content and is not published in a body a client may hand back.
+ * Assumptions: it is not published in a header either, and no caller is asked to supply one. The
+ * published contract states the same closure at lines 329 to 336 of
+ * {@code services/account-service/src/main/resources/openapi/account-api.yaml}: no version or entity
+ * tag travels in either direction, and the concurrency check is the provider's own counter on the
+ * rows the transaction loaded. An earlier wording of this sentence said the version "belongs in a
+ * header", which reads as a claim that a header carries it -- a wiring no part of this service
+ * performs -- and would send a client looking for one. An
  * outcome enumeration was rejected because the status line already carries the outcome, published as
  * {@link ApiError#CONFLICT_STATUS} with {@link ApiError#CODE_CONFLICT} beside
  * {@link ApiError#CODE_VALIDATION}, and a second copy inside the body could disagree with the first.
@@ -209,6 +216,22 @@ import java.util.List;
  * that makes {@link AccountViewResponse} name its equivalents for the masking they already carry.
  * This record neither applies nor reverses it, and it carries no card number and no verification
  * value at all.
+ *
+ * <p>Refactoring Rationale: the echo is typed as the VIEW's two masked detail shapes rather than as the
+ * inbound {@link AccountUpdateRequest}, and the change is a security correction rather than a
+ * refactoring. Reusing the inbound record made the paragraph above untrue of this file: that record's
+ * national-identifier components are the three clear parts a submitter types and its government-issued
+ * identifier is the clear value, so a response typed as it returned protected identifiers unchanged --
+ * masking "applied before any value reaches this record" had no member to reach. Reusing the view's
+ * details also means the update echo and the account view publish the SAME masked state, so the two
+ * cannot disagree about what a masked identifier looks like, and one direction of the contract cannot
+ * be widened without the other.
+ *
+ * <p>Trade-offs: the cost is that the echo is no longer the shape the submitter sent -- the dates are
+ * whole rather than split into year, month and day, and the national identifier is one masked value
+ * rather than three parts -- so a client re-editing after a conflict populates its form from the echo's
+ * fields rather than assigning them across. That is the price of not publishing the clear identifiers,
+ * and it is paid once per conflict.
  *
  * <p>Trade-offs: AR-15 makes component four non-null, copied and unmodifiable, and refuses an absent
  * list rather than coercing one. The copy costs a single allocation per response and buys a published
@@ -263,17 +286,21 @@ import java.util.List;
  *     submission, keyed to the thirty-six per-screen-field validation groups at lines 191 to 352 of
  *     {@code app/cbl/COACTUPC.cbl} and to their individual date, identifier and telephone parts; must
  *     not be {@code null}, is empty when no field failed, and is held as an unmodifiable copy
- * @param account the committed state on success and the current server state on a conflict, typed
- *     {@link AccountUpdateRequest} so that the shape a client submitted is the shape it reads back,
- *     with each date split into year, month and day and the national identifier into three parts; may
- *     be {@code null} when a request was rejected before any record was read
+ * @param account the committed account state on success and the current server state on a conflict,
+ *     typed {@link AccountViewResponse.AccountDetail}; may be {@code null} when a request was rejected
+ *     before any record was read
+ * @param customer the committed customer state on success and the current server state on a conflict,
+ *     typed {@link AccountViewResponse.CustomerDetail}, whose two protected identifiers are already
+ *     masked by {@code com.carddemo.account.mapper} before they reach this record; may be {@code null}
+ *     when a request was rejected before any record was read
  */
 public record AccountUpdateResponse(
         String accountId,
         String informationMessage,
         String returnMessage,
         List<ApiError.FieldError> fieldErrors,
-        AccountUpdateRequest account) {
+        AccountViewResponse.AccountDetail account,
+        AccountViewResponse.CustomerDetail customer) {
 
     /**
      * Seals the per-field error array and refuses an absent one.
@@ -303,17 +330,62 @@ public record AccountUpdateResponse(
      *     including its unset and empty states
      * @param fieldErrors the {@code List} of {@link ApiError.FieldError} entries to copy into an
      *     unmodifiable list; must not be {@code null}
-     * @param account the committed or current state, an {@link AccountUpdateRequest}, to retain
-     *     exactly as supplied
+     * @param account the committed or current account state, an
+     *     {@link AccountViewResponse.AccountDetail}, to retain exactly as supplied
+     * @param customer the committed or current customer state, an
+     *     {@link AccountViewResponse.CustomerDetail} whose protected identifiers arrive already masked,
+     *     to retain exactly as supplied
      * @throws NullPointerException if {@code fieldErrors} is {@code null} or contains a {@code null}
      *     entry
      */
     public AccountUpdateResponse {
-        // WHAT: replace the incoming reference with an unmodifiable copy of its contents.
         // WHY : Trade-offs: List.copyOf refuses a null argument and a null element and returns an
         //       unmodifiable copy in one call, so the array contract holds for every instance
         //       without a second import. See AR-15 on the type above for why an absent list is
         //       refused here rather than turned into an empty one as ApiError does at its line 463.
         fieldErrors = List.copyOf(fieldErrors);
+    }
+
+    /**
+     * The stand-in a withheld value is rendered as.
+     *
+     * <p>Assumptions: one constant for every withheld component, for the reason the request record
+     * states -- a per-field marker would make the withheld components distinguishable from each other in
+     * a log line, which is the first step of correlating them.</p>
+     */
+    private static final String REDACTED = "REDACTED";
+
+    /**
+     * Renders this response without the account state or the identifier that attributes it.
+     *
+     * <p>Refactoring Rationale: this override exists because the record-generated {@code toString}
+     * renders the {@code account} component, which is the full updated account view -- the same
+     * personal, address, telephone and monetary content the request carries -- and the
+     * {@code accountId} that attributes it. A response is the value most likely to be interpolated into
+     * a diagnostic, because it is what a handler holds when a later step fails.</p>
+     *
+     * <p>Assumptions: the two message components ARE rendered and the identifier and the account view are
+     * not. That division is not arbitrary: both messages are drawn from the reference's own fixed
+     * sentence set, so their content is bounded by that set and carries nothing about the record they
+     * describe. The field-error array is rendered as its SIZE rather than its contents, because an entry
+     * names a field and a sentence -- both bounded -- but the array is the one component whose length is
+     * itself diagnostic, and a count answers that without rendering anything.</p>
+     *
+     * <p>Trade-offs: an operator reading a log line learns that an update answered, with which sentence
+     * and how many fields failed, but not which account. Attributing it requires the correlation
+     * identifier, which is on the same line and exists for that purpose. The cost is one lookup; what is
+     * bought is that a log aggregation cannot be searched by account identifier to recover a
+     * cardholder's address and balance.</p>
+     *
+     * @return a rendering safe to write to any log or exception message, never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "AccountUpdateResponse[accountId=" + REDACTED
+                + ", informationMessage=" + informationMessage
+                + ", returnMessage=" + returnMessage
+                + ", fieldErrors=" + fieldErrors.size() + " entries"
+                + ", account=" + REDACTED
+                + "]";
     }
 }

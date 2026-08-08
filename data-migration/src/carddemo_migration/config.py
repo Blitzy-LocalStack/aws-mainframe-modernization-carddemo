@@ -172,6 +172,11 @@ from typing import Any
 # ``ConfigurationError`` and ``DatasetStagingSettings``, separating the two classes. The
 # grouping is therefore deliberate and is not a sort that was left unfinished.
 __all__ = [
+    "AWS_RETRY_MODE",
+    "AWS_READ_TIMEOUT_SECONDS",
+    "AWS_MAX_RETRY_ATTEMPTS",
+    "AWS_CONNECT_TIMEOUT_SECONDS",
+    "aws_client",
     "DEFAULT_PARAMETER_PREFIX",
     "DEFAULT_SSL_ROOT_CERT",
     "ENV_ALTERNATE_DB_USERS",
@@ -415,7 +420,19 @@ _PATH_SEGMENT_PATTERN = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 # would land somewhere a reader looking for it by convention would never find it. Every other
 # character is left alone: object keys are far more permissive than parameter names, and
 # narrowing them further here would reject a legitimate dataset name for no benefit.
-_PREFIX_COMPONENT_PATTERN = re.compile(r"\A[^/]+\Z")
+# WHY : Refactoring Rationale: this admitted ANY character but a slash, which meant a
+# carriage return, a line feed, a NUL or an escape character in a domain or dataset
+# segment reached the built prefix intact. The staging command logs the resulting key, so
+# an embedded newline let one staged object forge additional operational log lines, and an
+# escape sequence reached any terminal tailing those logs. The class is now stated
+# positively -- printable, no space, no slash, no backslash -- so a character has to be
+# named to be admitted rather than merely not named to be refused.
+# Trade-offs: this is the LAST line of defence rather than the only one. The callers that
+# accept externally supplied segments validate them with the shared safe-segment predicate
+# in the staging loader, which reports a specific fault; by the time a value reaches this
+# pattern the fault is reported as an unacceptable prefix component, which is correct but
+# less precise. Both exist because this one cannot be bypassed by a new caller.
+_PREFIX_COMPONENT_PATTERN = re.compile(r"\A[\x21-\x2E\x30-\x5B\x5D-\x7E]+\Z")
 
 # Assumptions: an allowlisted alternate user name must be a plain, unquoted PostgreSQL
 # role name -- it starts with a letter or underscore, continues with letters, digits, underscore
@@ -440,7 +457,7 @@ _MAX_GENERATION = 10**_GENERATION_DIGITS - 1
 # something that is not there", as distinct from a permission or transport failure. They are
 # matched by code rather than by exception class so that no service exception type has to be
 # imported at module scope, which is what keeps this module importable with the SDK absent;
-# see :func:`_aws_client`. ``ParameterVersionNotFound`` is included because a parameter that
+# see :func:`aws_client`. ``ParameterVersionNotFound`` is included because a parameter that
 # exists but has had the referenced version removed is, to a caller that named a path, the
 # same actionable condition as one that was never created.
 _MISSING_PARAMETER_CODES = frozenset({"ParameterNotFound", "ParameterVersionNotFound"})
@@ -460,6 +477,13 @@ _MISSING_SECRET_CODES = frozenset({"ResourceNotFoundException"})
 # single-use literal to a constant moves it away from its only reader for no protection.
 _AURORA_SEGMENT = "aurora"
 _DATASETS_SEGMENT = "datasets"
+
+# Assumptions: the canonical hyphenated RFC-4122 form and nothing else. The value this
+# matches is written into auth.users.cognito_sub, declared UUID, so accepting a braced or
+# unhyphenated spelling here would mean reading one form and having to send another. Both
+# hex cases are admitted because Cognito's own output case is not something this module
+# should depend on, and the engine treats the two as the same value.
+_SUBJECT_PATTERN = re.compile(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 
 # Assumptions: these are the two keys the secret document is read by, and they match the
 # field names a managed relational-database credential is written with. Naming them as
@@ -1594,20 +1618,104 @@ def _error_code(exc: BaseException) -> str:
     return code if isinstance(code, str) else ""
 
 
+#: Seconds the SDK waits to establish a connection before failing the attempt.
+#:
+#: WHY : Trade-offs: botocore's own default is 60 seconds, which is far longer than any healthy
+#:   connection inside a VPC with interface endpoints takes. The cost of the default is that a
+#:   black-holed connection -- a security group that stopped admitting 443, an endpoint removed
+#:   from the subnet -- consumes a whole minute per attempt before the first retry, so a step
+#:   that would fail in seconds instead approaches its Step Functions timeout and reports a
+#:   timeout rather than a connectivity fault. Ten seconds is generous for an in-VPC endpoint
+#:   and turns that failure back into a prompt, attributable one.
+AWS_CONNECT_TIMEOUT_SECONDS = 10
+
+#: Seconds the SDK waits for a response on an established connection before failing the attempt.
+#:
+#: WHY : Assumptions: this bounds ONE request, not the staging step. It is set well above the
+#:   connect timeout because a single ``PutObject`` of a multi-megabyte extract legitimately
+#:   takes longer to answer than a connection takes to open, while still being far below the
+#:   per-state timeout the batch state machine allows, so a hung socket is reported by the SDK
+#:   rather than by the orchestrator killing the task.
+AWS_READ_TIMEOUT_SECONDS = 60
+
+#: Retry attempts the SDK makes for one retryable API call, NOT counting the initial attempt.
+#:
+#: WHY : Assumptions: this is the value botocore's ``retries.max_attempts`` takes, and that key
+#:   counts RETRIES rather than total attempts -- measured: passing 3 yields a client reporting
+#:   ``total_max_attempts: 4``. The distinction is recorded because the key's name reads like a
+#:   total and a reader budgeting against the batch state machine's own retry would otherwise be
+#:   out by one on every call. Four total attempts is the effective ceiling.
+#:
+#: WHY : Alternatives Considered: the ``standard`` retry mode is selected explicitly rather than
+#:   left to the SDK's ``legacy`` default. The modes differ in which faults they treat as
+#:   retryable -- ``standard`` retries throttling and transient service errors with jittered
+#:   exponential backoff, ``legacy`` covers a narrower set -- and the choice is stated here so
+#:   the retry behaviour of this distribution does not change underneath it when a future SDK
+#:   release moves its own default. Trade-offs: retries are kept to three because the batch
+#:   state machine ALSO retries the whole step, so a large per-call budget multiplies against
+#:   that outer budget and delays a genuine failure instead of surfacing it.
+AWS_MAX_RETRY_ATTEMPTS = 3
+
+#: The botocore retry mode this distribution selects; see :data:`AWS_MAX_RETRY_ATTEMPTS`.
+AWS_RETRY_MODE = "standard"
+
+
+def _aws_client_config() -> Any:
+    """Build the botocore client configuration every AWS client in this distribution shares.
+
+    Purpose
+    -------
+    State the connect timeout, the read timeout and the retry policy in one place, so that no
+    client is created with the SDK's implicit defaults and the values are auditable together.
+
+    Parameters
+    ----------
+    None
+        Every value is a module constant above.
+
+    Returns
+    -------
+    Any
+        A ``botocore.config.Config``. Typed loosely because botocore is an optional import
+        resolved at call time rather than at module scope.
+
+    Raises
+    ------
+    ConfigurationError
+        If the AWS SDK is not installed.
+    """
+    # Assumptions: botocore is imported inside the function for the same reason boto3 is --
+    # importing ``config`` must remain free of third-party imports, which the package's own
+    # documentation promises and the codec tests rely on by running with only the standard
+    # library installed.
+    try:
+        from botocore.config import Config as BotocoreConfig
+    except ImportError as exc:
+        raise ConfigurationError(
+            "the AWS SDK is not installed; install data-migration/requirements.txt"
+        ) from exc
+
+    return BotocoreConfig(
+        connect_timeout=AWS_CONNECT_TIMEOUT_SECONDS,
+        read_timeout=AWS_READ_TIMEOUT_SECONDS,
+        retries={"max_attempts": AWS_MAX_RETRY_ATTEMPTS, "mode": AWS_RETRY_MODE},
+    )
+
+
 @lru_cache(maxsize=None)
-def _aws_client(service_name: str) -> Any:
+def aws_client(service_name: str) -> Any:
     """Build and cache one AWS service client configured entirely from the environment.
 
     Purpose
     -------
-    Provide the single point at which this module obtains an AWS client, so that both the
-    configuration discipline below and the caching decision are made once rather than at each
-    call site.
+    Provide the single point at which this distribution obtains an AWS client, so that the
+    region requirement, the timeout and retry policy, and the caching decision are all made
+    once rather than at each call site.
 
     Parameters
     ----------
     service_name : str
-        The SDK service identifier, ``"ssm"`` or ``"secretsmanager"``.
+        The SDK service identifier -- ``"ssm"``, ``"secretsmanager"`` or ``"s3"``.
 
     Returns
     -------
@@ -1618,8 +1726,16 @@ def _aws_client(service_name: str) -> Any:
     Raises
     ------
     ConfigurationError
-        If the AWS SDK is not installed, or if the client cannot be constructed because the
-        environment names no region.
+        If the AWS SDK is not installed, if the environment names no region, or if the client
+        cannot be constructed.
+
+    Notes
+    -----
+    This is the module's PUBLIC client factory and is exported in ``__all__``. It replaced a
+    private ``_aws_client`` that :mod:`carddemo_migration.loaders.s3_stage` reached into from
+    outside this module -- a public function in one module depending on a private name in
+    another, which no import check would have flagged and which made the sibling's own public
+    contract rest on a name this module was free to rename.
     """
     # Alternatives Considered: the SDK is imported inside this function rather than at the
     # top of the module. Importing it at module scope was written first and rejected, because the
@@ -1636,22 +1752,74 @@ def _aws_client(service_name: str) -> Any:
             "the AWS SDK is not installed; install data-migration/requirements.txt"
         ) from exc
 
-    # Alternatives Considered: no ``endpoint_url``, no ``region_name`` and no credentials
-    # are passed. The SDK resolves all three from the environment on its own, and letting it do
-    # so is what makes one code path correct everywhere: inside the batch staging task the
-    # region and the task role's credentials arrive from the container environment, while
-    # against the local emulator an ``AWS_ENDPOINT_URL`` variable redirects the same client with
-    # nothing rebuilt. Passing a literal endpoint -- or branching on a "running locally" flag to
-    # decide whether to pass one -- would create a second code path that only one of the two
-    # environments ever exercises, so a defect in either would be invisible from the other. It
-    # is the same discipline the reference emulator helper under ``tests/helpers/`` follows,
-    # which takes its endpoint from the environment and never embeds one.
-    try:
-        return boto3.client(service_name)
-    except _aws_error_types() as exc:
+    # Alternatives Considered: no ``endpoint_url``, no literal ``region_name`` and no
+    # credentials are passed. The SDK resolves all three from the environment on its own, and
+    # letting it do so is what makes one code path correct everywhere: inside the batch staging
+    # task the region and the task role's credentials arrive from the container environment,
+    # while against the local emulator an ``AWS_ENDPOINT_URL`` variable redirects the same
+    # client with nothing rebuilt. Passing a literal endpoint -- or branching on a "running
+    # locally" flag to decide whether to pass one -- would create a second code path that only
+    # one of the two environments ever exercises, so a defect in either would be invisible from
+    # the other. It is the same discipline the reference emulator helper under
+    # ``tests/helpers/`` follows, which takes its endpoint from the environment and never
+    # embeds one.
+    session = boto3.session.Session()
+
+    # Assumptions: the region is REQUIRED to be resolvable and its absence is refused here,
+    # before any client exists. The reason is specific rather than tidiness: S3 does not fail
+    # when no region is configured, it falls back to ``us-east-1`` and succeeds. A staging task
+    # deployed to another region with its region variable missing would therefore write every
+    # extract into the wrong region's namespace, or fail with a confusing redirect, rather than
+    # reporting the one thing actually wrong. Every other service raises ``NoRegionError`` at
+    # construction, so the check only ADDS a failure for the service that would otherwise stay
+    # silent -- and it names the missing setting instead of the symptom.
+    # Trade-offs: this refuses a caller who deliberately relies on the S3 default. That is
+    # intended; this distribution always runs where a region is configured, and an implicit
+    # default is exactly the kind of setting that is wrong for months without being noticed.
+    #
+    # Assumptions: BOTH region variables are consulted, and ``AWS_REGION`` is consulted DIRECTLY
+    # rather than through the session, because the pinned botocore does not resolve it. Measured
+    # on botocore 1.43.50: its session variable mapping for the region is
+    # ``('region', 'AWS_DEFAULT_REGION', None, None)`` -- ``AWS_DEFAULT_REGION`` only -- so with
+    # ``AWS_REGION=eu-west-1`` and nothing else set, ``Session().region_name`` is ``None`` and an
+    # S3 client silently resolves to ``us-east-1``. That is not a hypothetical: both environment
+    # roots set ``AWS_REGION`` and not ``AWS_DEFAULT_REGION``
+    # (``infra/envs/{dev,prod}/main.tf``), and ECS supplies ``AWS_REGION`` to a Fargate task
+    # itself, so before this the staging task read its region from an intended setting the SDK
+    # ignored and wrote to whatever ``us-east-1`` resolved to. Consulting the session first keeps
+    # a profile or an instance-metadata answer authoritative where one exists.
+    # Assumptions: ``AWS_REGION`` is consulted FIRST and the session second, which reproduces the
+    # precedence AWS documents across its SDKs -- ``AWS_REGION`` above ``AWS_DEFAULT_REGION``, and
+    # either environment variable above a profile or an instance-metadata answer. Taking the
+    # session first was written that way and corrected: the session resolves
+    # ``AWS_DEFAULT_REGION``, so with both variables set it returned the LOWER-precedence one and
+    # this function would have built a client for a region the operator had overridden. Reading
+    # the session second still covers everything the variables do not -- a named profile, a
+    # configuration file, instance metadata.
+    region = os.environ.get("AWS_REGION", "")
+    if not isinstance(region, str) or not region.strip():
+        region = session.region_name
+    if not isinstance(region, str) or not region.strip():
         raise ConfigurationError(
             f"the AWS client for {service_name} could not be created; the environment names no "
-            f"usable region or credentials ({type(exc).__name__})"
+            f"region. Set AWS_REGION or AWS_DEFAULT_REGION -- S3 would otherwise silently "
+            f"default to us-east-1 and stage to the wrong region"
+        )
+    region = region.strip()
+
+    # Trade-offs: the region is passed EXPLICITLY, which every other setting on this path
+    # deliberately is not. It has to be: when the value came from ``AWS_REGION`` the SDK will not
+    # read it, so omitting it here would build a client for ``us-east-1`` while this function had
+    # just proved the environment asked for another region -- the exact silent mismatch the check
+    # above exists to prevent. This is not the literal-configuration anti-pattern the comment
+    # above rejects, because the value is still read FROM the environment rather than written into
+    # source; nothing about which region is compiled in.
+    try:
+        return session.client(service_name, region_name=region, config=_aws_client_config())
+    except _aws_error_types() as exc:
+        raise ConfigurationError(
+            f"the AWS client for {service_name} could not be created for region {region}; the "
+            f"environment names no usable credentials ({type(exc).__name__})"
         ) from exc
 
 
@@ -1680,7 +1848,7 @@ def _ssm_parameter(path: str) -> str:
         If the parameter does not exist, if the caller is not permitted to read it, if the
         service call fails for any other reason, or if the value is present but blank.
     """
-    client = _aws_client("ssm")
+    client = aws_client("ssm")
     try:
         # Assumptions: decryption is explicitly not requested. Only the four non-secret
         # settings are read through this function, and the credential lives in the secret store,
@@ -1741,7 +1909,7 @@ def _secret_credentials(secret_name: str) -> tuple[str, str]:
         call fails for any other reason, if the secret holds binary data rather than text, if
         the text is not a JSON object, or if either required field is absent or empty.
     """
-    client = _aws_client("secretsmanager")
+    client = aws_client("secretsmanager")
     try:
         response = client.get_secret_value(SecretId=secret_name)
     except _aws_error_types() as exc:
@@ -2178,26 +2346,42 @@ def resolve_alternate_database_users() -> Mapping[str, frozenset[str]]:
 
     The accepted syntax is a comma-separated list of ``role=alternate`` pairs, for example one
     entry per role that is under alternating rotation. The role on the left must be one of the
-    eight owning roles in :data:`SCHEMA_ROLES`, and a role may appear more than once, which is
-    how a rotation that has provisioned more than one clone is expressed.
+    **fifteen** login roles in :data:`LOGIN_ROLE_NAMES` -- the eight connection roles of
+    :data:`SCHEMA_ROLES` together with the seven ``_migrator`` roles -- and a role may appear more
+    than once, which is how a rotation that has provisioned more than one clone is expressed.
+
+    Refactoring Rationale: this description said the role on the left had to be one of the eight
+    owning roles in :data:`SCHEMA_ROLES`, which is narrower than what the code accepts and
+    narrower than what the deployment needs. A ``_migrator`` credential is rotated by the same
+    operator procedure as a runtime one, so an allowlist that could not name it would refuse a
+    legitimately rotated migration credential -- and the refusal would present as a service
+    failing to start rather than as a gap in this variable. The implementation comment beside
+    ``owning_roles`` below already recorded the wider domain, so the docstring was contradicting
+    the code it documents; the docstring is corrected to match rather than the code narrowed to
+    match it.
 
     Parameters
     ----------
     None
-        Reads :data:`ENV_ALTERNATE_DB_USERS` from the process environment.
+        Takes no argument. Reads :data:`ENV_ALTERNATE_DB_USERS` from the process environment, and
+        the result is cached for the life of the process by :func:`functools.lru_cache`, so a
+        change to that variable after the first call is not observed.
 
     Returns
     -------
     Mapping[str, frozenset[str]]
-        A read-only mapping from owning role to the alternate user names allowlisted for it.
-        Empty when the variable is unset or blank, which is the expected configuration.
+        A read-only mapping from login role to the alternate user names allowlisted for it. Empty
+        when the variable is unset or blank, which is the expected configuration.
 
     Raises
     ------
     ConfigurationError
-        If any entry is empty, does not contain exactly one ``=``, names a role that is not one
-        of the eight owning roles, has an alternate that is not a plain PostgreSQL role name, or
-        has an alternate that is itself one of the eight owning roles.
+        If any entry is empty, does not contain exactly one ``=``, names a role that is not one of
+        the fifteen login roles, has an alternate that is not a plain PostgreSQL role name, or has
+        an alternate that is itself one of the fifteen login roles. Assumptions: widening the KEY
+        domain does not widen what may be allowlisted -- a login role is still refused as another
+        role's alternate, which is what keeps this variable from being usable to grant one role
+        the credential of another.
     """
     raw = os.environ.get(ENV_ALTERNATE_DB_USERS)
     if raw is None or not raw.strip():
@@ -2416,12 +2600,28 @@ def alternate_database_user_verification_sql() -> str:
     privilege-based one. Returning the text rather than executing it keeps this module free of a
     database dependency while removing the caller's freedom to invent its own weaker check.
 
+    Parameters
+    ----------
+    None
+        Takes no argument. The query text is a constant assembled here, so it depends on no
+        setting, no environment variable and no process state; the two values it needs arrive as
+        driver-bound parameters at execution time rather than as arguments to this function.
+
     Returns
     -------
     str
         A query with two named parameters, ``owning_role`` and ``alternate_user``, selecting one
         row whose columns match the field names of :class:`DatabaseUserAttributes`. The query
         returns no row when the user does not exist, which the caller must treat as a refusal.
+
+    Raises
+    ------
+    None
+        Raises nothing. Assembling a constant string cannot fail, so a caller needs no handler
+        here; every failure mode of this contract belongs to the caller's execution of the query.
+        Assumptions: the inapplicability is declared rather than left silent, because a reader has
+        to be able to tell a function that cannot fail from a docstring that forgot to say how it
+        does.
 
     Notes
     -----
@@ -2669,8 +2869,7 @@ def database_secret_name_for_role(role: str) -> str:
     text = _require_text(role, "database role name")
     if text not in LOGIN_ROLE_NAMES:
         raise ConfigurationError(
-            f"unknown database login role {text!r}; expected one of "
-            f"{', '.join(LOGIN_ROLE_NAMES)}"
+            f"unknown database login role {text!r}; expected one of {', '.join(LOGIN_ROLE_NAMES)}"
         )
     return parameter_path(_AURORA_SEGMENT, text).lstrip("/")
 
@@ -2991,6 +3190,101 @@ def resolve_dataset_staging_settings() -> DatasetStagingSettings:
     # not so this module can invent it.
     bucket = _ssm_parameter(parameter_path(_DATASETS_SEGMENT, "bucket"))
     return DatasetStagingSettings(bucket=bucket, environment=resolve_environment_name())
+
+
+@lru_cache(maxsize=1)
+def resolve_seed_user_subjects() -> Mapping[str, str]:
+    """Resolve each seed identity's Cognito subject, keyed by its eight-character user id.
+
+    Purpose
+    -------
+    Supply the one column the ``USRSEC`` record cannot provide.
+    ``services/auth-service/src/main/resources/db/migration/V1__auth.sql`` declares
+    ``auth.users.cognito_sub UUID NOT NULL UNIQUE`` and seeds no rows, while the 80-byte
+    ``USRSEC`` record carries only the id, the two names, a password this migration refuses
+    to carry forward, and the type. The subject is minted by the identity provider, so the
+    reader has to be told it; ``infra/modules/cognito`` publishes it through its
+    ``seed_user_subjects`` output and each environment root writes that document to
+    Parameter Store under ``<prefix>/<environment>/identity/seed-user-subjects``.
+
+    Returns
+    -------
+    Mapping[str, str]
+        Read-only mapping of eight-character ``SEC-USR-ID`` to canonical RFC-4122 subject.
+        Empty only if the pool was provisioned with no seed identities, which is the
+        module's default and is why an empty document is accepted rather than refused.
+
+    Raises
+    ------
+    ConfigurationError
+        If the environment name or prefix cannot be resolved, if the parameter is absent,
+        unreadable or blank, if the document is not a JSON object of strings, if any key is
+        not exactly eight characters, if any subject is not a canonical RFC-4122 value, or
+        if two ids share one subject.
+    """
+    # Alternatives Considered: resolving each subject at load time through
+    # cognito-idp admin-get-user. Rejected on two independent grounds: it would need a
+    # Cognito read grant the migration task requires for nothing else, and it would make a
+    # data load fail whenever the identity provider was unreachable from wherever the ETL
+    # runs, converting a data step into an identity-provider dependency. Reading one
+    # published document keeps provisioning as the single authority for a value only
+    # provisioning can mint.
+    # Assumptions: the segment is written as a literal here rather than promoted to a
+    # module constant, following the rule stated beside _AURORA_SEGMENT above -- a name used
+    # from exactly one place reads best beside the value it fetches, and moving it away from
+    # its only reader buys no protection.
+    document = _ssm_parameter(parameter_path("identity", "seed-user-subjects"))
+    try:
+        decoded = json.loads(document)
+    except json.JSONDecodeError as error:
+        # Trade-offs: the decoder's message is reported but the document is NOT, because it
+        # pairs every user id with its subject and an exception string is the least
+        # controlled place for that pairing to end up. The position the decoder names is
+        # enough to locate the fault in a value an operator can print deliberately.
+        raise ConfigurationError(
+            f"the seed-user subject document is not valid JSON: {error}"
+        ) from error
+
+    if not isinstance(decoded, dict):
+        raise ConfigurationError(
+            "the seed-user subject document must be a JSON object keyed by user id"
+        )
+
+    subjects: dict[str, str] = {}
+    for user_id, subject in decoded.items():
+        if not isinstance(subject, str):
+            raise ConfigurationError(f"the seed-user subject for {user_id} must be a string")
+        # Assumptions: eight characters exactly, because that is the width of
+        # SEC-USR-ID PIC X(08) at app/cpy/CSUSR01Y.cpy L18 and the width auth.users declares
+        # for its primary key. The Cognito module validates the same width on its own input,
+        # so agreeing here turns a silent join failure -- a row keyed on a value no other
+        # row uses -- into a rejection naming the offending id.
+        if len(user_id) != 8:
+            raise ConfigurationError(
+                f"the seed-user subject document key {user_id!r} is not 8 characters, "
+                "the width of SEC-USR-ID"
+            )
+        # Assumptions: the canonical hyphenated 8-4-4-4-12 form is required rather than
+        # accepted-and-normalised. The target column is UUID, and uuid.UUID() would also
+        # accept a braced, urn-prefixed or unhyphenated spelling, so validating with it
+        # would let this module read a form it then has to rewrite before use. Requiring
+        # the canonical form means the value read is the value written.
+        if _SUBJECT_PATTERN.fullmatch(subject) is None:
+            raise ConfigurationError(
+                f"the seed-user subject for {user_id} is not a canonical RFC-4122 value"
+            )
+        subjects[user_id] = subject
+
+    # Assumptions: distinctness is enforced here as well as by the column's UNIQUE
+    # constraint. Leaving it to the constraint would surface as an integrity error partway
+    # through a bulk load, after some rows had been written, whereas rejecting the document
+    # before the load starts leaves the table untouched.
+    if len(set(subjects.values())) != len(subjects):
+        raise ConfigurationError(
+            "the seed-user subject document assigns one subject to more than one user id, "
+            "which auth.users.cognito_sub declares UNIQUE"
+        )
+    return MappingProxyType(subjects)
 
 
 def reset_resolution_cache() -> None:

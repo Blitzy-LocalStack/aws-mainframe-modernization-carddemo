@@ -722,7 +722,7 @@ grep -rh -A1 'DEFINE GENERATIONDATAGROUP' app/jcl/ | grep -o 'NAME([A-Z0-9.]*)' 
 |---|---|---|---|
 | `TRANSACT.BKUP` | `DEFGDGB.jcl` **L25** | `LIMIT(5)` L26, `SCRATCH` L27 | transaction master backup |
 | `TRANSACT.DALY` | `DEFGDGB.jcl` **L31** | `LIMIT(5)` L32, `SCRATCH` L33 | daily transaction input |
-| `TRANREPT` | `DEFGDGB.jcl` **L37** | `LIMIT(5)` L38, `SCRATCH` L39 | the 133-column transaction report |
+| `TRANREPT` | `DEFGDGB.jcl` **L37** *and* `REPTFILE.jcl` **L26** | `LIMIT(5)` L38, `SCRATCH` L39 — **conflicting second declaration**: `LIMIT(10)` `REPTFILE.jcl` L27, no `SCRATCH`; see the note below | the 133-column transaction report |
 | `TCATBALF.BKUP` | `DEFGDGB.jcl` **L43** | `LIMIT(5)` L44, `SCRATCH` L45 | category-balance backup |
 | `SYSTRAN` | `DEFGDGB.jcl` **L49** | `LIMIT(5)` L50, `SCRATCH` L51 | system-generated transactions |
 | `TRANSACT.COMBINED` | `DEFGDGB.jcl` **L55** | `LIMIT(5)` L56, `SCRATCH` L57 | the combined transaction set |
@@ -1103,9 +1103,31 @@ plus the `batch.batch_run` ledger. Anyone comparing this with the baseline shoul
 read it as an addition, not as a port: `RESTART=` appears once and commented out, and
 `CHKPT=` nowhere.
 
-**Ten object-storage prefix families with five-noncurrent-version retention carry
-the generation semantics**, and the retention figure has a baseline origin —
-`LIMIT(5)` on every one of the ten bases — rather than being a chosen default.
+**Ten object-storage prefix families carry the generation semantics**, with
+five-noncurrent-version retention as the default, and that figure has a baseline
+origin rather than being a chosen number: **nine** of the ten bases declare
+`LIMIT(5)` with `SCRATCH` exactly once each.
+
+Assumptions: the tenth is the report family and it is stated separately here rather
+than folded into the nine, because this record's own inventory above establishes that
+`AWS.M2.CARDDEMO.TRANREPT` is declared **twice** — `DEFGDGB.jcl:L37` with `LIMIT(5)`
+and `SCRATCH`, and `REPTFILE.jcl:L26` with `LIMIT(10)` and no `SCRATCH` — which is why
+there are eleven definition statements over ten distinct names. Refactoring Rationale:
+this consequence previously read "`LIMIT(5)` on every one of the ten bases", which
+contradicted that inventory in the same document and quietly resolved a conflict the
+inventory had deliberately left open, promising instead that the report family's
+retention was "a parameter to confirm at apply time rather than a number this record
+picks silently". Two statements of one fact disagreeing inside one ADR is worse than
+either being wrong alone, because a reader cannot tell which was measured.
+
+The implementation matches the inventory rather than the withdrawn sentence:
+`infra/modules/s3-datasets` exposes `noncurrent_versions` as a per-family optional
+override of the global `noncurrent_version_retention`, and leaves it **unset** on all
+ten entries, so every family — including the report family — inherits the five-version
+default until an operator sets it. The conflict is therefore carried forward as an open
+parameter with a documented default, which is what the inventory promised, and no
+`SCRATCH`-versus-no-`SCRATCH` distinction survives into the target because object
+versioning has no non-destructive analogue of the operand.
 
 **A batch step's environment is entirely data.** The business date, the generation
 and the environment all arrive as container overrides, so the same image runs every

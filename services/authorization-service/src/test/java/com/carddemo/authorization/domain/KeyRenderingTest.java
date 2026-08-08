@@ -43,14 +43,21 @@ class KeyRenderingTest {
      * <p>Assumptions: the member NAME is asserted absent alongside the value. A rendering emitting
      * {@code accountId=null} on a partly built key would pass a value-only assertion while still
      * announcing that the component is rendered, and the next populated key would disclose.</p>
+     *
+     * <p>Refactoring Rationale: the date is a five-digit ORDINAL date, and this case previously used
+     * {@code 20260115} -- an eight-digit calendar-shaped value that
+     * {@code ck_pending_auth_detail_auth_date_domain} refuses, so no row could ever have carried it. The
+     * key type now enforces that domain itself, which is what surfaced the value as wrong; it is replaced
+     * with the same date expressed the way the column holds it, year 26 followed by day 015, rather than
+     * relaxing the type to keep an unreachable value working.</p>
      */
     @Test
     void theKeyRendersItsClockPartsAndNoAccountIdentifier() {
         String rendered =
-                new PendingAuthDetailKey(SYNTHETIC_ACCOUNT_ID, 20_260_115, 143_000).toString();
+                new PendingAuthDetailKey(SYNTHETIC_ACCOUNT_ID, 26_015, 143_000).toString();
 
         assertThat(rendered).startsWith("PendingAuthDetailKey[");
-        assertThat(rendered).contains("authDate=20260115");
+        assertThat(rendered).contains("authDate=26015");
         assertThat(rendered).contains("authTime=143000");
         assertThat(rendered).doesNotContain(String.valueOf(SYNTHETIC_ACCOUNT_ID));
         assertThat(rendered).doesNotContain("accountId");

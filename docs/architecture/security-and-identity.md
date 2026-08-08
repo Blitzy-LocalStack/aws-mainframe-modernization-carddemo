@@ -71,8 +71,9 @@
 > which records the
 > decision this document describes the shape of; `MIGRATION_README.md` and
 > `docs/runbooks/deploy.md`, which reference the credential and identity handling
-> rather than re-deriving it; the future `SecurityConfig` class of each online
-> service and the authored `JwtRoleConverter` of `common-lib`; and
+> rather than re-deriving it; the authored `SecurityConfig` class of each of the
+> seven services with an HTTP listener, together with the authored
+> `JwtRoleConverter` of `common-lib`; and
 > [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md), which
 > defers the cluster-level recoverability replacement to this document at its
 > L508–L517.
@@ -233,8 +234,9 @@ credential.
 Seed identities are created **at provisioning time with generated credentials**,
 and this is verifiable rather than asserted: the `seed_users` input at
 [`infra/modules/cognito/variables.tf`](../../infra/modules/cognito/variables.tf)
-L923 states in its own description that it *"Carries no password: main.tf generates
-each initial credential during apply and stores it in Secrets Manager"*, and that
+is declared at L891 and its L892 description states that it *"Carries no password:
+main.tf generates each initial credential during apply and stores it in Secrets
+Manager"*, and that
 the baseline's own demo identities — defined by
 [`app/jcl/DUSRSECJ.jcl`](../../app/jcl/DUSRSECJ.jcl) L35–L44 — are named there by
 identifier and user type only. The consequence is the one that matters for the
@@ -271,9 +273,13 @@ above; it does not own the verification rule or a stored verifier.
 > external contract this design depends on, and that dependency is real rather than
 > nominal.** Four behaviours are assumed of the pool and implemented nowhere in this
 > repository: credential verification, password policy enforcement, credential reset,
-> and repeated-failure handling. The future auth-service implementation must still
-> prove that its request path neither persists nor logs the credential and that it
-> discards its reference after the provider call. If the pool were replaced by a
+> and repeated-failure handling. The authored auth-service implementation —
+> `CognitoIdentityService` behind `AuthController` — must still be held to proving
+> that its request path neither persists nor logs the credential and that it
+> discards its reference after the provider call; `CognitoIdentityServiceTest` and
+> `AuthControllerTest` assert the redaction half of that, and the "neither persists"
+> half rests on there being no password column in the `auth` schema to persist into.
+> If the pool were replaced by a
 > provider that did not offer one of the four behaviours, the gap would surface as a
 > missing control rather than as a database migration failure. The dependency is
 > recorded here for exactly that reason: it is the class of assumption that is
@@ -361,8 +367,8 @@ separable things in the target, and separating them is the point:
 > weight, and the design depends on that separation holding.** A client that
 > navigated to an administrative route without the administrative group would render
 > a screen and then receive an authorization failure from every call that screen
-> makes once the service filter chains exist, because each service will re-derive
-> authority from the token independently. The
+> makes, because the filter chains exist in all seven services with an HTTP
+> listener and each re-derives authority from the token independently. The
 > alternative considered was to let the server drive navigation, mirroring `XCTL`
 > more closely; it was rejected because it would reintroduce a server-held notion of
 > "where this user is", which is the pseudo-conversational state the migration
@@ -380,12 +386,31 @@ resource-server filter chain, and those chains carry route rules that require th
 administrative authority. The shared converter is a building block and the per-service
 filter chain is what applies it; both halves are required, and neither on its own
 establishes that a given route is authorized. The layer those rules protect is now
-partly authored: **five** `*Controller.java` exist under `services/*/src/main/java` —
-`AccountController`, `CardXrefController` and `CustomerController` in `account-service`,
-`PendingAuthController` and `FraudController` in `authorization-service` — so a handler
-method is reached through a rule on those routes and on no others. Every other route rule
-in this section still guards an unauthored handler, and the two cases are kept apart
-below rather than reported as one.
+authored in every service but one: **sixteen** `*Controller.java` exist under
+`services/*/src/main/java` — three in `account-service`, one in `auth-service`, two in
+`authorization-service`, six in `reference-service`, two in `reporting-service` and two
+in `transaction-service` — so a handler method is reached through a rule on those
+routes. `card-service` is the sole exception: it has an authored `SecurityConfig` whose
+route rules guard no handler at all, because its `api` package holds only its charter.
+
+Refactoring Rationale: this paragraph previously put the figure at five controllers in
+two services and described "every other route rule" as guarding an unauthored handler.
+Both halves are now wrong by a wide margin, and the direction of the error mattered: a
+reader would have taken the authorization model for a mechanism with almost nothing
+behind it. The exception is narrowed to the one service it actually applies to rather
+than left as a blanket qualifier.
+
+Trade-offs: what is authored and what is *asserted* are still two different figures, and
+the smaller one is stated rather than glossed. Seven of the sixteen handlers have a
+`*ControllerTest` that exercises the handler through the web layer — one in
+`auth-service`, two in `authorization-service`, two in `reporting-service` and two in
+`transaction-service`. The other nine — three in `account-service` and six in
+`reference-service` — are covered only by their module's contract or routing test, which
+binds the published path set rather than driving a request through the filter chain. So
+for those nine the route rules in this section are delivered and reviewed but not
+exercised by a test, and that is the accurate boundary a reader should hold this section
+to.
+
 Assumptions: a registered filter chain over an unauthored handler is a delivered
 authorization mechanism with nothing behind it, which is a materially narrower gap
 than an unregistered converter. The two are kept apart throughout this section because
@@ -1167,15 +1192,22 @@ claim.
 > guards
 > that fail if the imported graph is empty, if the ownership contract stops being
 > exactly nine fixed roots, if a prohibition list no longer matches the constructs it
-> names, or if the money rule stops rejecting a planted violation. The reactor carries
-> 166 test classes in total. **Not authored:** `LayeringRulesTest` holds no
-> `..api..` → `..domain..` or `..repository..` rule, so the specific boundary this
-> section requires is the one ArchUnit rule that is missing; and no test serializes a
-> *customer* response through the production object mapper, so one of the two response
-> shapes carrying personal data is still unproven at the serialization boundary. The table
-> above therefore remains the required disclosure contract rather than a claim that masking
-> is enforced end to end — but the reason is now the missing boundary rule and the
-> unauthored routes, not a missing masker.
+> names, or if the money rule stops rejecting a planted violation. **Not authored:**
+> `LayeringRulesTest` holds no `..api..` → `..domain..` or `..repository..` rule, so the
+> specific boundary this section requires is the one ArchUnit rule that is missing; and
+> no test serializes a *customer* response through the production object mapper, so one
+> of the two response shapes carrying personal data is still unproven at the
+> serialization boundary. The table above therefore remains the required disclosure
+> contract rather than a claim that masking is enforced end to end — but the reason is
+> now the missing boundary rule and `card-service`'s absent routes, not a missing
+> masker.
+>
+> Refactoring Rationale: a reactor-wide test-class total stood in this paragraph and is
+> removed rather than updated. It was already wrong, and it was wrong in a way that
+> could not be caught by reading this document — the figure grows with every checkpoint
+> while the sentence around it stays plausible. Nothing in this section's argument
+> depends on the total; what the argument needs is the five rule families and the four
+> anti-vacuity guards named above, each of which is checkable in one named file.
 >
 > Three items have moved off this list since the previous revision, and each is asserted
 > positively in the reproduction block rather than described here. `ssn_encrypted` and
@@ -1185,15 +1217,24 @@ claim.
 > `card-service`'s `CardDetailRenderingTest`, which asserts the body keeps the number
 > masked and that the redacted rendering does not merge two distinct shapes. And
 > `account-service` now has a `mapper` package holding `AccountContextMapper` and
-> `AccountInquiryReplyMapper`; `card-service`'s still holds only a `package-info.java`,
-> so the card response mapper remains the unauthored half of that pair.
+> `AccountInquiryReplyMapper`, and `card-service`'s holds `CardMapper`, which applies
+> `CardNumberMasker.mask` on the row it builds and declares no card-verification member
+> at all. Refactoring Rationale: this sentence recorded that `card-service`'s mapper
+> package held only its charter, so the card response mapper was the unauthored half of
+> that pair. `CardMapper` has since landed, and the correction matters because the
+> sentence was cited as evidence that masking could not be enforced on a card response —
+> it now can be, and is, by a class that derives the masked shape from the masker's own
+> constants rather than from a literal.
 >
 > `cvv_encrypted` has moved from this list to the authored one: `card-service` declares
 > `EncryptedCvv`, `EncryptedCvvConverter` and `CardVerificationValueCipher`, `Card`
 > carries the value type behind `@Convert`, and the application-data key and the card
 > task role's two-action grant are both provisioned. What is still absent for that
-> column is only the caller — `card-service` publishes no controller and no response
-> mapper, so nothing invokes the cipher yet.
+> column is only the caller: `card-service` publishes no controller, so no request
+> path reaches the entity and nothing invokes the cipher yet. Its response mapper is no
+> longer part of that gap — `CardMapper` is authored — and the mapper is in any case not
+> where the cipher would be invoked, since the converter sits on the entity attribute
+> and the mapper never names the value at all.
 >
 > The masked-rendering contract acquired a second enforcement point as well:
 > [`MaskedCardNumber.java`](../../services/common-lib/src/main/java/com/carddemo/common/security/MaskedCardNumber.java)
@@ -1698,8 +1739,11 @@ assert {
     "account-service/AccountController.java",
     "account-service/CardXrefController.java",
     "account-service/CustomerController.java",
+    "auth-service/AuthController.java",
+    "auth-service/UserController.java",
     "authorization-service/FraudController.java",
     "authorization-service/PendingAuthController.java",
+    "card-service/CardController.java",
     "reference-service/AddressLookupController.java",
     "reference-service/DateEvaluationController.java",
     "reference-service/DisclosureGroupController.java",
@@ -1710,38 +1754,52 @@ assert {
     "reporting-service/StatementController.java",
     "transaction-service/BillPaymentController.java",
     "transaction-service/TransactionController.java",
-}, "fifteen handler classes across five services; auth and card publish contracts only"
+}, "eighteen handler classes across all seven request-serving services"
 # The three internal addresses named by the machine-identity table are the three
 # account-context controllers, so that seam serves a response rather than only carrying
-# a credential to a 404. The set grew from five to fifteen as the reference, reporting
-# and transaction handlers landed, and it is re-stated in full rather than relaxed to a
-# count: a count would go on passing if one service's handler were replaced by another's.
-# auth-service and card-service remain the two that publish a contract and a filter chain
-# with no handler behind either, which is the delivery boundary ADR-006 records.
+# a credential to a 404. The set grew from five to fifteen to eighteen as the reference,
+# reporting, transaction, auth and card handlers landed, and it is re-stated in full
+# rather than relaxed to a count: a count would go on passing if one service's handler
+# were replaced by another's. Every service that publishes a contract and a filter chain
+# now has handlers behind them; batch-service publishes neither and serves no request.
 assert {
     path.parts[1] + "/" + path.name
     for path in services.glob("*/src/main/java/**/Cognito*.java")
 } == {
-    "auth-service/CognitoUserProvisioningService.java",
     "auth-service/CognitoIdentityConfig.java",
+    "auth-service/CognitoIdentityService.java",
+    "auth-service/CognitoUserProvisioningService.java",
     "common-lib/CognitoAccessTokenValidator.java",
-}, "provisioning is authored; no service performs a password comparison of its own"
+}, "provisioning and the sign-on exchange are authored; no service compares a password"
 
 # Absent: the API-to-persistence layering rule.
 assert "..api.." not in layering_source, "no API-to-persistence rule is authored yet"
-# Assumptions: package-info.java files are excluded because they declare no members
-# and so cannot write a column; they name these columns only to describe the schema
-# their package maps. Including them would make this assertion measure prose rather
-# than the persistence code the paragraph above is about.
+# Assumptions: matched on the COLUMN MAPPING and not on a bare occurrence of the column
+# name, for the same reason the card verification value below is. Refactoring Rationale:
+# this assertion did match a bare occurrence and pinned the result to Customer.java, and
+# it began failing when the account-update mapper landed -- that mapper passes each column
+# name to the cipher as a PURPOSE label, which binds the ciphertext to the column it is
+# destined for and is not a mapping of it. Matching the name alone conflated the two, so
+# the assertion reported a second writer where there is one.
+assert {
+    path.name
+    for path in services.glob("*/src/main/java/**/*.java")
+    if 'name = "ssn_encrypted"' in path.read_text(encoding="utf-8")
+    or 'name = "govt_issued_id_encrypted"' in path.read_text(encoding="utf-8")
+} == {"Customer.java"}, (
+    "both encrypted identifier columns are mapped by exactly one entity, so the cipher"
+    " boundary is single for them as it is for the card verification value"
+)
+# And the cipher PURPOSE labels for those two columns are named by exactly one class,
+# which is the other half of the same boundary: one mapper decides what gets encrypted
+# for which column, and one entity decides where the ciphertext lands.
 assert {
     path.name
     for path in services.glob("*/src/main/java/**/*.java")
     if path.name != "package-info.java"
-    and re.search(r"ssn_encrypted|govt_issued_id_encrypted", path.read_text(encoding="utf-8"))
-} == {"Customer.java"}, (
-    "both encrypted identifier columns are written by exactly one entity, so the cipher"
-    " boundary is single for them as it is for the card verification value"
-)
+    and re.search(r'encrypt\([^;]*"(?:ssn|govt_issued_id)_encrypted"',
+                  path.read_text(encoding="utf-8"), re.S)
+} == {"CustomerMapper.java"}
 
 # The card verification value is written encrypted by exactly one mapped attribute too.
 # Asserted the same way so each fails in both directions -- once if a second writer of
@@ -1768,7 +1826,13 @@ assert {
     "MoneyModuleTest.java",
     "MoneyTest.java",
     "ReportingDtoMapperTest.java",
+    "TransactionMapperTest.java",
 }, "CardDetailRenderingTest asserts the serialised card body keeps the number masked"
+# Refactoring Rationale: TransactionMapperTest joined this set when the transaction
+# mapper's own serialisation cases landed, and it belongs here for the same reason the
+# card one does -- it renders a body through the mapper and asserts what the rendering
+# may contain. The set is stated in full rather than as a count so that a test leaving
+# it fails here as loudly as one joining it.
 
 # Transport: the task-side listener, and the JDBC client properties.
 service_configs = {

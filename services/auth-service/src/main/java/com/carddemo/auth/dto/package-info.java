@@ -29,29 +29,55 @@
  * each of those shapes is owned once by {@code com.carddemo.common} and is
  * referenced from here instead of being restated.
  *
- * <p>Assumptions: the inventory below is this package's <b>target contract</b> as
- * the migration plan assigns it, not a measurement of the files present today.
- * Seven {@code .java} files constitute this package at target and no more: this
- * descriptor, and six records -- {@code SignOnRequest}, {@code SignOnResponse},
- * {@code UserSummary}, {@code UserResponse}, {@code CreateUserRequest} and
- * {@code UpdateUserRequest}. <b>Five of the seven exist at this checkpoint</b>:
- * this descriptor and the first four records. {@code CreateUserRequest} and
- * {@code UpdateUserRequest} are <b>planned and not yet authored</b> -- they are
- * the two write payloads, and they arrive with the user-administration adapters
- * in {@code com.carddemo.auth.api}, which is itself still planned. Between them
- * the six carry the payloads of the five reference online programs
- * {@code COSGN00C}, {@code COUSR00C}, {@code COUSR01C}, {@code COUSR02C} and
- * {@code COUSR03C}; the four that exist today carry sign-on and the two read
- * shapes, which is why the read side is complete and the write side is not.
+ * <p>Assumptions: the inventory below is this package's <b>closed set</b>, and every
+ * member of it now has a file, so it is both the contract the plan assigns and a
+ * measurement of the directory. Eleven {@code .java} files constitute this package
+ * and no more: this descriptor, one sealed interface and nine records.
  *
- * <p>Refactoring Rationale: an earlier revision stated "seven files and no more"
- * and named all six records without qualification, which read as an inventory of
- * the directory rather than as the closed set the plan assigns. Two of the six
- * had no file. The two are marked rather than removed, because the closed-set
- * claim is the useful part of this charter -- it tells an author of the write
- * path which types to add and forbids a seventh -- and deleting them would
- * discard exactly that. The wording follows the convention the test charter at
- * {@code com.carddemo.auth.api} already established for the same situation.
+ * <ul>
+ *   <li>{@code SignOnOutcome} -- the sealed interface naming the two shapes the
+ *       sign-on operation's success status can carry, so a handler can return
+ *       either without widening its return type. It is the one type here that is
+ *       not a record, and it declares no member the two shapes do not both
+ *       already declare;</li>
+ *   <li>{@code SignOnRequest} and {@code SignOnResponse} -- the credential
+ *       exchange, from {@code COSGN00C}. {@code SignOnResponse} is additionally
+ *       the success body of the renewal and challenge exchanges, which is why its
+ *       renewal token is nullable;</li>
+ *   <li>{@code SignOnChallenge} -- the second success shape of that exchange, for
+ *       the outcome in which the pool accepts the credential but requires a
+ *       permanent password before issuing tokens;</li>
+ *   <li>{@code SignOnChallengeRequest} and {@code TokenRefreshRequest} -- the two
+ *       bodies that have <b>no reference counterpart at all</b>. Both exist
+ *       because the credential moved to a managed user pool: seeded accounts
+ *       arrive with temporary passwords, and a bearer token has a finite lifetime
+ *       where a terminal session did not. Each states that absence in its own
+ *       documentation rather than borrowing a reference citation it has no claim
+ *       to;</li>
+ *   <li>{@code UserSummary} and {@code UserResponse} -- the two read shapes, the
+ *       first one row of the {@code COUSR00C} list and the second the whole row
+ *       that {@code COUSR02C} and {@code COUSR03C} display;</li>
+ *   <li>{@code CreateUserRequest} and {@code UpdateUserRequest} -- the two write
+ *       payloads, from {@code COUSR01C} and {@code COUSR02C}.</li>
+ * </ul>
+ *
+ * <p>Refactoring Rationale: this inventory has been corrected twice and the second
+ * correction is the one a reader should note. An earlier revision stated "seven
+ * files and no more" and named six records without qualification when two of them
+ * had no file, which read as a measurement rather than as a target; that was
+ * amended by marking the two as planned. Both then landed, and two further request
+ * records and the sealed interface were added with the challenge and renewal
+ * exchanges, so the qualified wording had become the stale half: it described five
+ * of seven files existing in a directory holding eleven. The count and the
+ * membership are therefore restated as measured, and the planned-versus-present
+ * distinction is withdrawn because nothing in this package is now planned. The
+ * closed-set claim is retained, because it is the useful part of this charter -- it
+ * tells an author which types belong here and forbids a twelfth.
+ *
+ * <p>Assumptions: the closed set is enforced by reading, not by a gate. Nothing in
+ * the build counts the files in this directory, so a twelfth type added without
+ * amending this list would compile; what this paragraph buys is that the amendment
+ * is an obvious omission to a reviewer rather than an invisible one.
  *
  * <h2>Where the declared widths come from</h2>
  *
@@ -221,7 +247,7 @@
  *
  * <p>Trade-offs: the two shared shapes are referenced from another module
  * rather than declared here, which couples this package to that module and
- * means a reader of these six records opens two packages to see a complete
+ * means a reader of these nine records opens two packages to see a complete
  * response. The house doctrine is why that coupling is accepted.
  * {@code tests/README.md} states it as an instruction at its lines 540 to 542,
  * "never duplicate a layout; keep it single-sourced from app/cpy/", and two
@@ -241,7 +267,7 @@
  * <p>Trade-offs: this file contains one Javadoc block and one package
  * declaration and nothing else -- no type, no annotation, no import and no line
  * comment. A package declaration needs no import, and anything that would
- * require one belongs in one of the six records instead.
+ * require one belongs in one of the nine records instead.
  *
  * <p>Trade-offs: the block carries no parameter, return or exception
  * at-clauses, and no authorship, version or release marker either. The

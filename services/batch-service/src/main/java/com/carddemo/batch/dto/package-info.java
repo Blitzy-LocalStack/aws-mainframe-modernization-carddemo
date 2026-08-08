@@ -264,7 +264,17 @@
  *       any one of them: {@code app/jcl/DEFGDGB.jcl} defines six at lines 25,
  *       31, 37, 43, 49 and 55, {@code app/jcl/DEFGDGD.jcl} three more at lines
  *       28, 51 and 74, and {@code app/jcl/DALYREJS.jcl} the tenth at line 24 --
- *       every one of the ten carrying {@code LIMIT(5)} and {@code SCRATCH}.</dd>
+ *       each of those ten statements carrying {@code LIMIT(5)} and
+ *       {@code SCRATCH}. Assumptions: a FOURTH job defines a generation data
+ *       group and is named here rather than left out, because omitting it is
+ *       what makes the sentence above read as a blanket claim.
+ *       {@code app/jcl/REPTFILE.jcl} line 26 declares the {@code TRANREPT} base
+ *       a second time, at {@code LIMIT(10)} and with no {@code SCRATCH}, so the
+ *       baseline holds ELEVEN defining statements over TEN distinct bases and is
+ *       not self-consistent about the report family. Five is applied uniformly,
+ *       the conflict is recorded on {@code DatasetGeneration} itself, and
+ *       {@code infra/modules/s3-datasets} keeps a per-family retention override
+ *       unset against the day it is resolved.</dd>
  *
  *   <dt>{@code BatchErrorEvent}</dt>
  *   <dd>The terminal error-sink message envelope, and the only queue payload

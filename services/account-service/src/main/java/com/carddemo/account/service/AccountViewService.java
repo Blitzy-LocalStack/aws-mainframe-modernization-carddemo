@@ -1,11 +1,18 @@
 package com.carddemo.account.service;
 
+import com.carddemo.account.domain.Account;
+import com.carddemo.account.domain.Customer;
 import com.carddemo.account.dto.AccountContextView;
+import com.carddemo.account.dto.AccountViewResponse;
+import com.carddemo.account.dto.CardXrefResponse;
 import com.carddemo.account.dto.CardXrefView;
 import com.carddemo.account.mapper.AccountContextMapper;
+import com.carddemo.account.mapper.CardXrefMapper;
+import com.carddemo.account.mapper.CustomerMapper;
 import com.carddemo.account.repository.AccountRepository;
 import com.carddemo.account.repository.CardXrefRepository;
 import com.carddemo.account.repository.CustomerRepository;
+import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 import org.springframework.stereotype.Service;
@@ -76,6 +83,12 @@ public class AccountViewService {
      */
     private final AccountContextMapper mapper;
 
+    /** Projects a customer row onto the human view's customer detail. */
+    private final CustomerMapper customerMapper;
+
+    /** Projects cross-reference rows onto the by-account response list. */
+    private final CardXrefMapper crossReferenceMapper;
+
     /**
      * Creates the service.
      *
@@ -89,16 +102,25 @@ public class AccountViewService {
      * @param customers the customer master repository; must not be {@code null}
      * @param crossReferences the card cross-reference repository; must not be {@code null}
      * @param mapper the projection to the published contracts; must not be {@code null}
+     * @param customerMapper the projection from a customer row to the human view's customer detail; must
+     *     not be {@code null}
+     * @param crossReferenceMapper the projection from cross-reference rows to the by-account response
+     *     list; must not be {@code null}
      * @throws NullPointerException if any argument is {@code null}
      */
     public AccountViewService(AccountRepository accounts,
             CustomerRepository customers,
             CardXrefRepository crossReferences,
-            AccountContextMapper mapper) {
+            AccountContextMapper mapper,
+            CustomerMapper customerMapper,
+            CardXrefMapper crossReferenceMapper) {
         this.accounts = Objects.requireNonNull(accounts, "accounts must not be null");
         this.customers = Objects.requireNonNull(customers, "customers must not be null");
         this.crossReferences = Objects.requireNonNull(crossReferences, "crossReferences must not be null");
         this.mapper = Objects.requireNonNull(mapper, "mapper must not be null");
+        this.customerMapper = Objects.requireNonNull(customerMapper, "customerMapper must not be null");
+        this.crossReferenceMapper =
+                Objects.requireNonNull(crossReferenceMapper, "crossReferenceMapper must not be null");
     }
 
     /**
@@ -160,5 +182,98 @@ public class AccountViewService {
     @Transactional(readOnly = true)
     public boolean customerExists(long customerId) {
         return this.customers.existsById(customerId);
+    }
+
+    /**
+     * Reads the HUMAN account view: the account's own fields beside its customer's.
+     *
+     * <p>Purpose: this is the migrated form of {@code app/cbl/COACTVWC.cbl}, which reads the account
+     * master by key, follows the account's customer identifier to the customer master, and fills one
+     * screen from both. Until this method existed the whole human view had no production path: the two
+     * response shapes and the mapper methods that build them were reachable only from each other, so a
+     * change to a published width could not break anything that ran.</p>
+     *
+     * <p>Assumptions: BOTH reads happen in ONE read-only transaction, so the account and the customer
+     * seen on one screen are consistent with each other. Two separate transactions could return an
+     * account and a customer from either side of a concurrent update, and the screen would show a pairing
+     * that never existed.</p>
+     *
+     * <p>Assumptions: the customer is located through the CROSS-REFERENCE rather than through a column on
+     * the account, because the account record declares no customer identifier -- the baseline resolves the
+     * pairing through {@code CXACAIX}, the by-account path of the cross-reference file, which is a
+     * secondary index in the target. This method is therefore one of the two production consumers of
+     * that index.</p>
+     *
+     * <p>Trade-offs: a missing cross-reference row and a missing customer row are reported as the same
+     * not-found outcome rather than distinguished. The distinction is real -- one is a broken pairing and
+     * the other a missing master -- but neither is actionable by the caller, and naming which would tell
+     * an unauthenticated caller something about the shape of the data.</p>
+     *
+     * @param accountId the account to read; must exist
+     * @return the account view, never {@code null}
+     * @throws NoSuchElementException if the account, its cross-reference or its customer is absent
+     */
+    @Transactional(readOnly = true)
+    public AccountViewResponse readAccountView(long accountId) {
+        Account account = this.accounts.findById(accountId)
+                .orElseThrow(() -> new NoSuchElementException(
+                        "no account master row exists for account " + accountId));
+        Customer customer = resolveCustomer(accountId);
+        return new AccountViewResponse(
+                Long.toString(accountId),
+                this.mapper.toAccountDetail(account),
+                this.customerMapper.toCustomerDetail(customer),
+                null,
+                null);
+    }
+
+    /**
+     * Lists an account's card cross-reference rows through the migrated by-account index.
+     *
+     * <p>Purpose: this is the {@code CXACAIX} access path. The baseline surfaces the cross-reference file
+     * to the online region under that alternate-index name and reads it by account; the target declares
+     * {@code idx_card_xref_account_id} and reads it with an ordered query. Until this method existed the
+     * path had no production consumer at all, so the index existed, the repository method existed and the
+     * mapper existed, and nothing joined them.</p>
+     *
+     * <p>Assumptions: the order is by card number ascending and is part of the CONTRACT rather than an
+     * artefact of the query, because an alternate-index read returns its rows in index order and a caller
+     * paging or diffing the list depends on that order being stable.</p>
+     *
+     * <p>Assumptions: an account with no cards yields an EMPTY list rather than a not-found outcome. An
+     * account legitimately has no card, and the baseline's browse of an alternate index likewise ends
+     * immediately rather than failing.</p>
+     *
+     * @param accountId the account whose cross-reference rows are required
+     * @return the rows in ascending card-number order, empty when the account has none, never
+     *     {@code null}
+     */
+    @Transactional(readOnly = true)
+    public List<CardXrefResponse> listCardCrossReferences(long accountId) {
+        return this.crossReferenceMapper.toCardXrefResponses(
+                this.crossReferences.findByAccountIdOrderByCardNumAsc(accountId));
+    }
+
+    /**
+     * Resolves an account's customer through the by-account cross-reference path.
+     *
+     * @param accountId the account whose customer is required
+     * @return the customer row, never {@code null}
+     * @throws NoSuchElementException if the account has no cross-reference row, or the row names a
+     *     customer the customer master does not hold
+     */
+    private Customer resolveCustomer(long accountId) {
+        // WHY : Assumptions: the FIRST cross-reference row is used, and the choice is safe because every
+        //       row for one account names the same customer -- the baseline's cross-reference record
+        //       carries the account and the customer together, so a second card on the same account
+        //       repeats the customer rather than introducing another. Reading all rows to assert they
+        //       agree would turn a screen read into a scan of an account's whole card set for a property
+        //       the record layout already guarantees.
+        return this.crossReferences.findByAccountIdOrderByCardNumAsc(accountId).stream()
+                .findFirst()
+                .map(CardXref -> CardXref.getCustomerId())
+                .flatMap(this.customers::findById)
+                .orElseThrow(() -> new NoSuchElementException(
+                        "no customer could be resolved for account " + accountId));
     }
 }

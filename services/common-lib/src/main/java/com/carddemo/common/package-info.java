@@ -9,10 +9,10 @@
  *       string wire form. Two production classes: {@code Money},
  *       {@code MoneyModule}.</li>
  *   <li><b>{@code codec}</b> -- the copybook record layouts, the sign-overpunch
- *       and packed-decimal codecs, and the message-queue CSV payloads. Five
+ *       and packed-decimal codecs, and the two message-queue payload forms. Six
  *       production classes: {@code CopybookLayout}, {@code FixedWidthCodec},
  *       {@code ZonedDecimalCodec}, {@code PackedDecimalCodec},
- *       {@code CsvAuthCodec}.</li>
+ *       {@code CsvAuthCodec}, {@code InquiryRequestCodec}.</li>
  *   <li><b>{@code error}</b> -- the problem shape carrying a per-field error
  *       array, the structured equivalent of the baseline abend data block, the
  *       two refusals the security filter chain answers itself, and the two
@@ -27,15 +27,24 @@
  *       {@code PageResponse}, {@code CursorToken}.</li>
  *   <li><b>{@code security}</b> -- conversion of the identity provider's group
  *       claim into Spring Security authorities, the access-token checks the
- *       issuer's decoder does not perform, and the two renderings that keep an
- *       identifier out of an operational record. Four production classes:
- *       {@code JwtRoleConverter}, {@code CognitoAccessTokenValidator},
- *       {@code CardNumberMasker}, {@code OpaqueIdentifier}.</li>
+ *       issuer's decoder does not perform, the renderings that keep an identifier
+ *       out of an operational record or a markup document, the sealed selector a
+ *       URL may carry in place of a protected identifier, and the short-lived
+ *       bearer token one bounded context presents to another. Eight production
+ *       classes: {@code JwtRoleConverter}, {@code CognitoAccessTokenValidator},
+ *       {@code CardNumberMasker}, {@code MaskedCardNumber},
+ *       {@code OpaqueIdentifier}, {@code SealedSelector},
+ *       {@code HtmlTextEncoder}, {@code InternalServiceToken}.</li>
+ *   <li><b>{@code messaging}</b> -- the message-expiry attribute every queue
+ *       consumer honours, and the canonical encoding a correlation identity must
+ *       satisfy to travel as queue metadata. Two production classes:
+ *       {@code MessageExpiry}, {@code MessagingCorrelationId}.</li>
  *   <li><b>{@code observability}</b> -- the Micrometer common tag set
- *       {@code service}, {@code environment} and {@code version}, and the
- *       decision about what a rendered value may contain before it reaches a log
- *       line. Two production classes: {@code MetricsConfig},
- *       {@code LogSafeText}.</li>
+ *       {@code service}, {@code environment} and {@code version}, the decision
+ *       about what a rendered value may contain before it reaches a log line, and
+ *       the failure rendering that carries a type chain and no message text. Three
+ *       production classes: {@code MetricsConfig}, {@code LogSafeText},
+ *       {@code ThrowableDigest}.</li>
  *   <li><b>{@code time}</b> -- the exact 26-character
  *       {@code YYYY-MM-DD HH:MM:SS.mmmmmm} form. One production class:
  *       {@code TimestampFormatter}.</li>
@@ -44,20 +53,34 @@
  *       classes: {@code DateEditValidator}, {@code FieldValidationFlag}.</li>
  * </ul>
  *
- * <p>Trade-offs: those eight subpackages are the whole of it. This package has
+ * <p>Trade-offs: those nine subpackages are the whole of it. This package has
  * no application-layer subpackage at all -- no controller, service, repository,
  * domain, transfer-object or mapper package, and no configuration package
  * either. {@code MetricsConfig} consequently sits under {@code observability},
  * beside the concern it configures, rather than in a configuration package of
  * its own.
  *
+ * <p>Refactoring Rationale: this roster named eight subpackages and understated
+ * three of them -- {@code codec} by one class, {@code observability} by one and
+ * {@code security} by four -- while omitting {@code messaging} altogether. The
+ * omission was the consequential one: a reader looking for where a queue
+ * consumer's expiry contract lives would have concluded from this charter that
+ * the shared kernel had no messaging concern, and would have written a second
+ * copy of it inside a service. {@code SharedKernelInventoryTest} now re-derives
+ * the whole roster from the directory on every build, so the next such gap fails
+ * a test rather than misleading a reader.
+ *
  * <p>Refactoring Rationale: this root holds exactly ONE production class,
  * {@code CardDemoCommonAutoConfiguration}, and an earlier revision held none. It
- * is here rather than in any of the eight because it registers components from
- * FOUR of them -- the correlation filter from {@code web}, the meter filter from
- * {@code observability}, the codec module from {@code money} and the error advice
- * from {@code error} -- so placing it in one of the four would put that package
- * in charge of three it does not own. It exists at all because those components
+ * is here rather than in any of the nine because it registers components from
+ * FOUR of them -- the correlation filter and the cursor-token signer from
+ * {@code web}, the meter filter from {@code observability}, the codec module from
+ * {@code money} and the error advice from {@code error} -- so placing it in one of
+ * the four would put that package in charge of three it does not own. Its sixth
+ * contribution, a {@code Clock}, belongs to no subpackage at all: it is a
+ * {@code java.time} type, supplied here because five of those components take one
+ * and a service that had to declare its own would be free to declare a different
+ * one. It exists at all because those components
  * were being written and then instantiated by nothing: a service scans its own
  * bounded context's root, never this module's, so each shared component was
  * compiled, tested and left out of every running context. The symptom was silent
@@ -65,66 +88,73 @@
  * service dimension, failed requests rendered in the framework's own shape -- and
  * an alternative that required each of the eight services to import them
  * explicitly would have left the same omission possible eight times over. The cost is that a reader hunting for configuration by name has to
- * know the concern first. The gain is that all eight subpackage names are
- * contracts rather than seven contracts and one bucket, so the question "which
+ * know the concern first. The gain is that all nine subpackage names are
+ * contracts rather than eight contracts and one bucket, so the question "which
  * subpackage does this belong in" keeps a definite answer as the tree grows.
- * The closed inventory immediately below enumerates those eight and nothing else,
+ * The closed inventory immediately below enumerates those nine and nothing else,
  * which is what makes the closed list checkable rather than merely intended.
  *
  * <h2>The closed inventory</h2>
  *
- * <p>The module's contract is <b>27 production classes</b> in a root and eight
- * subpackages, each carrying one charter file, for <b>36</b> compilation units. The
+ * <p>The module holds <b>35 production classes</b> in a root and nine
+ * subpackages, each carrying one charter file, for <b>45</b> compilation units. The
  * table is the closed set: a class belonging to this module belongs to exactly one
- * of these nine rows, and a proposed addition that fits none of them does not belong
+ * of these ten rows, and a proposed addition that fits none of them does not belong
  * in the shared kernel at all.
  *
  * <pre>
  * package               production classes   charter   compilation units
  * common (this root)                     1         1                   2
  * common.money                           2         1                   3
- * common.codec                           5         1                   6
+ * common.codec                           6         1                   7
  * common.error                           7         1                   8
+ * common.messaging                       2         1                   3
  * common.web                             3         1                   4
- * common.security                        4         1                   5
- * common.observability                   2         1                   3
+ * common.security                        8         1                   9
+ * common.observability                   3         1                   4
  * common.time                            1         1                   2
  * common.validation                      2         1                   3
  * </pre>
  *
  * <p>Read down the table. Cross-check by production class:
- * 1 + 2 + 5 + 7 + 3 + 4 + 2 + 1 + 2 = 27, the root contributing one. Cross-check by
- * compilation unit: 2 + 3 + 6 + 8 + 4 + 5 + 3 + 2 + 3 = 36. Both totals agree,
- * and this file is one of the nine charters. Each sum is kept whole on one line
+ * 1 + 2 + 6 + 7 + 2 + 3 + 8 + 3 + 1 + 2 = 35, the root contributing one. Cross-check by
+ * compilation unit: 2 + 3 + 7 + 8 + 3 + 4 + 9 + 4 + 2 + 3 = 45. Both totals agree,
+ * and this file is one of the ten charters. Each sum is kept whole on one line
  * so that it can be checked by eye and matched by a search without a line break
  * splitting it.
  *
- * <p>Assumptions: the authoritative figures are <strong>27 production classes
- * across 8 subpackages and the root, in 36 compilation units, of which 9 are charters</strong>
+ * <p>Assumptions: the authoritative figures are <strong>35 production classes
+ * across 9 subpackages and the root, in 45 compilation units, of which 10 are charters</strong>
  * -- this file among them. They are counted subpackage by subpackage, and both
  * cross-checks above re-derive them independently, by class and by compilation
  * unit. The total and the breakdown are stated together for that reason: a bare
  * total invites a reader to trust it, whereas a breakdown lets a reader re-derive
  * it and reject any figure that does not add up. Any class count for this package
- * other than 27 fails both sums and is wrong.
+ * other than 35 fails both sums and is wrong.
  *
- * <p>Refactoring Rationale: the table said 23 production classes in 32 compilation
- * units, and one row was the whole of the error. {@code common.error} carried 3 and
- * 4 where the directory holds 7 and 8, so both totals were four short and the two
- * cross-check sums agreed with each other while disagreeing with the tree -- which
- * is the one failure mode a pair of mutually consistent sums cannot catch. The row
- * is corrected at its source and the totals re-derived from the corrected row rather
- * than adjusted by adding four, so that the arithmetic a reader repeats is the
- * arithmetic that produced the figures. The subpackage charter at
- * {@code com.carddemo.common.error} was corrected in the same change and states the
- * same 7 and 8, because a row here that disagreed with the charter beneath it would
- * merely relocate the defect.
+ * <p>Refactoring Rationale: this table has now been wrong twice in the same way, and
+ * the second time is why it is no longer maintained by hand. The first revision said
+ * 23 and 32 because {@code common.error} carried 3 and 4 against a directory holding
+ * 7 and 8. The correction to 27 and 36 was arithmetically sound and still described a
+ * tree that no longer existed: {@code common.codec} had gained a class,
+ * {@code common.observability} one, {@code common.security} four, and a whole
+ * subpackage -- {@code common.messaging} -- had appeared with two. Two mutually
+ * consistent cross-check sums cannot catch that, which is precisely the failure mode
+ * they were introduced to catch, so the sums are no longer the guard.
+ * {@code com.carddemo.common.architecture.SharedKernelInventoryTest} re-derives every
+ * row of this table from the directory on each build and fails on any disagreement,
+ * including a subpackage present in the tree and absent from the table. The sums are
+ * kept because they let a READER re-derive the totals; the test is what makes them
+ * true. Alternatives Considered: deleting the table and letting the directory speak
+ * for itself, rejected because a listing says what is there and this table says what
+ * BELONGS there, which is the judgement a reviewer needs when deciding whether a new
+ * type is in the right module.
  *
  * <h2>Where this inventory exceeds the plan, and why each addition is here</h2>
  *
  * <p>Assumptions: the migration plan's section 0.4.1.2 names <b>17</b> shared-kernel
- * production classes by path, and the closed inventory above admits <b>27</b>. The
- * difference is 10 deliberate additions rather than drift, and it is enumerated here
+ * production classes by path, and the closed inventory above admits <b>35</b>. The
+ * difference is 18 deliberate additions rather than drift, and it is enumerated here
  * because a count that exceeds the plan's without saying so reads as either an
  * oversight or an unrecorded scope change. Each addition below is in the shared
  * kernel for the same reason the plan's own 17 are: it carries a contract that two or
@@ -171,16 +201,58 @@
  *       contain before it reaches a log line, which is the executable half of the
  *       sensitive-data logging prohibition in
  *       {@code docs/architecture/observability.md}.</li>
+ *   <li>{@code observability.ThrowableDigest} -- renders a failure for a log line as
+ *       the chain of types that produced it and carries no message text, because a
+ *       provider's exception message routinely quotes the value that failed and a log
+ *       line is durable.</li>
+ *   <li>{@code codec.InquiryRequestCodec} -- the fixed-width request and reply
+ *       framing the two request/reply inquiry flows share. Two independently written
+ *       framings would agree until the day one padded a field differently, and the
+ *       symptom would be a reply the other side parsed into plausible wrong
+ *       values.</li>
+ *   <li>{@code messaging.MessageExpiry} -- the message-expiry attribute every queue
+ *       consumer honours, parsed in one place. The baseline sets a five-second
+ *       expiry and the target queue service has no per-message time-to-live, so the
+ *       attribute IS the contract; a consumer that read it differently from the
+ *       producer would drop live messages or act on stale ones.</li>
+ *   <li>{@code messaging.MessagingCorrelationId} -- the canonical encoding a
+ *       correlation identity must satisfy to travel as queue metadata, kept separate
+ *       from the servlet rule because the two transports admit different characters
+ *       and one rule for both would have to be the intersection.</li>
+ *   <li>{@code security.MaskedCardNumber} -- states what a masked primary account
+ *       number IS, where {@code CardNumberMasker} only produces one. Without it each
+ *       response contract judged the shape for itself, so a contract could accept a
+ *       value the masker would never emit.</li>
+ *   <li>{@code security.SealedSelector} -- seals a protected identifier into an
+ *       opaque authenticated selector a URL may carry, and opens it again on the
+ *       service side. An HTTP resource has to be addressable, and the masker cannot
+ *       serve because a masked value is not reversible.</li>
+ *   <li>{@code security.HtmlTextEncoder} -- encodes a value so that placing it in a
+ *       markup document cannot change that document's structure. The migrated
+ *       statement generator writes a markup artifact whose cells carry merchant free
+ *       text, which is caller-supplied.</li>
+ *   <li>{@code security.InternalServiceToken} -- mints the short-lived bearer token
+ *       one bounded context presents to another. Two contexts calling each other
+ *       must agree on the token's shape and lifetime exactly, which is the defining
+ *       property of a shared-kernel contract.</li>
  * </ul>
  *
- * <p>Trade-offs: the alternative to naming these 10 here was to leave the plan's 17
- * and this charter's 27 to be reconciled by whoever next noticed the gap. Rejected,
- * because the reconciliation is not mechanical -- nine of the ten are cross-cutting
- * contracts and one is a registration mechanism, and no arithmetic recovers that
- * from two totals. The cost accepted is that this list has to be maintained
- * alongside the table above whenever an addition is argued in; the compensation is
- * that the argument for each existing addition is on the record rather than
- * reconstructed.
+ * <p>Trade-offs: the alternative to naming these 18 here was to leave the plan's 17
+ * and this charter's 35 to be reconciled by whoever next noticed the gap. Rejected,
+ * because the reconciliation is not mechanical -- seventeen of the eighteen are
+ * cross-cutting contracts and one is a registration mechanism, and no arithmetic
+ * recovers that from two totals. The cost accepted is that this list has to be
+ * maintained alongside the table above whenever an addition is argued in; the
+ * compensation is that the argument for each existing addition is on the record
+ * rather than reconstructed.
+ *
+ * <p>Refactoring Rationale: this list named 10 additions against a difference of 18,
+ * so eight classes were in the module with no recorded argument for being there --
+ * exactly the "oversight or unrecorded scope change" the paragraph above says the
+ * enumeration exists to rule out. {@code SharedKernelInventoryTest} now asserts that
+ * the number of entries in this list equals the measured production-class count minus
+ * the plan's 17, so an addition argued into the module without an argument written
+ * here fails the build.
  *
  * <h2>The dependency arrow points inward only</h2>
  *
@@ -280,9 +352,9 @@
  * absence is a decision rather than an oversight, and it rests on two
  * independent grounds.
  *
- * <p>Assumptions: first, the count canon above admits exactly nine charter
- * files, every one of them at this package or deeper. A tenth would break the
- * 36-compilation-unit total, and authoring an artifact the migration plan does
+ * <p>Assumptions: first, the count canon above admits exactly ten charter
+ * files, every one of them at this package or deeper. An eleventh would break the
+ * 45-compilation-unit total, and authoring an artifact the migration plan does
  * not call for falls outside the scope this tree is held to. Second, the
  * ruleset's charter-presence check is a file-set check: it fires only for a
  * directory that contains a compilation unit the audit actually processed.
@@ -297,7 +369,7 @@
  * content would be a sentence pointing at this one, because a charter that
  * defers is worse than no charter: it has to be kept in step with the file it
  * defers to, and it invites the next author to add a third. The count canon
- * above is the arithmetic guard on that: nine charters, not eleven, so a later
+ * above is the arithmetic guard on that: ten charters, not twelve, so a later
  * addition at either directory shows up as a broken total rather than as a
  * judgement call.
  *
@@ -543,7 +615,7 @@
  * layer, its single-program integration layer, its golden-master end-to-end
  * layer, and its fixtures, goldens, helpers and mocks. This module's own test
  * tree is {@code services/common-lib/src/test}, and it holds the unit tests and
- * the architecture rules for the 27 production classes this charter enumerates.
+ * the architecture rules for the 35 production classes this charter enumerates.
  * Neither substitutes for the other, and work on one does not modify the other.
  *
  * <p>Assumptions: the oracle suite covers batch flows. Three of the contracts

@@ -78,12 +78,21 @@
 --        -f data-migration/sql/V1__reporting_views.sql
 -- =============================================================================
 
--- WHY : Trade-offs: one explicit transaction for the whole file. CREATE VIEW and
---       GRANT are both transactional in PostgreSQL, so an interrupted run leaves
---       no half-built surface -- either all four views and all four grants exist
---       or none do. The alternative, four independent statements, can leave
---       reporting able to read two relations and not the other two, which
---       presents as a partly-working report rather than as a failed migration.
+-- WHY : Trade-offs: one explicit transaction for the whole file. CREATE TABLE,
+--       CREATE VIEW and GRANT are all transactional in PostgreSQL, so an
+--       interrupted run leaves no half-built surface -- either the grouping-key
+--       table, all seven views and all seven grants exist, or none of them do.
+--       The alternative, letting each object commit independently, can leave
+--       reporting able to read some relations and not others, which presents as a
+--       partly-working report rather than as a failed migration.
+-- WHY : Refactoring Rationale: this note said "all four views and all four grants"
+--       and offered "four independent statements" as the alternative. The file has
+--       created seven views since the statement and reference projections were
+--       added, so the figure was falsified by the file it describes -- and it is
+--       the shape of claim that goes stale silently, because nothing fails when a
+--       comment undercounts. The counts are restated from the CREATE and GRANT
+--       statements below, and the alternative is described by its mechanism rather
+--       than by a number so that adding an eighth view cannot invalidate it again.
 BEGIN;
 
 -- WHY : Assumptions: the owner is asserted rather than assumed. A run as any

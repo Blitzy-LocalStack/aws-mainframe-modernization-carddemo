@@ -76,7 +76,8 @@ public enum PageDirection {
      *
      * @param wireValue the value a client sent, possibly {@code null}
      * @return the matching constant, or {@code null} when the input was {@code null}
-     * @throws IllegalArgumentException when the value is neither of the two the contract publishes
+     * @throws IllegalArgumentException when the value is neither of the two the contract publishes,
+     *     carrying a message that names the admitted domain and does NOT reproduce what was supplied
      */
     @JsonCreator
     public static PageDirection fromWireValue(String wireValue) {
@@ -88,7 +89,16 @@ public enum PageDirection {
                 return candidate;
             }
         }
-        throw new IllegalArgumentException(
-                "direction must be one of next or previous; received " + wireValue);
+        // WHY : Refactoring Rationale: this refusal appended the supplied value to its message, and
+        //       is fixed with its sibling in PhoneAreaCodeResponse.CodeClass rather than after it.
+        //       The two are the only @JsonCreator refusals in this package, they had the same echo,
+        //       and this type's own charter cross-references that one -- so correcting one and
+        //       leaving the other would make the package inconsistent about the same decision. The
+        //       direction arrives as a query parameter, which is caller-controlled text of arbitrary
+        //       length, and the deserialiser wraps whatever is thrown here into a logged message that
+        //       can reach a response body.
+        // WHY : Assumptions: the admitted domain is closed and has two members, so naming it tells a
+        //       caller everything the echo did without putting the caller's own bytes in a log line.
+        throw new IllegalArgumentException("direction must be one of next or previous");
     }
 }

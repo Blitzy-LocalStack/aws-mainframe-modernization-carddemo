@@ -5,9 +5,11 @@ import com.carddemo.account.dto.AccountUpdateRequest;
 import com.carddemo.account.dto.AccountViewResponse;
 import com.carddemo.account.dto.CustomerResponse;
 import com.carddemo.common.error.ApiError;
+import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.validation.FieldValidationFlag;
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -173,6 +175,18 @@ public class CustomerMapper {
     public static final String IDENTIFIER_REDACTED = "[REDACTED]";
 
     /**
+     * The single character a submitter sends to REMOVE a stored optional protected identifier.
+     *
+     * <p>Assumptions: the marker is the reference's own, not one invented here.
+     * {@code app/cbl/COACTUPC.cbl} L1401 to L1403 tests the screen field for {@code '*'} or spaces and
+     * moves low values into the field when either holds, so the asterisk is already the character a user
+     * of this screen types to blank a field. Reusing it means the target adds a capability -- telling
+     * removal apart from an unedited field, which the baseline cannot -- without adding an input
+     * convention a user would have to learn.</p>
+     */
+    public static final String IDENTIFIER_REMOVAL_MARKER = "*";
+
+    /**
      * The declared width of the national identifier once its three screen parts are composed.
      */
     // WHY : Assumptions: nine is the sum of the three update-map parts and the width of the stored
@@ -245,6 +259,39 @@ public class CustomerMapper {
 
     /** The declared width of the line-number part of a telephone number on the update map. */
     private static final int TELEPHONE_LINE_NUMBER_WIDTH = 4;
+
+    /** The number of parts a submitted telephone number arrives in, all three required together. */
+    private static final int TELEPHONE_PART_COUNT = 3;
+
+    /** The request property carrying the year part of the submitted date of birth. */
+    private static final String DATE_OF_BIRTH_YEAR_PROPERTY = "dateOfBirthYear";
+
+    /** The request property carrying the month part of the submitted date of birth. */
+    private static final String DATE_OF_BIRTH_MONTH_PROPERTY = "dateOfBirthMonth";
+
+    /** The request property carrying the day part of the submitted date of birth. */
+    private static final String DATE_OF_BIRTH_DAY_PROPERTY = "dateOfBirthDay";
+
+    /**
+     * The request-property stem the three parts of the first telephone number share.
+     *
+     * <p>Assumptions: the stem is a constant rather than a literal at the call site because the part
+     * identities are composed from it, so a stem that did not match the request record's property names
+     * would produce three unbindable keys at once rather than one.</p>
+     */
+    private static final String TELEPHONE_1_PROPERTY_STEM = "phone1";
+
+    /** The request-property stem the three parts of the second telephone number share. */
+    private static final String TELEPHONE_2_PROPERTY_STEM = "phone2";
+
+    /** The suffix the request record appends to a stem to name the area-code part. */
+    private static final String TELEPHONE_AREA_CODE_PROPERTY_SUFFIX = "AreaCode";
+
+    /** The suffix the request record appends to a stem to name the exchange-prefix part. */
+    private static final String TELEPHONE_PREFIX_PROPERTY_SUFFIX = "Prefix";
+
+    /** The suffix the request record appends to a stem to name the line-number part. */
+    private static final String TELEPHONE_LINE_NUMBER_PROPERTY_SUFFIX = "LineNumber";
 
     /** The declared width of the electronic-transfer account identifier. */
     private static final int EFT_ACCOUNT_ID_WIDTH = 10;
@@ -508,106 +555,216 @@ public class CustomerMapper {
                         "pri_card_holder_ind", true));
     }
 
+
     /**
-     * Builds the stored customer row from the account update request, composing every split value and
-     * encrypting both protected identifiers.
+     * Applies a submitted edit onto the LOADED customer row, preserving what the submitter cannot resend.
      *
-     * <p>Assumptions: the update map decomposes THREE logical values into NINE physical fields, and this
-     * method owns the composition in that direction. The national identifier arrives as three parts, the
-     * date of birth as three, and each telephone number as three, and the reference recomposes each of
-     * them before writing: {@code app/cbl/COACTUPC.cbl} L4044 writes the national identifier with a
-     * single move that only makes sense once the parts are joined, L4047 through L4052 rebuilds the date
-     * of birth with two separators, and L4027 through L4033 and L4035 through L4041 rebuild the two
-     * telephone numbers with three punctuation characters each.</p>
+     * <p>Purpose: this is the update path. It replaces the previous shape, in which
+     * a {@code toCustomer(AccountUpdateRequest)} method built a brand-new {@code Customer} from the
+     * request alone, and it exists because that shape lost data three separate ways -- each of which is
+     * a consequence of the mapper never seeing the stored row. That method and the postal-code widener
+     * it used are REMOVED rather than left beside this one: the reference program persists this record
+     * with {@code EXEC CICS REWRITE} at {@code app/cbl/COACTUPC.cbl} L4086 and issues no
+     * {@code WRITE} anywhere, so there is no create flow for a customer in this context and the removed
+     * method had no baseline counterpart to serve. Leaving it would have left a route that resets the
+     * version and blanks the postal-code tail available to the next caller who found it.</p>
      *
-     * <p>Assumptions: a new row is constructed rather than an existing one mutated, because
-     * {@link Customer} declares no setter at all. That is not a limitation to work around: the row's
-     * concurrency counter is the provider's to advance, and constructing the complete row makes the
-     * eighteen-field completeness a compile-time obligation rather than a runtime constraint violation.
-     * The version this row replaces is compared by that counter, which is how the reference's manual
-     * before-image comparison is expressed natively; nothing here reads or writes it.</p>
+     * <p>Refactoring Rationale: the three losses, and why mutating the loaded row fixes all three at
+     * once. (1) The optimistic-lock version was reset to zero on every update, so the concurrent-change
+     * detection the reference performs with its before-image had no target form at all; the provider
+     * compares the version it LOADED, so only a mutated managed row can reproduce the check.
+     * (2) An omitted government-issued identifier became {@code null} and DELETED stored ciphertext the
+     * submitter had never been shown and could not have re-supplied. (3) The stored postal code's
+     * positions six to ten were overwritten with blanks on every update. None of the three is fixable
+     * from the request alone, because in each case the value that must survive is one only the stored row
+     * holds.</p>
      *
-     * <p>Assumptions: this record declares no card verification value at any offset, so there is nothing
-     * of that kind here to suppress. A step in this method that appeared to suppress one would be
-     * describing a field the input does not have.</p>
+     * <p>Assumptions: the two protected identifiers are resolved into
+     * {@link Customer.ProtectedValueUpdate} intents HERE rather than in the entity, because deciding
+     * whether a submission edited a masked field is a representation question and this class owns
+     * representation. The entity is told what to do; it does not infer it from a value.</p>
      *
-     * @param request the submitted account update, whose customer region supplies every value below;
-     *     must not be {@code null}
-     * @return the row to persist, carrying ciphertext for both protected identifiers, never {@code null}
-     * @throws NullPointerException if {@code request} is {@code null}
-     * @throws IllegalArgumentException if a required value was never supplied, is not digits where the
-     *     reference declares a numeric picture, or does not fit the width its {@code PICTURE} clause
-     *     declares
+     * <p>Assumptions: the national identifier is re-enciphered only when the submitted three parts
+     * compose to something, and preserved otherwise. Re-enciphering on every update would produce fresh
+     * ciphertext for an unedited value on every save, which advances the version, makes the column change
+     * in every audit of the table, and defeats any downstream change detection -- for a value that did
+     * not change.</p>
+     *
+     * <p>Trade-offs: because the submitter is shown a mask, this class cannot tell an unedited national
+     * identifier from a deliberate re-entry of the same digits, and treats a supplied value as a
+     * replacement in both cases. The cost is one unnecessary encipherment when a submitter retypes the
+     * value it was already storing; the alternative -- deciphering the stored value to compare -- would
+     * require a decipher route this context deliberately does not have.</p>
+     *
+     * @param stored the managed row loaded in this transaction; must not be {@code null}
+     * @param request the submitted edit; must not be {@code null}
+     * @throws NullPointerException if either argument is {@code null}
+     * @throws ClientInputException if a submitted value is absent where the reference requires one, is
+     *     wider than the field it is stored in, holds a character its numeric picture cannot carry, or
+     *     is one part of a telephone number or date whose remaining parts were not supplied; every
+     *     entry it names is keyed by the REQUEST PROPERTY the value arrived in, so a caller can attach
+     *     the refusal to the control it typed into
+     * @throws IllegalArgumentException if a composed value's width contradicts this class's own
+     *     arithmetic, which is an internal invariant rather than a caller's mistake and is therefore
+     *     deliberately answered as a server fault
      * @throws IllegalStateException if the injected protection boundary cannot protect an identifier,
      *     which is propagated rather than caught because a row written with an unprotected identifier is
      *     worse than a request that fails
      */
-    public Customer toCustomer(AccountUpdateRequest request) {
+    public void applyUpdate(Customer stored, AccountUpdateRequest request) {
+        Objects.requireNonNull(stored, "stored must not be null");
         Objects.requireNonNull(request, "request must not be null");
 
-        // WHY : Assumptions: the identifier is composed FIRST and encrypted immediately, so that the
-        //   clear form exists on exactly one local reference for the shortest span this method can
-        //   arrange. The alternative -- assembling every field and encrypting at the constructor call --
-        //   would keep the clear value live across the whole method for no benefit.
-        byte[] protectedNationalIdentifier = this.protection.encrypt(
-                nationalIdentifier(request.ssnPart1(), request.ssnPart2(), request.ssnPart3()),
-                "ssn_encrypted");
-
-        // WHY : Trade-offs: the government-issued identifier is OPTIONAL and its column is nullable, so a
-        //   request that never supplied it yields no ciphertext rather than ciphertext of a blank value.
-        //   Encrypting twenty blanks would produce a stored value indistinguishable from a real one for
-        //   any reader, including the migration's own verification, and would make an absent identifier
-        //   look like a present one. app/cbl/COACTUPC.cbl L4045 and L4046 move the field unconditionally
-        //   because a COBOL alphanumeric field cannot be absent; the target column genuinely can be, and
-        //   the shared never-supplied test is what folds a null, an empty value and a run of pad
-        //   characters into the one answer the reference could give.
-        byte[] protectedGovernmentIdentifier = null;
-        if (!FieldValidationFlag.isNeverSupplied(request.governmentIssuedId())) {
-            protectedGovernmentIdentifier = this.protection.encrypt(
-                    // WHY : Assumptions: the value is right-padded to its declared twenty characters
-                    //   before encryption, reproducing what the reference's move does. ACSGOVTI is
-                    //   PIC X(20) at app/cpy-bms/COACTUP.CPY L282 and CUST-GOVT-ISSUED-ID is PIC X(20) at
-                    //   app/cpy/CVCUS01Y.cpy L18, so the reference move at app/cbl/COACTUPC.cbl L4045 and
-                    //   L4046 is a same-width alphanumeric transfer, which left-justifies and blank-fills.
-                    //   Encrypting an unpadded value would return ciphertext that decrypts to a string of
-                    //   a different length than the reference stored.
-                    padToWidth(request.governmentIssuedId(), GOVERNMENT_IDENTIFIER_WIDTH,
-                            "govt_issued_id_encrypted"),
-                    "govt_issued_id_encrypted");
-        }
-
-        return new Customer(
-                customerIdentifierValue(request.customerId()),
-                requiredAtMostWidth(request.firstName(), NAME_WIDTH, "first_name"),
-                optionalAtMostWidth(request.middleName(), NAME_WIDTH, "middle_name"),
-                requiredAtMostWidth(request.lastName(), NAME_WIDTH, "last_name"),
-                requiredAtMostWidth(request.addressLine1(), ADDRESS_LINE_WIDTH, "addr_line_1"),
-                optionalAtMostWidth(request.addressLine2(), ADDRESS_LINE_WIDTH, "addr_line_2"),
-                // WHY : Assumptions: the request's CITY component is stored on the THIRD ADDRESS LINE,
-                //   which is the same remapping the outbound projection performs in reverse and the same
-                //   evidence supports it: ACSCITYI PIC X(50) at app/cpy-bms/COACTUP.CPY L252 and at
-                //   app/cpy-bms/COACTVW.CPY L192 against CUST-ADDR-LINE-3 PIC X(50) at
-                //   app/cpy/CVCUS01Y.cpy L11, with no CUST-CITY field existing anywhere under app to
-                //   store it in instead. The widths agree exactly, so nothing is truncated or padded and
-                //   the round trip through this class is lossless. This is the single clearest reason the
-                //   translation cannot be generated: no generator can pair two fields whose names have
-                //   nothing in common on the strength of a width and a move statement.
-                requiredAtMostWidth(request.city(), ADDRESS_LINE_WIDTH, "addr_line_3"),
-                requiredExactWidth(request.stateCode(), STATE_CODE_WIDTH, "addr_state_cd"),
-                requiredExactWidth(request.countryCode(), COUNTRY_CODE_WIDTH, "addr_country_cd"),
-                storedPostalCode(request.zipCode()),
+        // WHY : Refactoring Rationale: the ten identities below name the REQUEST PROPERTY the value
+        //   arrived in -- firstName, city, stateCode -- where they previously named the stored column
+        //   -- first_name, addr_line_3, addr_state_cd. The identity is not a diagnostic label: it
+        //   becomes the key of a per-field entry in the emitted problem document, which transformation
+        //   rule T7 makes the way a refusal reaches a form control, and a form binds its controls to
+        //   the property names it submitted. A column name is unbindable, so an array keyed that way
+        //   left a caller with a refusal it could not attach to anything on the screen. The change also
+        //   settles an inconsistency inside this very method: the postal code, the credit score, the
+        //   three identifier parts and the three date parts ALREADY named their request properties, so
+        //   one response could carry both vocabularies at once.
+        // WHY : Assumptions: the reference lineage the column names carried is not lost. It is recorded
+        //   against each component on the entity and on the request record, which is where a reader
+        //   looking for a copybook field goes; the value here is read by a client, not by that reader.
+        stored.applyUpdate(
+                requiredAtMostWidth(request.firstName(), NAME_WIDTH, "firstName"),
+                optionalAtMostWidth(request.middleName(), NAME_WIDTH, "middleName"),
+                requiredAtMostWidth(request.lastName(), NAME_WIDTH, "lastName"),
+                requiredAtMostWidth(request.addressLine1(), ADDRESS_LINE_WIDTH, "addressLine1"),
+                optionalAtMostWidth(request.addressLine2(), ADDRESS_LINE_WIDTH, "addressLine2"),
+                requiredAtMostWidth(request.city(), ADDRESS_LINE_WIDTH, "city"),
+                requiredExactWidth(request.stateCode(), STATE_CODE_WIDTH, "stateCode"),
+                requiredExactWidth(request.countryCode(), COUNTRY_CODE_WIDTH, "countryCode"),
+                updatedPostalCode(request.zipCode(), stored.getAddressZip()),
                 telephoneNumber(request.phone1AreaCode(), request.phone1Prefix(),
-                        request.phone1LineNumber(), "phone_num_1"),
+                        request.phone1LineNumber(), TELEPHONE_1_PROPERTY_STEM),
                 telephoneNumber(request.phone2AreaCode(), request.phone2Prefix(),
-                        request.phone2LineNumber(), "phone_num_2"),
-                protectedNationalIdentifier,
-                protectedGovernmentIdentifier,
+                        request.phone2LineNumber(), TELEPHONE_2_PROPERTY_STEM),
+                nationalIdentifierUpdate(request),
+                governmentIdentifierUpdate(request),
                 dateOfBirth(request.dateOfBirthYear(), request.dateOfBirthMonth(),
                         request.dateOfBirthDay()),
-                requiredExactWidth(request.eftAccountId(), EFT_ACCOUNT_ID_WIDTH, "eft_account_id"),
+                requiredExactWidth(request.eftAccountId(), EFT_ACCOUNT_ID_WIDTH, "eftAccountId"),
                 requiredExactWidth(request.primaryCardHolderIndicator(),
-                        PRIMARY_CARD_HOLDER_INDICATOR_WIDTH, "pri_card_holder_ind"),
+                        PRIMARY_CARD_HOLDER_INDICATOR_WIDTH, "primaryCardHolderIndicator"),
                 creditScoreValue(request.ficoCreditScore()));
+    }
+
+    /**
+     * Widens a submitted postal code to the stored width, KEEPING the stored tail when it still applies.
+     *
+     * <p>Purpose: the update screen field is five characters wide -- {@code ACSZIPCI PIC X(5)} at
+     * {@code app/cpy-bms/COACTUP.CPY} L246, declared {@code LENGTH=5} at {@code app/bms/COACTUP.bms}
+     * L384 -- while the column is ten. The reference resolves that with an ordinary alphanumeric move
+     * into the wider field, which left-justifies and blank-fills: {@code app/cbl/COACTUPC.cbl} L1354
+     * moves the screen field into {@code ACUP-NEW-CUST-ADDR-ZIP PIC X(10)} at L809, and L4025 moves that
+     * into {@code CUST-UPDATE-ADDR-ZIP PIC X(10)} at L447. So the reference OVERWRITES positions six to
+     * ten with blanks on every update.</p>
+     *
+     * <p>Refactoring Rationale: this is a DOCUMENTED DIVERGENCE from that behaviour, and it is registered
+     * as one rather than reproduced, because the reference behaviour destroys committed data that the
+     * submitter was never shown. The seed extract is what settles it: of the fifty records in
+     * {@code app/data/ASCII/custdata.txt}, THIRTY carry a real four-digit extension in positions six to
+     * ten -- {@code 19852-6716} and twenty-nine more -- and only twenty are five characters followed by
+     * blanks. The account view screen shows five characters
+     * ({@code app/cbl/COACTVWC.cbl} L515 into {@code ACSZIPCI PIC X(5)}), so a submitter who opens a
+     * customer, changes a telephone number and saves would silently drop the extension on any of those
+     * thirty. That is data loss with no user intent behind it.</p>
+     *
+     * <p>Assumptions: the tail is preserved when the submitted five characters MATCH the stored leading
+     * five, and cleared when they differ. The condition is what keeps the divergence narrow and correct
+     * in both directions: an unchanged postal code keeps its extension, and a genuinely changed postal
+     * code does not silently retain an extension belonging to the old one, which would be a different
+     * and worse defect. Nothing observable on the screen changes either way, because the screen shows
+     * only the leading five in both cases.</p>
+     *
+     * <p>Alternatives Considered: widening the screen field to ten so a submitter could send the whole
+     * value. Rejected because the field width is the baseline's and is asserted from two independent
+     * places, and widening it would change the reference contract this migration reproduces rather than
+     * closing the loss. Also considered: refusing an update whose stored value has a tail. Rejected
+     * because it would make thirty of the fifty seed customers uneditable.</p>
+     *
+     * @param screenValue the five-character value the update screen supplies; must be supplied
+     * @param storedValue the stored ten-character value from the loaded row, which may be {@code null}
+     *     on a row that somehow holds none
+     * @return the value at exactly the ten characters the column stores, never {@code null}
+     * @throws IllegalArgumentException if the value was never supplied or is wider than the five
+     *     characters the screen field declares
+     */
+    private static String updatedPostalCode(String screenValue, String storedValue) {
+        String atScreenWidth = requiredAtMostWidth(screenValue, POSTAL_CODE_SCREEN_WIDTH, "zipCode");
+        if (storedValue != null && storedValue.length() == POSTAL_CODE_RECORD_WIDTH) {
+            String storedHead = storedValue.substring(0, POSTAL_CODE_SCREEN_WIDTH);
+            String storedTail = storedValue.substring(POSTAL_CODE_SCREEN_WIDTH);
+            // WHY : Assumptions: the comparison is on the SUBMITTED value padded to the screen width,
+            //       not on the raw submission, because a submitter sending four characters and a
+            //       submitter sending those four followed by a blank mean the same postal code and the
+            //       screen cannot distinguish them. Comparing unpadded would clear the tail for one and
+            //       keep it for the other.
+            if (padToWidth(atScreenWidth, POSTAL_CODE_SCREEN_WIDTH, "addr_zip").equals(storedHead)) {
+                return storedHead + storedTail;
+            }
+        }
+        return padToWidth(atScreenWidth, POSTAL_CODE_RECORD_WIDTH, "addr_zip");
+    }
+
+    /**
+     * Decides what the submission intends for the national identifier.
+     *
+     * <p>Assumptions: the column is declared {@code NOT NULL}, so the only two available intents are
+     * preserve and replace, and an absent submission means preserve. That is the whole reason this method
+     * exists rather than the value being passed straight through: a submitter is shown a mask, so an
+     * absent value is "I did not edit this" and never "store nothing".</p>
+     *
+     * @param request the submitted edit; must not be {@code null}
+     * @return the intent for the national identifier, never {@code null}
+     * @throws IllegalStateException if the protection boundary cannot protect the identifier
+     */
+    private Customer.ProtectedValueUpdate nationalIdentifierUpdate(AccountUpdateRequest request) {
+        if (FieldValidationFlag.isNeverSupplied(request.ssnPart1())
+                && FieldValidationFlag.isNeverSupplied(request.ssnPart2())
+                && FieldValidationFlag.isNeverSupplied(request.ssnPart3())) {
+            return Customer.ProtectedValueUpdate.preserve();
+        }
+        return Customer.ProtectedValueUpdate.replaceWith(this.protection.encrypt(
+                nationalIdentifier(request.ssnPart1(), request.ssnPart2(), request.ssnPart3()),
+                "ssn_encrypted"));
+    }
+
+    /**
+     * Decides what the submission intends for the government-issued identifier.
+     *
+     * <p>Assumptions: the column is nullable, so all three intents are available, and an absent
+     * submission means PRESERVE rather than clear. This is the finding's centre: an absent value
+     * previously became {@code null} and deleted stored ciphertext. Preserve is the only reading that
+     * cannot destroy data a submitter never saw, and the submitter has an explicit way to remove a value
+     * -- the marker character the reference itself uses -- which is what the clearing branch below
+     * serves.</p>
+     *
+     * <p>Assumptions: the CLEAR intent is selected by the reference's own removal marker rather than by
+     * an absent value. {@code app/cbl/COACTUPC.cbl} L1403 moves low values into the field when the screen
+     * field holds the marker or spaces, and the shared never-supplied test folds marker, empty and pad
+     * into one answer -- so the baseline cannot distinguish "remove" from "unedited" at all. The target
+     * can, and it uses the marker for removal specifically because that is the character the reference
+     * already gives a user for the purpose, so no new input convention is invented.</p>
+     *
+     * @param request the submitted edit; must not be {@code null}
+     * @return the intent for the government-issued identifier, never {@code null}
+     * @throws IllegalStateException if the protection boundary cannot protect the identifier
+     */
+    private Customer.ProtectedValueUpdate governmentIdentifierUpdate(AccountUpdateRequest request) {
+        String submitted = request.governmentIssuedId();
+        if (IDENTIFIER_REMOVAL_MARKER.equals(submitted)) {
+            return Customer.ProtectedValueUpdate.clear();
+        }
+        if (FieldValidationFlag.isNeverSupplied(submitted)) {
+            return Customer.ProtectedValueUpdate.preserve();
+        }
+        return Customer.ProtectedValueUpdate.replaceWith(this.protection.encrypt(
+                padToWidth(submitted, GOVERNMENT_IDENTIFIER_WIDTH, "govt_issued_id_encrypted"),
+                "govt_issued_id_encrypted"));
     }
 
     /**
@@ -798,14 +955,23 @@ public class CustomerMapper {
      * @param month the two-character month part, required, all digits
      * @param day the two-character day part, required, all digits
      * @return the date of birth, never {@code null}
-     * @throws IllegalArgumentException if any part was never supplied, is not exactly its declared width,
-     *     holds a character that is not a digit, or does not name a real calendar date
+     * @throws ClientInputException if any part was never supplied, is not exactly its declared width,
+     *     holds a character that is not a digit, or if the three together do not name a real calendar
+     *     date -- all of which are refusals of a value the caller supplied
+     * @throws IllegalArgumentException if the three validated parts compose to something other than the
+     *     declared width, which is an internal invariant of this method's own arithmetic rather than
+     *     anything the caller did, and is therefore deliberately NOT a client-input refusal
      */
     private static LocalDate dateOfBirth(String year, String month, String day) {
-        String yearPart = requiredDigitsAtExactWidth(year, DATE_OF_BIRTH_YEAR_WIDTH, "dateOfBirthYear");
-        String monthPart =
-                requiredDigitsAtExactWidth(month, DATE_OF_BIRTH_MONTH_WIDTH, "dateOfBirthMonth");
-        String dayPart = requiredDigitsAtExactWidth(day, DATE_OF_BIRTH_DAY_WIDTH, "dateOfBirthDay");
+        // WHY : Refactoring Rationale: the three identities are constants rather than literals now that
+        //   the combination refusal below names the same three. Two literal sets naming one trio is how
+        //   a per-part refusal and a cross-part refusal end up keyed differently for one control.
+        String yearPart = requiredDigitsAtExactWidth(year, DATE_OF_BIRTH_YEAR_WIDTH,
+                DATE_OF_BIRTH_YEAR_PROPERTY);
+        String monthPart = requiredDigitsAtExactWidth(month, DATE_OF_BIRTH_MONTH_WIDTH,
+                DATE_OF_BIRTH_MONTH_PROPERTY);
+        String dayPart = requiredDigitsAtExactWidth(day, DATE_OF_BIRTH_DAY_WIDTH,
+                DATE_OF_BIRTH_DAY_PROPERTY);
 
         // WHY : Assumptions: the separators are re-inserted in the same two positions the reference's
         //   STRING statement writes them, which is what makes the ten characters below identical to the
@@ -826,8 +992,23 @@ public class CustomerMapper {
             //   real calendar date, which is a client mistake rather than a server fault; keeping the
             //   cause preserves which position the parser objected to, and discarding it would leave a
             //   diagnostic naming the whole field.
-            throw new IllegalArgumentException(
-                    "the supplied date of birth parts do not name a real calendar date", notADate);
+            // WHY : Refactoring Rationale: a client-input refusal rather than a bare argument one, which
+            //   is what this site's own note already argued for -- it recorded that the only way to
+            //   arrive here is a well-formed value that is not a real calendar date, "which is a client
+            //   mistake rather than a server fault" -- while the type it raised had the shared advice
+            //   answer HTTP 500. The type now matches the reading.
+            // WHY : Assumptions: all three parts are named, because the parts are individually valid
+            //   and only their COMBINATION is not: a thirty-first of February is refused without either
+            //   part being wrong on its own, so naming one would point a caller at a value it need not
+            //   change. Trade-offs: the parse exception is dropped as a cause rather than kept, because
+            //   the advice logs the message of what it renders and the platform's parse message quotes
+            //   the composed date; the position it identifies is not worth carrying a caller's value
+            //   into a log for.
+            throw new ClientInputException(ApiError.CODE_VALIDATION,
+                    List.of(DATE_OF_BIRTH_YEAR_PROPERTY, DATE_OF_BIRTH_MONTH_PROPERTY,
+                            DATE_OF_BIRTH_DAY_PROPERTY),
+                    FieldValidationFlag.NOT_OK,
+                    "the supplied date of birth parts do not name a real calendar date");
         }
     }
 
@@ -868,14 +1049,26 @@ public class CustomerMapper {
      * @param areaCode the three-character area-code part, or a never-supplied value
      * @param prefix the three-character exchange-prefix part, or a never-supplied value
      * @param lineNumber the four-character line-number part, or a never-supplied value
-     * @param field the stored column the value belongs to, so a refusal names which number was at fault
+     * @param propertyStem the request-property stem the three parts share, being {@code phone1} or
+     *     {@code phone2}, from which each part's own property name is composed so that a refusal names
+     *     the control the caller submitted rather than the column the value lands in
      * @return the punctuated fifteen characters to store, or {@code null} when all three parts were
      *     never supplied
-     * @throws IllegalArgumentException if some but not all parts were supplied, or if a supplied part is
-     *     not exactly its declared width or holds a character that is not a digit
+     * @throws com.carddemo.common.error.ClientInputException if some but not all parts were supplied,
+     *     or if a supplied part is not exactly its declared width
      */
     private static String telephoneNumber(String areaCode, String prefix, String lineNumber,
-            String field) {
+            String propertyStem) {
+
+        // WHY : Refactoring Rationale: the three part identities are COMPOSED from the stem rather than
+        //   passed in, because the request record names them exactly stem + AreaCode, stem + Prefix and
+        //   stem + LineNumber -- phone1AreaCode, phone1Prefix, phone1LineNumber -- so composing them
+        //   keeps one argument where six would otherwise be needed and makes the two call sites
+        //   differ only in the stem. Alternatives Considered: a three-element list per call site, which
+        //   is explicit but repeats the same three suffixes at both sites and lets one site drift.
+        String areaCodeProperty = propertyStem + TELEPHONE_AREA_CODE_PROPERTY_SUFFIX;
+        String prefixProperty = propertyStem + TELEPHONE_PREFIX_PROPERTY_SUFFIX;
+        String lineNumberProperty = propertyStem + TELEPHONE_LINE_NUMBER_PROPERTY_SUFFIX;
 
         boolean areaCodeAbsent = FieldValidationFlag.isNeverSupplied(areaCode);
         boolean prefixAbsent = FieldValidationFlag.isNeverSupplied(prefix);
@@ -893,9 +1086,34 @@ public class CustomerMapper {
         //   alternative arrangement. Refusing names the mistake at the boundary instead of storing an
         //   unreadable number.
         if (areaCodeAbsent || prefixAbsent || lineNumberAbsent) {
-            throw new IllegalArgumentException("the telephone number for " + field
-                    + " was supplied in part only; all three parts are required together because each"
-                    + " occupies a fixed span between the punctuation the record stores");
+            // WHY : Refactoring Rationale: this is raised as a CLIENT-INPUT refusal and not as a bare
+            //   argument one, so that the shared advice answers HTTP 400 with a per-field entry instead
+            //   of HTTP 500 with an abend block. The advice's own recorded contract draws that line by
+            //   the exception's declared type: a bare argument refusal names an internal invariant and
+            //   is deliberately answered as a server fault, while a value that came from OUTSIDE the
+            //   process is answered as the caller's to correct. A partly typed telephone number is
+            //   plainly the latter.
+            // WHY : Assumptions: only the ABSENT parts are named, not all three. The remedy is to
+            //   supply what is missing, so naming a part the caller already filled would ask for an
+            //   edit that is not needed and would mark a satisfied control as at fault. The state is
+            //   the blank one, which is the reference's own reading of an empty control -- its
+            //   templated highlight draws an asterisk for exactly that case.
+            List<String> absentParts = new ArrayList<>(TELEPHONE_PART_COUNT);
+            if (areaCodeAbsent) {
+                absentParts.add(areaCodeProperty);
+            }
+            if (prefixAbsent) {
+                absentParts.add(prefixProperty);
+            }
+            if (lineNumberAbsent) {
+                absentParts.add(lineNumberProperty);
+            }
+            throw new ClientInputException(ApiError.CODE_VALIDATION, List.copyOf(absentParts),
+                    FieldValidationFlag.BLANK,
+                    "the telephone number beginning " + propertyStem
+                            + " was supplied in part only; all three parts are required together"
+                            + " because each occupies a fixed span between the punctuation the record"
+                            + " stores");
         }
 
         // WHY : Assumptions: the three parts are checked for WIDTH ONLY and not for digits, because the
@@ -907,9 +1125,10 @@ public class CustomerMapper {
         //   real exchange is a value-domain question the reference answers against its own lookup asset,
         //   and that answer belongs to the service layer; testing it here would put a business rule in the
         //   mapping layer.
-        String area = requiredAtExactWidth(areaCode, TELEPHONE_AREA_CODE_WIDTH, field);
-        String exchange = requiredAtExactWidth(prefix, TELEPHONE_PREFIX_WIDTH, field);
-        String line = requiredAtExactWidth(lineNumber, TELEPHONE_LINE_NUMBER_WIDTH, field);
+        String area = requiredAtExactWidth(areaCode, TELEPHONE_AREA_CODE_WIDTH, areaCodeProperty);
+        String exchange = requiredAtExactWidth(prefix, TELEPHONE_PREFIX_WIDTH, prefixProperty);
+        String line =
+                requiredAtExactWidth(lineNumber, TELEPHONE_LINE_NUMBER_WIDTH, lineNumberProperty);
 
         String composed = TELEPHONE_OPENING_PUNCTUATION + area + TELEPHONE_CLOSING_PUNCTUATION
                 + exchange + TELEPHONE_SEPARATOR + line;
@@ -918,7 +1137,7 @@ public class CustomerMapper {
         //   declares and the outbound projections do not have to guess whether a stored value was padded
         //   on load or not. The two characters added are exactly the FILLER PIC X(2) tail at
         //   app/cbl/COACTUPC.cbl L731, so nothing is invented.
-        return padToWidth(composed, TELEPHONE_RECORD_WIDTH, field);
+        return padToWidth(composed, TELEPHONE_RECORD_WIDTH, propertyStem);
     }
 
     /**
@@ -966,37 +1185,6 @@ public class CustomerMapper {
         return atRecordWidth.substring(0, TELEPHONE_SCREEN_WIDTH);
     }
 
-    /**
-     * Widens the postal code the update screen supplies to the width the record stores.
-     *
-     * <p>Assumptions: the screen field is half the width of the column, and the reference resolves that
-     * by an ordinary alphanumeric move rather than by any transformation.
-     * {@code ACSZIPCI PIC X(5)} at {@code app/cpy-bms/COACTUP.CPY} L246 is moved into
-     * {@code ACUP-NEW-CUST-ADDR-ZIP PIC X(10)}, declared at {@code app/cbl/COACTUPC.cbl} L809, by the
-     * normalisation at L1350 through L1355, and that value reaches
-     * {@code CUST-UPDATE-ADDR-ZIP PIC X(10)} at L447 through the single move at L4025. An alphanumeric
-     * move into a wider field left-justifies and blank-fills, so padding on the right is what the
-     * reference stores and not a choice made here.</p>
-     *
-     * <p>Assumptions: the CUSTOMER postal code is genuinely round-tripped by the reference and the
-     * ACCOUNT postal code is not, and recording the asymmetry prevents a reader generalising the wrong
-     * rule from one entity to the other. The customer value appears in the before-image as
-     * {@code ACUP-OLD-CUST-ADDR-ZIP PIC X(10)} at {@code app/cbl/COACTUPC.cbl} L721 and is written back
-     * at L4025, so this class WRITES it; {@code ACCT-ADDR-ZIP PIC X(10)} at
-     * {@code app/cpy/CVACT01Y.cpy} L15 appears in neither the before-image block nor the write-back, so
-     * the account's postal code is preserved by the account projection rather than written by it. Both
-     * are ten-character text and neither is a date, despite sharing a picture with the one date this
-     * record declares.</p>
-     *
-     * @param screenValue the five-character value the update screen supplies; must be supplied
-     * @return the value at exactly the ten characters the column stores, never {@code null}
-     * @throws IllegalArgumentException if the value was never supplied or is wider than the five
-     *     characters the screen field declares
-     */
-    private static String storedPostalCode(String screenValue) {
-        String atScreenWidth = requiredAtMostWidth(screenValue, POSTAL_CODE_SCREEN_WIDTH, "zipCode");
-        return padToWidth(atScreenWidth, POSTAL_CODE_RECORD_WIDTH, "addr_zip");
-    }
 
     /**
      * Narrows the stored postal code to the width the account view screen shows.
@@ -1233,12 +1421,18 @@ public class CustomerMapper {
      * @param width the width the reference declares for the field
      * @param field the request component name, so a refusal names the input the client can correct
      * @return the value as supplied, never {@code null}
-     * @throws IllegalArgumentException if the value was never supplied or is wider than the declared width
+     * @throws ClientInputException if the value was never supplied or is wider than the declared width
      */
     private static String requiredAtMostWidth(String value, int width, String field) {
         String supplied = requiredValue(value, field);
         if (supplied.length() > width) {
-            throw new IllegalArgumentException("the supplied value of " + field + " occupies "
+            // WHY : Assumptions: a client-input refusal in the NOT-OK state, not the blank one, for the
+            //   reason recorded on requiredValue: a value was supplied and was refused, so the
+            //   reference recolours the control rather than marking it empty. The width itself is
+            //   reported because it is the one fact that makes the refusal actionable, and it discloses
+            //   nothing -- it is published in the request record's own documentation.
+            throw new ClientInputException(ApiError.CODE_VALIDATION, field,
+                    FieldValidationFlag.NOT_OK, "the supplied value of " + field + " occupies "
                     + supplied.length() + " characters but the reference field declares " + width);
         }
         return supplied;
@@ -1256,14 +1450,19 @@ public class CustomerMapper {
      * @param width the width the reference declares for the field
      * @param field the request component name, so a refusal names the input the client can correct
      * @return the value as supplied, or {@code null} when it was never supplied
-     * @throws IllegalArgumentException if a supplied value is wider than the declared width
+     * @throws ClientInputException if a supplied value is wider than the declared width
      */
     private static String optionalAtMostWidth(String value, int width, String field) {
         if (FieldValidationFlag.isNeverSupplied(value)) {
             return null;
         }
         if (value.length() > width) {
-            throw new IllegalArgumentException("the supplied value of " + field + " occupies "
+            // WHY : Assumptions: an OPTIONAL field that was supplied too wide is refused on the same
+            //   terms as a mandatory one. Optionality governs whether a value must arrive, not whether
+            //   an arriving value may exceed the width the record declares, and silently truncating
+            //   here would store a value the caller never typed.
+            throw new ClientInputException(ApiError.CODE_VALIDATION, field,
+                    FieldValidationFlag.NOT_OK, "the supplied value of " + field + " occupies "
                     + value.length() + " characters but the reference field declares " + width);
         }
         return value;
@@ -1352,11 +1551,24 @@ public class CustomerMapper {
      * @param value the value the request supplies, which may be absent
      * @param field the request component name, so a refusal names the input the client can correct
      * @return the value as supplied, never {@code null}
-     * @throws IllegalArgumentException if the value was never supplied
+     * @throws ClientInputException if the value was never supplied
      */
     private static String requiredValue(String value, String field) {
         if (FieldValidationFlag.isNeverSupplied(value)) {
-            throw new IllegalArgumentException(
+            // WHY : Refactoring Rationale: a client-input refusal rather than a bare argument one, so
+            //   the shared advice answers HTTP 400 with a per-field entry rather than HTTP 500 with an
+            //   abend block. That advice draws the line by declared type and states the rule plainly: a
+            //   service that wants the 400 shape for a value that came from outside the process raises
+            //   this type. An omitted mandatory field is the most ordinary caller mistake there is, and
+            //   answering it as a server fault told the caller the service had failed while routing an
+            //   empty form control into the channel that is supposed to mean an abend.
+            // WHY : Assumptions: the state is the BLANK one, which is the direct target form of the
+            //   reference's FLG-*-BLANK conditions -- its templated highlight at
+            //   app/cpy/CSSETATY.cpy L17 through L27 moves an asterisk into a field that is blank and
+            //   only recolours one whose value was refused, so the two states are the reference's own
+            //   distinction rather than an addition.
+            throw new ClientInputException(ApiError.CODE_VALIDATION, field,
+                    FieldValidationFlag.BLANK,
                     "no value was supplied for " + field + ", which the reference requires");
         }
         return value;
@@ -1377,13 +1589,17 @@ public class CustomerMapper {
      * @param width the width the reference declares for the screen field
      * @param field the request component name, so a refusal names the input the client can correct
      * @return the value as supplied, never {@code null}
-     * @throws IllegalArgumentException if the value was never supplied or is not exactly the declared
+     * @throws ClientInputException if the value was never supplied or is not exactly the declared
      *     width
      */
     private static String requiredAtExactWidth(String value, int width, String field) {
         String supplied = requiredValue(value, field);
         if (supplied.length() != width) {
-            throw new IllegalArgumentException("the supplied value of " + field + " occupies "
+            // WHY : Assumptions: a client-input refusal in the NOT-OK state, for the reason recorded on
+            //   requiredAtMostWidth. This helper is the one an exactly-sized PART of a composed value
+            //   goes through, so its refusal is what a caller sees for a two-digit area code.
+            throw new ClientInputException(ApiError.CODE_VALIDATION, field,
+                    FieldValidationFlag.NOT_OK, "the supplied value of " + field + " occupies "
                     + supplied.length() + " characters but the reference field declares exactly " + width
                     + "; a shorter part would place a pad character inside the composed value");
         }
@@ -1456,13 +1672,19 @@ public class CustomerMapper {
      * @param value the value to test; must not be {@code null}
      * @param field the field name, so a refusal names the input the client can correct
      * @return the value unchanged, never {@code null}
-     * @throws IllegalArgumentException if any character of the value is not an ASCII digit
+     * @throws ClientInputException if any character of the value is not an ASCII digit
      */
     private static String digitsOnly(String value, String field) {
         for (int position = 0; position < value.length(); position++) {
             char character = value.charAt(position);
             if (character < '0' || character > '9') {
-                throw new IllegalArgumentException("the supplied value of " + field
+                // WHY : Assumptions: a client-input refusal in the NOT-OK state, and the POSITION is
+                //   reported while the CHARACTER is not. The position is what makes the refusal
+                //   actionable; the character is part of the value the caller submitted, and this
+                //   helper guards the national identifier and the credit score, so echoing it would
+                //   copy a fragment of a protected identifier into a diagnostic.
+                throw new ClientInputException(ApiError.CODE_VALIDATION, field,
+                        FieldValidationFlag.NOT_OK, "the supplied value of " + field
                         + " holds a character at position " + (position + 1)
                         + " that the reference's numeric picture cannot carry");
             }

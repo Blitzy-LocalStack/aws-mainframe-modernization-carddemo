@@ -5,6 +5,7 @@ import jakarta.persistence.EmbeddedId;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Table;
 import java.math.BigDecimal;
+import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -739,6 +740,142 @@ public class PendingAuthDetail {
             String merchantCategoryCode, String acqrCountryCode, Short posEntryMode,
             String merchantId, String merchantName, String merchantCity, String merchantState,
             String merchantZip, String transactionId, String matchStatus) {
+        this(id, authOrigDate, authOrigTime, cardNum, authType, cardExpiryDate, messageType,
+                messageSource, authIdCode, authRespCode, authRespReason, processingCode,
+                transactionAmount, approvedAmount, merchantCategoryCode, acqrCountryCode,
+                posEntryMode, merchantId, merchantName, merchantCity, merchantState, merchantZip,
+                transactionId, matchStatus, MatchStatusProvenance.ORIGINATED);
+    }
+
+    /**
+     * Reconstitutes a row that already exists in the store, in whichever of the four states it holds.
+     *
+     * <p>Purpose: this is the rehydration entry point, and it exists because the constructor above cannot
+     * serve one. That constructor originates a NEW decision, so it accepts only the two states an insert
+     * reaches; a row being loaded may legitimately carry either of the other two --
+     * {@link #MATCH_STATUS_PENDING_EXPIRED} written by the purge job and
+     * {@link #MATCH_STATUS_MATCHED_WITH_TRAN} written by the posting match -- and the extract that seeds
+     * this deployment carries rows in all four. The committed fixture
+     * {@code pautdtl1-match-status-domain.bin} holds one of each.
+     *
+     * <p>Refactoring Rationale: rehydration previously went through the originating constructor, so an
+     * expired or matched row COULD NOT BE LOADED AT ALL -- the load failed with a message stating the
+     * value "is reached by a later transition and never by an insert", which was true of the constructor
+     * and false of the row. The two paths are now separate methods over one private constructor, and the
+     * only thing that differs between them is which set the match status is checked against. Widening the
+     * constructor instead was rejected: it would have let the decision path persist a row claiming to have
+     * been matched against a transaction that does not exist, which is the defect the narrow check was
+     * introduced to prevent, and no constraint could catch it because all four values are legal for the
+     * column.
+     *
+     * <p>Assumptions: every OTHER invariant is unchanged and still applies here -- the entry mode's
+     * two-digit range, the match status membership of the column's four-value domain, and the required
+     * key. Rehydration relaxes exactly one rule, and it relaxes it to the schema's own
+     * {@code ck_pending_auth_detail_match_status}, so a value this method accepts is a value the column
+     * accepts. A rehydration path that skipped validation altogether was rejected for the same reason the
+     * mapper refuses a partially applied summary: a malformed stored row should be reported when it is
+     * read, naming the component, rather than propagated into the application as though it were sound.
+     *
+     * <p>Assumptions: the two fraud members are NOT parameters here either. A loaded row that carries a
+     * marking is applied through {@link #applyFraudMark(String, String)} by the caller that decoded it,
+     * which is the same operation the marking screen uses, so a marking reaches these members through one
+     * path however it arrived.
+     *
+     * @param id the three-part key of account, authorization date and authorization time; must not be
+     *     {@code null}, and its two clock parts hold decoded rather than complemented values
+     * @param authOrigDate the six characters of the acquirer's originating date; may be {@code null}
+     * @param authOrigTime the six characters of the acquirer's originating time; may be {@code null}
+     * @param cardNum the sixteen-character primary account number presented; must not be {@code null}
+     * @param authType the four-character authorization type; may be {@code null}
+     * @param cardExpiryDate the four characters of the card expiry code; may be {@code null}
+     * @param messageType the six-character network message type; may be {@code null}
+     * @param messageSource the six-character network message source; may be {@code null}
+     * @param authIdCode the six-character authorization identification code; may be {@code null}
+     * @param authRespCode the two-character response code; may be {@code null}
+     * @param authRespReason the four-character response reason; may be {@code null}
+     * @param processingCode the six digits of the processing code as characters; may be {@code null}
+     * @param transactionAmount the amount the acquirer requested, exact at scale two; must not be
+     *     {@code null}
+     * @param approvedAmount the amount actually approved, exact at scale two; must not be {@code null}
+     * @param merchantCategoryCode the four-character merchant category; may be {@code null}
+     * @param acqrCountryCode the three-character acquirer country; may be {@code null}
+     * @param posEntryMode how the card details entered the terminal; may be {@code null}, and when
+     *     present must lie between {@value #POS_ENTRY_MODE_MIN} and {@value #POS_ENTRY_MODE_MAX}
+     * @param merchantId the fifteen-character merchant identifier; may be {@code null}
+     * @param merchantName the merchant name at its declared width, never trimmed; may be {@code null}
+     * @param merchantCity the thirteen-character merchant city; may be {@code null}
+     * @param merchantState the two-character merchant state; may be {@code null}
+     * @param merchantZip the nine-character merchant postal code; may be {@code null}
+     * @param transactionId the acquirer's fifteen-character transaction identifier; must not be
+     *     {@code null}
+     * @param matchStatus the state the stored row holds, which may be any of the four the column admits
+     *     and must not be {@code null}
+     * @return the reconstituted row, never {@code null}
+     * @throws NullPointerException if {@code matchStatus} is {@code null}
+     * @throws IllegalArgumentException if {@code matchStatus} is outside the column's four-value domain,
+     *     or if {@code posEntryMode} is present and outside its two-digit range
+     */
+    public static PendingAuthDetail rehydrated(PendingAuthDetailKey id, String authOrigDate,
+            String authOrigTime, String cardNum, String authType, String cardExpiryDate,
+            String messageType, String messageSource, String authIdCode, String authRespCode,
+            String authRespReason, String processingCode, BigDecimal transactionAmount,
+            BigDecimal approvedAmount, String merchantCategoryCode, String acqrCountryCode,
+            Short posEntryMode, String merchantId, String merchantName, String merchantCity,
+            String merchantState, String merchantZip, String transactionId, String matchStatus) {
+        return new PendingAuthDetail(id, authOrigDate, authOrigTime, cardNum, authType,
+                cardExpiryDate, messageType, messageSource, authIdCode, authRespCode,
+                authRespReason, processingCode, transactionAmount, approvedAmount,
+                merchantCategoryCode, acqrCountryCode, posEntryMode, merchantId, merchantName,
+                merchantCity, merchantState, merchantZip, transactionId, matchStatus,
+                MatchStatusProvenance.REHYDRATED);
+    }
+
+    /**
+     * Assigns every member, validating the match status against the set its provenance admits.
+     *
+     * <p>Assumptions: the provenance is the LAST parameter and is what distinguishes this constructor
+     * from the public one, whose parameter list is otherwise identical. A private constructor with the
+     * same erasure as a public one is not expressible, so the discriminator has to be a parameter rather
+     * than a convention; making it an enumeration rather than a boolean means each call site reads as the
+     * path it is instead of as {@code true} or {@code false}.</p>
+     *
+     * @param id the three-part key; must not be {@code null}
+     * @param authOrigDate the acquirer's originating date; may be {@code null}
+     * @param authOrigTime the acquirer's originating time; may be {@code null}
+     * @param cardNum the primary account number presented; must not be {@code null}
+     * @param authType the authorization type; may be {@code null}
+     * @param cardExpiryDate the card expiry code; may be {@code null}
+     * @param messageType the network message type; may be {@code null}
+     * @param messageSource the network message source; may be {@code null}
+     * @param authIdCode the authorization identification code; may be {@code null}
+     * @param authRespCode the response code; may be {@code null}
+     * @param authRespReason the response reason; may be {@code null}
+     * @param processingCode the processing code as characters; may be {@code null}
+     * @param transactionAmount the requested amount at scale two; must not be {@code null}
+     * @param approvedAmount the approved amount at scale two; must not be {@code null}
+     * @param merchantCategoryCode the merchant category; may be {@code null}
+     * @param acqrCountryCode the acquirer country; may be {@code null}
+     * @param posEntryMode the entry mode; may be {@code null} and is range-checked when present
+     * @param merchantId the merchant identifier; may be {@code null}
+     * @param merchantName the merchant name, never trimmed; may be {@code null}
+     * @param merchantCity the merchant city; may be {@code null}
+     * @param merchantState the merchant state; may be {@code null}
+     * @param merchantZip the merchant postal code; may be {@code null}
+     * @param transactionId the acquirer's transaction identifier; must not be {@code null}
+     * @param matchStatus the state to record; must not be {@code null}
+     * @param provenance which set of match statuses this construction may use; must not be {@code null}
+     * @throws NullPointerException if {@code matchStatus} or {@code provenance} is {@code null}
+     * @throws IllegalArgumentException if the match status is outside the set the provenance admits, or
+     *     if the entry mode is present and out of range
+     */
+    private PendingAuthDetail(PendingAuthDetailKey id, String authOrigDate, String authOrigTime,
+            String cardNum, String authType, String cardExpiryDate, String messageType,
+            String messageSource, String authIdCode, String authRespCode, String authRespReason,
+            String processingCode, BigDecimal transactionAmount, BigDecimal approvedAmount,
+            String merchantCategoryCode, String acqrCountryCode, Short posEntryMode,
+            String merchantId, String merchantName, String merchantCity, String merchantState,
+            String merchantZip, String transactionId, String matchStatus,
+            MatchStatusProvenance provenance) {
         this.id = id;
         this.authOrigDate = authOrigDate;
         this.authOrigTime = authOrigTime;
@@ -774,7 +911,16 @@ public class PendingAuthDetail {
         //       outcomes at most, and would then be silently wrong for the other -- and wrong in a
         //       direction no constraint could catch, since both values are legal for the column to
         //       hold. Only the caller that reached the decision knows which branch this row is.
-        this.matchStatus = requireOriginatedMatchStatus(matchStatus);
+        // WHY : Refactoring Rationale: the set the value is checked against comes from the PROVENANCE
+        //       rather than being fixed to the originated pair, and it was fixed. An originating
+        //       decision may reach only the two values the reference insert selects between; a row
+        //       being loaded may hold any of the four the column admits, and routing a load through
+        //       the narrow check made an expired or matched row impossible to read at all. One check
+        //       with two sets keeps both rules in one place, where a reader can see that the load
+        //       relaxes exactly one of them and nothing else.
+        this.matchStatus = Objects
+                .requireNonNull(provenance, "provenance must not be null")
+                .requireInDomain(matchStatus);
 
         // WHY : Assumptions: the two fraud members are deliberately left unassigned. Their ordinary
         //       state is a space the extract supplies or a null this deployment writes -- the reference
@@ -783,48 +929,98 @@ public class PendingAuthDetail {
     }
 
     /**
-     * Returns the supplied match status if an insert path could have produced it.
+     * Which set of match statuses a construction of this type may choose from.
      *
-     * <p>Assumptions: the refusal is staged, and the two stages report different faults. A value the
-     * copybook does not name at all is not a match status; a value it does name but that only a later
-     * transition reaches is a match status this type may not originate. Collapsing the two would
-     * report a lower-case {@code 'p'} and a legitimately-loaded {@code 'E'} with the same sentence,
-     * and only one of those is a spelling mistake.</p>
+     * <p>Purpose: the two entry points of this class differ in exactly one rule, and this enumeration is
+     * that rule made explicit. An originating decision may record only the two values the reference insert
+     * selects between; a row being reconstituted from the store may hold any of the four its column
+     * admits. Both checks live here, side by side, so a reader can see the whole of the difference in one
+     * place rather than inferring it from two constructors.
      *
-     * <p>Assumptions: a bare {@link IllegalArgumentException} rather than a bean-validation
-     * annotation, because this invariant has to hold for every instance including the ones a test
-     * builds directly, and bean validation runs only where a validator is wired. Each message names
-     * the rejected value so a caller that passed a lower-case spelling can see which one it was.</p>
-     *
-     * @param candidate the match status a caller supplied; must not be {@code null}
-     * @return {@code candidate} unchanged, once it is known to be one of the two originated values
-     * @throws NullPointerException if {@code candidate} is {@code null}
-     * @throws IllegalArgumentException if {@code candidate} is outside {@link #MATCH_STATUS_DOMAIN},
-     *     or is inside it but not one of {@link #ORIGINATED_MATCH_STATUSES}
+     * <p>Alternatives Considered: a boolean parameter on the private constructor. Rejected because
+     * {@code false} at a call site says nothing about which path it is, whereas the two names below do,
+     * and because a boolean invites a third state to be squeezed in as a second boolean later.
+     * Alternatives Considered: two full constructors each with its own check. Rejected because the
+     * twenty-three assignments beside the check would then exist twice, and the copy that was edited
+     * without the other is the defect this class has already had once.
      */
-    private static String requireOriginatedMatchStatus(String candidate) {
-        // WHY : Assumptions: null is refused FIRST and by name, rather than being left for either
-        //       membership test to reject. Both Set.of and List.of build immutable collections whose
-        //       contains THROWS NullPointerException on a null argument instead of returning false, so
-        //       relying on membership alone would raise an NPE from inside a collection -- a refusal
-        //       that names neither the field nor the invariant. requireNonNull raises the same
-        //       exception type the caller documents, carrying the component's name.
-        Objects.requireNonNull(candidate, "matchStatus must not be null");
-        if (!MATCH_STATUS_DOMAIN.contains(candidate)) {
-            throw new IllegalArgumentException("matchStatus is not a match status value: the "
-                    + "copybook's condition names at cpy/CIPAUDTY.cpy L46 to L49 close the domain to "
-                    + "P, D, E or M, of which only P and D may be originated per cbl/COPAUA0C.cbl "
-                    + "L902 to L906, but was: " + candidate);
+    private enum MatchStatusProvenance {
+
+        /**
+         * A new decision, which may record only the two values an insert reaches.
+         *
+         * <p>Assumptions: the pair is {@link PendingAuthDetail#ORIGINATED_MATCH_STATUSES}, taken from
+         * {@code cbl/COPAUA0C.cbl} L902 to L906, whose test has exactly two branches and no default.</p>
+         */
+        ORIGINATED(ORIGINATED_MATCH_STATUSES),
+
+        /**
+         * A row read back from the store, which may hold any state the column admits.
+         *
+         * <p>Assumptions: the set is {@link PendingAuthDetail#MATCH_STATUS_DOMAIN}, which is the schema's
+         * own {@code ck_pending_auth_detail_match_status}, so a value this provenance accepts is a value
+         * the column accepts and nothing wider.</p>
+         */
+        REHYDRATED(MATCH_STATUS_DOMAIN);
+
+        /** The values a construction of this provenance may record. */
+        private final Collection<String> admitted;
+
+        /**
+         * Binds a provenance to the set of match statuses it admits.
+         *
+         * @param admittedStatuses the values this provenance may record; must not be {@code null}
+         */
+        MatchStatusProvenance(Collection<String> admittedStatuses) {
+            this.admitted = admittedStatuses;
         }
-        if (!ORIGINATED_MATCH_STATUSES.contains(candidate)) {
-            throw new IllegalArgumentException("matchStatus must be one of "
-                    + ORIGINATED_MATCH_STATUSES + " -- '" + MATCH_STATUS_PENDING
-                    + "' when the authorization was approved and '" + MATCH_STATUS_DECLINED
-                    + "' when it was declined, per cbl/COPAUA0C.cbl L902 to L906; '" + candidate
-                    + "' is reached by a later transition and never by an insert");
+
+        /**
+         * Returns the supplied match status if this provenance may record it.
+         *
+         * <p>Assumptions: the refusal is staged, and the two stages report different faults. A value the
+         * copybook does not name at all is not a match status; a value it does name but that only a later
+         * transition reaches is a match status an INSERT may not originate. Collapsing the two would
+         * report a lower-case {@code 'p'} and a legitimately-loaded {@code 'E'} with the same sentence,
+         * and only one of those is a spelling mistake.</p>
+         *
+         * <p>Assumptions: a bare {@link IllegalArgumentException} rather than a bean-validation
+         * annotation, because this invariant has to hold for every instance including the ones a test
+         * builds directly, and bean validation runs only where a validator is wired. Each message names
+         * the rejected value so a caller that passed a lower-case spelling can see which one it was.</p>
+         *
+         * @param candidate the match status a caller supplied; must not be {@code null}
+         * @return {@code candidate} unchanged, once this provenance is known to admit it
+         * @throws NullPointerException if {@code candidate} is {@code null}
+         * @throws IllegalArgumentException if {@code candidate} is outside
+         *     {@link PendingAuthDetail#MATCH_STATUS_DOMAIN}, or is inside it but outside the set this
+         *     provenance admits
+         */
+        private String requireInDomain(String candidate) {
+            // WHY : Assumptions: null is refused FIRST and by name, rather than being left for either
+            //       membership test to reject. Both Set.of and List.of build immutable collections whose
+            //       contains THROWS NullPointerException on a null argument instead of returning false, so
+            //       relying on membership alone would raise an NPE from inside a collection -- a refusal
+            //       that names neither the field nor the invariant. requireNonNull raises the same
+            //       exception type the caller documents, carrying the component's name.
+            Objects.requireNonNull(candidate, "matchStatus must not be null");
+            if (!MATCH_STATUS_DOMAIN.contains(candidate)) {
+                throw new IllegalArgumentException("matchStatus is not a match status value: the "
+                        + "copybook's condition names at cpy/CIPAUDTY.cpy L46 to L49 close the domain to "
+                        + "P, D, E or M, of which only P and D may be originated per cbl/COPAUA0C.cbl "
+                        + "L902 to L906, but was: " + candidate);
+            }
+            if (!this.admitted.contains(candidate)) {
+                throw new IllegalArgumentException("matchStatus must be one of "
+                        + ORIGINATED_MATCH_STATUSES + " -- '" + MATCH_STATUS_PENDING
+                        + "' when the authorization was approved and '" + MATCH_STATUS_DECLINED
+                        + "' when it was declined, per cbl/COPAUA0C.cbl L902 to L906; '" + candidate
+                        + "' is reached by a later transition and never by an insert");
+            }
+            return candidate;
         }
-        return candidate;
     }
+
 
     /**
      * Returns the supplied point-of-sale entry mode if it fits the copybook's two unsigned digits.
@@ -1201,9 +1397,9 @@ public class PendingAuthDetail {
      */
     public void applyFraudMark(String fraudState, String reportDate) {
         // WHY : Assumptions: the null test precedes the membership test for the reason recorded on
-        //       requireOriginatedMatchStatus -- a Set.of set throws on contains(null) rather than answering
-        //       false, so membership alone would surface an NPE from inside the collection instead of the
-        //       refusal this method documents.
+        //       MatchStatusProvenance.requireInDomain -- a Set.of set throws on contains(null) rather than
+        //       answering false, so membership alone would surface an NPE from inside the collection
+        //       instead of the refusal this method documents.
         if (fraudState == null || !FRAUD_MARK_DOMAIN.contains(fraudState)) {
             throw new IllegalArgumentException("fraud state must be F or R but was: " + fraudState);
         }

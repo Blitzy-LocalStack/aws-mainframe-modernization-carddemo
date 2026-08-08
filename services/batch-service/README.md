@@ -924,15 +924,20 @@ configured default, which proves the two settings agree instead of deriving one 
 other — if they ever disagreed this module would migrate one schema and write into
 another, and each setting alone would look correct.
 
-Assumptions: `BatchConfig` is absent rather than authored empty because a step definition
-has nothing to define until the jobs exist — `job/` currently holds only its package
-charter, and the seven job types §2 assigns it are later-index artifacts. Alternatives
-Considered: authoring it now with the job repository and transaction manager registered
-in it. Rejected on two counts: Spring Boot already auto-configures both from the data
-source, so the registration would restate a framework default and then have to be kept in
-step with it; and a configuration class whose stated purpose is chunk-oriented steps,
-holding no step, reads to the next author as though the steps had been considered and
-omitted.
+Assumptions: `BatchConfig` is authored, and it was authored WITH the jobs rather than
+ahead of them, because a step definition has nothing to define until the jobs exist.
+`job/` now holds all seven job classes §2 assigns it plus a shared dataset writer and its
+package charter, and `config/BatchConfig` carries exactly what those seven share: the time
+source the durable step ledger stamps its rows with, and one nested builder that wraps a
+job's unit of work in a ledger-guarded step. Alternatives Considered: authoring it earlier
+with the job repository and transaction manager registered in it. Rejected on two counts
+that still hold: Spring Boot already auto-configures both from the data source, so the
+registration would restate a framework default and then have to be kept in step with it;
+and a configuration class whose stated purpose is step infrastructure, holding no step,
+reads to the next author as though the steps had been considered and omitted — which is
+why the class arrived with the steps and not before them. Refactoring Rationale: this
+paragraph said `BatchConfig` was absent and `job/` held only its charter, which was
+measured before the jobs landed; both statements are now false of the directory.
 
 ### 9.1 Why there is no `OpenApiConfig`, no `SecurityConfig`, and no API contract
 

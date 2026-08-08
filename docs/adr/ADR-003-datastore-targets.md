@@ -171,10 +171,19 @@ six bases in one `IDCAMS` step. The other four sit elsewhere.
 | `DISCGRP.BKUP` | `DEFGDGD.jcl` **L74** | `LIMIT(5)` L75, `SCRATCH` L76 | disclosure-group backup |
 | `DALYREJS` | `DALYREJS.jcl` **L25** | `LIMIT(5)` L26, `SCRATCH` L27 | daily reject stream |
 
-Every one of the ten is defined at `LIMIT(5)`, so the target's retention count is
+Nine of the ten are defined at `LIMIT(5)` once each, and the tenth carries two
+competing definitions as the note below records, so the target's retention count is
 read off the baseline rather than chosen. Six belong to the ledger domain, three
 to reference data and one to reporting, which is the split the object-storage
 module provisions.
+
+Refactoring Rationale: this sentence read "every one of the ten is defined at
+`LIMIT(5)`" and was immediately qualified by the note beneath it, which is the
+arrangement that lets a reader quoting the opening state something the same page
+disproves — and [ADR-005](ADR-005-batch-orchestration.md) did exactly that, carrying
+the unqualified form into its consequences while claiming the two records agree. The
+count now leads with the nine that are unambiguous and defers the tenth to the note
+that owns it, so the two records agree on the sentence as well as on the finding.
 
 Assumptions: **the baseline is not self-consistent about one of the ten, and the
 conflict is recorded rather than quietly resolved.** An exhaustive search for

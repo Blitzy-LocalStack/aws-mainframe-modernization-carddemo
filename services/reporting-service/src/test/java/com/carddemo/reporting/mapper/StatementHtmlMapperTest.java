@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.carddemo.common.money.Money;
+import com.carddemo.common.security.HtmlTextEncoder;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.nio.charset.StandardCharsets;
@@ -288,10 +289,19 @@ class StatementHtmlMapperTest {
     /**
      * A customer name whose assembled form exceeds the width the markup cell narrows it to.
      *
-     * <p>Assumptions: this reaches the first required fixture property. Its 60 characters are longer
+     * <p>Assumptions: this reaches the first required fixture property. Its 59 characters are longer
      * than the {@value StatementTextMapper#MARKUP_NAME_WIDTH} the markup cell keeps, so the narrowing
      * at line 560 of {@code app/cbl/CBSTM03A.CBL} provably drops content rather than happening to fit;
      * and the 51st character onward is what a re-derivation from the wrong source would keep.</p>
+     *
+     * <p>Refactoring Rationale: this paragraph said 60 and the literal below measures 59. The figure is
+     * load-bearing rather than decorative, because the whole point of the constant is that it EXCEEDS
+     * the fifty the markup cell keeps, and the nine dropped characters are named elsewhere in this class
+     * as the 51st through 59th. Five other sites already stated 59 correctly, so this one paragraph
+     * disagreed with the rest of the file and with the literal it introduces; a reader reconciling them
+     * would have had to count the string by hand to learn which was right. The narrowing claim itself is
+     * unaffected -- 59 is greater than 50 exactly as 60 would have been -- which is precisely why no
+     * assertion failed and why the figure had to be measured rather than trusted.</p>
      */
     private static final String OVER_WIDE_NAME_TEXT =
             "ANNA-MARIE ELISABETH VON HOHENBERG-SCHWARZENSTEIN THE THIRD";
@@ -679,8 +689,6 @@ class StatementHtmlMapperTest {
      */
     private static Stream<Arguments> rightTrimSites() {
         return Stream.of(
-                // WHAT: the name site declares the assembled width of 75 while the cell renders the
-                //       narrowed 50.
                 // WHY : Assumptions: the prepared record accepts the assembled name only at 75, and
                 //       line 560 of app/cbl/CBSTM03A.CBL narrows it to 50 before line 563 reads it,
                 //       so the value has to be built at 75 and expected at the narrowed width. A site
@@ -744,7 +752,6 @@ class StatementHtmlMapperTest {
     void everyRecordOfEveryEmissionIsTheDeclaredLength() {
         List<byte[]> records = wholeStatement();
 
-        // WHAT: the sweep is asserted non-empty before the per-record length is asserted.
         // WHY : Assumptions: an all-satisfy assertion over an empty collection passes vacuously, so
         //       an emitter that returned nothing at all would read as green here. The expected total
         //       is 22 + 34 + 11 + 8, and grep -c 'WRITE FD-HTMLFILE-REC' app/cbl/CBSTM03A.CBL
@@ -771,7 +778,6 @@ class StatementHtmlMapperTest {
     @Test
     @DisplayName("the declared record length of 100 is corroborated three independent ways")
     void theDeclaredRecordLengthIsCorroboratedThreeWays() {
-        // WHAT: the published constant is asserted equal to the number all three artifacts declare.
         // WHY : Assumptions: this is the anchor every other width assertion in the file resolves
         //       through, so it is pinned to a literal exactly once and here. The three artifacts are
         //       independent of one another: a program's working storage, a program's file section and
@@ -779,7 +785,6 @@ class StatementHtmlMapperTest {
         //       agreement between them is evidence rather than repetition.
         assertThat(StatementHtmlMapper.HTML_RECORD_LENGTH).isEqualTo(100);
 
-        // WHAT: every fragment is asserted to fit inside that length with room to spare.
         // WHY : Assumptions: the two longest declared fragments are 85 characters -- the table element
         //       at lines 157 to 158 of app/cbl/CBSTM03A.CBL and the centred panel cell at lines 176 to
         //       178 -- so the table has 15 characters of headroom. Asserting the headroom rather than
@@ -813,7 +818,6 @@ class StatementHtmlMapperTest {
         byte[] markupRecord = StatementHtmlMapper.emitDocumentFooter().get(0);
         byte[] textLine = StatementTextMapper.emitTransactionLine(conformingRow());
 
-        // WHAT: the two artifacts' records are asserted to differ in length, and by how much.
         // WHY : Assumptions: the difference of twenty is stated as arithmetic on the two published
         //       lengths rather than as the literal 20, so the assertion cannot pass by accident if
         //       either declaration is ever re-read from its source. Line 66 of
@@ -843,7 +847,6 @@ class StatementHtmlMapperTest {
     void everyRecordIsSingleByteEncoded() {
         List<byte[]> records = wholeStatement();
 
-        // WHAT: each record's decoded character count is asserted equal to its byte count.
         // WHY : Assumptions: the round trip is the check. Decoding as US-ASCII and re-encoding must
         //       return the same byte count for every record, which holds only while every character
         //       occupies one byte. Relying on the platform default would make the outcome depend on
@@ -854,7 +857,6 @@ class StatementHtmlMapperTest {
             assertThat(decoded.getBytes(StandardCharsets.US_ASCII)).hasSize(record.length);
         });
 
-        // WHAT: every byte is asserted inside the printable US-ASCII range.
         // WHY : Assumptions: US-ASCII encodes every code point from 0x00 to 0x7F, so an encoder check
         //       alone would admit a carriage return or a null byte. On a fixed-length record data set
         //       an embedded terminator forges a record boundary and displaces every record after it,
@@ -895,7 +897,6 @@ class StatementHtmlMapperTest {
         records.addAll(StatementHtmlMapper.emitNameAddressAndBasicDetails(widest));
         records.addAll(StatementHtmlMapper.emitTransactionRow(widestRow));
 
-        // WHAT: every widest-input record is asserted at exactly the declared length, never above it.
         // WHY : Assumptions: a value with no blank pair is the worst case for the right-trim regime,
         //       because the delimiter at line 563 of app/cbl/CBSTM03A.CBL is never found and the whole
         //       declared width transfers. The name cell then reaches 26 + 50 + 2 + 4 = 82 and the
@@ -908,7 +909,6 @@ class StatementHtmlMapperTest {
         assertThat(renderedSpan(records.get(ASSEMBLED_ADDRESS_INDEX),
                 StatementHtmlMapper.PLAIN_CELL_PREFIX)).hasSize(ASSEMBLED_ADDRESS_WIDTH + 2);
 
-        // WHAT: an assembly that would overrun the record is asserted to be REFUSED, not truncated.
         // WHY : Trade-offs: refusal is the behaviour under test and truncation is the alternative that
         //       was not taken. A cell truncated at 100 could sever a closing tag or split a character
         //       reference and leave a bare ampersand in the document, and a length check afterwards
@@ -935,7 +935,6 @@ class StatementHtmlMapperTest {
     @Test
     @DisplayName("the fragment table holds exactly 34 entries")
     void theFragmentTableHoldsExactlyThirtyFourEntries() {
-        // WHAT: 34 is asserted as a literal here, and only here, against three independent counts.
         // WHY : Assumptions: the figure is verified rather than estimated. Over lines 150 to 211 of
         //       app/cbl/CBSTM03A.CBL, grep -cE '^ +88 +HTML-' returns exactly 34, and the same command
         //       over the whole file returns the same 34, so no fragment is declared outside that span.
@@ -946,7 +945,6 @@ class StatementHtmlMapperTest {
         assertThat(DECLARED_FRAGMENTS).hasSize(34);
         assertThat(DECLARED_FRAGMENT_NAMES).hasSize(34);
 
-        // WHAT: 34 is asserted DIFFERENT from the other verified counts in this module.
         // WHY : Assumptions: four counts of this module have been verified independently and none
         //       substitutes for another -- 34 markup fragments here, 17 plain-text statement bands, 22
         //       FILLER items in the daily transaction report copybook, and 10 enabled checks in
@@ -958,7 +956,6 @@ class StatementHtmlMapperTest {
                 .isNotEqualTo(22)
                 .isNotEqualTo(10);
 
-        // WHAT: the table is asserted to hold no duplicate and no blank entry.
         // WHY : Assumptions: four of the reference's literals are short closing or opening tags that
         //       differ by a single character -- the row and cell pairs at lines 159 to 162 -- so a
         //       transcription that repeated one of them would still produce a table of 34. A duplicate
@@ -982,7 +979,6 @@ class StatementHtmlMapperTest {
     @DisplayName("every declared fragment is carried across character for character")
     void everyDeclaredFragmentIsCarriedAcrossVerbatim(String fragmentName, String transcribed,
             String published) {
-        // WHAT: the published constant is asserted EQUAL to this file's independent transcription.
         // WHY : Assumptions: markup a browser renders is a user-visible string, so AAP Rule T8 carries
         //       it across character for character -- every blank, angle bracket, quote and attribute
         //       value. The transcription in this file is read from the 88-level declarations at lines
@@ -992,7 +988,6 @@ class StatementHtmlMapperTest {
                 .as("%s must carry its reference bytes", fragmentName)
                 .isEqualTo(transcribed);
 
-        // WHAT: the fragment is asserted un-normalised, un-trimmed and un-reformatted.
         // WHY : Assumptions: three specific normalisations would each leave valid markup and change the
         //       bytes. Collapsing the two consecutive blanks after <table at line 157 of
         //       app/cbl/CBSTM03A.CBL, stripping a leading or trailing blank, or lower-casing a colour
@@ -1027,7 +1022,6 @@ class StatementHtmlMapperTest {
                 .filter(field -> field.getName().startsWith(FRAGMENT_FIELD_PREFIX))
                 .toList();
 
-        // WHAT: the reflective census of named fields is asserted equal to the declared count.
         // WHY : Assumptions: the one prefix covers both spellings the reference uses -- the numbered
         //       fragments at lines 150 to 158 and 163 onward, and the four row and cell tags named
         //       LTRS, LTRE, LTDS and LTDE at lines 159 to 162. A narrower prefix would silently cover
@@ -1037,7 +1031,6 @@ class StatementHtmlMapperTest {
         assertThat(fragmentFields).extracting(Field::getName)
                 .containsExactlyInAnyOrderElementsOf(DECLARED_FRAGMENT_NAMES);
 
-        // WHAT: each field is asserted public, static and final, and its value asserted in the table.
         // WHY : Assumptions: static and final together are what make a fragment a compile-time constant
         //       rather than a value rebuilt per call, which is the property the reference's own
         //       storage-declared literals have. A non-final field would let one emission change what a
@@ -1057,7 +1050,6 @@ class StatementHtmlMapperTest {
                     .contains((String) field.get(null));
         }
 
-        // WHAT: the published table is asserted immutable.
         // WHY : Assumptions: the table is walked by this class and by the attribute-context assertion
         //       below, so a caller able to add an entry could introduce a fragment that no emitter
         //       emits and that no assertion covers. Refusal on mutation is what keeps the census above
@@ -1085,7 +1077,6 @@ class StatementHtmlMapperTest {
         byte[] heading = StatementHtmlMapper.emitDocumentHeader(accountItem)
                 .get(ACCOUNT_HEADING_INDEX);
 
-        // WHAT: each of the three declared widths is asserted on its own component.
         // WHY : Assumptions: the byte sum has to close, and it does: the opening literal declared
         //       FILLER PIC X(34) at line 213 of app/cbl/CBSTM03A.CBL with its value at line 214, the
         //       account item L11-ACCT PIC X(20) at line 215, and the closing literal FILLER PIC X(05)
@@ -1103,7 +1094,6 @@ class StatementHtmlMapperTest {
                 .isEqualTo(StatementHtmlMapper.ACCOUNT_HEADING_CONTENT_LENGTH)
                 .isEqualTo(59);
 
-        // WHAT: the opening literal's own trailing blank is asserted to be content.
         // WHY : Assumptions: the thirty-fourth character of the value at line 214 of
         //       app/cbl/CBSTM03A.CBL is a blank, and it is what separates the heading text from the
         //       digits. A transcription that read it as source-formatting slack would produce a 33
@@ -1113,7 +1103,6 @@ class StatementHtmlMapperTest {
         assertThat(StatementHtmlMapper.ACCOUNT_HEADING_PREFIX.strip())
                 .hasSize(StatementHtmlMapper.ACCOUNT_HEADING_PREFIX_LENGTH - 1);
 
-        // WHAT: the emitted record is asserted to be the three components then blanks out to 100.
         // WHY : Assumptions: the padding from 59 to 100 is 41 blanks and comes from the record being
         //       written from a group declared inside the 100-character storage at line 148 of
         //       app/cbl/CBSTM03A.CBL, so the unused suffix is blank by declaration. Asserting the whole
@@ -1150,7 +1139,6 @@ class StatementHtmlMapperTest {
         byte[] heading = StatementHtmlMapper.emitDocumentHeader(headingItem)
                 .get(ACCOUNT_HEADING_INDEX);
 
-        // WHAT: the heading's middle component is asserted left-justified and BLANK-padded to 20.
         // WHY : Assumptions: the two forms share their eleven leading characters and differ only in the
         //       nine that follow, so the difference is located precisely. The leading zeros are present
         //       in BOTH; a reader told only that one pads with blanks and the other with zeros could
@@ -1162,7 +1150,6 @@ class StatementHtmlMapperTest {
         assertThat(reportField).isEqualTo(ACCOUNT_DIGITS).hasSize(ACCOUNT_ID_DIGITS);
         assertThat(headingItem.substring(ACCOUNT_ID_DIGITS)).isBlank().doesNotContain("0");
 
-        // WHAT: those nine blanks are asserted to stand INSIDE the emitted heading.
         // WHY : Assumptions: the closing literal is declared as a separate item AFTER the account item
         //       at line 216 of app/cbl/CBSTM03A.CBL rather than after a trimmed one, so the nine
         //       declared blanks stand between the digits and the closing tag. An assembly that trimmed
@@ -1199,7 +1186,6 @@ class StatementHtmlMapperTest {
         byte[] nameCell = StatementHtmlMapper.emitNameAddressAndBasicDetails(conformingHeader())
                 .get(NAME_CELL_INDEX);
 
-        // WHAT: the two declared group component widths are asserted, and their sum.
         // WHY : Assumptions: the byte sum closes at 26 + 50 = 76, which is what makes the missing
         //       closing position observable: a group that ended in a closing tag would declare 80. The
         //       widths are asserted from the published constants so the arithmetic is checkable against
@@ -1210,7 +1196,6 @@ class StatementHtmlMapperTest {
         assertThat(MARKUP_NAME_WIDTH).isEqualTo(50);
         assertThat(StatementHtmlMapper.NAME_CELL_PREFIX_LENGTH + MARKUP_NAME_WIDTH).isEqualTo(76);
 
-        // WHAT: the emitted cell is asserted to CLOSE, and to close with the declared four characters.
         // WHY : Assumptions: the closing tag is supplied by the concatenation at line 565 of
         //       app/cbl/CBSTM03A.CBL as a literal delimited by an asterisk, so it is four characters
         //       transferred whole. An emitted cell 76 characters long with no closing tag would be the
@@ -1224,7 +1209,6 @@ class StatementHtmlMapperTest {
                 .contains(StatementHtmlMapper.CELL_SUFFIX);
         assertThat(text(nameCell).strip()).endsWith(StatementHtmlMapper.CELL_SUFFIX);
 
-        // WHAT: the whole record is asserted byte for byte against the rebuilt shape.
         // WHY : Assumptions: prefix, then the cut name, then the re-appended blank pair, then the
         //       closing tag, then blanks to 100 -- which for this name is 26 + 10 + 2 + 4 = 42
         //       characters of content and 58 blanks. Naming the whole record is what excludes a cell
@@ -1255,7 +1239,6 @@ class StatementHtmlMapperTest {
         byte[] nameCell = StatementHtmlMapper.emitNameAddressAndBasicDetails(fields)
                 .get(NAME_CELL_INDEX);
 
-        // WHAT: the source value is asserted to EXCEED the narrowed width before anything is emitted.
         // WHY : Assumptions: this reaches the first required fixture property, and without it the case
         //       is vacuous. A name shorter than 50 would be narrowed to itself, so a mapper that
         //       re-derived the narrowing and a mapper that read it from the record would emit the same
@@ -1263,7 +1246,6 @@ class StatementHtmlMapperTest {
         assertThat(OVER_WIDE_NAME_TEXT.length()).isGreaterThan(MARKUP_NAME_WIDTH);
         assertThat(assembled).hasSize(ASSEMBLED_NAME_WIDTH);
 
-        // WHAT: the emitted value is asserted equal to the RECORD'S accessor, character for character.
         // WHY : Assumptions: the expectation is taken from fields.markupName() rather than recomputed
         //       here, so the assertion states that the cell renders WHAT THE RECORD CARRIES. Computing
         //       the leftmost 50 characters independently in this file would put the narrowing in a
@@ -1274,7 +1256,6 @@ class StatementHtmlMapperTest {
         assertThat(renderedSpan(nameCell, StatementHtmlMapper.NAME_CELL_PREFIX))
                 .isEqualTo(narrowed + StatementHtmlMapper.PAIRED_BLANK);
 
-        // WHAT: the characters beyond the narrowed width are asserted ABSENT from the emitted record.
         // WHY : Assumptions: the narrowing is provably a truncation because the tail exists and is
         //       gone. The assembled name is 59 characters of text, so its 51st through 59th characters
         //       are declared content that the markup cell must not carry; a mapper reading the wrong
@@ -1283,7 +1264,6 @@ class StatementHtmlMapperTest {
         assertThat(droppedTail).isNotEmpty();
         assertThat(text(nameCell)).doesNotContain(droppedTail);
 
-        // WHAT: the record is asserted to hold no eighth component the narrowing could be stored in.
         // WHY : Alternatives Considered: storing the narrowed name beside the assembled one as an
         //       eighth component. Rejected because nothing would check that the two agreed, so an
         //       instance could hold the narrowing of one name beside another name entirely. Pinning the
@@ -1308,14 +1288,12 @@ class StatementHtmlMapperTest {
                 headerWithComponent(site.componentOrdinal(), padded));
         String rendered = renderedSpan(records.get(site.recordIndex()), site.prefix());
 
-        // WHAT: the value is asserted to carry trailing blanks before it is rendered.
         // WHY : Assumptions: this reaches the second required fixture property, and the case is vacuous
         //       without it. A value that already ended at its declared width would carry no blank pair,
         //       the delimiter would never be found, and a trimming implementation and a non-trimming
         //       one would emit identical bytes.
         assertThat(padded).hasSize(site.declaredWidth()).endsWith("  ");
 
-        // WHAT: the embedded value is asserted to be the text with its trailing blanks REMOVED.
         // WHY : Assumptions: the reference transfers the item only up to its first PAIR of blanks --
         //       grep -c "DELIMITED BY '  '" over app/cbl/CBSTM03A.CBL returns exactly 4, which is these
         //       four sites and no others -- so the declared padding does not reach the document. The
@@ -1326,7 +1304,6 @@ class StatementHtmlMapperTest {
                 .startsWith(text);
         assertThat(rendered.substring(0, text.length())).isEqualTo(text);
 
-        // WHAT: the two blanks immediately after the cut value are asserted present, and only two.
         // WHY : Assumptions: the literal at lines 564, 572, 580 and 588 of app/cbl/CBSTM03A.CBL is two
         //       blanks DELIMITED BY SIZE, so it transfers whole and unconditionally. One blank would be
         //       a different document and none would be a different document again, so the count is
@@ -1338,7 +1315,6 @@ class StatementHtmlMapperTest {
                 .as("%s closes with exactly the declared blank pair", site.label())
                 .isEqualTo(text + StatementHtmlMapper.PAIRED_BLANK);
 
-        // WHAT: the whole record is asserted byte for byte, padding included.
         // WHY : Assumptions: the record is the unit the data set holds, so the assertion is made on all
         //       100 bytes. A cell correct in its first 20 characters and wrong in its padding would
         //       satisfy a prefix assertion and would still be a byte difference in the golden
@@ -1362,13 +1338,11 @@ class StatementHtmlMapperTest {
                 headerWithComponent(site.componentOrdinal(), padded));
         String rendered = renderedSpan(records.get(site.recordIndex()), site.prefix());
 
-        // WHAT: the value is asserted to hold interior blanks and no interior blank PAIR.
         // WHY : Assumptions: the precondition is what makes the case meaningful. The value holds two
         //       single blanks and no pair before its padding, so the only pair in it is the one the
         //       padding begins with -- which is exactly where the cut must fall.
         assertThat(INTERIOR_SPACE_NAME_TEXT).contains(" ").doesNotContain("  ");
 
-        // WHAT: the whole three-word value is asserted present, not merely its first word.
         // WHY : Assumptions: the delimiter is TWO blanks and not one, and this is the assertion that
         //       separates a right-trim from a first-word truncation. It is exactly the mistake a reader
         //       of the plain-text name assembly reaches for: that assembly at lines 462 to 469 of
@@ -1400,7 +1374,6 @@ class StatementHtmlMapperTest {
     void theTwoDelimitersProduceDifferentAndBothCorrectResults() {
         String assembled = StatementTextMapper.assembleName("MARY JO", "", "VAN DYKE");
 
-        // WHAT: the single-blank assembly is asserted to have stopped at each part's first blank.
         // WHY : Assumptions: this is the plain-text mapper's own documented behaviour and it is
         //       asserted here only as the CONTRAST, not re-proven. The first part contributes MARY
         //       alone, the blank middle part contributes nothing between two blank literals, and the
@@ -1410,7 +1383,6 @@ class StatementHtmlMapperTest {
         assertThat(assembled.strip()).isEqualTo("MARY  VAN");
         assertThat(assembled).doesNotContain("JO").doesNotContain("DYKE");
 
-        // WHAT: the markup cell is asserted to cut that same value at its first blank PAIR.
         // WHY : Assumptions: the markup regime sees the paired-blank separator the single-blank
         //       assembly produced and cuts there, so the markup cell carries MARY alone. That is not
         //       a defect of either regime: it is what a two-blank delimiter does to a value holding a
@@ -1420,7 +1392,6 @@ class StatementHtmlMapperTest {
         assertThat(renderedSpan(nameCell, StatementHtmlMapper.NAME_CELL_PREFIX))
                 .isEqualTo("MARY" + StatementHtmlMapper.PAIRED_BLANK);
 
-        // WHAT: the two results are asserted DIFFERENT for the one source name.
         // WHY : Assumptions: naming the inequality is what makes the two delimiters non-substitutable.
         //       The plain-text item carries MARY, two blanks and VAN; the markup cell carries MARY and
         //       stops. A reader who generalised from one file to the other would be wrong in whichever
@@ -1447,14 +1418,12 @@ class StatementHtmlMapperTest {
         String rendered = renderedSpan(records.get(site.recordIndex()),
                 StatementHtmlMapper.PLAIN_CELL_PREFIX);
 
-        // WHAT: the value is asserted to carry trailing blanks before it is rendered.
         // WHY : Assumptions: this reaches the third required fixture property. Without trailing blanks
         //       there is nothing for a trim to remove, so a trimming implementation and this one would
         //       emit identical bytes and the case would prove nothing.
         assertThat(padded).hasSize(site.declaredWidth()).endsWith(" ");
         assertThat(padded.length() - text.length()).isPositive();
 
-        // WHAT: the ENTIRE declared item is asserted present, padding and all.
         // WHY : Assumptions: the delimiter at lines 688, 700 and 712 of app/cbl/CBSTM03A.CBL is an
         //       ASTERISK, and no asterisk occurs in the data these items carry, so the delimiter is
         //       never found and the concatenation consumes the whole item. This is an idiomatic COBOL
@@ -1467,7 +1436,6 @@ class StatementHtmlMapperTest {
                 .hasSize(site.declaredWidth());
         assertThat(rendered).endsWith(" ");
 
-        // WHAT: the whole record is asserted byte for byte, with no blank pair added before the tag.
         // WHY : Assumptions: this regime appends NO blank pair, which is the second difference from the
         //       right-trim regime and is as load-bearing as the first. The concatenation at lines 687 to
         //       690 of app/cbl/CBSTM03A.CBL has three operands where the one at lines 562 to 567 has
@@ -1475,7 +1443,6 @@ class StatementHtmlMapperTest {
         assertThat(text(records.get(site.recordIndex()))).isEqualTo(expectedRecord(
                 StatementHtmlMapper.PLAIN_CELL_PREFIX + padded + StatementHtmlMapper.CELL_SUFFIX));
 
-        // WHAT: the span length is asserted to be the declared width, not the declared width plus two.
         // WHY : Assumptions: the absence of the appended pair is stated as arithmetic rather than as a
         //       suffix check, because a whole-item span legitimately ENDS in blanks -- they are the
         //       item's own declared padding. Only the length distinguishes padding the item carried from
@@ -1499,7 +1466,6 @@ class StatementHtmlMapperTest {
         List<byte[]> records = StatementHtmlMapper.emitTransactionRow(
                 rowWithComponent(site.componentOrdinal(), full));
 
-        // WHAT: a value with NO trailing blanks is asserted to arrive whole as well.
         // WHY : Assumptions: this is what distinguishes "no trim happened" from "there was nothing to
         //       trim". The case above proves padding survives; this one proves the regime is not a
         //       conditional trim that happens to leave a full item alone, so together they pin the
@@ -1533,7 +1499,6 @@ class StatementHtmlMapperTest {
                         rowWithDescription(item(shared, DESCRIPTION_ITEM_WIDTH)))
                 .get(DESCRIPTION_INDEX), StatementHtmlMapper.PLAIN_CELL_PREFIX);
 
-        // WHAT: the two emitted spans are asserted UNEQUAL for the one shared text.
         // WHY : Assumptions: this is the assertion that makes substituting one regime for the other
         //       impossible. If either regime were replaced by the other, the two spans would become
         //       equal in one direction or the other, and every other assertion in this file about the
@@ -1541,7 +1506,6 @@ class StatementHtmlMapperTest {
         //       100-byte record.
         assertThat(rightTrimmed).isNotEqualTo(wholeItem);
 
-        // WHAT: the difference is asserted to be EXACTLY the trailing blanks and nothing else.
         // WHY : Assumptions: naming the difference precisely is what turns an inequality into a
         //       specification. Stripped, the two agree, so neither regime altered the characters of the
         //       value; unstripped, the right-trimmed span is the text plus the re-appended pair while
@@ -1551,7 +1515,6 @@ class StatementHtmlMapperTest {
         assertThat(wholeItem).isEqualTo(item(shared, DESCRIPTION_ITEM_WIDTH));
         assertThat(wholeItem.length()).isGreaterThan(rightTrimmed.length());
 
-        // WHAT: the interior blank is asserted to survive BOTH regimes.
         // WHY : Assumptions: the shared text carries one interior blank, so a regime that cut at a
         //       single blank would reduce it to COFFEE under either treatment. Asserting the interior
         //       blank on both sides means the inequality above is about trailing padding alone and not
@@ -1593,14 +1556,12 @@ class StatementHtmlMapperTest {
                 rowCells.get(DESCRIPTION_INDEX),
                 rowCells.get(AMOUNT_INDEX));
 
-        // WHAT: the site count is asserted to be seven, matching four plus three.
         // WHY : Assumptions: the arithmetic closes -- grep -c "DELIMITED BY '  '" over
         //       app/cbl/CBSTM03A.CBL returns 4 for the right-trim regime, and the transaction paragraph
         //       labelled at line 675 holds 3 asserted cells -- so seven is a sum of two verified counts
         //       rather than a figure carried over from anywhere else.
         assertThat(regimeCells).hasSize(REGIME_CLEAR_SITE_COUNT).hasSize(7);
 
-        // WHAT: every one of the seven is asserted to reach 100 with BLANK bytes, never nulls.
         // WHY : Assumptions: the shortest of the seven is the transaction-identifier cell at 3 + 16 + 4
         //       = 23 characters, so 77 of its bytes are padding and the padding is most of the record.
         //       A zero-filled remainder would satisfy a length assertion and would put 77 null bytes
@@ -1616,7 +1577,6 @@ class StatementHtmlMapperTest {
             }
         });
 
-        // WHAT: the shortest cell's padding run is asserted at its exact arithmetic length.
         // WHY : Assumptions: naming the number is what makes the padding checkable. The identifier cell
         //       occupies 3 + 16 + 4 = 23 characters inside the 100 declared at line 94 of
         //       app/jcl/CREASTMT.JCL, so its padding is exactly 77 blanks; an off-by-one in either
@@ -1648,7 +1608,6 @@ class StatementHtmlMapperTest {
                 .get(CURRENT_BALANCE_INDEX);
         String embedded = renderedSpan(balanceCell, StatementHtmlMapper.CURRENT_BALANCE_CELL_PREFIX);
 
-        // WHAT: the embedded span is asserted IDENTICAL to the mask's own output.
         // WHY : Assumptions: the expectation is the mask's return value rather than a literal, so the
         //       assertion states that the assembler embedded the string it was given. This file owns
         //       only that embedding: CobolEditMaskTest owns what the mask does and
@@ -1661,7 +1620,6 @@ class StatementHtmlMapperTest {
                 .hasSize(AMOUNT_WIDTH)
                 .hasSize(13);
 
-        // WHAT: the shape is asserted: leading zeros kept, no comma, sign in the LAST position.
         // WHY : Assumptions: these three are asserted at the point of embedding because each has a
         //       plausible wrong form that still fills the cell. Inserting two grouping separators would
         //       return fifteen characters into a thirteen-character item; stripping the leading zeros
@@ -1672,7 +1630,6 @@ class StatementHtmlMapperTest {
         assertThat(embedded.charAt(AMOUNT_WIDTH - 1)).isEqualTo(' ');
         assertThat(embedded).doesNotStartWith("+").doesNotStartWith("-");
 
-        // WHAT: the negative form is asserted to place its sign in that same last position.
         // WHY : Assumptions: the sign position is only observable on a negative value, so the positive
         //       case above cannot establish it alone. A trailing hyphen is what the declaration at line
         //       113 of app/cbl/CBSTM03A.CBL specifies, and a leading one would still be thirteen
@@ -1703,7 +1660,6 @@ class StatementHtmlMapperTest {
         String embedded = renderedSpan(StatementHtmlMapper.emitTransactionRow(conformingRow())
                 .get(AMOUNT_INDEX), StatementHtmlMapper.PLAIN_CELL_PREFIX);
 
-        // WHAT: the embedded span is asserted IDENTICAL to the mask's output, suppression included.
         // WHY : Assumptions: the value arrives already edited under the declaration at line 137 of
         //       app/cbl/CBSTM03A.CBL, so the assembler's only obligation is to copy it. Asserting
         //       equality with the mask's return value rather than with a literal is what keeps this file
@@ -1716,7 +1672,6 @@ class StatementHtmlMapperTest {
         assertThat(embedded).startsWith(" ").doesNotStartWith("0");
         assertThat(embedded).doesNotContain(",");
 
-        // WHAT: the two statement regimes are asserted DIFFERENT for the one magnitude.
         // WHY : Assumptions: the two masks are both thirteen characters with a trailing sign, so an
         //       interchange is invisible to every geometry check in this file. Naming the inequality is
         //       what excludes it: the balance mask at line 113 of app/cbl/CBSTM03A.CBL preserves the
@@ -1725,7 +1680,6 @@ class StatementHtmlMapperTest {
                 .isNotEqualTo(CobolEditMask.formatStatementBalance(Money.of("250.00")))
                 .hasSameSizeAs(CobolEditMask.formatStatementBalance(Money.of("250.00")));
 
-        // WHAT: the assembler is asserted to apply NO formatting of its own to the embedded value.
         // WHY : Trade-offs: embedding already-formatted bytes rather than accepting an exact decimal and
         //       formatting here is the choice under test, and its cost is that the assembler cannot
         //       validate the number it renders. What it buys is that one rendering exists per value: a
@@ -1758,7 +1712,6 @@ class StatementHtmlMapperTest {
                         rowWithComponent(2, statementZero)).get(AMOUNT_INDEX),
                 StatementHtmlMapper.PLAIN_CELL_PREFIX);
 
-        // WHAT: the exact thirteen characters of the statement zero are asserted, then embedded.
         // WHY : Assumptions: naming all thirteen is the only assertion that excludes the four wrong
         //       forms a reader reaches for, because every one of them is shorter and every one parses as
         //       the same number: a wholly blank item, a bare decimal point with cents, an unsuppressed
@@ -1767,7 +1720,6 @@ class StatementHtmlMapperTest {
         assertThat(statementZero).isNotEqualTo("0.00").isNotEqualTo(".00").isNotEqualTo("+0.00");
         assertThat(embedded).isEqualTo(statementZero);
 
-        // WHAT: the statement zero is asserted DIFFERENT from the report's fifteen blanks.
         // WHY : Assumptions: the report's zero is blank in all fifteen positions and the statement's is
         //       not blank at all, so substituting one artifact's zero for the other's produces a cell
         //       that reads as empty where a cardholder's statement must show a zero amount. The widths
@@ -1796,7 +1748,6 @@ class StatementHtmlMapperTest {
                 item(ACCOUNT_DIGITS, ACCOUNT_ID_ITEM_WIDTH));
         List<byte[]> footer = StatementHtmlMapper.emitDocumentFooter();
 
-        // WHAT: the 22 header records are asserted in exact sequence, the heading at position eleven.
         // WHY : Assumptions: the sequence transcribed is the paragraph labelled at line 506 of
         //       app/cbl/CBSTM03A.CBL through its exit at line 554, in source order: the document opening
         //       at lines 508 to 523, a row and banner cell at 524 and 526, the account heading at 529
@@ -1830,7 +1781,6 @@ class StatementHtmlMapperTest {
                 StatementHtmlMapper.HTML_LTRS,
                 StatementHtmlMapper.HTML_L22_35);
 
-        // WHAT: repeated fragments are asserted emitted again rather than collapsed to one.
         // WHY : Assumptions: three declarations are selected more than once inside this one sequence --
         //       the row open at lines 524, 535 and 549 of app/cbl/CBSTM03A.CBL, the cell close at 531
         //       and 545, and the row close at 533 and 547. A sequence that emitted a repeated fragment
@@ -1840,7 +1790,6 @@ class StatementHtmlMapperTest {
         assertThat(headerContent).filteredOn(StatementHtmlMapper.HTML_LTDE::equals).hasSize(2);
         assertThat(headerContent).filteredOn(StatementHtmlMapper.HTML_LTRE::equals).hasSize(2);
 
-        // WHAT: the eight footer records are asserted in exact sequence, closing outermost last.
         // WHY : Assumptions: the sequence is the markup tail of the paragraph labelled at line 416 of
         //       app/cbl/CBSTM03A.CBL, at lines 439 to 454, and it is the only place the four closing
         //       declarations are selected at all. The table, body and document closes have to arrive in
@@ -1857,7 +1806,6 @@ class StatementHtmlMapperTest {
                         StatementHtmlMapper.HTML_L79,
                         StatementHtmlMapper.HTML_L80);
 
-        // WHAT: each emitted fragment record is asserted un-reindented and un-reformatted.
         // WHY : Assumptions: the strip above is applied only to compare content against the declared
         //       literal, so the unstripped record is asserted here to begin at position zero with no
         //       leading blank. A fragment emitted with one space of indentation would strip to the same
@@ -1900,7 +1848,6 @@ class StatementHtmlMapperTest {
                 .map(StatementHtmlMapperTest::text)
                 .reduce("", String::concat);
 
-        // WHAT: every supplied component's marker is asserted present in the emitted document.
         // WHY : Assumptions: the reference populates its shared storage once per card at lines 462 to
         //       485 of app/cbl/CBSTM03A.CBL and once per transaction at lines 676 to 678, and both
         //       artifacts then read those same items -- the markup paragraph at lines 560, 571, 579, 587,
@@ -1942,7 +1889,6 @@ class StatementHtmlMapperTest {
         StatementHtmlMapper.emitNameAddressAndBasicDetails(header);
         StatementHtmlMapper.emitTransactionRow(row);
 
-        // WHAT: all eight header values and all three row values are asserted unchanged after rendering.
         // WHY : Assumptions: the derived narrowed name is included among the eight, because it is the one
         //       value the record computes rather than stores and therefore the one that could change if
         //       the assembler mutated the component it derives from. Comparing before and after is what
@@ -1981,7 +1927,6 @@ class StatementHtmlMapperTest {
         second.addAll(StatementHtmlMapper.emitTransactionRow(conformingRow()));
         second.addAll(StatementHtmlMapper.emitDocumentFooter());
 
-        // WHAT: the two runs are asserted equal record by record and byte by byte.
         // WHY : Assumptions: the reference keeps no per-statement state of its own beyond the storage it
         //       re-blanks before each assembly, so two runs over one card must agree. Any disagreement
         //       here would mean the assembler consulted something outside its arguments, and a date read
@@ -1993,7 +1938,6 @@ class StatementHtmlMapperTest {
                     .isEqualTo(first.get(index));
         }
 
-        // WHAT: each returned record is asserted to be a FRESH array rather than a shared buffer.
         // WHY : Assumptions: two runs would also agree if both returned the same array, so identity is
         //       asserted separately from equality. A caller writing one record to a data set and then
         //       assembling the next must not find the first changed underneath it, which is what a
@@ -2028,7 +1972,6 @@ class StatementHtmlMapperTest {
         List<byte[]> markupCells = StatementHtmlMapper.emitNameAddressAndBasicDetails(header);
         List<byte[]> markupRow = StatementHtmlMapper.emitTransactionRow(row);
 
-        // WHAT: the three whole-item basic-detail values are asserted IDENTICAL in both artifacts.
         // WHY : Assumptions: these three reach both artifacts under the whole-item regime, so they agree
         //       character for character with no allowance at all. The account identifier keeps its nine
         //       declared blanks, the balance keeps its leading zeros and its sign position, and the
@@ -2045,7 +1988,6 @@ class StatementHtmlMapperTest {
                 .contains(header.currentBalance())
                 .contains(header.creditScore());
 
-        // WHAT: the three transaction values are asserted IDENTICAL in both artifacts.
         // WHY : Assumptions: line 679 of app/cbl/CBSTM03A.CBL writes the plain-text band from the same
         //       three items that lines 687, 699 and 711 embed in the markup, so the two renderings are
         //       the same bytes. This is what makes a per-transaction disagreement between the artifacts
@@ -2061,7 +2003,6 @@ class StatementHtmlMapperTest {
                 .contains(row.description())
                 .contains(row.amount());
 
-        // WHAT: the name and the three address values are asserted to agree APART FROM trailing blanks.
         // WHY : Assumptions: this is the one documented allowance, and it is stated as an equality after
         //       stripping rather than left as an inequality. The plain-text bands carry each item at its
         //       declared width while the markup cells cut each at its first blank pair, so the two
@@ -2081,7 +2022,6 @@ class StatementHtmlMapperTest {
                 StatementHtmlMapper.PLAIN_CELL_PREFIX).strip())
                 .isEqualTo(header.assembledAddress().strip());
 
-        // WHAT: the two artifacts' record lengths are asserted to be the second and only other allowance.
         // WHY : Assumptions: naming both allowances closes the assertion. If a third difference appeared
         //       -- a value formatted differently, a label spelled differently, a mask interchanged -- it
         //       would fall outside the two and would fail one of the equalities above rather than passing
@@ -2111,7 +2051,6 @@ class StatementHtmlMapperTest {
                 .map(StatementHtmlMapperTest::text)
                 .reduce("", String::concat);
 
-        // WHAT: the two runs are asserted identical, and the document asserted to carry no year.
         // WHY : Assumptions: an emitted year is the cheapest observable evidence of a clock read, and the
         //       reference's markup carries none -- its only dynamic values are the seven customer and
         //       account items and the three transaction items. Asserting the absence of a four-digit year
@@ -2154,7 +2093,6 @@ class StatementHtmlMapperTest {
                 StatementHtmlMapper.PLAIN_CELL_PREFIX + ASSEMBLED_ADDRESS_TEXT
                         + StatementHtmlMapper.PAIRED_BLANK + StatementHtmlMapper.CELL_SUFFIX));
 
-        // WHAT: the three whole-item cells are asserted with their DECLARED BLANKS still inside them.
         // WHY : Assumptions: that regime transfers the item complete -- the three concatenations at lines
         //       615, 622 and 629 of app/cbl/CBSTM03A.CBL are delimited by an asterisk the data never
         //       holds -- so asserting them trimmed would pass for an implementation that had started
@@ -2172,7 +2110,6 @@ class StatementHtmlMapperTest {
                         + item(CREDIT_SCORE_TEXT, CREDIT_SCORE_ITEM_WIDTH)
                         + StatementHtmlMapper.CELL_SUFFIX));
 
-        // WHAT: the absence of every character reference is asserted over the WHOLE emission.
         // WHY : Assumptions: the declared fragments carry real angle brackets -- every one of the 34
         //       literals at lines 150 to 211 of app/cbl/CBSTM03A.CBL opens or closes an element -- so a
         //       change that encoded them would leave the document rendering its own tags as visible
@@ -2290,7 +2227,6 @@ class StatementHtmlMapperTest {
                 + "&amp;lt;script&amp;gt;"
                 + StatementHtmlMapper.PAIRED_BLANK + StatementHtmlMapper.CELL_SUFFIX));
 
-        // WHAT: the raw metacharacters are asserted absent from the RENDERED VALUE alone.
         // WHY : Assumptions: the record's own opening literal and closing tag are declared markup and
         //       legitimately carry angle brackets -- the 26 characters declared at lines 218 and 219 of
         //       app/cbl/CBSTM03A.CBL and the 4 the concatenation supplies at line 565 -- so extracting
@@ -2603,7 +2539,6 @@ class StatementHtmlMapperTest {
         assertThat(StatementHtmlMapper.emitDocumentFooter())
                 .hasSize(StatementHtmlMapper.DOCUMENT_FOOTER_LINE_COUNT);
 
-        // WHAT: the four counts are asserted to sum to the reference's own total of write sites.
         // WHY : Assumptions: 22 + 34 + 11 + 8 is 75, and grep -c 'WRITE FD-HTMLFILE-REC' over
         //       app/cbl/CBSTM03A.CBL reports exactly 75. The two numbers are reached independently, so
         //       their agreement is what shows no write site has been dropped from any of the four
@@ -2613,5 +2548,72 @@ class StatementHtmlMapperTest {
                 + StatementHtmlMapper.TRANSACTION_ROW_LINE_COUNT
                 + StatementHtmlMapper.DOCUMENT_FOOTER_LINE_COUNT)
                 .isEqualTo(75);
+    }
+
+    /**
+     * The five published entity constants are the spellings the shared encoder actually produces.
+     *
+     * <p>Purpose: this artifact declares its entity vocabulary publicly, and those five constants are
+     * asserted by a dozen cases in this class. Since the replacement itself is now performed by
+     * {@link HtmlTextEncoder} rather than by a table in the mapper, the constants would otherwise be a
+     * second statement of the same fact -- correct today and free to drift the moment the shared
+     * encoder changed a spelling. This case makes them a MIRROR that fails loudly instead.</p>
+     *
+     * <p>Refactoring Rationale: the mapper used to hold its own five-character replacement table, and
+     * the two tables were byte-identical by coincidence rather than by construction: nothing compared
+     * them, so a correction applied to the shared encoder would have left this artifact emitting the
+     * old spelling. The table here has been removed and the encoding delegated; what remains is the
+     * published vocabulary, and this case is what binds it to the implementation.</p>
+     *
+     * <p>Assumptions: the encoder is called on the bare character rather than through a cell, because
+     * the point of comparison is the SPELLING and a cell would add prefix, padding and record framing
+     * that the other cases in this class already cover.</p>
+     *
+     * <p>This test takes no parameter, returns no value and raises nothing.</p>
+     */
+    @Test
+    @DisplayName("the published entity constants mirror the shared encoder's own spellings")
+    void thePublishedEntityConstantsMirrorTheSharedEncoder() {
+        assertThat(HtmlTextEncoder.encode("&"))
+                .as("the ampersand must be encoded first and spelled as this artifact publishes it")
+                .isEqualTo(StatementHtmlMapper.AMPERSAND_ENTITY);
+        assertThat(HtmlTextEncoder.encode("<"))
+                .isEqualTo(StatementHtmlMapper.LESS_THAN_ENTITY);
+        assertThat(HtmlTextEncoder.encode(">"))
+                .isEqualTo(StatementHtmlMapper.GREATER_THAN_ENTITY);
+        assertThat(HtmlTextEncoder.encode("\""))
+                .isEqualTo(StatementHtmlMapper.QUOTE_ENTITY);
+        assertThat(HtmlTextEncoder.encode("'"))
+                .as("the apostrophe is the numeric reference, not the named one, because this artifact"
+                        + " declares no document type that would guarantee the named form")
+                .isEqualTo(StatementHtmlMapper.APOSTROPHE_ENTITY);
+    }
+
+    /**
+     * The shared encoder replaces exactly the five characters this artifact publishes and no others.
+     *
+     * <p>Assumptions: the closure is asserted over the whole printable US-ASCII range this artifact
+     * admits, so a shared encoder that began encoding a sixth character would fail here. That matters
+     * to a fixed-length record: an unannounced replacement would expand a cell by up to five
+     * characters and displace every closing tag after it, and the expansion budget this class computes
+     * is sized from the five it knows about.</p>
+     *
+     * <p>This test takes no parameter, returns no value and raises nothing.</p>
+     */
+    @Test
+    @DisplayName("the shared encoder replaces exactly the five characters this artifact publishes")
+    void theSharedEncoderReplacesExactlyTheFivePublishedCharacters() {
+        List<String> replaced = new ArrayList<>();
+        for (char character = StatementHtmlMapper.LOWEST_RENDERABLE_CHARACTER;
+                character < StatementHtmlMapper.LOWEST_REFUSED_HIGH_CHARACTER; character++) {
+            String single = String.valueOf(character);
+            if (!HtmlTextEncoder.encode(single).equals(single)) {
+                replaced.add(single);
+            }
+        }
+
+        assertThat(replaced)
+                .as("a sixth replaced character would expand a cell this artifact has already sized")
+                .containsExactlyInAnyOrder("&", "<", ">", "\"", "'");
     }
 }

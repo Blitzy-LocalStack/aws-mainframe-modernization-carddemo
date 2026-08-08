@@ -10,6 +10,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
+import com.carddemo.common.security.JwtRoleConverter;
+import com.carddemo.reference.config.SecurityConfig;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.yaml.snakeyaml.Yaml;
@@ -25,8 +27,9 @@ import org.yaml.snakeyaml.Yaml;
  *
  * <p>Refactoring Rationale: each assertion below corresponds to a contradiction a review found
  * between two of those three. The contract required a monotonically incremented version that no
- * table carried; it declared a group requirement on reads that the chain does not enforce and could
- * not enforce without refusing every administrator; it constrained the date mask to an enumeration
+ * table carried; it declared a requirement on reads WEAKER than the chain enforces, naming only
+ * authentication after the read rule had been hardened to demand a recognised group; it constrained
+ * the date mask to an enumeration
  * while promising to ANSWER an unrecognised mask rather than refuse it; it described the reference
  * maintenance batch as all-or-nothing although the baseline program soft-rejects a record and
  * continues; and its ten paging examples all failed the pattern it publishes for them. None of those
@@ -44,16 +47,17 @@ class ReferenceWireContractTest {
     private static final String MIGRATION_RESOURCE = "/db/migration/V1__reference.sql";
 
     /**
-     * The requirement value every read operation declares.
+     * The value every read operation declares, taken from the converter rather than restated.
      *
-     * <p>Assumptions: this is a REQUIREMENT and not a group name. The two group names remain
-     * {@code carddemo-admin} and {@code carddemo-user}; this value says that any accepted token
-     * suffices, which is what {@code anyRequest().authenticated()} enforces.</p>
+     * <p>Assumptions: on an operation this names a requirement satisfied by EITHER recognised group,
+     * which is what {@link SecurityConfig#businessAccess()} enforces on the read route. Reading it from
+     * {@link JwtRoleConverter} rather than writing the literal is what stops the document and the
+     * converter drifting apart while this test keeps passing.</p>
      */
-    private static final String AUTHENTICATED = "authenticated";
+    private static final String USER_AUTHORITY = JwtRoleConverter.USER_AUTHORITY;
 
     /** The group every write operation declares and the filter chain requires. */
-    private static final String ADMIN_AUTHORITY = "carddemo-admin";
+    private static final String ADMIN_AUTHORITY = JwtRoleConverter.ADMIN_AUTHORITY;
 
     /** The operation-level field carrying each operation's authority requirement. */
     private static final String AUTHORITY_FIELD = "x-required-authority";
@@ -218,17 +222,20 @@ class ReferenceWireContractTest {
         // WHY : Assumptions: the chain restricts by HTTP METHOD and not by path, so the expected
         //       value of this field is computable from the method alone -- which is why the
         //       assertion can be exhaustive rather than a table somebody has to extend. The chain is
-        //       four hasAuthority matchers for the four write methods followed by
-        //       anyRequest().authenticated(), so a write declares the administrative group and
-        //       everything else declares only that a token was accepted.
-        // WHY : Refactoring Rationale: the reads previously declared carddemo-user, which the chain
-        //       does not require. Enforcing it would have been worse than declaring it: the shared
-        //       converter builds no hierarchy, so a token carrying only the administrative group
-        //       would have been refused every read, and the baseline refuses an administrator
-        //       nothing.
+        //       four hasAuthority matchers for the four write methods followed by a read rule of
+        //       access(businessAccess()) and a denyAll() catch-all, so a write declares the
+        //       administrative group and every read declares the value either group satisfies.
+        // WHY : Refactoring Rationale: the reads previously declared authenticated, and this comment
+        //       previously justified it -- that carddemo-user could not be enforced because the shared
+        //       converter builds no hierarchy, so an administrator-only token would be refused every
+        //       read. That premise was removed when the read rule became businessAccess(), which is
+        //       hasAnyAuthority over BOTH groups and therefore admits an administrator-only token. The
+        //       document was left behind, publishing a requirement no rule enforces and one WEAKER than
+        //       the chain applies: a consumer honouring authenticated would admit a token carrying
+        //       neither group, which is the missing-authorization defect the hardening removed.
         operations().forEach((label, operation) -> {
             String method = label.substring(0, label.indexOf(' '));
-            String expected = WRITE_METHODS.contains(method) ? ADMIN_AUTHORITY : AUTHENTICATED;
+            String expected = WRITE_METHODS.contains(method) ? ADMIN_AUTHORITY : USER_AUTHORITY;
             assertThat(operation.get(AUTHORITY_FIELD))
                     .as("%s must declare %s", label, expected)
                     .isEqualTo(expected);
@@ -236,21 +243,36 @@ class ReferenceWireContractTest {
     }
 
     /**
-     * Verifies that the authority model separates a requirement value from a group name.
+     * Verifies that the authority model publishes exactly the vocabulary the chain enforces.
+     *
+     * <p>Assumptions: {@code groupValues} is compared against
+     * {@link SecurityConfig#BUSINESS_AUTHORITIES} -- the very list the read rule is built from -- rather
+     * than against two literals, so the document cannot claim a vocabulary the chain does not admit.
+     * That constant is published for exactly this purpose.</p>
      */
     @Test
-    @DisplayName("the authority model separates requirements from group names")
-    void theAuthorityModelSeparatesRequirementsFromGroupNames() {
+    @DisplayName("the authority model publishes the vocabulary the filter chain enforces")
+    void theAuthorityModelPublishesTheVocabularyTheFilterChainEnforces() {
         Map<String, Object> model = mapping(contract(), "x-authority-model");
 
         assertThat(model.get("values"))
                 .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.list(String.class))
-                .containsExactlyInAnyOrder(AUTHENTICATED, ADMIN_AUTHORITY);
+                .as("the admitted values are the two the sibling contracts publish, and the withdrawn"
+                        + " third value must not return: nothing in this chain requires only"
+                        + " authentication")
+                .containsExactlyInAnyOrder(USER_AUTHORITY, ADMIN_AUTHORITY);
         assertThat(model.get("groupValues"))
                 .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.list(String.class))
-                .as("the group vocabulary is the migrated form of the two user types and is closed")
-                .containsExactlyInAnyOrder(ADMIN_AUTHORITY, "carddemo-user");
-        assertThat(model).containsKey("authenticatedMeans");
+                .as("the group vocabulary is the migrated form of the two user types, is closed, and is"
+                        + " the list SecurityConfig.businessAccess() is built from")
+                .containsExactlyInAnyOrderElementsOf(SecurityConfig.BUSINESS_AUTHORITIES);
+        assertThat(model)
+                .as("the read value states a requirement rather than the absence of one, so the model"
+                        + " must say what it means")
+                .containsKey("userMeans");
+        assertThat(model)
+                .as("the prose for the withdrawn value must go with it")
+                .doesNotContainKey("authenticatedMeans");
     }
 
     /**

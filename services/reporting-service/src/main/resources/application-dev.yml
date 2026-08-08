@@ -213,23 +213,39 @@ management:
       show-details: never
       show-components: never
 
-      # WHY : Assumptions: the role is named explicitly rather than left unset.
-      #       Unset, the framework treats ANY authenticated caller as authorized,
-      #       and an authenticated caller here is any holder of a valid user-pool
-      #       token -- an ordinary cardholder included, and a cardholder is not an
-      #       operator. The value is the authority JwtRoleConverter publishes for
-      #       the administrative Cognito group, named there as the constant
-      #       ADMIN_AUTHORITY so the two cannot drift apart.
-      #       Assumptions: the actuator's authorization test delegates to the
-      #       servlet role check, which prepends the framework's role prefix to a
-      #       value that does not already carry one, while this system's
-      #       authorities are the provider's group names with NO prefix. The
-      #       consequence is stated rather than glossed: this arrangement fails
-      #       CLOSED. Until the resource-server configuration grants a caller the
-      #       named role, the group below discloses the status word and nothing
-      #       else -- the same answer the aggregate path gives, and the safe
-      #       direction to fail in.
-      roles: carddemo-admin
+      # WHY : (1) Refactoring Rationale: a `roles: carddemo-admin` entry stood here
+      #       and is DELETED. The note that accompanied it was accurate about the
+      #       mechanism and wrong to leave it in place: the actuator's
+      #       authorization test delegates to the servlet role check, which
+      #       prepends the framework's ROLE_ prefix to a value that does not
+      #       already carry one, while this system's authorities are the
+      #       provider's group names with NO prefix. `carddemo-admin` therefore
+      #       tested for an authority `ROLE_carddemo-admin` that nothing in this
+      #       system grants, so the group failed closed for EVERY caller -- an
+      #       administrator included. A setting that can never be satisfied is not
+      #       a safe default; it is a gate that looks configured and denies the one
+      #       caller it was meant to admit, which is why the group below existed
+      #       and could not be read.
+      #       (2) Assumptions: the gate now lives where the authority is compared
+      #       as it is published -- SecurityConfig.diagnosticAccess() requires
+      #       JwtRoleConverter.ADMIN_AUTHORITY on the exact path
+      #       /actuator/health/diagnostics, declared ahead of the permitted health
+      #       namespace. So an anonymous caller is refused 401 and an ordinary
+      #       cardholder 403 before the endpoint is reached, and only an
+      #       administrator arrives.
+      #       (3) Trade-offs: with this key absent the endpoint's own test reduces
+      #       to "is the principal authenticated", which on its own would admit any
+      #       token holder. That is accepted because the chain rule above it admits
+      #       nobody else, and it is retained rather than replaced because it keeps
+      #       one property worth having: if the chain rule were ever widened, an
+      #       ANONYMOUS caller would still receive the bare status word rather than
+      #       the contributor detail. Alternatives Considered: registering a
+      #       GrantedAuthorityDefaults bean with an empty prefix so that the
+      #       servlet role check compares the unprefixed authority and the key
+      #       could stay as written. Rejected because it changes what `hasRole`
+      #       means for the whole service in order to repair one path, and this
+      #       module's authorities are deliberately expressed in the authority
+      #       register throughout.
 
       group:
         # WHY : (1) Assumptions: the contributors are the ones THIS module

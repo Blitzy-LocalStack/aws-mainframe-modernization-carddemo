@@ -6,13 +6,12 @@ import com.carddemo.authorization.domain.PendingAuthDetail;
 import com.carddemo.authorization.domain.PendingAuthDetailKey;
 import com.carddemo.authorization.dto.FraudMarkRequest;
 import com.carddemo.authorization.dto.FraudMarkResponse;
+import com.carddemo.authorization.mapper.AuthFraudMapper;
 import com.carddemo.authorization.mapper.PendingAuthViewMapper;
 import com.carddemo.authorization.repository.AuthFraudRepository;
 import com.carddemo.authorization.repository.PendingAuthDetailRepository;
 import com.carddemo.authorization.repository.PendingAuthSummaryRepository;
-import java.time.Clock;
 import java.time.LocalDate;
-import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.NoSuchElementException;
 import java.util.Objects;
@@ -66,69 +65,6 @@ public class FraudMarkingService {
             DateTimeFormatter.ofPattern("MM/dd/yy");
 
     /**
-     * The number of characters the acquirer-supplied original date carries.
-     *
-     * <p>Assumptions: six, from {@code PA-AUTH-ORIG-DATE PIC X(06)} at {@code cpy/CIPAUDTY.cpy} L22, and
-     * the three two-character slices the reference takes of it at {@code cbl/COPAUS2C.cbl} L103 to
-     * L105.</p>
-     */
-    private static final int ORIG_DATE_LENGTH = 6;
-
-    /**
-     * The century a two-digit year of 70 or above resolves into.
-     */
-    private static final int TWENTIETH_CENTURY = 1900;
-
-    /**
-     * The century a two-digit year below 70 resolves into.
-     */
-    private static final int TWENTY_FIRST_CENTURY = 2000;
-
-    /**
-     * The two-digit year at and above which the earlier century is chosen.
-     *
-     * <p>Refactoring Rationale: the pivot is 70, and it is stated here because the migration's schema
-     * comment requires it to be named exactly once, "outside the schema", so that a stored value is
-     * unambiguous rather than left for every reader to guess. It is not invented: the reference write
-     * hands its assembled string to Db2's {@code TIMESTAMP_FORMAT} under the mask
-     * {@code 'YY-MM-DD HH24.MI.SSNNNNNN'} at {@code cbl/COPAUS2C.cbl} L171 to L172 and L227 to L228, and
-     * that function's documented window for a two-digit year is 1970 through 2069. Choosing any other
-     * pivot would make the target's composed timestamp differ from the reference's for the same input,
-     * which is the one thing this key must not do -- it is the primary key both systems address the row
-     * by.
-     *
-     * <p>Assumptions: the pivot applies to THIS field only and must not be reused for the card expiry.
-     * The original date is a PAST value while an expiry is a FUTURE one, so no single pivot serves both;
-     * the authorization fixture contract test records that asymmetry independently.</p>
-     */
-    private static final int CENTURY_PIVOT = 70;
-
-    /**
-     * The divisor that separates the millisecond component from the clock half of the decoded time key.
-     *
-     * <p>Assumptions: one thousand, because the writer multiplies the clock time by one thousand and adds
-     * the milliseconds at {@code cbl/COPAUA0C.cbl} L871 to L872.</p>
-     */
-    private static final int MILLIS_PER_SECOND = 1000;
-
-    /**
-     * The divisor that separates one two-digit clock field from the next.
-     *
-     * <p>Assumptions: one hundred, and NOT sixty. The clock half of this key is the POSITIONAL form
-     * {@code HHMMSS} -- {@code cbl/COPAUA0C.cbl} L868 moves the six characters {@code FORMATTIME}
-     * produced into a numeric field, so the digits sit side by side -- and the reference reader splits it
-     * exactly that way, taking two characters at a time at {@code cbl/COPAUS2C.cbl} L108 to L110 and
-     * three for the milliseconds at L111. Dividing by sixty would read 104530 as 29 hours rather than as
-     * half past ten, and the composed key would then name a different row than the reference writes.</p>
-     */
-    private static final int CLOCK_FIELD_MODULUS = 100;
-
-    /**
-     * The number of nanoseconds in one millisecond.
-     */
-    private static final int NANOS_PER_MILLI = 1_000_000;
-
-    /**
      * The authorization rows, read under a pessimistic lock and updated in place.
      */
     private final PendingAuthDetailRepository details;
@@ -156,29 +92,30 @@ public class FraudMarkingService {
     private final PendingAuthViewMapper mapper;
 
     /**
-     * The clock both report dates are taken from.
-     */
-    private final Clock clock;
-
-    /**
-     * Builds the service over its two repositories, the view mapper and the clock.
+     * Builds the service over its three repositories and the view mapper.
+     *
+     * <p>Refactoring Rationale: a {@link java.time.Clock} was injected here and is not any more. It
+     * supplied the fraud report date, which the reference system takes from the DATABASE server rather
+     * than from the application -- so the clock was answering a question it was the wrong source for,
+     * and the date now comes from {@link AuthFraudRepository#currentDate()}. The dependency is removed
+     * rather than left unused, because an injected clock is exactly what a later reader would reach for
+     * when a second date was needed, which is how the divergence arose the first time.</p>
      *
      * @param details the authorization repository; must not be {@code null}
      * @param summaries the parent-summary repository the customer identifier is read from; must not be
      *     {@code null}
-     * @param fraudRows the fraud-row repository; must not be {@code null}
+     * @param fraudRows the fraud-row repository, which also supplies the database's report date; must
+     *     not be {@code null}
      * @param mapper the view mapper that redeems the path selector; must not be {@code null}
-     * @param clock the clock the report date is read from; must not be {@code null}
      * @throws NullPointerException if any argument is {@code null}
      */
     public FraudMarkingService(PendingAuthDetailRepository details,
             PendingAuthSummaryRepository summaries, AuthFraudRepository fraudRows,
-            PendingAuthViewMapper mapper, Clock clock) {
+            PendingAuthViewMapper mapper) {
         this.details = Objects.requireNonNull(details, "details must not be null");
         this.summaries = Objects.requireNonNull(summaries, "summaries must not be null");
         this.fraudRows = Objects.requireNonNull(fraudRows, "fraudRows must not be null");
         this.mapper = Objects.requireNonNull(mapper, "mapper must not be null");
-        this.clock = Objects.requireNonNull(clock, "clock must not be null");
     }
 
     /**
@@ -239,7 +176,16 @@ public class FraudMarkingService {
         //       times. Both values now live in one schema written by one local transaction, so a second
         //       clock read could only introduce that disagreement; the register entry records why the
         //       collapse is accepted and what it costs.
-        LocalDate today = LocalDate.now(this.clock);
+        // WHY : Refactoring Rationale: the date comes from the DATABASE and it used to come from an
+        //       injected application clock. AuthFraudMapper.toFraudRow states the requirement in its own
+        //       contract -- "the report date as the DATABASE supplies it, never as an application clock
+        //       reads it" -- because the reference system dates both of its writes from the database
+        //       server, at cbl/COPAUS2C.cbl L194 and L225. The two sources are not interchangeable: a
+        //       container's clock, its configured zone and the database session's zone are three
+        //       independent settings, so a report raised either side of midnight could be dated a day
+        //       apart from the value the reference would have written, on exactly the field an
+        //       investigator filters by.
+        LocalDate today = this.fraudRows.currentDate();
         String segmentDate = SEGMENT_REPORT_DATE.format(today);
 
         // WHY : Assumptions: the two rows are written in the reference ORDER -- the fraud row first, then
@@ -252,8 +198,14 @@ public class FraudMarkingService {
         boolean created = writeFraudRow(detail, key, request, today);
         applyStateToDetail(detail, request.action(), segmentDate);
 
-        return new FraudMarkOutcome(
-                created ? FraudMarkResponse.added() : FraudMarkResponse.updated(), created);
+        // WHY : Refactoring Rationale: the response body is projected by the mapper rather than chosen
+        //       here with a conditional over the two factories. The two are equivalent today, and the
+        //       reason for the change is that the mapper is where the created-versus-replaced decision is
+        //       already documented against the two sentences the reference reports at
+        //       cbl/COPAUS2C.cbl L201 and L232 -- so one type now decides both which sentence a caller
+        //       reads and which status the contract publishes for it, instead of that pairing living in
+        //       one place and being re-derived in another.
+        return new FraudMarkOutcome(AuthFraudMapper.markResponse(created), created);
     }
 
     /**
@@ -271,8 +223,16 @@ public class FraudMarkingService {
     private boolean writeFraudRow(PendingAuthDetail detail, PendingAuthDetailKey key,
             FraudMarkRequest request, LocalDate today) {
 
-        LocalDateTime authTs = composeAuthTimestamp(detail);
-        AuthFraudKey fraudKey = new AuthFraudKey(detail.getCardNum(), authTs);
+        // WHY : Refactoring Rationale: the key is composed by the mapper and it used to be composed here.
+        //       AuthFraudMapper.fraudRowKey delegates the timestamp half to
+        //       PendingAuthDetailMapper.authTimestamp, which is the one transcription of the reference
+        //       composition at cbl/COPAUS2C.cbl L103 to L111 -- the acquirer-supplied originating date
+        //       sliced year, month then day, and the server-derived time key divided out of its
+        //       positional form. This method held a third copy of that arithmetic, with its own century
+        //       pivot and its own field moduli, and two copies of a key composition are two rows that can
+        //       be addressed: a divergence in either half would not fail, it would read and write a real
+        //       but different authorization's fraud row.
+        AuthFraudKey fraudKey = AuthFraudMapper.fraudRowKey(detail);
         Optional<AuthFraud> existing = this.fraudRows.findById(fraudKey);
 
         if (existing.isPresent()) {
@@ -281,7 +241,12 @@ public class FraudMarkingService {
             //       snapshot the row took when it was first inserted is deliberately left as it was. A row
             //       replaced here therefore still describes the authorization as it stood at the first
             //       report, which is the property that makes taking the snapshot worth anything.
-            existing.get().applyState(request.action(), today);
+            // WHY : Refactoring Rationale: the transition goes through the mapper, which applies the same
+            //       two columns through the entity's own operation and additionally refuses an action
+            //       outside the closed domain before touching the row. Calling the entity directly here
+            //       left the create path and the replace path reaching the row through two different
+            //       types, so a rule added to one would silently not apply to the other.
+            AuthFraudMapper.applyFraudState(existing.get(), request, today);
             return false;
         }
 
@@ -290,8 +255,16 @@ public class FraudMarkingService {
                         "the authorization's account has no pending-authorization summary, so the fraud"
                                 + " row's customer identifier cannot be read"))
                 .getCustomerId();
-        this.fraudRows.save(AuthFraud.from(detail, authTs, key.getAccountId(), customerId,
-                request.action(), today));
+
+        // WHY : Refactoring Rationale: the row is projected by the mapper, where it used to be built
+        //       through the entity's own factory with the account identifier passed in beside the
+        //       authorization. The mapper reads that identifier from the authorization's OWN key instead
+        //       of accepting it, so the row cannot be written naming an account the authorization does not
+        //       belong to -- an argument that was available to be passed wrongly is now not available at
+        //       all. The projection also carries the documentation of which twenty-four columns have
+        //       exactly one legitimate source, which is the knowledge this call site was silently
+        //       depending on.
+        this.fraudRows.save(AuthFraudMapper.toFraudRow(detail, request, customerId, today));
         return true;
     }
 
@@ -334,83 +307,6 @@ public class FraudMarkingService {
         //       cbl/COPAUS2C.cbl L95-L101 does by formatting the date and moving it in unconditionally,
         //       before either its insert path or its update path is chosen.
         detail.applyFraudMark(action, segmentDate);
-    }
-
-    /**
-     * Composes the fraud key's timestamp from the authorization's original date and its time key.
-     *
-     * <p>Assumptions: the composition is the reference one and its two halves come from DIFFERENT sources,
-     * which is worth knowing before anyone treats the result as a single trustworthy instant. The date
-     * part is sliced year, month then day out of the ACQUIRER-supplied original date at
-     * {@code cbl/COPAUS2C.cbl} L103 to L105; the time part is the SERVER-derived key, decoded from its
-     * nines complement at L107 and split into hours, minutes, seconds and milliseconds at L108 to L111.
-     * The key this repository stores is already decoded, so no complement arithmetic is repeated here.</p>
-     *
-     * <p>Assumptions: the three low fractional digits are always zero BY CONSTRUCTION and not by accident.
-     * The reference assembles twenty-three characters ending in a three-digit millisecond field followed
-     * by a literal {@code '000'} at {@code cbl/COPAUS2C.cbl} L38 to L51, and reads them back as six
-     * fractional digits, so half the declared microsecond precision is literal padding. Nobody computing
-     * a duration from two such values should read precision into them.</p>
-     *
-     * @param detail the authorization being marked; never {@code null}
-     * @return the composed timestamp forming the second half of the fraud row's key, never {@code null}
-     * @throws IllegalStateException if the original date is absent, is not six characters, or does not
-     *     parse as a calendar date, or if the time key is absent
-     */
-    private static LocalDateTime composeAuthTimestamp(PendingAuthDetail detail) {
-        String origDate = detail.getAuthOrigDate();
-        Integer timeKey = detail.getId().getAuthTime();
-
-        // WHY : Assumptions: an unparseable original date is a 500 and not a 400, and it IS reachable: the
-        //       migration records that this column is acquirer-supplied and must tolerate a value that is
-        //       blank or will not parse, which is why it stores characters rather than a date. The caller
-        //       of this operation supplied none of it, so reporting the condition as the caller's mistake
-        //       would be wrong; the reference outcome is the same class of failure, since its own composed
-        //       string reaches Db2's conversion function and comes back as a system error that the caller
-        //       rolls back and reports at cbl/COPAUS1C.cbl L256 to L258.
-        if (origDate == null || origDate.length() != ORIG_DATE_LENGTH) {
-            throw new IllegalStateException(
-                    "the authorization carries no six-character original date, so the fraud row's"
-                            + " composed key cannot be built");
-        }
-        Objects.requireNonNull(timeKey, "the authorization carries no authorization time key");
-
-        int year;
-        int month;
-        int day;
-        try {
-            int twoDigitYear = Integer.parseInt(origDate.substring(0, 2));
-            year = (twoDigitYear >= CENTURY_PIVOT ? TWENTIETH_CENTURY : TWENTY_FIRST_CENTURY)
-                    + twoDigitYear;
-            month = Integer.parseInt(origDate.substring(2, 4));
-            day = Integer.parseInt(origDate.substring(4, ORIG_DATE_LENGTH));
-        } catch (NumberFormatException malformed) {
-            throw new IllegalStateException(
-                    "the authorization's original date is not six digits, so the fraud row's composed"
-                            + " key cannot be built");
-        }
-
-        int composed = timeKey.intValue();
-        int millis = composed % MILLIS_PER_SECOND;
-        int clock = composed / MILLIS_PER_SECOND;
-        int second = clock % CLOCK_FIELD_MODULUS;
-        clock /= CLOCK_FIELD_MODULUS;
-        int minute = clock % CLOCK_FIELD_MODULUS;
-        int hour = clock / CLOCK_FIELD_MODULUS;
-
-        try {
-            return LocalDateTime.of(year, month, day, hour, minute, second,
-                    millis * NANOS_PER_MILLI);
-        } catch (java.time.DateTimeException impossible) {
-            // WHY : Assumptions: this catches a date or time that parsed as digits but names no instant --
-            //       month 13, day 31 of February, hour 24. The request body names no key member at
-            //       all -- the sealed selector is the row's only address -- and the original date is
-            //       stored data no constraint in this context has ever seen, so the composition is the
-            //       first place its impossibility can be discovered.
-            throw new IllegalStateException(
-                    "the authorization's original date and time key name no instant, so the fraud row's"
-                            + " composed key cannot be built");
-        }
     }
 
     /**

@@ -48,56 +48,87 @@
  * gate for it would attribute the obligation to a sentence that does not carry
  * it.
  *
- * <h2>The closed inventory: five files here, four of them tests</h2>
+ * <h2>The closed inventory: six files here, five of them tests</h2>
  *
- * <p>Target contract: this directory is to hold exactly five Java files and no
- * subdirectory. Four are test classes, one per migrated program, and the fifth
- * is this charter. Each line count below was counted in the file itself rather
- * than carried over from a summary, and each transaction identifier and screen
- * name is quoted from the transaction inventory in the repository root
- * {@code README.md}:
+ * <p>This directory holds exactly six Java files and no subdirectory. Five are
+ * test classes and the sixth is this charter. Each line count below was
+ * counted in the file itself rather than carried over from a summary, and
+ * each transaction identifier and screen name is quoted from the transaction
+ * inventory in the repository root {@code README.md}:
+ *
+ * <pre>
+ * this directory: 6 java files = 5 tests + 1 charter
+ * </pre>
+ *
+ * <p>Refactoring Rationale: the marker line above was added because "exactly six
+ * Java files" was a closed-set claim that nothing checked, and a sixth test
+ * authored without an entry below would have made it silently false. The line and
+ * the class names under it are compared with this directory on every build by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
+ * so the inventory cannot drift from the directory without failing.</p>
  *
  * <ul>
- *   <li>{@code TransactionViewServiceTest} pins {@code app/cbl/COTRN01C.cbl},
- *       330 lines, the "Transaction View" single-record detail screen,
- *       transaction {@code CT01}.</li>
- *   <li>{@code TransactionListServiceTest} pins {@code app/cbl/COTRN00C.cbl},
- *       699 lines, the "Transaction List" paged browse screen, transaction
- *       {@code CT00}. AUTHORED, and partially: it carries the cursor-binding
- *       cases -- that a page's boundary tokens open for the subject they were
- *       issued to and for no other, and that a subject-less binding is refused
- *       at the entry of the method -- and does NOT yet carry the five boundary
- *       messages, the eleventh-row probe or the display reversal. The class
- *       records that split in its own header, so a reader meeting a green run
- *       does not read it as full parity coverage of the paragraph.</li>
- *   <li>{@code TransactionAddServiceTest} pins {@code app/cbl/COTRN02C.cbl},
- *       783 lines, the "Transaction Add" capture screen, transaction
- *       {@code CT02}.</li>
- *   <li>{@code BillPaymentServiceTest} pins {@code app/cbl/COBIL00C.cbl}, 572
- *       lines, the "Bill Payment" balance-affecting payment screen,
- *       transaction {@code CB00}.</li>
+ *   <li>{@code TransactionViewServiceTest} pins
+ *       {@code app/cbl/COTRN01C.cbl}, 330 lines, the "Transaction View"
+ *       single-record detail screen, transaction {@code CT01}.</li>
+ *   <li>{@code TransactionListServiceTest} pins
+ *       {@code app/cbl/COTRN00C.cbl}, 699 lines, the "Transaction List" paged
+ *       browse screen, transaction {@code CT00}. It holds the four properties
+ *       that decide whether a keyset browse is faithful -- the strictly-past
+ *       forward step, the strictly-before backward step with its display
+ *       reversal, the surplus eleventh row that answers forward availability
+ *       and is then discarded, and the mid-browse insert that is neither
+ *       skipped nor served twice -- together with the five verbatim boundary
+ *       strings and the selector that chooses between them.</li>
+ *   <li>{@code TransactionListServiceCursorBindingTest} pins the one
+ *       property of that same browse which a token holder can attack: whose
+ *       cursor a page's boundary tokens open for. Alternatives Considered:
+ *       folding these cases into the class above, which is where they began.
+ *       They were moved out because the sealer they exercise is the one
+ *       collaborator held REAL, so a failure here means the cursor seal has
+ *       weakened while a failure there means a paging paragraph has been
+ *       mistranscribed; with both in one class the class name no longer
+ *       distinguishes those two very different diagnoses.</li>
+ *   <li>{@code TransactionAddServiceTest} pins
+ *       {@code app/cbl/COTRN02C.cbl}, 783 lines, the "Transaction Add" capture
+ *       screen, transaction {@code CT02}.</li>
+ *   <li>{@code BillPaymentEvaluationOrderTest} pins
+ *       {@code app/cbl/COBIL00C.cbl}, 572 lines, the "Bill Payment"
+ *       balance-affecting payment screen, transaction {@code CB00}.
+ *       Assumptions: it is named for the property it holds rather than for the
+ *       class it exercises, because the property is an ORDER -- the reference
+ *       settles the account identifier before it reaches its confirmation
+ *       evaluation, so a submission deficient in both is answered for the
+ *       identifier and not the confirmation. A name of the form
+ *       {@code BillPaymentServiceTest} would have promised whole-class coverage
+ *       that this file does not carry.</li>
  * </ul>
  *
- * <p>Assumptions: that list is a TARGET CONTRACT and not a measurement of the
- * directory, and the distinction is declared rather than left to be inferred.
- * This charter was authored ahead of the classes it governs, for the reason the
- * file-set check further down gives: a charter has to be present before a
- * sibling class in this directory can clear the {@code validate} phase, so this
- * file landed first and the four test classes follow it. A class named above
- * that has no file is therefore PLANNED, not missing, and the property a reader
- * should check is a listing of this directory rather than a count quoted here.
- * The same holds for the four production classes named in the next section:
- * they are the production package's declared target, and its own charter is
- * where their status is recorded.
+ * <p>Assumptions: that list is a measurement of the directory as well as the
+ * closed set this charter admits, and the two now agree. Each entry names a
+ * file that exists, and the property each holds is stated at the entry
+ * rather than in a blanket sentence, so a reader meeting a green run can
+ * tell what the run proved from what it did not reach.
  *
- * <p>Assumptions: as this file stands, exactly ONE of the four is AUTHORED and
- * it is marked so at its entry above; the remaining three are PLANNED. The
- * per-entry marking is deliberate rather than a blanket sentence, because a
- * blanket "all planned" preamble sitting above a directory that already holds a
- * class is a false statement a reader cannot correct from the charter alone --
- * and this charter's own {@code Refactoring Rationale} for single-sourcing
- * applies to itself. Each marker is to be updated in the same change that lands
- * or removes the class it describes.
+ * <p>Refactoring Rationale: this passage previously declared the list a target
+ * contract rather than a measurement, recorded that exactly one of four
+ * classes was authored, and named a fifth-file canon with
+ * {@code BillPaymentServiceTest} in place of the class that landed. All of
+ * it is superseded and is replaced rather than annotated. The declaration
+ * was correct discipline while the directory was empty -- a charter has to
+ * exist before a sibling class in the same directory can clear the
+ * {@code validate} phase, so this file necessarily landed first -- but
+ * keeping the disclaimer once the classes arrived inverted its purpose: it
+ * went on telling a reader to distrust an inventory that had become
+ * accurate, and it kept a class name that no file carries, which is the one
+ * kind of error a reader cannot correct from the charter alone.
+ *
+ * <p>Assumptions: the four production classes named in the next section are
+ * likewise present, and their own charter at
+ * {@code services/transaction-service/src/main/java/com/carddemo/transaction/service/package-info.java}
+ * remains the authority for their status. It is cited rather than restated,
+ * because two statements of one contract drift apart and a reader then
+ * cannot tell which is current.
  *
  * <p>Assumptions: the inventory citation is given at the line numbers the
  * repository root {@code README.md} carries as the tree stands, which are lines
@@ -125,14 +156,25 @@
  * there. No test in this package asserts report content, and adding one would
  * put the assertion in a module that does not own the code it describes.
  *
- * <h2>The four units under test, and no interface beside any of them</h2>
+ * <h2>The four units under test, and no interface standing for any of them</h2>
  *
- * <p>Each test class exercises exactly one annotated service class of the
- * production package of the same name: {@code TransactionViewService},
- * {@code TransactionListService}, {@code TransactionAddService} and
- * {@code BillPaymentService}. There is no interface declared beside any of
- * them, so a test instantiates the class itself rather than a stand-in for it,
- * and a reader looking for the code under test has one place to look.
+ * <p>Every test class here exercises one annotated service class of the
+ * production package of the same name, and between them the five cover four:
+ * {@code TransactionViewService}, {@code TransactionListService},
+ * {@code TransactionAddService} and {@code BillPaymentService}. None of the
+ * four has an interface declared for it, so a test instantiates the class
+ * itself rather than a stand-in for it, and a reader looking for the code
+ * under test has one place to look.
+ *
+ * <p>Assumptions: the production package does declare one interface, the
+ * outbound port {@code AccountContextClient}, alongside its HTTP implementation
+ * {@code RestAccountContextClient}. Neither is a unit under test here: the port
+ * is a COLLABORATOR of two of the four services and is mocked, and its
+ * implementation is exercised where a real HTTP exchange can be stood up rather
+ * than in a Mockito test. The distinction is stated because the sentence above
+ * once read that no interface existed in the package at all, which a reader
+ * meeting {@code AccountContextClient} would have had to treat as either a
+ * stale charter or a layering breach, with nothing here to say which.
  *
  * <p>Assumptions: that shape is settled by the production charter at
  * {@code services/transaction-service/src/main/java/com/carddemo/transaction/service/package-info.java},
@@ -144,9 +186,9 @@
  *
  * <p>Trade-offs: this package has NO shared abstract base class, no
  * {@code AbstractServiceTest}, no test fixture builder or object mother, no
- * helper or utility class, and no context configuration class. The four tests
+ * helper or utility class, and no context configuration class. The five tests
  * deliberately share nothing. The compromise accepted is that the annotation
- * and mock declarations repeat across four files. What that buys is twofold.
+ * and mock declarations repeat across five files. What that buys is twofold.
  * Each file stays readable on its own, so a maintainer debugging one screen
  * never has to read a second file to learn what the setup did. And the
  * directory carries no internal compile dependency, so a change made for one
@@ -171,6 +213,13 @@
  *       three transaction screens.</li>
  *   <li>{@code com.carddemo.transaction.mapper.BillPaymentMapper}, for the
  *       payment screen.</li>
+ *   <li>{@code com.carddemo.transaction.service.AccountContextClient}, the
+ *       outbound port through which the capture screen resolves a card
+ *       cross-reference and the payment screen reads an account balance.
+ *       Assumptions: it is mocked rather than stood up, because what it reaches
+ *       is a different bounded context over HTTP; a test that resolved it for
+ *       real would fail for a reason belonging to that context and not to the
+ *       paragraph under test.</li>
  * </ul>
  *
  * <p>Assumptions: {@code com.carddemo.common.web.CursorToken} is NOT in that
@@ -196,8 +245,8 @@
  * <p>Assumptions: this directory has NO dependency on a sibling test package.
  * Nothing here is declared in, extends, or reads a type from the {@code api},
  * {@code repository}, {@code mapper} or {@code architecture} test packages, and
- * nothing in those packages is a precondition for running these four classes.
- * The four are runnable as a selection on their own. Introducing such a
+ * nothing in those packages is a precondition for running these five classes.
+ * The five are runnable as a selection on their own. Introducing such a
  * dependency would couple two kinds of test whose whole reason for sitting in
  * separate packages is that they fail for different reasons and are read by
  * different people.
@@ -294,7 +343,7 @@
  * {@code services/transaction-service/src/test}.
  *
  * <p>Assumptions: the oracle is reference material. It is never modified, never
- * re-pinned and never replaced, and the four tests in this package are strictly
+ * re-pinned and never replaced, and the five tests in this package are strictly
  * additive to it. Nothing here reaches into its helpers, meaning none of
  * {@code tests/helpers/cobol_runner.py},
  * {@code tests/helpers/golden_compare.py},
@@ -338,14 +387,14 @@
  * {@code src/test/resources/fixtures/} directory. Neither reaches
  * {@code src/test/java}, and that file's own header records the refusal
  * directly, on the ground that {@code includeTestSourceDirectory} is set true
- * in {@code services/pom.xml} precisely so that tests ARE audited. All five
+ * in {@code services/pom.xml} precisely so that tests ARE audited. All six
  * files in this directory are therefore swept in full, and no reader should
  * assume test code is exempt.
  *
  * <p>Assumptions: two checks bear on this file and both must pass. The
  * file-set check {@code JavadocPackage} requires a charter to EXIST in any
  * directory holding an audited compilation unit, which is why this file is
- * authored before the four test classes rather than after them -- without it
+ * authored before the five test classes rather than after them -- without it
  * they could not clear the {@code validate} phase. The syntax-tree check
  * {@code MissingJavadocPackage} requires that charter to CARRY Javadoc. A
  * charter reduced to a bare package statement satisfies the first and fails the
@@ -422,11 +471,12 @@
  * Its current enumeration names seven leaf subpackages -- {@code dto},
  * {@code domain}, {@code api}, {@code service}, {@code repository},
  * {@code mapper} and {@code architecture} -- for eight charters in all. This is
- * the {@code service} one, and it is the sixth to be authored: the root and the
- * {@code dto}, {@code domain}, {@code repository} and {@code architecture}
- * charters precede it, and the {@code api} and {@code mapper} charters arrive
- * with their packages. The figure is recorded so that a reader can tell a
- * charter that is missing from one that was never intended.
+ * the {@code service} one, and all eight now exist: this file was the sixth to
+ * be authored, after the root and the {@code dto}, {@code domain},
+ * {@code repository} and {@code architecture} charters, and the {@code api} and
+ * {@code mapper} charters have since arrived with their packages. The figure is
+ * recorded so that a reader can tell a charter that is missing from one that
+ * was never intended.
  *
  * <p>Refactoring Rationale: an earlier enumeration of that canon named five
  * leaf subpackages, for six charters in all, and it was superseded when

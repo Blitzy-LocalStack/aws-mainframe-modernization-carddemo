@@ -120,7 +120,9 @@ public record DatasetGeneration(
      * The number of generations retained per family, five.
      *
      * <p>Assumptions: five is the reference baseline's own retention limit, declared as
-     * {@code LIMIT(5)} on every one of the ten defining statements -- {@code app/jcl/DEFGDGB.jcl:26}
+     * {@code LIMIT(5)} on ten of the baseline's eleven defining statements -- the eleventh is the
+     * duplicate recorded in the paragraph below, so "ten statements" here counts the statements that
+     * agree on five and NOT the statements that exist -- {@code app/jcl/DEFGDGB.jcl:26}
      * for the first of them, and lines 32, 38, 44, 50 and 56 of that same file, then
      * {@code app/jcl/DEFGDGD.jcl:29}, {@code :52} and {@code :75}, then
      * {@code app/jcl/DALYREJS.jcl:26}. Each of the ten pairs that limit with {@code SCRATCH} on the
@@ -159,23 +161,41 @@ public record DatasetGeneration(
     public static final int GENERATION_DIGITS = 4;
 
     /**
-     * The lowest accepted generation number, zero.
+     * The lowest accepted generation number, one.
      *
-     * <p>Assumptions: zero is admitted because the sibling renderer admits it.
-     * {@code data-migration/src/carddemo_migration/config.py:1333} documents the accepted range as
-     * "between 0 and 9999 inclusive" and line 1371 enforces exactly that, so a
-     * {@code gen=0000} prefix is a prefix that component can create and that
-     * {@code loaders/s3_stage.py:27} can parse back.</p>
+     * <p>Assumptions: one, because a generation number here means the same thing it means in the
+     * reference baseline, where the first relative reference is {@code (+1)} and the first
+     * catalogued generation of every one of the ten bases is {@code G0001V00}. There is no
+     * mainframe generation zero, so {@code gen=0000} would name a coordinate with no counterpart on
+     * either side of the migration. The sibling stager states the same bound for the same reason at
+     * {@code data-migration/src/carddemo_migration/loaders/s3_stage.py:125}, and it is the value
+     * that component returns for the first generation of a business date at
+     * {@code loaders/s3_stage.py:1328}.</p>
      *
-     * <p>Trade-offs: a minimum of one was the alternative, and it is the more intuitive reading --
-     * the reference baseline's absolute generation names begin at the first generation, and the
-     * first generation of a family renders here as {@code gen=0001}. It was rejected because the
-     * two components write into one bucket: a Java bound of one would make a prefix the Python
-     * stager can legitimately produce unrepresentable in Java, so a Java verification pass could
-     * not name a generation that already existed. The cost accepted is that this type admits a
-     * generation number the mainframe notion of a generation has no counterpart for.</p>
+     * <p>Refactoring Rationale: this bound was zero, on the recorded ground that the sibling
+     * renderer admits zero and a Java bound of one would leave a prefix that component can
+     * legitimately produce unrepresentable here. That ground was withdrawn after being measured
+     * against the sibling rather than against its renderer alone. The renderer at
+     * {@code config.py:1495} does accept zero, but no writer reaches it with zero: every staging
+     * write is guarded by {@code _require_staged_generation} at
+     * {@code loaders/s3_stage.py:1010-1044}, which enforces one to 9999 inclusive. The one caller
+     * that does pass zero is {@code family_prefix} at {@code loaders/s3_stage.py:1088-1093}, and it
+     * passes zero to a throwaway sample it immediately truncates at {@code dt=} -- its own comment
+     * records that the value "cannot influence the result" and that this is precisely why the
+     * builder is left permissive while writes are guarded separately. So {@code gen=0000} is not a
+     * prefix the sibling creates; it was a prefix the sibling's renderer would tolerate. This type
+     * models a coordinate that a writer allocates, which makes the writer's bound the one it must
+     * share.</p>
+     *
+     * <p>Trade-offs: the accepted cost is that a {@code gen=0000} prefix left in a bucket by any
+     * component predating this bound is now unrepresentable, so it is skipped rather than counted
+     * when a family is listed. That is the intended reading and not a loss: such a prefix is not a
+     * generation under the shared contract, so counting it would let it answer a {@code (0)}
+     * reference or consume one of the five retained slots. It cannot collide with a real
+     * allocation either, because the first allocation renders {@code gen=0001} and addresses a
+     * different key.</p>
      */
-    public static final int MINIMUM_GENERATION_NUMBER = 0;
+    public static final int MINIMUM_GENERATION_NUMBER = 1;
 
     /**
      * The highest accepted generation number, nine thousand nine hundred and ninety-nine.

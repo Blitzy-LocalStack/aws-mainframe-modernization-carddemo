@@ -1065,29 +1065,136 @@ resource "aws_secretsmanager_secret" "seed_user" {
   tags = var.tags
 }
 
-resource "terraform_data" "seed_user" {
+# WHY : Refactoring Rationale: the identity is a NATIVE aws_cognito_user. It was a
+#       terraform_data whose triggers_replace listed given_name, family_name,
+#       user_type and seed_user_credential_revision, and whose when = destroy
+#       provisioner ran admin-delete-user. terraform_data has no notion of an
+#       in-place update -- its only response to a changed trigger is destroy then
+#       create -- so correcting a spelling in a surname, moving one person between
+#       'A' and 'U', or bumping the rotation counter DELETED the Cognito identity
+#       and made a new one. Everything Cognito owns and Terraform cannot recreate
+#       went with it: a fresh sub (breaking the auth.users.cognito_sub join, which
+#       V1__auth.sql declares NOT NULL UNIQUE), the password the person had chosen
+#       since handover, their registered MFA factors and their remembered devices.
+#       The identity provider treats every one of those changes as an in-place
+#       attribute update -- custom:user_type is declared mutable = true in the pool
+#       schema above for exactly this reason -- so the destroy was never anything
+#       the platform asked for. This resource converges attributes through
+#       AdminUpdateUserAttributes and deletes the user only when the resource
+#       itself is destroyed, which is the only circumstance in which deletion is
+#       what was asked for.
+#       Assumptions: sub is computed here and is the join to auth.users. It is
+#       published through the seed_user_subjects output so the ETL that loads the
+#       USRSEC profile rows can satisfy that NOT NULL UNIQUE column; because sub
+#       now survives an attribute change, a value the ETL has already written
+#       stays correct instead of being invalidated by the next unrelated edit.
+resource "aws_cognito_user" "seed_user" {
   for_each = local.seed_users_by_id
 
+  user_pool_id = aws_cognito_user_pool.this.id
+
+  # WHY : Assumptions: the username IS the eight-character SEC-USR-ID, not a
+  #       derived or generated handle. variables.tf enforces the width, and the
+  #       same value is the primary key of auth.users, so using it verbatim is
+  #       what makes the two halves joinable at all. The pool sets
+  #       case_sensitive = false above, so sign-on tolerates either case while
+  #       the stored form stays exactly as the baseline record spells it.
+  username = each.key
+
+  # WHY : Assumptions: three attributes and no more. given_name and family_name
+  #       are Cognito standard attributes carrying SEC-USR-FNAME and
+  #       SEC-USR-LNAME; custom:user_type carries SEC-USR-TYPE and is the one
+  #       schema entry this pool declares. There is deliberately NO password
+  #       attribute of any kind, because SEC-USR-PWD X(08) at
+  #       app/cpy/CSUSR01Y.cpy L21 is the field this migration refuses to carry
+  #       forward -- Cognito owns the credential and nothing else stores it.
+  #       Assumptions: attributes is optional and not computed in the pinned
+  #       provider, so only the keys named here are tracked. Server-side
+  #       attributes the pool maintains on its own therefore cannot present as
+  #       drift, which is why the map does not need an ignore_changes.
+  #       Assumptions: authorization does NOT read this attribute. Authority
+  #       comes from group membership below, converted from cognito:groups by
+  #       JwtRoleConverter. custom:user_type exists to keep the lineage back to
+  #       SEC-USR-TYPE legible, so a change to it is a lineage correction rather
+  #       than a privilege change -- one more reason it must not force a replace.
+  attributes = {
+    given_name         = each.value.given_name
+    family_name        = each.value.family_name
+    "custom:user_type" = each.value.user_type
+  }
+
+  # WHY : Trade-offs: SUPPRESS means Cognito generates an initial password and
+  #       delivers it to nobody. The alternative is to set temporary_password
+  #       here, and it is rejected: the argument is sensitive but it is still
+  #       configuration, so the value would have to exist in a variable, in plan
+  #       output and in state -- the three places this module's secret handling
+  #       exists to keep credentials out of. The accepted cost is that the
+  #       generated value is unknown and unusable, which is precisely why the
+  #       credential resource below immediately replaces it with a value written
+  #       to Secrets Manager. The pool also has no email or phone attribute
+  #       configured, so there is no delivery medium for a message to use.
+  message_action = "SUPPRESS"
+
+  # WHY : Assumptions: stated rather than left to the provider default so that
+  #       disabling a seed identity is a one-word edit that Cognito applies in
+  #       place through AdminDisableUser, instead of an operator reaching for a
+  #       delete. That is the same distinction this whole resource exists to
+  #       draw: withdrawing access is not destroying the identity.
+  enabled = true
+}
+
+# WHY : Refactoring Rationale: the credential is a separate resource from the
+#       identity. The two were one terraform_data, and fusing them is what made
+#       every profile edit a deletion. Splitting them puts each change on the
+#       mechanism that can express it: an attribute change is an in-place update
+#       of the resource above, and a credential change is a replacement of this
+#       one, which destroys nothing an operator wants to keep.
+#       Assumptions: the trigger set is exactly three values, and each is a real
+#       reason the handover credential is no longer valid. seed_user_credential_revision
+#       is the operator's deliberate rotation. The secret ARN changes only when
+#       the entry has been replaced, and a replaced entry holds no value to hand
+#       over. sub changes only when the identity is genuinely new, and a new
+#       identity carries the undelivered password Cognito generated above.
+#       The three profile fields are deliberately ABSENT: renaming a person or
+#       correcting their role is no reason to invalidate their password, and
+#       listing them here is exactly what the previous shape did.
+#       Assumptions: referencing sub also orders this after the user exists, so
+#       no depends_on is needed and admin-set-user-password cannot run first.
+#       Assumptions: there is NO when = destroy provisioner, and none should be
+#       added. Deleting the identity belongs to aws_cognito_user above, which
+#       does it only on its own destroy; re-adding one here would rebuild the
+#       destroy-on-replace path this split exists to remove. Nothing else needs
+#       undoing either -- the secret is removed by its own resource.
+resource "terraform_data" "seed_user_credential" {
+  for_each = local.seed_users_by_id
+
+  # WHY : Assumptions: kept although no provisioner reads self, because it is the
+  #       only thing in this resource's state that names which identity the
+  #       credential belongs to. The secret's name is deliberately opaque and the
+  #       password is deliberately absent, so without this an operator reading
+  #       state sees a rotation record it cannot attribute to anyone.
   input = {
     user_pool_id = aws_cognito_user_pool.this.id
-    username     = each.key
+    username     = aws_cognito_user.seed_user[each.key].username
   }
 
   triggers_replace = [
     var.seed_user_credential_revision,
-    each.value.given_name,
-    each.value.family_name,
-    each.value.user_type,
     aws_secretsmanager_secret.seed_user[each.key].arn,
+    aws_cognito_user.seed_user[each.key].sub,
   ]
 
   provisioner "local-exec" {
+    # WHY : Assumptions: the identity's names and role are NOT passed. The script
+    #       sets a password and writes a secret; it does not create a user and
+    #       does not own an attribute, so handing it profile data would give it
+    #       a second, competing authority over values aws_cognito_user already
+    #       converges. The password-policy inputs are passed because the value it
+    #       generates has to satisfy the pool policy declared above, and the
+    #       policy lives here rather than being rediscovered by an API call.
     environment = {
       CARDDEMO_USER_POOL_ID      = aws_cognito_user_pool.this.id
-      CARDDEMO_USER_ID           = each.key
-      CARDDEMO_GIVEN_NAME        = each.value.given_name
-      CARDDEMO_FAMILY_NAME       = each.value.family_name
-      CARDDEMO_USER_TYPE         = each.value.user_type
+      CARDDEMO_USER_ID           = aws_cognito_user.seed_user[each.key].username
       CARDDEMO_SEED_SECRET_ARN   = aws_secretsmanager_secret.seed_user[each.key].arn
       CARDDEMO_PASSWORD_LENGTH   = tostring(var.password_minimum_length)
       CARDDEMO_REQUIRE_LOWERCASE = tostring(var.password_require_lowercase)
@@ -1098,18 +1205,6 @@ resource "terraform_data" "seed_user" {
     }
 
     command     = "python3 ${path.module}/seed_user_bootstrap.py"
-    interpreter = ["/bin/sh", "-c"]
-  }
-
-  provisioner "local-exec" {
-    when = destroy
-
-    environment = {
-      CARDDEMO_USER_POOL_ID = self.input.user_pool_id
-      CARDDEMO_USER_ID      = self.input.username
-    }
-
-    command     = "python3 ${path.module}/seed_user_bootstrap.py --delete"
     interpreter = ["/bin/sh", "-c"]
   }
 }
@@ -1125,14 +1220,30 @@ resource "terraform_data" "seed_user" {
 #       a fallback would convert a plan-time rejection into a silent assignment
 #       to the wrong group, which is strictly worse than failing.
 #       Assumptions: membership is a separate resource from the user rather than
-#       an attribute of it, so a role change is an in-place membership change and
-#       does not touch the identity or its credential.
+#       an attribute of it, so a role change is a replacement of THIS resource --
+#       one DeleteGroupUser and one AddUserToGroup -- and does not touch the
+#       identity or its credential. That is now true of the whole chain and was
+#       not before: while the identity was a terraform_data keyed on user_type, a
+#       role change destroyed the user underneath this membership, so the claim
+#       this comment makes held for the membership alone and was false overall.
+#       Assumptions: username is taken from aws_cognito_user rather than from
+#       each.key, although the two values are identical. The reference is what
+#       carries the dependency, so membership cannot be attempted before the
+#       identity exists; a bare each.key compiled fine and needed a depends_on to
+#       say the same thing less precisely, and that depends_on has been removed.
+#       Trade-offs: the replacement is left as destroy-then-create, and
+#       create_before_destroy is deliberately NOT set. Either ordering leaves a
+#       brief window during a deliberate role change: the default gives a moment
+#       in which the user belongs to no group and therefore holds no authority,
+#       while create_before_destroy would give a moment in which they belong to
+#       both and, on an 'A'-to-'U' change, still hold administrator authority.
+#       Momentarily having too little authority is recoverable by retrying a
+#       request; momentarily having too much is not recoverable at all if it is
+#       used, so the default is the safer of the two and is kept on purpose.
 resource "aws_cognito_user_in_group" "seed_user" {
   for_each = local.seed_users_by_id
 
   user_pool_id = aws_cognito_user_pool.this.id
-  username     = each.key
+  username     = aws_cognito_user.seed_user[each.key].username
   group_name   = local.group_name_by_user_type[each.value.user_type]
-
-  depends_on = [terraform_data.seed_user]
 }

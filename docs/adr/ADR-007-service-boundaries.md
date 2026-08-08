@@ -68,15 +68,33 @@ counts below were read from the files rather than rounded from memory.
 | Programs in `app/cbl` | **31** — **12** batch `CB*`, **18** online `CO*`, **1** date utility (`CSUTLDTC`) | `app/cbl` |
 | Programs across `app/**` | **44** — the 31 above plus **13** in the three extension trees | `app/**` |
 | Copybooks | **30** in `app/cpy`, **62** across `app/**` | `app/cpy` and the extension trees |
-| JCL jobs | **38** in `app/jcl`, **55** across `app/**` including `samples/**` | `app/jcl` |
+| JCL jobs | **38** in `app/jcl`, **46** across `app/**`, **55** repository-wide | `app/jcl`, the extension trees, and the sibling `samples/**` tree |
 
 Two of those counts need a word of precision, because the obvious reading of each
 is wrong. The **44** is the program count across `app/**`, not across the whole
-repository: the repository holds more `.cbl` files than that, because the existing
-test suite contributes its own COBOL unit-test programs under `tests/cobol-unit`,
-and those are test artifacts rather than baseline programs. The **55** likewise
-includes the nine jobs under `samples/**`, which are compile and security samples
+repository: the repository holds more `.cbl` files than that — **56** — because the
+existing test suite contributes **12** COBOL unit-test programs under
+`tests/cobol-unit`, and those are test artifacts rather than baseline programs.
+
+The JCL row needs the same care, and it needs it in the other direction. **38** is
+what `app/jcl` itself holds; **46** is the `app/**` total, the extra eight being the
+five jobs in `app/app-authorization-ims-db2-mq/jcl` and the three in
+`app/app-transaction-type-db2/jcl`; and **55** is the repository-wide total, whose
+remaining nine live in `samples/jcl`. Those nine are compile and security samples
 for the mainframe build path and are reference-only.
+
+Refactoring Rationale: this row previously read "**55** across `app/**` including
+`samples/**`", which was wrong twice in one clause. It overstated the `app/**` total
+by nine, and it placed `samples/**` inside `app/**` when `samples/**` is a sibling
+top-level tree — so a reader trying to reconcile the number against the filesystem
+would have found neither the count nor the path. The three figures are now given
+separately with the directory each one covers, because a single number spanning two
+unrelated trees is the shape of claim that goes stale without anyone noticing. The
+distinction is load-bearing rather than pedantic: `app/**` is the reference baseline
+this decomposition is derived FROM, while `samples/**` is tooling for the mainframe
+build path that §0.2.2 of the plan places out of scope entirely, and a count that
+merges the two would put nine out-of-scope jobs inside the input to a boundary
+argument.
 
 Assumptions: these counts are the decomposition's input, so the ADR states them
 as measurements with their source rather than as approximations. A boundary
@@ -180,7 +198,7 @@ graph TB
         REFS["reference-service<br/>schema: reference"]
         BATCH["batch-service<br/>schema: batch"]
         AUTHZ["authorization-service<br/>schema: authorization"]
-        RPT["reporting-service<br/>owns no tables"]
+        RPT["reporting-service<br/>schema: reporting<br/>reads 7 views, no readable table"]
     end
 
     CICS -.->|"business rules extracted;<br/>baseline stays byte-identical"| TGT
@@ -191,11 +209,15 @@ graph TB
     BATCH -->|reads rates| REFS
     BATCH ==>|"scoped cross-schema WRITE<br/>ledger + account only"| TRAN
     BATCH ==> ACCT
-    RPT -.->|SELECT-only views| TRAN
-    RPT -.->|SELECT-only views| ACCT
-    RPT -.->|SELECT-only views| CARD
-%% Dashed = read-only. Double arrow = the one deliberate write exception.
+    RPT -.->|"7 SELECT-only views"| TRAN
+    RPT -.-> ACCT
+    RPT -.-> REFS
+%% Dashed = read-only. Double arrow = the one deliberate cross-schema WRITE exception.
 %% Every other context reads and writes only its own schema.
+%% The reporting edges are drawn to the three schemas the seven views actually read
+%% -- ledger, account and reference. No view reads the card schema, so no edge is
+%% drawn to CARD even though the NOLOGIN owner role holds a read grant there; an
+%% edge for an unexercised grant would overstate the coupling this diagram is for.
 ```
 
 ## Decision
@@ -308,7 +330,7 @@ commit and nothing here adds a new distributed transaction.
 | `reference-service` | `COTRTLIC`, `COTRTUPC`, `COBTUPDT`, `CODATE01`, `CSUTLDTC` | the `reference` schema (transaction types, categories, disclosure groups, lookup tables) |
 | `batch-service` | `CBTRN01C`, `CBTRN02C`, `CBACT04C`, `CBEXPORT`, `CBIMPORT` | the `batch` schema, plus the scoped grants described below |
 | `authorization-service` | `COPAUS0C`, `COPAUS1C`, `COPAUS2C`, `COPAUA0C`, `CBPAUP0C`, `PAUDBLOD`, `PAUDBUNL`, `DBUNLDGS` | the `authorization` schema |
-| `reporting-service` | `CORPT00C`, `CBTRN03C`, `CBSTM03A`, `CBSTM03B` | **no tables** — read-only cross-schema views under a `SELECT`-only role |
+| `reporting-service` | `CORPT00C`, `CBTRN03C`, `CBSTM03A`, `CBSTM03B` | the `reporting` schema, in which its own role can read **no table** — only 7 `SELECT`-only views, all owned by a separate `NOLOGIN` role |
 
 ### 2. Ownership follows data, which makes the boundary checkable
 
@@ -338,22 +360,66 @@ read by `batch-service`, so neither is a defensible owner of the whole reference
 domain. Giving the domain one owner and letting both read it keeps a single writer
 for every reference table.
 
-### 4. `reporting-service` owning no tables is a boundary decision, not an omission
+### 4. `reporting-service` reading no table is a boundary decision, not an omission
 
-Reporting consumes data from every other context — transactions, accounts, cards
-and category balances — and produces statements and reports from them. If it owned
-any table, every context that writes the data it reports on would depend on the
-reporting context for part of its own domain, inverting the dependency direction
-for no gain. So the context owns a `reporting` schema that holds **no tables at
-all** — only read-only views over the other seven schemas — and reads them under a
-database role granted `SELECT` and nothing else.
+Reporting consumes data from other contexts — transactions, accounts, customers,
+the card cross-reference and the reference codes — and produces statements and
+reports from them. If it owned any table those contexts read, every context that
+writes the data it reports on would depend on the reporting context for part of its
+own domain, inverting the dependency direction for no gain. So the boundary is
+drawn so that **the reporting service role can read no table anywhere**: it reads
+seven views, and it is the only context whose own role holds no table privilege at
+all.
 
-Trade-offs: the cost of this is that reporting cannot persist anything, so
+That sentence is deliberately about the ROLE rather than about the schema, because
+three different things are easy to conflate here and only one of them is the
+boundary. They are separated below, each with the artifact that fixes it.
+
+| The question | The answer | Where it is fixed |
+|---|---|---|
+| What does the `reporting` schema physically contain? | **One table and seven views.** The table is `reporting.card_grouping_key`; the views are `v_report_transactions`, `v_statement_transactions`, `v_transaction_types`, `v_transaction_categories`, `v_accounts`, `v_customers` and `v_card_xref`, each created `WITH (security_barrier)`. | [`data-migration/sql/V1__reporting_views.sql`](../../data-migration/sql/V1__reporting_views.sql) |
+| Who owns those objects? | **`carddemo_reporting_owner`**, a `NOLOGIN` role. It owns the schema, the table and all seven views, and it is the principal that holds the cross-schema read grants the views need. Nothing authenticates as it. | `V0__schemas_and_roles.sql` (schema and role) and `V1__reporting_views.sql` (`ALTER ... OWNER TO`, once per object) |
+| What can the service actually read at run time? | **The seven views and nothing else.** `carddemo_reporting` holds `USAGE` on `reporting` and `SELECT` on each view by name; `CREATE` on the schema is revoked; every privilege on `ledger`, `account`, `card` and `reference` is explicitly revoked from it, at both table and schema level; and `reporting.card_grouping_key` is revoked from it by name, so the one physical table in its own schema is not readable by it either. | `V0__schemas_and_roles.sql` §5 and the per-view grants in `V1__reporting_views.sql` |
+
+Refactoring Rationale: this section previously said the schema "holds **no tables at
+all** — only read-only views over the other seven schemas". Both halves were wrong,
+and each was wrong in a way that mattered. The schema does hold a table, so a reader
+checking the claim against the migration would have found a counter-example in the
+first `CREATE` statement and had no way to tell which of the two documents to trust.
+And the views span **three** source schemas — `ledger`, `account` and `reference` —
+not seven: no view reads `auth`, `authorization`, `batch` or `card`. The corrected
+form states the property that is actually true and actually load-bearing, which is
+about the reachable privilege of the role rather than the emptiness of the schema.
+An emptiness claim is also the more fragile of the two: it would be falsified by the
+next helper object anyone adds, whereas the privilege claim is falsified only by a
+grant, which is the thing the boundary is about.
+
+Assumptions: `reporting.card_grouping_key` does not weaken the decision, and the
+reason is the revoke rather than the table's contents. It exists because
+`CBSTM03A`'s statement ordering is by card, and the grouping key that ordering needs
+is derived once rather than recomputed per statement. It is owned by the `NOLOGIN`
+owner and revoked from the service role, so it is reachable only through the views
+that read it — meaning the service still cannot address a table directly, which is
+the invariant, and the invariant survives the table's existence intact.
+
+Assumptions: the owner role's read grants are broader than current use, and that gap
+is recorded rather than tidied away. It holds `USAGE` plus `SELECT` on `ledger`,
+`account`, `card` and `reference` — four schemas — while the seven views read only
+three of them. The `card` grant is unexercised today. It is left in place because
+`CBSTM03A` and `CBSTM03B` are the statement programs assigned to this context and
+their migration is not yet complete, so a statement view over `card.cards` is a
+foreseeable addition rather than a hypothetical one; and because narrowing it would
+put a grant change on the critical path of that work for no present security gain,
+the owner being `NOLOGIN` and unreachable. A reader auditing grants against use will
+find this one over-provisioned, and this paragraph is here so that finding it does
+not read as an undocumented mistake.
+
+Trade-offs: the cost of this boundary is that reporting cannot persist anything, so
 report-run bookkeeping lives with the batch step ledger rather than with the
-reporting context. That was accepted because the alternative — one owned table for
-bookkeeping — would establish exactly the write-ownership precedent the read-only
-role is there to prevent, and a role that is `SELECT`-only cannot drift into
-writing by accident.
+reporting context. That was accepted because the alternative — one table owned and
+writable by the reporting role — would establish exactly the write-ownership
+precedent the read-only role exists to prevent, and a role holding no write
+privilege anywhere cannot drift into writing by accident.
 
 ### 5. The extension trees' data collapses inward, eliminating a two-phase commit
 
@@ -440,10 +506,27 @@ invariants. Transport is a way in; it is not a reason to duplicate an owner.
 ### The arithmetic, stated plainly
 
 Nine candidates, minus the two folded in, plus the one added, equals **eight**
-contexts. **All nine candidate responsibilities are delivered; only their
-packaging differs.** Nothing was dropped: account inquiry still answers inquiries,
-transaction-type maintenance still maintains transaction types, and both are
-reachable exactly as before through their own inbound adapters.
+contexts. The net effect on the deployable count is therefore **one** fewer than the
+supplied arrangement, not two — the fold and the addition are separate terms and both
+have to be counted.
+
+**Every one of the nine candidate responsibilities is assigned to a context; only
+their packaging differs.** Nothing was dropped, and the two folded ones are the two
+that are furthest along: account inquiry still answers inquiries through
+`account-service`'s queue consumer, and transaction-type maintenance still maintains
+transaction types through `reference-service`'s endpoints, each reachable exactly as
+before through its own inbound adapter. Assignment is not the same as completion,
+though, and the difference is per responsibility rather than uniform — the
+[honest-boundary table](#honest-boundary--what-this-record-does-not-establish) states
+which capabilities are implemented and which are still targets.
+
+Refactoring Rationale: this paragraph read "All nine candidate responsibilities are
+delivered". That holds for the two folded ones and does not hold across all nine —
+the batch and posting responsibility has no `Job` bean behind it yet — so a single
+"delivered" spanning the whole set converted a boundary statement into a completion
+claim it was never making. The sentence is now about assignment, which is what a
+boundary decision actually establishes, and completion is deferred to the one table
+that tracks it so the two cannot disagree.
 
 ### Folding a transport in does not remove the transport
 
@@ -477,11 +560,34 @@ program.
 
 ### The decision
 
-`batch-service` runs against the one cluster under a **dedicated database role
-holding narrowly-scoped cross-schema write grants on the `ledger` and `account`
-schemas only**. The unit of work therefore remains **a single ACID commit**,
-expressed as one transaction boundary in the posting job rather than as a
-distributed protocol.
+`batch-service` connects to the one cluster as a **dedicated database role whose
+only cross-schema write grants are `INSERT` and `UPDATE` across `ledger` and
+`UPDATE` on `account.accounts`**. The unit of work is therefore to be **a single
+ACID commit**, expressed as one transaction boundary in the posting job rather than
+as a distributed protocol.
+
+Assumptions: the two halves of that sentence are at different stages, and the
+difference is stated here rather than left for a reader to discover. The **grant** is
+landed and checkable today — it is in
+[`data-migration/sql/V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql)
+section 4, and the matrix below reproduces it action by action. The **transaction
+boundary** is not: `services/batch-service/src/main/java/com/carddemo/batch/job/`
+holds no `Job` bean yet, and the module's own entry point says so in as many words,
+so no posting job currently opens that boundary. This section therefore describes a
+target the grant has been provisioned for, and the wording is future tense on purpose
+wherever the code does not yet exist. What is decided, and what this ADR is for, is
+that the boundary will be one local transaction rather than a saga — and that
+decision is what the grant already encodes.
+
+Refactoring Rationale: the previous wording said `batch-service` "runs against the
+one cluster" and that the unit of work "therefore remains a single ACID commit,
+expressed as one transaction boundary in the posting job". Both verbs asserted a
+running implementation, and the posting job they attribute the boundary to does not
+exist. It also described the grant as covering "the `ledger` and `account` schemas
+only", which reads as two whole schemas when the `account` half is one named table.
+An ADR that reports a target as delivered is worse than one that reports nothing,
+because the reader most likely to rely on it is the one deciding whether the work is
+still to do.
 
 ### The alternative considered and rejected
 
@@ -503,12 +609,73 @@ would immediately and correctly flag as a parity failure. Functional parity is a
 non-negotiable requirement, so an option that breaks it is not available at any
 price.
 
-### The exception is scoped tightly, and that is part of the decision
+### The exception is scoped, and the scope is stated as a matrix rather than as an adjective
 
-The grant is narrow — two schemas, and write access only where a write actually
-occurs. It applies to **one** context and exists for **one** unit of work. It is
-**not** a general licence for cross-schema access, and no precedent should be read
-out of it: every other context reads and writes only its own schema, and
+`batch-service` is the only principal anywhere in the cluster that holds a
+cross-schema **WRITE** grant, and that is the property the boundary rests on. It is
+not, however, the only principal that reaches outside its own schema at all, and it
+does not reach only two schemas. The full picture is small enough to state exactly,
+so it is stated exactly — every row below is a statement in
+[`data-migration/sql/V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql),
+sections 4 and 5.
+
+| Principal | Kind | Own schema | `ledger` | `account` | `card` | `reference` | `reporting` |
+|---|---|---|---|---|---|---|---|
+| `carddemo_batch` | service, `LOGIN` | `batch`: `SELECT, INSERT, UPDATE` on all tables, sequences, `CREATE` revoked | `USAGE` + **`SELECT, INSERT, UPDATE` on all tables** + sequences + future defaults | `USAGE` + `SELECT` on all tables; `UPDATE` revoked schema-wide, then **re-granted on `account.accounts` alone** | `USAGE` + `SELECT` only | `USAGE` + `SELECT` only | — |
+| `carddemo_reporting` | service, `LOGIN` | none it can read — see decision 4 | all privileges revoked, table and schema level | revoked | revoked | revoked | `USAGE` + `SELECT` on the 7 views; `CREATE` revoked; `card_grouping_key` revoked by name |
+| `carddemo_reporting_owner` | owner, **`NOLOGIN`** | owns `reporting` | `USAGE` + `SELECT` on all tables | `USAGE` + `SELECT` | `USAGE` + `SELECT` | `USAGE` + `SELECT` | owns the table and all 7 views |
+| `carddemo_auth`, `carddemo_account`, `carddemo_card`, `carddemo_ledger`, `carddemo_reference`, `carddemo_authorization` | service, `LOGIN` | `SELECT, INSERT, UPDATE` on all tables of its own schema, sequences, `CREATE` revoked | — | — | — | — | — |
+
+Three things follow from that table, and each of them is narrower than the sentence
+this section used to carry.
+
+First, the **write** exception really is singular: exactly one principal holds
+`INSERT` or `UPDATE` outside its own schema, it is `carddemo_batch`, and its write
+reach is two schemas — all of `ledger`, and one named table in `account`. Second,
+there is a **second** cross-schema principal, and it is read-only and
+credential-less: `carddemo_reporting_owner` holds `SELECT` across four schemas so
+that the views can read what their caller cannot, and it is `NOLOGIN`, so no session
+can ever authenticate as it. Third, the six remaining service roles do touch only
+their own schema, so the no-precedent claim survives for them intact.
+
+Refactoring Rationale: this section previously read "The grant is narrow — two
+schemas, and write access only where a write actually occurs … every other context
+reads and writes only its own schema". Each clause was wrong in a different
+direction, which is why the matrix replaces the prose rather than trimming it.
+`carddemo_batch` reaches **four** schemas, not two — it reads `card` and `reference`
+as well. Write access is **not** confined to where a write occurs: the `ledger`
+grant is `ON ALL TABLES` plus a future-table default, so it covers
+`ledger.daily_transactions`, which posting only reads. And "every other context"
+overstated the isolation by omitting `carddemo_reporting_owner`'s four-schema read.
+A privilege claim carried as an adjective cannot be checked; a matrix naming
+principal, schema and action can be diffed against the SQL, which is what this ADR
+needs a reader to be able to do.
+
+Assumptions: the schema-wide `ledger` grant is deliberate and is **not** narrowed to
+the three tables posting writes. The target design fixes that shape — the plan's own
+data-ownership section specifies "narrowly-scoped cross-schema write grants on
+`ledger.*` and `account.*` **only**" — and `ledger.*` is a schema-wide expression.
+Narrowing it further would depart from the frozen design to buy a boundary against
+one table the same role already reads, so the grant is left as specified and the gap
+is documented here instead. The `account` side goes the other way: the SQL is
+**narrower** than `account.*`, granting `UPDATE` on `account.accounts` alone,
+because the baseline's unit of work rewrites only the account master. Being narrower
+than the design needs no exception — it moves in the same direction the design is
+arguing in — so it is recorded here as a deliberate tightening rather than as a
+divergence. Of the four `ledger` tables, posting writes
+`transactions`, `transaction_category_balances` and `transaction_rejects` and reads
+`daily_transactions`; the excess is therefore `UPDATE` and `INSERT` on that one
+input table.
+
+Trade-offs: documenting an over-broad grant rather than tightening it trades a small
+amount of privilege minimisation for fidelity to a frozen specification and for a
+reader's ability to reconcile the two. It is the right trade only because the
+statement is written down: an undocumented over-grant is indistinguishable from an
+oversight, and the next person to audit it would either narrow it and diverge from
+the design or leave it and not know why.
+
+It remains true that this is **not** a general licence for cross-schema access, that
+it applies to one context and exists for one unit of work, and that
 `reporting-service` holds no write access anywhere. The corresponding store-side
 statement is in [ADR-003](ADR-003-datastore-targets.md).
 
@@ -518,15 +685,37 @@ Trade-offs: rejecting a saga for posting while adopting a transactional outbox f
 authorization replies looks inconsistent until the difference is named, so it is
 named here. The outbox in `authorization-service` writes a reply row **inside the
 same local transaction** as the authorization decision and publishes it afterwards
-from the committed row. It adds a row to one schema and closes a window in which
-the baseline could commit a decision and then fail before its reply was published.
-It does not split an atomic commit into steps and it introduces no intermediate
-state that an observer can mistake for a finished one. A saga for posting would do
-the opposite: fragment a commit that is currently atomic, in order to satisfy a
-boundary rule, at the cost of behaviour. Adopting one and rejecting the other is
-therefore the same criterion applied twice — never make a state observable that
-the baseline does not make observable. See
-[ADR-004](ADR-004-messaging.md) for the outbox itself.
+from the committed row. It adds a row to one schema and it moves publication from
+**before** the commit to **after** it, which is the whole of its effect. It does not
+split an atomic commit into steps and it introduces no intermediate state that an
+observer can mistake for a finished one. A saga for posting would do the opposite:
+fragment a commit that is currently atomic, in order to satisfy a boundary rule, at
+the cost of behaviour. Adopting one and rejecting the other is therefore the same
+criterion applied twice — never make a state observable that the baseline does not
+make observable. See [ADR-004](ADR-004-messaging.md) for the outbox itself.
+
+The window the outbox closes is worth naming precisely, because its direction is
+counter-intuitive and this record previously had it backwards. In the baseline,
+[`app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl)
+processes one message per iteration in this order: `6000-MAKE-DECISION` at **L459**,
+then `7100-SEND-RESPONSE` at **L461**, which reaches `MQPUT1` at **L758** under
+`MQPMO-NO-SYNCPOINT` set at **L753**, then `8000-WRITE-AUTH-TO-DB` at **L464**, and
+only then `EXEC CICS SYNCPOINT` at **L335**. The reply is therefore published
+**before** the database work commits, and published outside the unit of work, so the
+commit cannot take it back. The failure that window admits is a **ghost reply**: a
+requester holds an approval or decline for an authorization that was never persisted.
+Moving publication after the commit is what eliminates it.
+
+Refactoring Rationale: this section previously described the window as one in which
+"the baseline could commit a decision and then fail before its reply was published" —
+a lost reply, which is the opposite failure and would have been closed by a different
+mechanism entirely. Getting the direction wrong is not a wording slip: a lost reply is
+a liveness problem a retry can repair, while a ghost reply is a correctness problem
+that leaves the requester's view and the system of record permanently disagreeing, and
+only the second justifies writing the reply inside the transaction. [ADR-004](ADR-004-messaging.md)
+states the order correctly and is the authority; this record now agrees with it, and
+the divergence is registered as
+[**D-5**](../architecture/cobol-to-service-traceability.md#d-5--the-reply-published-before-the-decision-is-committed).
 
 ## Cost Implications
 
@@ -536,33 +725,60 @@ about. No currency figure is estimated here and no price list is quoted; the cla
 is about which dimensions are multiplied by what, which is checkable from the
 infrastructure definitions.
 
-### Service count multiplies the per-service floor
+### Service count multiplies the per-service floor — but only for the online contexts
 
-Each deployable context carries its own charge dimensions independently of how
-much work it does:
+The eight contexts do not all carry the same charge dimensions, because they are not
+all deployed the same way. Seven of them answer HTTP requests and run as long-lived
+ECS services; the eighth, `batch-service`, runs only as a task that Step Functions
+starts one execution at a time. The infrastructure states that split directly: the
+environment roots build a `workloads` map in which the seven online contexts carry
+`online = true` and `batch` carries `online = false`, and
+[`infra/modules/ecs-service`](../../infra/modules/ecs-service) gates its resources on
+the resulting `create_service` input. So the table has to distinguish the two.
 
-| Per-service dimension | Why it is a floor rather than a variable |
-|---|---|
-| Always-on task footprint | Each context runs at least one task to answer a request at all; below that it is not deployed |
-| Log group | One per service, charged on ingestion and on retained volume |
-| Load-balancer target group and health checks | One per service, polled continuously whether or not traffic arrives |
-| Container image repository | One per service, charged on stored image versions |
+| Per-workload dimension | Applies to | Why it is a floor rather than a variable | Gated in `ecs-service/main.tf` by |
+|---|---|---|---|
+| Always-on task footprint (`aws_ecs_service`) | the **7** online contexts only | An online context runs at least one task to answer a request at all; below that it is not deployed. A batch task is charged for its run and is absent between runs. | `count = var.create_service ? 1 : 0` |
+| Load-balancer target group and health checks | the **7** online contexts only | Polled continuously whether or not traffic arrives | `count = var.create_service && var.attach_load_balancer ? 1 : 0` |
+| Autoscaling target and policy | the **7** online contexts only | One registered target per service | `count = var.create_service && var.enable_autoscaling ? 1 : 0` |
+| Log group | **every** workload — the 8 contexts plus the ETL image | Charged on ingestion and on retained volume, for a task as much as for a service | unconditional |
+| Task definition, execution role, task role | **every** workload | No charge of their own; listed so the table is not read as an inventory of what exists | unconditional |
+| Container image repository | **10** repositories | Charged on stored image versions | `infra/modules/ecr` — the eight services plus `ui` and `data-migration` |
 
-**Eight contexts rather than nine is one fewer of each of those four.** That is a
-small, structural, permanent saving, and it is named because it is the direct cost
-consequence of the fold in the previous section rather than an incidental benefit.
-The fold was decided on ownership grounds; the cost effect confirms it rather than
-motivating it.
+**Each online context removed is one fewer always-on task, target group, autoscaling
+target, log group and image repository.** Applied to this decision the net is one:
+the fold in the previous section removes two online contexts — Account Inquiry and
+Transaction-Type Ref, both of which would have been online — while
+`reference-service` is added to own the seeded lookup data, so eight contexts stand
+where the supplied arrangement had nine. That is a small, structural, permanent
+saving of one online floor, and it is named because it is the direct cost consequence
+of the fold rather than an incidental benefit. The count itself is derived in
+[The arithmetic, stated plainly](#the-arithmetic-stated-plainly), which is the single
+authority for it in this record. The fold was decided on ownership grounds; the cost
+effect confirms it rather than motivating it.
+
+Refactoring Rationale: the table previously listed four dimensions and presented each
+as applying to "each deployable context", with an always-on task and a target group
+among them. That is false for `batch-service`, which has `online = false` in both
+environment roots and therefore gets a task definition, two IAM roles and a log group
+and **no** ECS service, target group or autoscaling target at all. It also
+under-counted the image repositories, which are ten rather than eight because `ui` and
+`data-migration` each have one and neither is a bounded context. A cost table that
+multiplies the wrong dimensions by the wrong count is the kind of error that survives
+review precisely because the conclusion it supports is correct, so the dimensions are
+now separated by the input that actually gates them and each row names that input.
 
 ### The environment lever is size and retention, never topology
 
-Topology is identical between `dev` and `prod` by construction, so the only levers
-are per-service task count, per-service task CPU and memory, and log retention in
-days. Cost therefore scales as **the number of services multiplied by the
-per-service floor**, with the floor set by those levers. That product is the
-concrete reason not to split a context for tidiness: a ninth context that owns no
-table of its own still pays a task, a log group, a target group and a repository in
-every environment, for the whole life of the system.
+Topology is identical between `dev` and `prod` by construction — the `online` flag of
+every workload is the same in both roots, so the two differ in sizing and retention
+and never in which resources exist. The only levers are therefore per-service task
+count, per-service task CPU and memory, and log retention in days. Cost scales as
+**the number of *online* services multiplied by the online floor, plus one log group
+and one image repository per remaining deployable**. That product is the concrete
+reason not to split a context for tidiness: a ninth online context that owns no table
+of its own still pays a task, a target group, an autoscaling target, a log group and a
+repository in every environment, for the whole life of the system.
 
 ### Schema-per-service and cluster-per-service have materially different shapes
 
@@ -604,12 +820,26 @@ The requirements state the tie-breaker verbatim:
 > a close call, choose the lower-risk, lower-cost option and note it."
 
 Its *lower-risk, lower-cost* clause settles both refinements in this record. The
-fold of two candidates into the contexts that own their data is both lower cost —
-two fewer per-service floors than the supplied arrangement — and lower risk, since
-it leaves one writer per table instead of two. Keeping the posting unit of work as
-one atomic commit is both lower cost — no orchestration state, no compensation
-code — and lower risk, since it introduces no observable state that the baseline
-does not have.
+refinement is a fold **and** an addition, so its net cost effect is smaller than the
+fold alone suggests: as derived in
+[The arithmetic, stated plainly](#the-arithmetic-stated-plainly), the arrangement
+carries **one** fewer deployable than the supplied one. That one is an online context,
+so the saving is one online floor — one always-on task, one target group, one
+autoscaling target, one log group and one image repository, in every environment. It
+is lower risk on a separate ground that does not net out at all: each fold leaves one
+writer per table instead of two, and that property holds for both of them
+independently of the context that was added. Keeping the posting unit of work as one
+atomic commit is likewise both lower cost — no orchestration state, no compensation
+code — and lower risk, since it introduces no observable state that the baseline does
+not have.
+
+Refactoring Rationale: this paragraph previously claimed "two fewer per-service floors
+than the supplied arrangement". It counted the two folds and omitted the added
+context, which the same document derives correctly three sections earlier, so the
+record contradicted itself on a figure a cost reviewer would take at face value. The
+fix is to stop restating the derivation here and cite the one section that owns it:
+the defect was a second copy of an arithmetic result drifting from the first, and
+removing the copy is what stops it recurring rather than correcting it in place.
 
 **This decision is not one of the two close calls.** The AAP identifies exactly
 two, and neither is this one: SQS versus Amazon MQ in
@@ -627,10 +857,23 @@ Trade-offs: strict database-per-service isolation would have no context holding
 any grant on another context's schema, and this decision knowingly falls short of
 that for one context and one unit of work. It was accepted because the alternative
 changes observable behaviour, which is not permitted. The compensating controls are
-that the grant is narrow rather than schema-wide-by-default, the role is dedicated
-to the posting workload rather than shared, write access reaches only the two
-schemas the three writes touch, and **no other context holds cross-schema write
-access at all**.
+that the role is dedicated to the posting workload rather than shared, that its
+**write** reach is two schemas — all of `ledger`, and `account.accounts` alone — that
+its reach in the other two cross-schema targets, `card` and `reference`, is `SELECT`
+only, and that **no other principal holds cross-schema write access at all**. The
+one other principal that crosses a schema boundary, `carddemo_reporting_owner`, is
+read-only and `NOLOGIN`. The exact per-schema actions are in the matrix above.
+
+Refactoring Rationale: this paragraph previously offered "the grant is narrow rather
+than schema-wide-by-default" and "write access reaches only the two schemas the three
+writes touch" as compensating controls. The first is not true of the `ledger` grant,
+which is `ON ALL TABLES` with a future-table default and therefore is schema-wide by
+default; the second miscounts the reach by omitting the two read-only schemas.
+Offering a control that does not hold is worse than offering one fewer control,
+because a reader auditing the compensations would have found the strongest-sounding
+one falsified and had no way to judge the rest. The claims are now the ones the
+matrix substantiates, and the word "context" is replaced by "principal" because the
+owner role is not a context.
 
 ### Accepted trade-off — one cluster hosting eight schemas is a shared blast radius
 
@@ -691,10 +934,26 @@ would add a failure mode without removing one.
 
 ### Risk — `reporting-service`'s read-only role drifting into write access
 
-Mitigated by construction rather than by policy: the context owns no tables, and
-its role is granted `SELECT` and nothing else. There is no table for it to be
-given write access to without a schema change that would be visible in a
-migration and in this record.
+Mitigated by construction rather than by policy: `carddemo_reporting` is granted
+`SELECT` and nothing else, anywhere. It holds no `INSERT`, `UPDATE`, `DELETE` or
+`TRUNCATE` in any schema, `CREATE` on its own schema is revoked, and the one physical
+table in that schema is revoked from it by name — so acquiring write access would
+take a new grant, and a new grant is a change visible in a migration and in this
+record. Two further properties make the drift harder rather than merely visible: the
+seven views are created `WITH (security_barrier)` and left non-`security_invoker`, so
+they execute with the owner's rights rather than the caller's, and the owner is
+`NOLOGIN`, so the principal that does hold cross-schema reads has no way to
+authenticate at all.
+
+Refactoring Rationale: this risk previously rested on "the context owns no tables …
+There is no table for it to be given write access to". The premise is false —
+`reporting.card_grouping_key` exists in that schema — so the mitigation as stated
+would have collapsed the moment a reader checked it, and the reader most likely to
+check is the one assessing exactly this risk. The mitigation is restated on the
+privilege facts, which is where it actually lives: a role holding no write privilege
+anywhere cannot drift into writing whether or not a table is present for it to write
+to. That framing is also strictly stronger, because it keeps holding when the next
+helper relation is added.
 
 ### Assumptions this decision rests on
 
@@ -738,28 +997,54 @@ is delivered.
 
 ### Honest boundary — what this record does not establish
 
-The eight contexts are **authored and statically validated**: the modules build,
-their tests run, and the infrastructure that would host them is defined and
-statically checked. Applying that infrastructure against a live account is an
-operator action outside this scope. Consequently **no boundary in this record has
-been load-tested or benchmarked against a live provisioned environment**. The
-claims made here are about ownership, atomicity and charge dimensions — all of
-which are checkable from the baseline and the definitions — and not about measured
-latency or measured throughput, for which this record offers no evidence and makes
-no assertion.
+All eight contexts exist as Maven modules that **build and whose tests run**, and the
+infrastructure that would host them is defined and statically checked. That is not the
+same as all eight being functionally complete, and the difference is set out below
+rather than left inside the word "authored".
+
+| Claim | Status |
+|---|---|
+| Eight modules build; the reactor is green; each module's unit tests run | **Established.** `mvn -B clean verify` across the aggregator |
+| Each context owns exactly one schema, and the grants match this record | **Established**, and checkable against `V0__schemas_and_roles.sql` and the per-service `V1__*.sql` migrations |
+| Cross-context domain imports fail the build | **Established** by the architecture test in the shared module |
+| Posting is one ACID transaction over three writes | **Not yet implemented.** The grant that permits it is provisioned, but `batch-service` holds no `Job` bean, so no code opens that transaction. The decision is recorded; the implementation is a target |
+| The account context's update endpoint | **Not yet implemented.** The request and response contracts are authored and each declares its own pending status; no route, no OpenAPI operation and no update service exist |
+| The account context's reference address lookups | **Implemented.** `RestReferenceAddressLookup` satisfies the port with bounded timeouts and is registered as a bean, and the reference context publishes the three lookups it reads |
+| Any boundary load-tested or benchmarked against a live provisioned environment | **Not established at all.** Applying the infrastructure against a live account is an operator action outside this scope |
+
+Consequently **no boundary in this record has been load-tested or benchmarked**. The
+claims made here are about ownership, atomicity and charge dimensions — all of which
+are checkable from the baseline and the definitions — and not about measured latency
+or measured throughput, for which this record offers no evidence and makes no
+assertion.
+
+Refactoring Rationale: this section previously said the eight contexts were "authored
+and statically validated: the modules build, their tests run", and left it there. The
+sentence was true of every module and was read as though it were true of every
+capability, which it is not — and the gap it hid was the largest one in the record,
+namely that the posting transaction this ADR's central exception exists to permit has
+no code behind it yet. Splitting the paragraph into a claim-by-claim table costs some
+brevity and buys the one thing a status statement is for: a reader can tell which
+rows are safe to build on. The table also has to be maintained as rows land, which is
+a real cost, and it is preferred to a single adjective that goes stale invisibly.
 
 ## Consequences
 
-- **Eight schemas, one owner each, and one of them holds no tables.** All eight
-  contexts own a schema, so the ownership rule has no exception at the schema
-  level; seven of those schemas hold tables, and the eighth, `reporting`, holds
-  only read-only views over the other seven. The schema list and its per-table
-  detail are in
+- **Eight schemas, one owner each, and one context that can read no table.** All
+  eight contexts own a schema, so the ownership rule has no exception at the schema
+  level. Seven of those schemas hold the tables their context reads and writes. The
+  eighth, `reporting`, holds one table and seven `security_barrier` views over three
+  source schemas — `ledger`, `account` and `reference` — and its one table is revoked
+  from the reporting service role by name, so that context addresses no table
+  directly. The schema list and its per-table detail are in
   [`docs/architecture/data-model-and-schema-mapping.md`](../architecture/data-model-and-schema-mapping.md).
-- **One scoped cross-schema grant exists, and only one.** `batch-service` holds
-  write access to `ledger` and `account` so that posting stays a single ACID
-  commit. Any future request for a second such grant is a request to reopen this
-  decision.
+- **One scoped cross-schema WRITE grant exists, and only one.** `batch-service` holds
+  `INSERT` and `UPDATE` across `ledger` and on `account.accounts` so that posting
+  stays a single ACID commit; it additionally reads `card` and `reference`. Exactly
+  one other principal crosses a schema boundary at all — `carddemo_reporting_owner`,
+  which is read-only and `NOLOGIN` — and the remaining six service roles touch only
+  their own schema. Any future request for a second cross-schema write grant is a
+  request to reopen this decision.
 - **Two contexts carry a queue consumer as well as an HTTP API.**
   `account-service` hosts the inquiry consumer and `reference-service` hosts the
   date-conversion consumer, both preserving request/reply semantics per

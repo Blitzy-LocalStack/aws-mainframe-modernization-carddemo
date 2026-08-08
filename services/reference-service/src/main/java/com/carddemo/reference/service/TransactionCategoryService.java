@@ -42,8 +42,24 @@ public class TransactionCategoryService {
     /** The cursor binding for this browse, distinct from every other browse in this service. */
     public static final String CURSOR_BINDING = "reference-transaction-category-list";
 
-    /** The number of rows one page publishes, matching the type browse. */
-    public static final int PAGE_SIZE = 10;
+    /**
+     * The number of rows one page publishes, matching the type browse at seven.
+     *
+     * <p>Assumptions: unlike the type browse, this number is CHOSEN rather than inherited. The
+     * transaction-type extension ships two maps only -- {@code COTRTLI.bms} for the type list and
+     * {@code COTRTUP.bms} for the type update -- so no baseline screen browses categories and there is
+     * no page boundary here to preserve. Seven is taken from the sibling browse so that two lists a
+     * caller pages through in the same session step by the same amount, which is the only property a
+     * caller can actually observe across the pair.</p>
+     *
+     * <p>Refactoring Rationale: this was ten, documented only as "matching the type browse" -- which
+     * was true of the number at the time and became false the moment the type browse was corrected to
+     * the seven its baseline declares. Restating the number here rather than referring to the sibling
+     * constant is deliberate: a reference would keep the two aligned automatically but would hide that
+     * one of them is a preserved contract and the other is a local choice, and those two have different
+     * standing if a future revision wants to change either.</p>
+     */
+    public static final int PAGE_SIZE = 7;
 
     /** The verbatim refusal when no category carries the key asked for. */
     public static final String MESSAGE_CATEGORY_NOT_FOUND = "Transaction category NOT found...";

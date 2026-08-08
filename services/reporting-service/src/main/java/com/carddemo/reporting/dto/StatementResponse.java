@@ -257,11 +257,17 @@ import jakarta.validation.constraints.Size;
  *
  * <p>Assumptions: this record is not the transaction list and is not the envelope that carries one.
  * The statement's transaction lines are answered as {@code StatementTransactionResponse} rows inside
- * {@code com.carddemo.common.web.PageResponse}, the single such envelope in the reactor, whose seven
- * components and one type parameter are declared at
- * {@code services/common-lib/src/main/java/com/carddemo/common/web/PageResponse.java} L210 to L217.
+ * {@code com.carddemo.common.web.PageResponse}, the single such envelope in the reactor, whose FOUR
+ * components and one type parameter -- {@code items}, {@code firstKey}, {@code lastKey} and
+ * {@code hasNext} -- are declared at
+ * {@code services/common-lib/src/main/java/com/carddemo/common/web/PageResponse.java} L231 to L235.
  * This record is neither that envelope nor an element inside it, and a controller composes the two
- * answers independently. The envelope is therefore named in this prose and deliberately not
+ * answers independently.
+ *
+ * <p>Refactoring Rationale: this said seven components and cited L210 to L217, which is prose rather
+ * than the declaration. The envelope has four components. The correction is recorded rather than made
+ * silently because the same inflated figure appeared on the sibling row record, so a reader who found
+ * it twice would reasonably have treated it as verified. The envelope is therefore named in this prose and deliberately not
  * imported, because an import that no declaration here needs would assert a dependency edge that
  * does not exist.
  *
@@ -610,5 +616,45 @@ public record StatementResponse(
      */
     public String generatedAt() {
         return generatedAt;
+    }
+
+    /**
+     * The stand-in a withheld value is rendered as.
+     */
+    private static final String REDACTED = "REDACTED";
+
+    /**
+     * Renders this statement summary without the cardholder values it carries.
+     *
+     * <p>Refactoring Rationale: this override exists because the record-generated {@code toString}
+     * renders the primary account number, the account identifier, the customer's name and the statement
+     * total. Three of those four are exactly the values every other rendering in this reactor is careful
+     * to withhold, and the fourth -- the total -- is a monetary value attributable to a named person by
+     * the other three on the same line.</p>
+     *
+     * <p>Assumptions: the primary account number is withheld ENTIRELY rather than masked to its last
+     * four digits here. A masked rendering is the right answer in a response body, where a cardholder is
+     * confirming which of their own cards they are looking at; it is the wrong answer in a log, where the
+     * last four digits combined with a customer name on the same line identify the card outright.</p>
+     *
+     * <p>Assumptions: the transaction count and the two artefact references ARE rendered. The count is a
+     * cardinality with no attribution once the identifiers are withheld, and the two references are
+     * object-storage locations an operator needs in order to find the artefact a failure concerns --
+     * which is the single most useful thing this rendering can carry. The generation instant is rendered
+     * for the same reason and carries no personal content.</p>
+     *
+     * @return a rendering safe to write to any log or exception message, never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "StatementResponse[cardNumber=" + REDACTED
+                + ", accountId=" + REDACTED
+                + ", customerName=" + REDACTED
+                + ", totalAmount=" + REDACTED
+                + ", transactionCount=" + transactionCount
+                + ", plainTextUri=" + plainTextUri
+                + ", htmlUri=" + htmlUri
+                + ", generatedAt=" + generatedAt
+                + "]";
     }
 }

@@ -15,20 +15,38 @@
  * contract of record is the hand-authored OpenAPI 3.1 document at
  * {@code services/card-service/src/main/resources/openapi/card-api.yaml}, which settles the paths,
  * the parameter and property names, the response shapes and the error vocabulary. That document
- * declares four synchronous operations. Each is named below by the operation identifier it carries
- * there, so that a reader can move between this charter and the contract without guessing which
- * entry answers to which.
+ * declares <b>five</b> synchronous operations. Each is named below by the operation identifier it
+ * carries there, so that a reader can move between this charter and the contract without guessing
+ * which entry answers to which.
  *
- * <p>Assumptions: the count is four and is stated as four here, in the contract's own header and in
- * the contract test that holds the two to each other. It previously read five in this sentence while
- * the list immediately below it held four entries and the paragraph immediately after it said "those
- * four operations" three times. A miscount in a roster's own preamble is worse than a miscount in
- * prose: this charter exists so a reader can move between it and the contract without re-deriving
- * the surface, so a reader who trusted the preamble would have gone looking for a fifth operation
- * that was never withdrawn because it never existed. The contract publishes {@code listCards},
- * {@code getCard}, {@code updateCard} and {@code getAdminCardDetail} and nothing else, and
- * {@code CardApiContractTest.theContractPublishesExactlyTheFourContractedOperations} is what keeps
- * that true rather than merely asserted.
+ * <p>Assumptions: <b>the count is five</b>, and it is measured rather than remembered. The contract
+ * publishes {@code listCards}, {@code lookupCard}, {@code getCard}, {@code updateCard} and
+ * {@code getAdminCardDetail} and nothing else, the list below holds exactly those five entries, and
+ * {@code CardApiContractTest.theContractPublishesExactlyTheFiveContractedOperations} is what keeps that
+ * true rather than merely asserted.
+ *
+ * <p>Refactoring Rationale: this preamble said four while the list immediately below it held five
+ * entries and the paragraph after it referred to "those five operations", so the file contradicted
+ * itself in the one place a reader consults it -- the roster's own count. The history is worth stating
+ * because the number has now been wrong in both directions: an earlier revision read five here against
+ * a four-entry list, and the correction applied then moved the preamble instead of the list, which
+ * turned an overcount into an undercount and left the resolution note asserting that no fifth operation
+ * had ever existed. It had: {@code lookupCard} resolves a typed card number to the card it names, and
+ * it is the one operation that accepts a full primary account number, which is why it takes the number
+ * in a request BODY. The lesson recorded rather than the number: a count belongs beside the roster that
+ * justifies it, and the entries below are the authority for this one.
+ *
+ * <p><b>Assumptions: {@code CardController} is contracted and NOT yet authored.</b> No
+ * {@code CardController.java} exists in this directory -- it holds this charter alone -- so none of the
+ * five operations is served, and a reader should not expect to find a handler for one. What does exist
+ * around it is the whole of the rest of the chain: the five operations' request and response shapes in
+ * {@code com.carddemo.card.dto}, the mapper in {@code com.carddemo.card.mapper}, the repository in
+ * {@code com.carddemo.card.repository}, the entity and the sealed selector in
+ * {@code com.carddemo.card.domain}, the cipher in {@code com.carddemo.card.service}, the four
+ * configuration classes in {@code com.carddemo.card.config}, and the contract test that binds this
+ * document to {@code SecurityConfig}. The distinction is stated here because "one controller belongs to
+ * this package and the set is closed" is a statement about the contract, not about the directory, and a
+ * reader who read it as the latter would go looking for a file that is not there.
  *
  * <ul>
  *   <li>{@code listCards}, one page of the card list positioned by key rather than by offset,

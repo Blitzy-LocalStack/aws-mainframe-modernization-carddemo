@@ -341,19 +341,56 @@ output "hosted_ui_domain" {
 #       secret value still carries the username for an operator authorized to
 #       retrieve it.
 output "seed_user_secret_arns" {
-  description = "Secrets Manager ARNs of generated initial passwords, as a map keyed by an opaque 128-bit handle rather than a user id. Consumed by IAM policy statements in the calling root that scope secretsmanager:GetSecretValue to exactly these entries. No password or identity value is published; the username remains inside the encrypted secret value for authorized retrieval."
+  description = "Secrets Manager ARNs of generated initial passwords, as a map keyed by an opaque 128-bit handle rather than a user id. Published so that an operator can scope a secretsmanager:GetSecretValue grant, or an audit query, to exactly these entries; no root currently reads this output, because seed retrieval is an out-of-band operator step performed with an already-privileged principal rather than a Terraform-wired one. No password or identity value is published; the username remains inside the encrypted secret value for authorized retrieval."
   value = {
     for user_id, secret in aws_secretsmanager_secret.seed_user :
     random_id.seed_user_secret[user_id].hex => secret.arn
   }
-  depends_on = [terraform_data.seed_user]
+  depends_on = [terraform_data.seed_user_credential]
 }
 
 output "seed_user_secret_names" {
-  description = "Secrets Manager names of the same entries, keyed by the same opaque handle. Published alongside the ARNs because an IAM statement scopes to an ARN while the retrieval command in docs/runbooks/deploy.md takes a name. No password, user id or personal name is exposed through this output."
+  description = "Secrets Manager names of the same entries, keyed by the same opaque handle. Published alongside the ARNs because an IAM statement scopes to an ARN while the retrieval command documented in this module README takes a name; that command is the only consumer today, and no root reads this output. No password, user id or personal name is exposed through this output."
   value = {
     for user_id, secret in aws_secretsmanager_secret.seed_user :
     random_id.seed_user_secret[user_id].hex => secret.name
   }
-  depends_on = [terraform_data.seed_user]
+  depends_on = [terraform_data.seed_user_credential]
+}
+
+# WHY : Refactoring Rationale: this output exists because the pool and auth.users
+#       have to agree, and until now nothing carried the value that makes them
+#       agree. services/auth-service/src/main/resources/db/migration/V1__auth.sql
+#       declares cognito_sub UUID NOT NULL UNIQUE and seeds no rows, so every row
+#       the ETL loads from USRSEC needs a subject that only Cognito can mint. The
+#       reader at data-migration/src/carddemo_migration/readers/usrsec.py loads
+#       the profile fields and no credential -- the table has no password column
+#       -- which leaves the subject as the one column it cannot derive from the
+#       80-byte record. Publishing it here, keyed by the eight-character
+#       SEC-USR-ID that is the primary key of that table, is what closes the join.
+#       Alternatives Considered: having the ETL resolve each subject at load time
+#       with cognito-idp admin-get-user. Rejected on two grounds: it would give
+#       the migration task a Cognito read grant it needs for nothing else, and it
+#       would make the load depend on the pool being reachable from wherever the
+#       ETL runs, turning a data step into an identity-provider dependency.
+#       Alternatives Considered: keying this map by the same opaque handle the two
+#       secret outputs use. Rejected because it would be useless -- the consumer's
+#       whole requirement is the pairing of user id to subject, and an opaque
+#       handle it cannot resolve back to a user id answers nothing.
+#       Trade-offs: this DOES pair a user id with a value, which the two outputs
+#       above deliberately refuse to do. The distinction is what is on the other
+#       side of the pairing. Those two pair a user id with the LOCATION OF ITS
+#       PASSWORD, and possession of the state would then be a map of whose
+#       credential to fetch. A subject is not a credential and grants nothing: it
+#       is an opaque identifier the identity provider already puts in the `sub`
+#       claim of every token that user presents, and every user id here is
+#       already legible in the calling root's seed_users input. So the pairing
+#       adds no disclosure, while withholding it would leave the NOT NULL column
+#       unsatisfiable.
+output "seed_user_subjects" {
+  description = "Cognito subject (sub) of each seed identity, as a map keyed by the eight-character SEC-USR-ID. Consumed by the calling root, which publishes it to Parameter Store so the ETL can populate auth.users.cognito_sub, declared UUID NOT NULL UNIQUE in V1__auth.sql. Carries no credential: a subject is the opaque identifier already present in the sub claim of every token the user presents."
+  value = {
+    for user_id, user in aws_cognito_user.seed_user :
+    user_id => user.sub
+  }
 }

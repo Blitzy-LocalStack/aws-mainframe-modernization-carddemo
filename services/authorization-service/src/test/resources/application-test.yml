@@ -66,7 +66,6 @@
 #     so an absence cannot be mistaken for an oversight.
 # =============================================================================
 
-# WHAT: turns off the TLS listener that the base profile enables.
 # WHY : Assumptions: the base obtains its keystore password from
 #       `CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD`, a placeholder carrying NO
 #       default, and its keystore from a path a container entrypoint mints. A
@@ -83,18 +82,27 @@ server:
     enabled: false
 
 spring:
-  # WHAT: pins this profile's imported configuration to the shared classpath
-  #       defaults, marked optional, and adds no other source.
   # WHY : Assumptions: the import set is where a test context would otherwise
-  #       acquire a dependency on deployed infrastructure. application-dev.yml
-  #       and application-prod.yml each add
-  #       `optional:aws-parameterstore:/carddemo/.../authorization/` on top of
-  #       this same classpath entry; this profile deliberately adds NO
+  #       acquire a dependency on deployed infrastructure. This profile adds NO
   #       environment-bound source, so no test can reach Parameter Store or
   #       Secrets Manager, hang against an unreachable metadata endpoint, or
   #       depend on a parameter tree existing. Declaring the set explicitly is
   #       what makes that auditable at a glance instead of inferable from which
   #       profiles are inactive.
+  # WHY : Refactoring Rationale: this note said application-dev.yml and
+  #       application-prod.yml each add
+  #       `optional:aws-parameterstore:/carddemo/.../authorization/` on top of the
+  #       same classpath entry. Neither does any longer. The resolver for that
+  #       prefix is registered by the queue starter's autoconfiguration, so the
+  #       location is claimed in this module and its Systems Manager client is then
+  #       built, and this module declines to pin a static region -- so preparing
+  #       either profile failed on a region the default provider chain could not
+  #       resolve, which the `optional:` marker does not suppress. Both overlays
+  #       and the parameter-store starter were withdrawn together, and
+  #       ProfileConfigImportTest asserts that all three profiles now resolve with
+  #       no AWS setting present. The correction is recorded rather than the note
+  #       simply deleted, because this profile's own guarantee was previously
+  #       stated by contrast with two overlays that no longer differ from it.
   # WHY : Alternatives Considered: (a) an empty import list, which would also
   #       add nothing but would drop the shared defaults that supply the
   #       structured-logging fields and the `carddemo.environment` and
@@ -112,8 +120,6 @@ spring:
 
   datasource:
     hikari:
-      # WHAT: replaces the base profile's certificate-verifying TLS requirement
-      #       with an unencrypted connection.
       # WHY : Assumptions: the base sets `sslmode: verify-full` and points
       #       `sslrootcert` at a certificate-authority bundle, because a managed
       #       database endpoint presents a certificate chained to one. A
@@ -131,7 +137,6 @@ spring:
       data-source-properties:
         sslmode: disable
 
-      # WHAT: shrinks the connection pool the base sizes for a serving task.
       # WHY : Trade-offs: the base sizes for ten concurrent in-flight messages.
       #       A test drives one thread at a time, so the surplus connections are
       #       idle sockets a container must accept, and a floor of zero lets the
@@ -143,7 +148,6 @@ spring:
       maximum-pool-size: 4
       minimum-idle: 0
 
-      # WHAT: triples the time a caller waits for a connection from the pool.
       # WHY : Assumptions: the base value is tuned for an already-warm task
       #       talking to an already-running database, where a wait that long means
       #       something is wrong and failing fast is the right answer. The first
@@ -161,8 +165,6 @@ spring:
       connection-timeout: 30000
 
   flyway:
-    # WHAT: restates, unchanged, the base profile's migration switch, its
-    #       migration source, its two schema keys and its baselining setting.
     # WHY : Assumptions: `schemas` and `default-schema` are restated rather than
     #       inherited because they answer different questions -- which schema
     #       Flyway manages, and where its history table resolves -- and a value
@@ -183,8 +185,6 @@ spring:
     default-schema: authorization
     baseline-on-migrate: false
 
-    # WHAT: lets Flyway create the `authorization` schema, which the base profile
-    #       forbids it from creating.
     # WHY : Assumptions: this is not a preference, it is the difference between a
     #       migration that runs and one that cannot. The base pairs
     #       `create-schemas: false` with a schema-qualified `default-schema`
@@ -213,7 +213,6 @@ spring:
     #       definition here would drift from it silently.
     create-schemas: true
 
-    # WHAT: empties the base profile's list of statements run before migration.
     # WHY : Assumptions: the base runs one statement there to assume the schema's
     #       owning role, so that objects the migration creates are owned by that
     #       role and its grants apply to them. That role is created only by
@@ -235,8 +234,6 @@ spring:
 
   jpa:
     hibernate:
-      # WHAT: keeps schema generation switched off, exactly as the base profile
-      #       sets it.
       # WHY : Assumptions: this value is restated deliberately, because the
       #       convenient relaxation is the one that would quietly void this
       #       module's most specific tests. Flyway's V1__authorization.sql is the
@@ -260,8 +257,6 @@ spring:
       #       therefore pays for a migration before its first assertion.
       ddl-auto: none
 
-    # WHAT: restates the base profile's persistence-context and SQL-echo
-    #       settings.
     # WHY : Trade-offs: leaving the session open for view rendering is off here as
     #       it is in the base, so a lazy association touched outside a
     #       transactional boundary fails in a test the same way it would in a
@@ -277,8 +272,6 @@ spring:
   cloud:
     aws:
       region:
-        # WHAT: names a region for the AWS client builders, which the base
-        #       profile leaves unset.
         # WHY : Assumptions: this leaf is ABSENT from the base and the asymmetry
         #       is deliberate. The base enables the queue integration and
         #       supplies neither region nor credentials, because a deployed task
@@ -298,8 +291,6 @@ spring:
 
       sqs:
         listener:
-          # WHAT: stops the message listener container from starting with the
-          #       application context.
           # WHY : Assumptions: this leaf is absent from the base for the same
           #       shape of reason as the region above, inverted -- consuming the
           #       request queue is this context's entire inbound path, so the base
@@ -323,8 +314,6 @@ management:
   endpoints:
     web:
       exposure:
-        # WHAT: narrows the exposed actuator endpoints to the health endpoint
-        #       alone, dropping the metrics endpoint the base also publishes.
         # WHY : Trade-offs: the base publishes metrics because a deployed task is
         #       scraped for them. Nothing scrapes a test JVM, and publishing the
         #       endpoint costs a meter registry populated for every context that
@@ -337,7 +326,6 @@ management:
 
 logging:
   level:
-    # WHAT: restates the base profile's log levels and adds the migration logger.
     # WHY : Assumptions: `org.flywaydb` is the third leaf here that the base does
     #       not declare, and the reason it can omit it is that a deployment gates
     #       migration in its own pipeline step, where the outcome is already
@@ -359,7 +347,6 @@ logging:
 
 carddemo:
   messaging:
-    # WHAT: restates the receive wait the base profile configures, in seconds.
     # WHY : Assumptions: five SECONDS, and the unit is the whole point of
     #       restating it. The reference program sets `MOVE 5000 TO
     #       WS-WAIT-INTERVAL` at app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl
@@ -375,7 +362,6 @@ carddemo:
     #       wait independent of whether the base profile is loaded.
     poll-timeout-seconds: 5
 
-    # WHAT: restates the per-window processing bound the base profile configures.
     # WHY : Assumptions: 500 is the baseline's DECLARED bound --
     #       `05 WS-REQSTS-PROCESS-LIMIT PIC S9(4) COMP VALUE 500` at COPAUA0C.cbl
     #       L40 -- and it is the value a test should assert is configured. The
@@ -403,7 +389,6 @@ carddemo:
     #       and 501 is deliberately not written anywhere as a value.
     request-process-limit: 500
 
-    # WHAT: widens the outbox drain interval far beyond the base profile's.
     # WHY : Assumptions: this is a determinism control, not a tuning value, and it
     #       is the one key here that could otherwise make an outcome depend on
     #       when a test runs. The base drains the outbox on a short cycle because a
@@ -479,4 +464,3 @@ carddemo:
 #       would create a second source of truth that could drift from the build
 #       without anything detecting it.
 # =============================================================================
-

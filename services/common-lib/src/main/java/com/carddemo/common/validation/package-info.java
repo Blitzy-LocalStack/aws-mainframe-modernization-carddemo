@@ -207,6 +207,11 @@
  *
  * <p>Two production classes live here, and there will be no third:
  *
+ * <pre>
+ * this directory: 3 java files = 2 classes + 1 charter
+ * </pre>
+ *
+ *
  * <ul>
  *   <li>{@code FieldValidationFlag} -- the three-state per-field flag triad,
  *       carrying the acceptable, unacceptable and never-supplied states drawn
@@ -250,28 +255,50 @@
  *
  * <h2>The count canon</h2>
  *
- * <p>The shared kernel's contract is 21 production classes and 9 package charter
- * files, for 30 compilation units in total. This package contributes 2 of those
+ * <p>The shared kernel holds 35 production classes and 10 package charter files,
+ * for 45 compilation units in total. This package contributes 2 of those
  * production classes -- {@code DateEditValidator} and {@code FieldValidationFlag},
  * both present in this directory -- and 1 of those charters. The arithmetic is
  * recorded so that a class absent from the module is distinguishable from one the
  * contract never admitted:
  *
  * <pre>
- * root 1 + money 2 + codec 5 + error 3 + web 3 + security 3 + observability 1 + time 1 + validation 2 = 21
+ * root 1 + money 2 + codec 6 + error 7 + web 3 + security 8 + observability 3 + time 1 + validation 2 + messaging 2 = 35
  * </pre>
  *
- * <p>Cross-check by compilation unit, counting one charter per package plus
- * that package's production classes: 2 + 3 + 6 + 4 + 4 + 4 + 2 + 2 + 3 = 30,
- * the root contributing its charter and the one auto-configuration class. And 21 production classes plus 9
- * charters is 30. All three paths agree, and this file is one of the nine
- * charters.
+ * <p>Cross-check by compilation unit, counting one charter per package plus that
+ * package's production classes:
  *
- * <p>Assumptions: the authoritative totals are <strong>21 production classes and
- * 30 compilation units, 9 of them charters</strong>. The total is always stated
+ * <pre>
+ * root 2 + money 3 + codec 7 + error 8 + web 4 + security 9 + observability 4 + time 2 + validation 3 + messaging 3 = 45
+ * </pre>
+ *
+ * <p>The root contributes its charter and the one auto-configuration class. And
+ * 35 production classes plus 10 charters is 45. All three paths agree, and this
+ * file is one of the ten charters.
+ *
+ * <p>Assumptions: the authoritative totals are <strong>35 production classes and
+ * 45 compilation units, 10 of them charters</strong>. The total is always stated
  * beside a breakdown that re-derives it, which is why both are kept here instead
  * of the total alone: a figure that does not reproduce all three sums above is
  * rejected on sight rather than adopted.
+ *
+ * <p>Refactoring Rationale: this section previously recorded 21 production classes
+ * in 30 compilation units across 9 charters, and named eight subpackages. Every one
+ * of those figures was the migration plan's target rather than a measurement, and
+ * the delivered module had overshot all of them -- {@code codec} by one class,
+ * {@code error} by four, {@code observability} by two, {@code security} by five, and
+ * a tenth subpackage, {@code messaging}, had appeared with two classes and no row.
+ * A target that the delivery has exceeded is not a lenient description of the tree;
+ * it is a false one, and it is worse than no figure at all because a reader who
+ * trusts it concludes that classes present in the module were never admitted. Both
+ * sums are now labelled by package so that each addend is checkable on its own
+ * rather than only in aggregate: two mutually consistent totals cannot detect a
+ * stale breakdown, because they balance against each other while both disagree with
+ * the directory, which is precisely how the previous figures survived. The addends
+ * and both totals are re-derived from this directory tree by
+ * {@code SharedKernelInventoryTest}, so a class added to the shared kernel without
+ * this canon being updated fails the build rather than aging quietly here.
  *
  * <h2>The documentation scope boundary</h2>
  *

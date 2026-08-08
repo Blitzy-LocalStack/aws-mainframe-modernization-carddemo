@@ -3,22 +3,34 @@
  * security, published API metadata and datasource binding for the ledger
  * bounded context.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ * <h2>Contract and current membership, which now agree</h2>
  *
- * <p>Assumptions: every class name and inventory in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, not the
- * set of files present beside this one. This charter is authored ahead of the
- * classes it governs, so at the checkpoint that authored it the directory holds
- * this charter and nothing else. A type named below that has no file yet is
- * therefore <b>planned</b>, not missing.</p>
+ * <p>Assumptions: this package holds <b>four</b> classes and all four exist
+ * beside this charter -- {@code SecurityConfig}, {@code OpenApiConfig},
+ * {@code DataSourceConfig} and {@code InternalIdentityConfig} -- so the
+ * inventory below is a measurement of the directory as well as the closed
+ * set the migration plan assigns.
  *
- * <p>Alternatives Considered: withholding this charter until the three classes
- * it governs exist. Rejected, because this charter is what the author of each
+ * <p>Refactoring Rationale: two earlier claims are corrected here rather than
+ * overwritten silently. The charter said the directory held this file and
+ * nothing else, which was true when written and is now false of all four
+ * classes; and it closed the set at three, which omitted
+ * {@code InternalIdentityConfig} after it landed. The second was the more
+ * consequential, because closing a set at three tells a reader that a fourth
+ * class does not belong here -- and this particular fourth class is the
+ * machine credential the account-context calls present. Without it, the card
+ * cross-reference lookup a transaction add resolves through and the account
+ * read a bill payment checks a balance against are both answered 401, and
+ * each surfaces as the dependency being unavailable rather than as a
+ * configuration error. A stale closure claim can therefore cost an add and a
+ * payment, not just a reader's time.
+ *
+ * <p>Alternatives Considered: withholding this charter until the classes it
+ * governs existed. Rejected, because this charter is what the author of each
  * of those classes works from -- which type belongs here, which may not, and
- * what the closed set is -- so holding it back would leave the package with no
- * stated contract during exactly the interval in which one is needed. The cost
- * accepted is that the inventory reads as present tense unless the distinction
- * is declared, which is what the paragraph above is for.</p>
+ * what the closed set is -- so holding it back would have left the package
+ * with no stated contract during exactly the interval in which one was
+ * needed.
  *
  * <p><b>Purpose.</b> This package binds external concerns to the service while
  * the application context is being built, and it holds nothing else. Every
@@ -57,11 +69,12 @@
  * second time would give one contract two statements that can drift apart, and
  * the parent charter is the file a reader of any sibling package opens anyway.
  *
- * <h2>The three configuration classes</h2>
+ * <h2>The four configuration classes</h2>
  *
- * <p>Target contract: this package is to hold exactly three classes, each with
- * a narrow and separately testable responsibility. The enumeration below is the
- * closed set assigned to this package rather than a listing of the directory.
+ * <p>This package holds exactly four classes, each with a narrow and
+ * separately testable responsibility. The enumeration below is both the closed
+ * set assigned to this package and a listing of the directory, which now
+ * agree.
  *
  * <ul>
  *   <li>{@code SecurityConfig} builds the resource server filter chain that
@@ -127,20 +140,55 @@
  *       on this side, so that write becomes a call to the owning context, and
  *       pinning every pooled connection makes the boundary a property of the
  *       connection rather than a naming habit.</li>
+ *   <li>{@code InternalIdentityConfig} wires the machine identity this
+ *       context presents when it calls the account context, signing a
+ *       short-lived service token with the shared symmetric key that the
+ *       account context's own internal filter chain verifies. Assumptions: this
+ *       is the other half of a two-sided mechanism, so it cannot be read on its
+ *       own -- the minting side is here and the verifying side is
+ *       {@code com.carddemo.account.config.InternalApiSecurityConfig}, and the
+ *       two are configured from the same secret. The two calls that depend on
+ *       it are the card cross-reference lookup a transaction add resolves
+ *       through and the account read a bill payment checks a balance against,
+ *       exactly the two reads the baseline satisfied from the shared file set
+ *       named at {@code app/cbl/COTRN02C.cbl} lines 40 to 42 and
+ *       {@code app/cbl/COBIL00C.cbl} line 41. Without a credential on those
+ *       calls the account context answers 401, and this context reports its
+ *       dependency as unavailable rather than reporting a configuration fault,
+ *       so every add and every payment fails with a diagnostic that points away
+ *       from the cause. Trade-offs: a symmetric key means every holder can mint
+ *       as well as verify, which asymmetric signing would avoid. It is accepted
+ *       because the holder set is closed and named -- this context, the
+ *       pending-authorization context and the verifying account context are the
+ *       three principals the biconditional secret clause in
+ *       {@code infra/modules/ecs-service} enumerates -- so a fourth holder is a
+ *       plan-time change to that clause rather than a silent widening, and the
+ *       key never leaves the private application subnets.</li>
  * </ul>
  *
- * <p>Alternatives Considered: collecting the shared-kernel wiring into a fourth
- * class of its own, named for the framework it configures -- a Jackson
- * configuration for the money module, or a single holder for the shared beans.
- * Rejected. The parent charter names the contents of this package as exactly
- * three classes, and every one of the module shapes in this migration
- * enumerates the same three, so a fourth class here would make this module the
- * only one of the eight whose configuration package does not match the shape
- * its own charter declares. The divergence would be invisible in this module
- * and visible only to someone comparing two of them. The cost accepted is that
- * two responsibilities sit in {@code OpenApiConfig} rather than one, which is
- * why the paragraph above states what the two have in common instead of leaving
- * the pairing unexplained.
+ * <p>Alternatives Considered: collecting the shared-kernel wiring into a class
+ * of its own, named for the framework it configures -- a Jackson
+ * configuration for the money module, or a single holder for the shared
+ * beans. Rejected, because the shared-kernel registrations are not a
+ * responsibility in their own right: each one exists to make this service's
+ * published representation of itself complete, which is what
+ * {@code OpenApiConfig} already governs, so a separate holder would split
+ * one concern across two files and leave neither able to state the whole of
+ * it. Trade-offs: two responsibilities therefore sit in
+ * {@code OpenApiConfig} rather than one, which is why the entry above states
+ * what the two have in common instead of leaving the pairing unexplained.
+ *
+ * <p>Refactoring Rationale: this paragraph previously argued the same rejection
+ * from a count -- that a fourth class here would make this module the only
+ * one of the eight whose configuration package diverged from a three-class
+ * shape. That argument no longer holds and was replaced rather than
+ * adjusted, because it was unsound as well as stale: the eight configuration
+ * packages were never uniform, and they are measurably not uniform now, with
+ * the account context holding five classes and the pending-authorization
+ * context six. An argument that rests on a uniformity nobody enforces will
+ * keep expiring, whereas the argument above rests on what the class would be
+ * responsible for, which does not change when a sibling module gains a
+ * class.
  *
  * <h2>How the shared kernel reaches this context</h2>
  *
@@ -217,7 +265,7 @@
  *       under a package named for its concern and not under any package named
  *       {@code config}. Filing it by Spring stereotype instead of by concern is
  *       the predictable wrong turn, because this module does have a
- *       {@code config} package and that package holds three unrelated classes;
+ *       {@code config} package and that package holds four unrelated classes;
  *       the parent charter records the same warning, and it is repeated here
  *       because this is the directory someone hunting for the class opens.
  *       Correlation identifiers reach the log through the filter
@@ -251,8 +299,8 @@
  * them imports {@code api}, {@code service}, {@code repository},
  * {@code domain}, {@code dto} or {@code mapper}, from this module or from any
  * other. That is what leaves this package with no sibling dependency, and it is
- * why this charter and the three classes it governs can be written without
- * waiting on the rest of the module.
+ * why this charter and the four classes it governs can be read without reading
+ * the rest of the module.
  *
  * <p>Trade-offs: declining to import a sibling package is a real restriction
  * rather than a description of what happens to be true, because wiring a bean
@@ -275,26 +323,56 @@
  * forecloses, and the drift would be silent, because both copies would go on
  * compiling.
  *
- * <p>Assumptions: the layering test that will enforce part of this is
+ * <p>Assumptions: TWO layering gates run against this module's compiled classes
+ * on every build, and both are named because each covers something the other
+ * does not. The shared one is
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java},
- * and what it does and does not reach is stated precisely here rather than
- * summarised, because overstating mechanical coverage would leave a reviewer
- * checking nothing while believing a tool had. Its domain-isolation rule is
- * scoped to classes in a {@code domain} package, so it does not constrain
- * {@code com.carddemo.transaction.config} at all, and this package may freely
- * import Spring web, servlet and security types. Its money-path rule is scoped
- * to {@code com.carddemo.common.money} and below, so the numeric-representation
- * discipline that governs an amount handled in this package is a review
- * obligation and not a mechanical one. The rule class is assigned to this
- * module by the migration plan and has no file yet -- this module's own POM
- * declares the ArchUnit engine at test scope so that the class is executable
- * when it lands, because the shared kernel binds no test-jar goal and so
- * publishes no test classes to inherit -- which means the import discipline
- * stated above is currently carried entirely by review.
+ * delivered to this module as a {@code test-jar} dependency and pulled into
+ * this module's own test run by the {@code architecture-rules} Surefire
+ * execution in {@code services/pom.xml}, which scans that artifact and
+ * selects it by name. The module-local one is
+ * {@code services/transaction-service/src/test/java/com/carddemo/transaction/architecture/TransactionLayeringRulesTest.java},
+ * which additionally asserts that each of its rule families had SUBJECTS
+ * here -- the assertion the shared class cannot make, because it runs in
+ * nine modules and so must tolerate an empty subject set.
+ *
+ * <p>Assumptions: exactly which of the module-local rule families reaches this
+ * package is stated rather than summarised, because overstating mechanical
+ * coverage would leave a reviewer checking nothing while believing a tool
+ * had. Its domain-isolation family is scoped to classes in a {@code domain}
+ * package, so it does not constrain {@code com.carddemo.transaction.config}
+ * at all, and this package may freely import Spring web, servlet and
+ * security types. Its money-path family is scoped to this module's
+ * {@code domain}, {@code dto} and {@code mapper} packages, so the
+ * numeric-representation discipline that governs an amount handled in this
+ * package is a review obligation and not a mechanical one. Its
+ * foreign-domain family is the one that does reach here: it is scoped to
+ * every class of this module, so a configuration class in this package that
+ * imported a sibling context's {@code domain} package would fail the build.
+ * Trade-offs: that leaves the discipline split. The half that forbids
+ * importing another context's domain model is mechanical; the half that
+ * forbids importing this module's own {@code api}, {@code service},
+ * {@code repository}, {@code domain}, {@code dto} or {@code mapper} packages
+ * is carried by review, because a rule broad enough to forbid it would also
+ * forbid the framework wiring this package exists to do.
+ *
+ * <p>Refactoring Rationale: this passage previously named only the shared rule
+ * class, recorded that the module-local one had no file yet, and stated that
+ * the shared kernel bound no test-jar goal so published no test classes to
+ * inherit. All three statements are superseded. The kernel now binds that
+ * goal ahead of its {@code package} phase, this module consumes the artifact
+ * it produces, and the module-local class has landed beside it -- which is
+ * also why this module declares the ArchUnit engine at test scope on its own
+ * account, since the engine supplies an assertion API and no rules. The
+ * correction matters more than an ordinary stale sentence would, because the
+ * superseded text told a reader that nothing mechanical checked this
+ * package's imports, and a reader who believed it would have had no reason
+ * to expect the build to fail on the one import that it does in fact reject.
+ *
  *
  * <h2>No exemption from the documentation gate reaches this package</h2>
  *
- * <p>Assumptions: the three classes assigned to this package cannot be exempted
+ * <p>Assumptions: the four classes in this package cannot be exempted
  * from the Javadoc gate, and the two routes to exempting them are closed
  * independently of each other. The ruleset declines to set
  * {@code skipAnnotations}, even though the upstream documentation's own example
@@ -390,13 +468,16 @@
  *
  * <p>Trade-offs: prose is wrapped at 80 columns to match the sibling charters
  * in this tree, even though the ruleset configures no line-length check and so
- * does not require it. Exactly four lines exceed that width deliberately and
- * should be left as they are. Three are inline code spans holding a path, which
- * cannot be broken because a line break inside one would insert the comment
- * margin into the rendered path. The fourth is the opening section heading,
- * kept character-for-character identical to the heading the sibling charters
- * use so that the three read as one convention; rewording it to save two
- * columns would buy a narrower file at the cost of the only thing that heading
- * is for.
+ * does not require it. One category of line exceeds that width deliberately and
+ * must be left as it is: a line whose content is a single inline code span
+ * holding a repository path, which cannot be broken because a line break inside
+ * one would insert the comment margin into the rendered path and would also
+ * defeat a search for the path as written. A few prose lines elsewhere run a
+ * column or two over from earlier wrapping; those are incidental rather than
+ * deliberate, and reflowing one is safe. Refactoring Rationale: this used to
+ * name an exact number of over-width lines and account for each. The number was
+ * wrong when it was written and would have needed revising on every rewrap, so
+ * it is replaced by the distinction a maintainer actually has to apply -- which
+ * over-width lines may be reflowed and which may not.
  */
 package com.carddemo.transaction.config;

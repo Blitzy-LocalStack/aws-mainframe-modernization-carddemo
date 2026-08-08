@@ -203,36 +203,54 @@
  * <h2>Contents of this package</h2>
  *
  * <p>This package holds exactly two production classes, {@code Money} and {@code MoneyModule}, and
- * with this descriptor beside them the directory holds exactly three {@code .java} files. There is
+ * with this descriptor beside them the directory holds exactly three {@code .java} files:</p>
+ *
+ * <pre>
+ * this directory: 3 java files = 2 classes + 1 charter
+ * </pre>
+ *
+ * <p>There is
  * no fourth file here and none is to be added: the arithmetic contract and its wire-format
  * companion are the whole of the concern, and a third type would be either a second money
  * representation or a concern belonging to another package. Across {@code com.carddemo.common} as a
- * whole the contract admits two production classes in {@code money}, five in {@code codec}, three in
- * {@code error}, three in {@code web}, three in {@code security}, one in {@code observability}, one in
- * {@code time} and two in {@code validation}, the package root contributing one -- the
- * auto-configuration class that registers this package's codec module, and the correlation filter,
- * the meter filter and the error advice, in every service. The two totals
- * that follow are each kept whole on one line so that either can be checked by eye and matched by
- * a search without a line break splitting it:</p>
+ * whole the module holds six production classes in {@code codec}, seven in {@code error}, two in
+ * {@code messaging}, two in {@code money}, three in {@code observability}, eight in
+ * {@code security}, one in {@code time}, two in {@code validation} and three in {@code web}, the
+ * package root contributing one -- the auto-configuration class that registers this package's codec
+ * module, and the {@code Clock}, the cursor-token signer, the correlation filter, the meter filter
+ * and the error advice, in every service. The two totals that follow are each kept whole on one line
+ * so that either can be checked by eye, matched by a search without a line break splitting it, and
+ * read back by the drift test named below:</p>
  *
  * <pre>
- * production classes:  1 + 2 + 5 + 3 + 3 + 3 + 1 + 1 + 2 = 21
- * compilation units:   21 production + 9 package descriptors = 30  (target)
+ * production classes:  1 + 6 + 7 + 2 + 2 + 3 + 8 + 1 + 2 + 3 = 35
+ * compilation units:   35 production + 10 package descriptors = 45
  * </pre>
  *
- * <p>The nine descriptors are one for the package root and one for each of its eight subpackages.
+ * <p>The ten descriptors are one for the package root and one for each of its nine subpackages.
  * The figures are recorded so that a class absent from the module stays distinguishable from one
- * the contract never admitted.</p>
+ * the module never held.</p>
  *
- * <p>Assumptions: every figure above is a TARGET total and none of them is a measurement of what the
- * tree holds. This library is landed in plan order, so a class named here that has no file yet is
- * planned rather than absent, and phrasing the inventory as a target is what keeps this paragraph true
- * at every point in that sequence. Alternatives Considered: recording alongside it which of the named
- * classes had been authored when this descriptor was written was evaluated and rejected. Such a
- * sentence is accurate for exactly one commit and is then a false statement sitting inside the comment
- * a reader consults to learn what belongs here, which is worse than no sentence at all; the directory
- * listing and the reactor build already report the present state precisely, and neither of them can
- * fall out of date.</p>
+ * <p>Refactoring Rationale: every figure above was previously a TARGET rather than a measurement,
+ * and the paragraph that said so argued that a target "keeps this paragraph true at every point in
+ * that sequence". That reasoning held only while the tree was a subset of the target. It is not: the
+ * module now holds thirty-five production classes against a target of twenty-one, and one whole
+ * subpackage -- {@code messaging}, with {@code MessageExpiry} and
+ * {@code MessagingCorrelationId} -- that the target never named at all. A target that the delivery
+ * has overshot is not a forgiving description of the delivery; it is a false one, and it fails in
+ * the direction that matters, because a reader consults this block to learn whether a type they
+ * cannot find is missing or was never admitted, and an under-stated inventory answers "never
+ * admitted" about a class that is right there.</p>
+ *
+ * <p>Refactoring Rationale: the inventory is now a MEASUREMENT, and
+ * {@code com.carddemo.common.architecture.SharedKernelInventoryTest} re-derives it from the
+ * directory on every build and fails if this block disagrees. Alternatives Considered: deleting the
+ * inventory instead, on the argument that a directory listing already reports the present state and
+ * cannot fall out of date. Rejected because the listing answers a different question: it says what
+ * is there, not what belongs there, so it cannot distinguish a type that was added deliberately from
+ * one that drifted in from another concern -- which is the judgement this block exists to record.
+ * Mechanising it keeps the judgement and removes the staleness, where deleting it would keep the
+ * staleness problem solved and lose the judgement.</p>
  *
  * <h2>Why this descriptor exists</h2>
  *

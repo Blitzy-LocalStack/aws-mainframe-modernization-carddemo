@@ -308,6 +308,30 @@ public interface UserRepository extends JpaRepository<User, String> {
     List<User> findByUserIdGreaterThanOrderByUserIdAsc(String lastKey, Limit limit);
 
     /**
+     * Reads the first page of users, in ascending identifier order.
+     *
+     * <p>Assumptions: this is the browse's opening read, the one taken when no cursor has been supplied
+     * yet. It corresponds to the reference starting its browse at the low key rather than positioning on
+     * a value -- {@code app/cbl/COUSR00C.cbl} establishes the position before its first
+     * {@code READNEXT} rather than passing a key it was given.
+     *
+     * <p>Alternatives Considered: opening the browse with
+     * {@link #findByUserIdGreaterThanOrderByUserIdAsc} passing an empty string, which would remove this
+     * declaration. Rejected because it leans on a collation detail to mean "before every key": the column
+     * is {@code CHAR(8)} and PostgreSQL ignores trailing blanks when comparing it, so an empty string and
+     * a string of blanks compare equal, and a row whose identifier were blank would be silently excluded
+     * from the first page while appearing on later ones. A query with no lower bound states the intent
+     * directly and cannot be wrong about it.
+     *
+     * <p>Assumptions: the limit is the caller's surplus-of-one, exactly as on the two positioned reads, so
+     * the browse can tell a full page from a last page by whether the extra row arrived.
+     *
+     * @param limit the greatest number of rows to return, normally the page size plus one
+     * @return the lowest-keyed users in ascending order, at most {@code limit} of them; never {@code null}
+     */
+    List<User> findAllByOrderByUserIdAsc(Limit limit);
+
+    /**
      * Reads the page of users that precedes a stated position, in descending identifier order.
      *
      * <p>This is the relational form of the backward read at lines 655 to 663 of

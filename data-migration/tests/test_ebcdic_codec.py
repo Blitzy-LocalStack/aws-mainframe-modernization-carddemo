@@ -190,11 +190,17 @@ def test_a_text_field_decodes_to_its_declared_width_and_characters() -> None:
 def test_a_numeric_display_field_decodes_as_characters_not_as_a_number() -> None:
     """Return an unsigned display field's digits as characters, keeping leading zeros."""
     # WHY : Assumptions: a PIC 9(n) key is decoded as CHARACTERS and not parsed, because its
-    #   leading zeros are part of the key. Parsing it to an integer would make account
-    #   00000000001 and account 1 the same value, and the cross-reference join is on the
+    #   leading zeros are part of the key. Parsing it to an integer would collapse an
+    #   eleven-character key onto its unpadded digits, and the cross-reference join is on the
     #   eleven-character form.
+    # WHY : Assumptions: the span is a SYNTHETIC value verified absent from the shipped account,
+    #   cross-reference and customer extracts, where it was previously the identifier of the
+    #   corpus's first account. The property under test -- that leading zeros survive because the
+    #   field is not parsed -- does not depend on which digits follow them, so nothing is lost by
+    #   choosing digits that identify no record; and this package's boundaries forbid an account
+    #   identifier in source outright.
     field = layouts.uint("ACCT-ID", 0, 11)
-    assert decode_field(_ebcdic("00000000001"), field) == "00000000001"
+    assert decode_field(_ebcdic("00000000999"), field) == "00000000999"
 
 
 def test_a_computational_field_is_returned_as_untouched_bytes() -> None:
@@ -321,7 +327,23 @@ def test_a_whole_record_decodes_field_by_field_into_exact_values() -> None:
     image = next(iter(iter_ebcdic_records(_ACCOUNT_EXTRACT, layout)))
     fields = decode_record(image, layout)
 
-    assert fields["ACCT-ID"] == "00000000001"
+    # WHY : Assumptions: the account identifier is asserted STRUCTURALLY -- returned as ``str``,
+    #   at its declared width, all digits, leading zero intact -- rather than as a literal, which
+    #   is what it previously was. It is read from the shipped extract, so a literal here was a
+    #   committed account identifier that an equality failure would additionally render into the
+    #   pytest report. The claim under test is that ``decode_record`` hands back CHARACTERS for a
+    #   PIC 9(n) key rather than a number, and every one of these properties would break if it
+    #   parsed: a parsed value is not ``str``, is not eleven characters, and has no leading zero.
+    account_id = fields["ACCT-ID"]
+    returned_as_characters_at_declared_width = (
+        isinstance(account_id, str)
+        and len(account_id) == layout.field("ACCT-ID").length
+        and account_id.isdigit()
+        and account_id.startswith("0")
+    )
+    assert returned_as_characters_at_declared_width, (
+        "ACCT-ID must come back as characters at its declared width with its leading zero"
+    )
     assert fields["ACCT-ACTIVE-STATUS"] == "Y"
     # WHY : Assumptions: the balance is asserted as a Decimal AND at its exponent, because a
     #   value that merely compares equal to 194.00 but carries a different scale re-encodes to

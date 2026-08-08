@@ -33,6 +33,7 @@ from pathlib import Path
 
 import pytest
 
+from carddemo_migration import config
 from carddemo_migration.config import (
     LOGIN_ROLE_NAMES,
     MIGRATION_SCHEMA_ROLES,
@@ -458,3 +459,98 @@ def test_each_environment_root_projects_the_migration_credential(root: Path) -> 
         f"the {root.name} root must exclude reporting from the migration projection, because "
         f"the bootstrap SQL creates no carddemo_reporting_migrator role"
     )
+
+
+def test_aws_client_is_the_modules_public_client_factory() -> None:
+    """Export the client factory, so a sibling module need not reach into a private name.
+
+    WHY : Refactoring Rationale: the factory was ``_aws_client``, and
+    ``loaders.s3_stage.s3_client`` -- a PUBLIC function -- called it. A public contract in one
+    module therefore rested on a private name in another, excluded from that module's exported
+    surface and free to be renamed without any import check noticing. Asserting both the callable
+    and its presence in ``__all__`` is what keeps the promotion from being undone by tidying.
+    """
+    assert callable(config.aws_client)
+    assert "aws_client" in config.__all__
+    assert not hasattr(config, "_aws_client")
+    # WHY : Assumptions: the cache-clearing hook is asserted because
+    #   ``reset_resolution_cache`` discards memoised clients by SCANNING this module's globals for
+    #   it. A factory without it would be silently exempt from the reset, so a test substituting an
+    #   endpoint between cases -- or a process picking up rotated credentials -- would get a fresh
+    #   parameter-store client and a stale S3 client from the same call.
+    assert hasattr(config.aws_client, "cache_clear")
+
+
+def test_aws_client_refuses_an_environment_that_names_no_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail fast rather than letting S3 fall back to its default region.
+
+    WHY : Assumptions: the refusal matters for S3 specifically. Every other service raises
+    ``NoRegionError`` at construction, but S3 succeeds against ``us-east-1``, so without this
+    check a task deployed to another region with its region setting missing wrote every extract
+    into the wrong region's namespace and reported success.
+    """
+    for variable in ("AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE"):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("AWS_CONFIG_FILE", "/nonexistent")
+    config.reset_resolution_cache()
+
+    with pytest.raises(config.ConfigurationError, match="names no region"):
+        config.aws_client("s3")
+
+    config.reset_resolution_cache()
+
+
+@pytest.mark.parametrize(
+    ("variables", "expected"),
+    [
+        ({"AWS_REGION": "eu-west-1"}, "eu-west-1"),
+        ({"AWS_DEFAULT_REGION": "ap-south-1"}, "ap-south-1"),
+        ({"AWS_REGION": "eu-west-1", "AWS_DEFAULT_REGION": "ap-south-1"}, "eu-west-1"),
+    ],
+    ids=["aws-region-only", "aws-default-region-only", "aws-region-wins"],
+)
+def test_aws_client_resolves_the_region_from_either_variable(
+    variables: dict[str, str], expected: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Build a client for the region the environment names, from either variable.
+
+    WHY : Refactoring Rationale: the ``AWS_REGION``-only case is the one that was broken, and it is
+    the case this deployment actually runs. Measured on botocore 1.43.50, the session's variable
+    mapping for the region is ``AWS_DEFAULT_REGION`` alone, so with ``AWS_REGION`` set and nothing
+    else the session answers ``None`` and an S3 client silently resolves to ``us-east-1``. Both
+    environment roots set ``AWS_REGION`` -- ``infra/envs/{dev,prod}/main.tf`` -- and ECS supplies it
+    to a Fargate task itself, so the staging task read its region from a setting the SDK ignored.
+
+    WHY : Assumptions: the both-variables case asserts ``AWS_REGION`` WINS, which is the precedence
+    AWS documents across its SDKs. Consulting the session first would return the lower-precedence
+    variable, so an operator's override would be quietly discarded.
+    """
+    for variable in ("AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE"):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("AWS_CONFIG_FILE", "/nonexistent")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test-access-key")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test-secret-key")
+    for name, value in variables.items():
+        monkeypatch.setenv(name, value)
+    config.reset_resolution_cache()
+
+    client = config.aws_client("s3")
+
+    assert client.meta.region_name == expected
+    # WHY : Assumptions: the timeout and retry policy are asserted on the SAME client rather than
+    #   in a separate case, because the point is that a client this factory returns carries them --
+    #   a client built any other way does not, and botocore's own defaults leave the connect
+    #   timeout at sixty seconds.
+    assert client.meta.config.connect_timeout == config.AWS_CONNECT_TIMEOUT_SECONDS
+    assert client.meta.config.read_timeout == config.AWS_READ_TIMEOUT_SECONDS
+    # WHY : Assumptions: the assertion reads ``total_max_attempts`` and expects one MORE than the
+    #   configured value, because botocore's ``retries.max_attempts`` counts retries rather than
+    #   total attempts and it normalises the pair on the built client. Asserting the configured key
+    #   instead raises ``KeyError`` on the built client, which is how the off-by-one in the
+    #   constant's own documentation was found.
+    assert client.meta.config.retries["total_max_attempts"] == config.AWS_MAX_RETRY_ATTEMPTS + 1
+    assert client.meta.config.retries["mode"] == config.AWS_RETRY_MODE
+
+    config.reset_resolution_cache()

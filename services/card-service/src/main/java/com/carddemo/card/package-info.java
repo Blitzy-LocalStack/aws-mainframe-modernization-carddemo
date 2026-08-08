@@ -7,15 +7,24 @@
 /**
  * Root package of the card bounded context, which owns credit-card enquiry and maintenance.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ * <h2>Contract and current membership, and the one member still outstanding</h2>
  *
- * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
- * beside this one today. The migration lands its artifacts in plan order and this charter is
- * authored first, so at the checkpoint that authored it this directory holds this charter and three
- * subpackages, {@code config}, {@code mapper} and {@code service}, each of which holds only its own
- * charter. A type or test named below that has no file yet is therefore <b>planned</b>, not
- * missing, and a count below is a target total rather than a measurement of the directory.</p>
+ * <p>Assumptions: this charter's inventory is <b>measured against the directory</b>, and all seven
+ * subpackages exist -- {@code domain}, {@code repository}, {@code dto}, {@code mapper},
+ * {@code service}, {@code api} and {@code config} -- each holding its own charter and, apart from
+ * {@code api}, its classes. <b>Exactly one member of the map below has no file: {@code CardController}
+ * in {@code api}.</b> None of the five published operations is therefore served yet, and that single
+ * outstanding member is marked at its own entry rather than by a blanket qualification over the whole
+ * charter.</p>
+ *
+ * <p>Refactoring Rationale: this section previously declared every name in the charter a target rather
+ * than a measurement, on the ground that the directory held this charter and three charter-only
+ * subpackages. That was true when written and is now false in almost every particular -- the entity,
+ * the repository, the three data-transfer records, the mapper, the cipher and the four configuration
+ * classes are all present -- so a blanket "planned, not missing" preamble had become a blanket
+ * inaccuracy, and it is the most misleading form the inaccuracy can take: a reader is told nothing in
+ * the file can be trusted as an inventory, so the one name that genuinely is outstanding stops standing
+ * out. Marking the single exception is what restores that signal.</p>
  *
  * <p>Alternatives Considered: withholding this charter until every class it governs
  * exists. Rejected, because the charter is what the authors of those classes work
@@ -67,9 +76,15 @@
  *       record and the API surface</li>
  *   <li>{@code service}: {@code CardListService}, {@code CardViewService} and
  *       {@code CardUpdateService}</li>
- *   <li>{@code api}: {@code CardController}</li>
- *   <li>{@code config}: {@code SecurityConfig}, {@code OpenApiConfig} and
- *       {@code DataSourceConfig}</li>
+ *   <li>{@code api}: {@code CardController} -- <b>the one member of this map with no file.</b> The
+ *       package holds its charter, which carries the five-operation roster the controller is to serve
+ *       and the reason the count is five</li>
+ *   <li>{@code config}: {@code SecurityConfig}, {@code OpenApiConfig}, {@code DataSourceConfig} and
+ *       {@code KmsConfig} -- four classes, the fourth wiring the key-management client the stored card
+ *       verification value is enciphered with. Assumptions: four is where this context differs from its
+ *       account and transaction siblings, and the difference is a property of the data rather than of
+ *       taste: this is the only context that enciphers a stored column, so it is the only one whose
+ *       configuration package reaches a cryptographic service</li>
  * </ul>
  *
  * <h2>Shared kernel</h2>
@@ -106,8 +121,8 @@
  * they confer no ownership.
  *
  * <p>Assumptions: this context also carries no messaging and no batch concern. Nothing is
- * published or consumed here, which is why {@code config} holds three classes and no queue or job
- * configuration, and why the module declares no messaging or batch dependency. The absence is a
+ * published or consumed here, which is why none of the four classes in {@code config} is a queue or
+ * job configuration, and why the module declares no messaging or batch dependency. The absence is a
  * property of the baseline rather than an omission to be corrected: the three card screens exchange
  * no message, and the one batch program in the provenance above is a read-and-print utility whose
  * logic becomes the read path on the repository.

@@ -85,14 +85,14 @@ from carddemo_migration.copybook.zoned import (
 )
 
 if TYPE_CHECKING:
-    # WHY (Assumptions): the two corpus classes are imported for annotation only, under the
+    # WHY : Assumptions: the two corpus classes are imported for annotation only, under the
     #   type-checking guard, so this module never depends at run time on ``conftest`` being
     #   importable as a top-level name. pytest injects both objects as fixtures, so the names
     #   are needed to document the parameters and for nothing else; importing them
     #   unconditionally would tie collection of this file to pytest's path-insertion order.
     from conftest import FixtureCorpus, SeedCorpus
 
-# WHY (Assumptions): the two tables are transcribed as ten-character index strings, in which
+# WHY : Assumptions: the two tables are transcribed as ten-character index strings, in which
 #   the STRING INDEX IS THE DIGIT VALUE, because that is the representation ``zoned.py``
 #   itself uses at lines 322-323 and the reference codec uses at
 #   ``tests/helpers/record_codec.py`` lines 137-138. Asserting against the same shape is what
@@ -101,7 +101,7 @@ if TYPE_CHECKING:
 _POSITIVE_OVERPUNCH_TABLE = "{ABCDEFGHI"
 _NEGATIVE_OVERPUNCH_TABLE = "}JKLMNOPQR"
 
-# WHY (Trade-offs): only these five of the twenty overpunch bytes occur in the corpus, which
+# WHY : Trade-offs: only these five of the twenty overpunch bytes occur in the corpus, which
 #   was established by reading every signed span of ``app/data/ASCII/*.txt`` and
 #   ``tests/fixtures/**``. Exhaustive table coverage is chosen over pretending the live union
 #   is complete: fifteen bytes -- ``A``-``E``, ``I`` and the whole negative letter run
@@ -113,14 +113,14 @@ _NEGATIVE_OVERPUNCH_TABLE = "}JKLMNOPQR"
 #   from the fixture corpus at an interior offset.
 _LIVE_OVERPUNCH_BYTES = frozenset("{FGH}")
 
-# WHY (Assumptions): the ten-digit body below is the digit run of the attested live span
+# WHY : Assumptions: the ten-digit body below is the digit run of the attested live span
 #   ``0000005047G`` from ``app/data/ASCII/dailytran.txt`` line 1. Every table vector
 #   substitutes only its final character, so all twenty differ from an attested span in
 #   exactly one byte -- and ``ZonedDecimalCodecTest.java`` builds its table vectors from the
 #   same body, which is what makes the two languages' tables comparable line for line.
 _OVERPUNCH_BODY = "0000005047"
 
-# WHY (Assumptions): the three geometries below are the only ones the corpus declares for
+# WHY : Assumptions: the three geometries below are the only ones the corpus declares for
 #   money, and each is taken from a picture clause rather than from a byte count.
 #   ``PIC S9(09)V99`` is the transaction amount at ``app/cpy/CVTRA05Y.cpy`` line 10 and
 #   ``PIC S9(10)V99`` is every account amount at ``app/cpy/CVACT01Y.cpy`` lines 7-9 and 13-14.
@@ -135,7 +135,7 @@ _SIGNED = True
 #: Sign contract of a picture clause that carries no leading ``S``.
 _UNSIGNED = False
 
-# WHY (Assumptions): the three sign nibbles are named from ``packed.py``'s own constants
+# WHY : Assumptions: the three sign nibbles are named from ``packed.py``'s own constants
 #   rather than written as bare hexadecimal at each assertion site, so a test that refuses a
 #   nibble names the nibble it refuses. 0x0C is signed positive, 0x0D signed negative and
 #   0x0F unsigned positive, and all three occur in real data rather than in documentation.
@@ -143,7 +143,7 @@ _SIGN_POSITIVE_NIBBLE = 0x0C
 _SIGN_NEGATIVE_NIBBLE = 0x0D
 _SIGN_UNSIGNED_NIBBLE = 0x0F
 
-# WHY (Assumptions): this policy is READ from ``packed.py`` and not generalised from another
+# WHY : Assumptions: this policy is READ from ``packed.py`` and not generalised from another
 #   COBOL runtime. That module's ``_LOWEST_SIGN_NIBBLE`` comment states that 0x0A, 0x0B and
 #   0x0E are the alternate sign nibbles some encoders emit and that this codec rejects all
 #   three, as does the Java parity codec, because an unexpected nibble in the sign position is
@@ -163,7 +163,7 @@ _EXPORT_HAPPY_PATH = "export/happy_path"
 _REJECT_101_SCENARIO = "posting/reject_101_acct_missing"
 _REJECT_103_SCENARIO = "posting/reject_103_expired"
 
-# WHY (Assumptions): the two windows below are byte ranges that LOOK like signed zoned money
+# WHY : Assumptions: the two windows below are byte ranges that LOOK like signed zoned money
 #   fields and are not, and both were located by measuring the corpus rather than by guessing.
 #   Group A is the eleven characters at zero-based [12:23] of a 350-byte transaction record,
 #   which spans FOUR declared field boundaries -- the tail of ``TRAN-ID`` [0:16], all of
@@ -179,7 +179,7 @@ _GROUP_A_WINDOW_END = 23
 _GROUP_B_WINDOW_START = 143
 _GROUP_B_WINDOW_END = 153
 
-# WHY (Assumptions): the five Group A spans are paired with the value a signed 9-and-2 decode
+# WHY : Assumptions: the five Group A spans are paired with the value a signed 9-and-2 decode
 #   actually returns for them, which is the whole point of the pairing. None of the five
 #   RAISES -- each decodes successfully to a plausible nine-figure negative amount -- so the
 #   proof that pattern matching is unsafe is that it SUCCEEDS and lies, not that it fails.
@@ -191,7 +191,7 @@ _GROUP_A_FALSE_POSITIVES = (
     ("2252010001P", Decimal("-225201000.17")),
 )
 
-# WHY (Assumptions): a ten-character window read as signed money is eight integer positions
+# WHY : Assumptions: a ten-character window read as signed money is eight integer positions
 #   and two decimal ones, so the two Group B spans are paired with the values that geometry
 #   returns. They too decode rather than raise.
 _GROUP_B_FALSE_POSITIVES = (
@@ -210,7 +210,7 @@ def _account_field(name: str) -> FieldSpec:
     :returns: the registry's descriptor, carrying its declared offset, width and kind.
     :raises LayoutError: if the account layout declares no field of that name.
     """
-    # WHY (Assumptions): the descriptor is resolved from the registry on every call rather
+    # WHY : Assumptions: the descriptor is resolved from the registry on every call rather
     #   than copied into a module constant, because a constant would be a second declaration
     #   of an offset that ``layouts.py`` already owns. Two declarations of one offset is how
     #   the two drift apart, and a drifted offset still decodes to digits.
@@ -245,7 +245,7 @@ def _assert_decodes_and_re_encodes(
     :returns: the decoded value, for a caller that wants to assert something further.
     :raises AssertionError: if the value, its exponent, or the re-encoded span differs.
     """
-    # WHY (Assumptions): the scale is asserted through the exponent and not through equality,
+    # WHY : Assumptions: the scale is asserted through the exponent and not through equality,
     #   because Decimal("193.00") and Decimal("193") compare EQUAL while re-encoding to
     #   different spans. Parity is decided by a byte comparison against a golden master, so a
     #   value that compares right at the wrong exponent is a defect that equality cannot see.
@@ -266,7 +266,7 @@ def test_the_reference_account_balance_vector_decodes_to_its_documented_value() 
     Takes no parameters and returns no value; a differing value, scale or re-encoded span is
     reported as an assertion failure.
     """
-    # WHY (Alternatives Considered): this span is transcribed from the module docstring of
+    # WHY : Alternatives Considered: this span is transcribed from the module docstring of
     #   ``tests/helpers/record_codec.py``, which cites it as the ``CURR-BAL`` field of line 1
     #   of ``app/data/ASCII/acctdata.txt`` -- measured independently here at [12:24] of that
     #   line. Writing a different twelve-character span of my own was the alternative and
@@ -283,7 +283,7 @@ def test_the_reference_positive_transaction_amount_vector_carries_its_overpunch_
     Takes no parameters and returns no value; a differing value, scale or re-encoded span is
     reported as an assertion failure.
     """
-    # WHY (Assumptions): an overpunch is the LOW-ORDER DIGIT carrying a sign and not a
+    # WHY : Assumptions: an overpunch is the LOW-ORDER DIGIT carrying a sign and not a
     #   sign-only suffix, which is why ``0000005047G`` is 504.77 and never 50.47. Dropping the
     #   seven that ``G`` carries would produce a value wrong by a factor of ten that is
     #   entirely plausible as an amount, so the expected value is named in full here rather
@@ -299,7 +299,7 @@ def test_the_reference_negative_transaction_amount_vector_differs_only_in_its_fi
     Takes no parameters and returns no value; a differing value, scale or re-encoded span is
     reported as an assertion failure.
     """
-    # WHY (Assumptions): the reference pairs this span with the positive one deliberately.
+    # WHY : Assumptions: the reference pairs this span with the positive one deliberately.
     #   ``J`` is index 1 of the negative table where ``G`` is index 7 of the positive one, so
     #   the two spans differ in one byte and their values differ in both sign AND last digit --
     #   -504.71 against 504.77. A codec that read the sign correctly but took the digit from
@@ -315,7 +315,7 @@ def test_the_reference_encode_vectors_reproduce_the_documented_spans() -> None:
     Takes no parameters and returns no value; a differing span is reported as an assertion
     failure.
     """
-    # WHY (Assumptions): the two encode vectors are asserted from a Decimal literal and not
+    # WHY : Assumptions: the two encode vectors are asserted from a Decimal literal and not
     #   from a value the decoder just produced, because the reference docstring states them as
     #   encode vectors in their own right. The pairing also fixes the padding rule: a display
     #   field is right-aligned and left-padded with the digit zero, so 194.00 in a
@@ -339,7 +339,7 @@ def test_the_shipped_seed_supplies_both_reference_decode_vectors(seed_corpus: Se
     :returns: nothing; a seed whose bytes no longer match the cited vector is reported as an
         assertion failure.
     """
-    # WHY (Alternatives Considered): the citation is verified rather than trusted. The
+    # WHY : Alternatives Considered: the citation is verified rather than trusted. The
     #   reference docstring names these two spans as coming from line 1 of two named seeds, and
     #   a comment can go stale where an assertion cannot. Hard-coding the spans alone was the
     #   alternative: it would keep passing after a seed changed, at which point every value in
@@ -350,7 +350,7 @@ def test_the_shipped_seed_supplies_both_reference_decode_vectors(seed_corpus: Se
     assert decode_zoned_field(account_record, balance) == Decimal("194.00")
 
     daily_record = seed_corpus.ascii_records("dailytran.txt")[0]
-    # WHY (Assumptions): the daily-transaction and posted-transaction records share the
+    # WHY : Assumptions: the daily-transaction and posted-transaction records share the
     #   350-byte layout of ``app/cpy/CVTRA06Y.cpy`` and ``app/cpy/CVTRA05Y.cpy``, so the amount
     #   sits at [132:143] in both. The descriptor is taken from the record's own registered
     #   layout rather than from the transaction one, so the offset is never assumed to be
@@ -372,7 +372,7 @@ def test_every_account_money_field_of_the_live_fixture_decodes_exactly(
     record = fixture_corpus.records(_POSTING_HAPPY_PATH, "acctdata.txt")[0]
     assert len(record) == fixture_corpus.reclen("acctdata.txt") == 300
 
-    # WHY (Assumptions): the two cycle fields are the live POSITIVE-ZERO vector and are the
+    # WHY : Assumptions: the two cycle fields are the live POSITIVE-ZERO vector and are the
     #   reason this test reads all five amounts rather than one. Both hold ``00000000000{``, so
     #   the corpus itself attests that a zero amount carries the opening brace rather than a
     #   plain digit -- which is what makes the negative-zero carve-out asserted further down a
@@ -405,7 +405,7 @@ def test_the_credit_limit_vector_is_the_field_at_offset_twenty_four(
     :returns: nothing; a vector attributed to the wrong field is reported as an assertion
         failure.
     """
-    # WHY (Assumptions): 2065.00 is ``ACCT-CREDIT-LIMIT`` at [24:36] and NOT ``ACCT-CURR-BAL``
+    # WHY : Assumptions: 2065.00 is ``ACCT-CREDIT-LIMIT`` at [24:36] and NOT ``ACCT-CURR-BAL``
     #   at [12:24], and the distinction is asserted because the two fields are adjacent, are
     #   the same width, and are the same kind. Mis-attributing the vector would leave the
     #   decode assertion passing while the field it documents was wrong, and the balance in
@@ -431,7 +431,7 @@ def test_every_live_transaction_amount_decodes_exactly(fixture_corpus: FixtureCo
     assert len(records) == 5
     amount = _tran_field("TRAN-AMT")
 
-    # WHY (Assumptions): row 1 is the only attested NEGATIVE money span in the whole corpus,
+    # WHY : Assumptions: row 1 is the only attested NEGATIVE money span in the whole corpus,
     #   and it is why the five rows are asserted together rather than one being taken as
     #   representative. Its closing brace is the sole live member of the negative table, so
     #   dropping it would leave every negative assertion in this file synthetic.
@@ -461,7 +461,7 @@ def test_a_leading_zero_card_number_survives_beside_a_negative_amount(
     :returns: nothing; a truncated card number or a wrong amount is reported as an assertion
         failure.
     """
-    # WHY (Assumptions): the card number is declared ``PIC X(16)`` at [262:278] and is
+    # WHY : Assumptions: the card number is declared ``PIC X(16)`` at [262:278] and is
     #   therefore CHARACTER data, not a number, which is exactly why row 1's
     #   ``0927987108636232`` is asserted on the same row as the negative amount. A reader who
     #   assumed a sixteen-digit identifier were numeric would lose its leading zero, and this
@@ -475,7 +475,7 @@ def test_a_leading_zero_card_number_survives_beside_a_negative_amount(
     assert records[1][card.start : card.end] == "0927987108636232"
     assert decode_zoned_field(records[1], _tran_field("TRAN-AMT")) == Decimal("-919.00")
 
-    # WHY (Trade-offs): the other four rows' card numbers are asserted STRUCTURALLY -- declared
+    # WHY : Trade-offs: the other four rows' card numbers are asserted STRUCTURALLY -- declared
     #   width, all digits, no sign interpretation -- rather than as literals. The sibling
     #   ``ZonedDecimalCodecTest.java`` names no card number at all, and this file itself asserts
     #   twice over that a diagnostic must never echo a field marked sensitive, so multiplying
@@ -501,7 +501,7 @@ def test_the_two_timestamp_fields_hold_their_documented_live_content(
     :param fixture_corpus: session accessor for ``tests/fixtures``, supplied by ``conftest``.
     :returns: nothing; a differing stamp is reported as an assertion failure.
     """
-    # WHY (Assumptions): an all-blank processing timestamp is intentionally VALID and is a live
+    # WHY : Assumptions: an all-blank processing timestamp is intentionally VALID and is a live
     #   corpus fact rather than a hypothesis -- all five records carry twenty-six blanks at
     #   [304:330] because the field is stamped by the posting run and these records have not
     #   been posted. The originating stamp beside it is deterministic on all five, which is the
@@ -524,7 +524,7 @@ def test_the_two_overpunch_tables_are_ten_distinct_characters_each() -> None:
     Takes no parameters and returns no value; a table of the wrong length, or one sharing a
     character with the other, is reported as an assertion failure.
     """
-    # WHY (Alternatives Considered): the tables are asserted STRUCTURALLY as well as
+    # WHY : Alternatives Considered: the tables are asserted STRUCTURALLY as well as
     #   entry-by-entry, mirroring the reasoning ``zoned.py`` records for choosing two index
     #   strings over a dictionary or a twenty-branch comparison cascade: the position in the
     #   string is the digit value, so one lookup serves both directions. That property only
@@ -568,7 +568,7 @@ def test_the_positive_overpunch_table_carries_digits_zero_through_nine(
     :returns: nothing; a differing table position, value, scale or re-encoded span is reported
         as an assertion failure.
     """
-    # WHY (Trade-offs): three of these ten entries are attested by the corpus -- ``{``, ``F``,
+    # WHY : Trade-offs: three of these ten entries are attested by the corpus -- ``{``, ``F``,
     #   ``G`` and ``H`` appear in real spans, of which the latter three are positive money --
     #   and the remaining six, ``A`` through ``E`` and ``I``, are SYNTHETIC. They are
     #   constructed by substituting one byte of the attested span, so each differs from real
@@ -618,14 +618,14 @@ def test_the_negative_overpunch_table_carries_digits_zero_through_nine(
     :returns: nothing; a differing table position, value, scale or re-encoded span is reported
         as an assertion failure.
     """
-    # WHY (Trade-offs): nine of these ten entries are SYNTHETIC. Only the closing brace is
+    # WHY : Trade-offs: nine of these ten entries are SYNTHETIC. Only the closing brace is
     #   attested, in the span ``0000009190}`` of the second transaction fixture record; the
     #   letters ``J`` through ``R`` appear in no signed field of the corpus, because money is
     #   never a record's last field and no ASCII seed record therefore ends in a negative
     #   overpunch. Asserting only the attested byte was the alternative and would leave the
     #   negative table one tenth tested -- the half of the mapping where an error inverts
     #   financial meaning rather than merely shifting a cent.
-    # WHY (Assumptions): none of these ten values is zero, so every one round-trips byte for
+    # WHY : Assumptions: none of these ten values is zero, so every one round-trips byte for
     #   byte and the documented negative-zero exception does not apply to any of them. That
     #   exception is exercised on its own, over an all-zero span.
     assert _NEGATIVE_OVERPUNCH_TABLE[digit] == final_byte, (
@@ -649,7 +649,7 @@ def test_the_live_overpunch_union_is_exactly_five_of_the_twenty_bytes() -> None:
     Takes no parameters and returns no value; a union that has drifted from the measurement is
     reported as an assertion failure.
     """
-    # WHY (Assumptions): this figure is a MEASUREMENT of the corpus, taken by reading every
+    # WHY : Assumptions: this figure is a MEASUREMENT of the corpus, taken by reading every
     #   signed span of ``app/data/ASCII/*.txt`` and ``tests/fixtures/**``, and it is asserted
     #   so that the synthetic labelling above stays honest. If a future fixture introduced a
     #   sixth live byte, this assertion fails and the labels are corrected deliberately rather
@@ -666,7 +666,7 @@ def test_a_decoded_amount_keeps_its_declared_scale_rather_than_normalising() -> 
     Takes no parameters and returns no value; a decoded value whose exponent is not the
     declared scale is reported as an assertion failure.
     """
-    # WHY (Assumptions): Decimal("193.00") and Decimal("193") COMPARE EQUAL, so an equality
+    # WHY : Assumptions: Decimal("193.00") and Decimal("193") COMPARE EQUAL, so an equality
     #   assertion alone cannot detect a codec that normalised away the declared scale. The two
     #   re-encode to different spans -- ``00000001930{`` against ``00000000193{`` -- and parity
     #   is decided by a byte comparison against a golden master, so the exponent is asserted
@@ -696,7 +696,7 @@ def test_every_account_span_round_trips_byte_for_byte(span: str) -> None:
     :returns: nothing; a re-encoded span differing from the original is reported as an
         assertion failure.
     """
-    # WHY (Assumptions): the round trip is asserted over the ORIGINAL bytes and not over the
+    # WHY : Assumptions: the round trip is asserted over the ORIGINAL bytes and not over the
     #   decoded value, because that is the only direction in which the two tables must agree
     #   with each other. A decode-then-compare-value test passes even when encode consults a
     #   different table, whereas reproducing the source span requires both directions to share
@@ -713,25 +713,50 @@ def test_an_overpunched_negative_zero_re_encodes_as_a_positive_zero() -> None:
     parameters and returns no value; a preserved minus sign, or any other span failing to
     reproduce itself, is reported as an assertion failure.
     """
-    # WHY (Assumptions): :class:`decimal.Decimal` has no negative zero, and neither does the
-    #   ``BigDecimal`` the Java parity codec's ordinary ``decode``/``encode`` pair returns. The
-    #   alternative -- inventing a signed-zero representation on the Python side to preserve
-    #   the closing brace -- would make Python and Java disagree about the same source span,
-    #   which is precisely the divergence this suite exists to prevent. ``zoned.py`` records
-    #   the same carve-out at its encode site and notes that the Java codec offers a separate
-    #   sign-preserving pair for a caller that must reproduce a dataset byte for byte.
+    # WHY : Refactoring Rationale: this comment asserted that ":class:`decimal.Decimal` has no
+    #   negative zero", and that is FALSE -- measured, not argued: ``Decimal("-0.00")`` has
+    #   ``sign=1`` in ``as_tuple()``, returns ``True`` from ``is_signed()``, and still compares
+    #   equal to ``Decimal("0.00")``. Attributing the carve-out to a Python limitation that does
+    #   not exist is worse than leaving it unexplained, because the obvious "fix" it invites --
+    #   making the decoder preserve the sign, since ``Decimal`` can hold it -- is exactly the
+    #   change that breaks parity.
+    # WHY : Assumptions: the constraint is on the JAVA side and it is real. ``BigDecimal`` stores
+    #   an unscaled ``BigInteger`` with a scale, and ``BigInteger`` has exactly one zero, so
+    #   ``new BigDecimal("-0.00")`` yields ``0.00`` with ``signum() == 0`` and the sign is
+    #   discarded at construction -- measured against the pinned JDK, not assumed. There is
+    #   therefore no signed zero for the Java codec to round-trip.
+    # WHY : Assumptions: what the Python decoder does is consequently a DELIBERATE
+    #   normalisation and not an inability. It maps a ``'}'``-overpunched zero onto an unsigned
+    #   ``Decimal`` so the two languages agree about the same source span, which is precisely
+    #   the divergence this suite exists to prevent. ``zoned.py`` records the same carve-out at
+    #   its encode site and notes that the Java codec offers a separate sign-preserving pair for
+    #   a caller that must reproduce a dataset byte for byte.
     negative_zero = decode_zoned(
         "00000000000}", _ACCOUNT_MONEY_INT_DIGITS, _MONEY_DEC_DIGITS, _SIGNED
     )
     assert negative_zero == Decimal("0.00")
-    assert negative_zero.is_signed() is False, "Decimal carries no negative zero to preserve"
+    # WHY : Assumptions: this asserts what the DECODER produced, so the message says so. A
+    #   message claiming Decimal "carries no negative zero to preserve" would state the false
+    #   premise the comment above withdraws, and it would do it at the point a failure is read.
+    assert negative_zero.is_signed() is False, (
+        "the decoder must normalise a '}'-overpunched zero to an UNSIGNED Decimal;"
+        " Decimal can represent -0.00, so this is the decoder's choice and not a limitation"
+    )
+    # WHY : Assumptions: the premise is asserted here rather than only described, so the
+    #   corrected comment above cannot itself go stale. If a future Python release did drop the
+    #   signed zero, this line fails and the reasoning gets revisited instead of silently
+    #   becoming true by accident.
+    assert Decimal("-0.00").is_signed() is True, (
+        "Decimal is expected to CARRY a signed zero; the normalisation above is a parity"
+        " choice made because Java's BigDecimal has exactly one zero"
+    )
     assert negative_zero.as_tuple().exponent == -_MONEY_DEC_DIGITS
     assert (
         encode_zoned(negative_zero, _ACCOUNT_MONEY_INT_DIGITS, _MONEY_DEC_DIGITS, _SIGNED)
         == "00000000000{"
     )
 
-    # WHY (Assumptions): the exception is asserted to be confined to zero. A non-zero negative
+    # WHY : Assumptions: the exception is asserted to be confined to zero. A non-zero negative
     #   span of the same width reproduces itself exactly, so the carve-out cannot be read as
     #   licence for the encoder to drop a sign generally.
     _assert_decodes_and_re_encodes(
@@ -746,7 +771,7 @@ def test_the_encode_path_refuses_a_binary_floating_point_value() -> None:
     failure. The exception class verified is :class:`TypeError`, named here because
     ``pytest.raises`` captures it inside a context manager where no linter can inspect it.
     """
-    # WHY (Alternatives Considered): coercion via ``Decimal(str(value))`` was available and was
+    # WHY : Alternatives Considered: coercion via ``Decimal(str(value))`` was available and was
     #   rejected. A binary float cannot represent ten cents exactly -- ``0.1`` is stored as a
     #   value slightly above one tenth -- so accepting one would let an approximation enter the
     #   money path and silently corrupt a monetary total that nothing downstream would
@@ -758,7 +783,7 @@ def test_the_encode_path_refuses_a_binary_floating_point_value() -> None:
         encode_zoned(0.1, _TRAN_MONEY_INT_DIGITS, _MONEY_DEC_DIGITS, _SIGNED)  # type: ignore[arg-type]
     assert "float" in str(refusal.value), "the diagnostic must name the refused type"
 
-    # WHY (Assumptions): ``bool`` is an ``int`` subclass, so it would otherwise pass an
+    # WHY : Assumptions: ``bool`` is an ``int`` subclass, so it would otherwise pass an
     #   ``isinstance(value, int)`` gate and encode as one unit. It is refused separately and is
     #   asserted here beside float because the two are the same class of defect -- a value that
     #   is not money arriving where money is expected.
@@ -773,7 +798,7 @@ def test_exact_values_are_accepted_from_every_admitted_type() -> None:
     Takes no parameters and returns no value; a rejected exact input, or one encoding to a
     differing span, is reported as an assertion failure.
     """
-    # WHY (Assumptions): the three admitted types are asserted together with float's refusal
+    # WHY : Assumptions: the three admitted types are asserted together with float's refusal
     #   so the contract reads as a whole. Text is admitted because a decimal string is exact,
     #   which is the same reason money crosses an API boundary as a JSON string rather than as
     #   a JSON number: a client that parses a JSON number routes it through an IEEE-754 double
@@ -781,7 +806,7 @@ def test_exact_values_are_accepted_from_every_admitted_type() -> None:
     geometry = (_TRAN_MONEY_INT_DIGITS, _MONEY_DEC_DIGITS, _SIGNED)
     assert encode_zoned(Decimal("504.77"), *geometry) == "0000005047G"
     assert encode_zoned("504.77", *geometry) == "0000005047G"
-    # WHY (Assumptions): an integer input carries scale zero, so 504 becomes 504.00 and its
+    # WHY : Assumptions: an integer input carries scale zero, so 504 becomes 504.00 and its
     #   scaled magnitude is 50400 -- eleven positions of which the low-order one is the digit
     #   zero, hence the opening brace. The span is written out in full rather than derived,
     #   because the two adjacent zeroes are exactly where a transposition hides.
@@ -797,7 +822,7 @@ def test_an_unsigned_key_decodes_as_plain_digits_with_no_overpunch_reading(
     :returns: nothing; a key read as signed, or one that consumed the following byte, is
         reported as an assertion failure.
     """
-    # WHY (Assumptions): ``ACCT-ID`` is ``PIC 9(11)`` with no leading ``S``, so it holds eleven
+    # WHY : Assumptions: ``ACCT-ID`` is ``PIC 9(11)`` with no leading ``S``, so it holds eleven
     #   plain digits and its low-order position is an ordinary digit rather than an overpunch.
     #   The field immediately after it is ``ACCT-ACTIVE-STATUS`` at [11:12] holding ``'Y'``,
     #   which is what makes this the meaningful guard against over-eager sign parsing: a decoder
@@ -828,7 +853,7 @@ def test_an_overpunch_supplied_for_an_unsigned_field_is_refused(final_byte: str)
     :returns: nothing; an accepted overpunch is reported as an assertion failure. The exception
         class verified is :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
     """
-    # WHY (Alternatives Considered): tolerating a negative overpunch here by reading it as a
+    # WHY : Alternatives Considered: tolerating a negative overpunch here by reading it as a
     #   signed value was rejected, because an unsigned picture clause cannot REPRESENT a
     #   negative number -- the target column has no sign either, so a tolerated sign would be
     #   dropped somewhere further downstream with nothing recording that it had been. Both
@@ -845,7 +870,7 @@ def test_a_plain_trailing_digit_supplied_for_a_signed_field_is_refused() -> None
     assertion failure. The exception class verified is
     :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
     """
-    # WHY (Alternatives Considered): treating a plain trailing digit as implicitly positive was
+    # WHY : Alternatives Considered: treating a plain trailing digit as implicitly positive was
     #   available and was rejected. In a field declared signed it is proof that the producer
     #   used a different sign convention -- concretely, that a GnuCOBOL build ran with the
     #   default ``-fsign=ASCII`` instead of the mandatory ``-fsign=EBCDIC``, which
@@ -870,7 +895,7 @@ def test_a_group_a_window_is_not_a_signed_money_field(window: str, misread_value
     :returns: nothing; a window that failed to decode, or decoded to a different wrong value,
         is reported as an assertion failure.
     """
-    # WHY (Assumptions): the rule these windows prove is that ONLY a declared offset, a
+    # WHY : Assumptions: the rule these windows prove is that ONLY a declared offset, a
     #   declared length and a declared kind identify a zoned field, and that a signed field
     #   must never be pattern-matched over a whole record. The danger is precisely that the
     #   misread SUCCEEDS: ``3580010001P`` at [12:23] of
@@ -912,7 +937,7 @@ def test_the_declared_span_disagrees_with_every_false_positive_window(
     :returns: nothing; a window that agreed with a declared field, or a record whose windows
         have drifted from the measurement, is reported as an assertion failure.
     """
-    # WHY (Assumptions): this is the assertion that makes the anchoring rule actionable rather
+    # WHY : Assumptions: this is the assertion that makes the anchoring rule actionable rather
     #   than abstract. On one and the same record, the look-alike window at [12:23] yields a
     #   nine-figure negative and the DECLARED amount at [132:143] yields the real value, and
     #   the two differ. Both windows are located from the descriptors' own offsets, so the test
@@ -936,7 +961,7 @@ def test_the_declared_span_disagrees_with_every_false_positive_window(
         assert misread_a != declared_amount, (
             f"row {row}: the [12:23] window must not agree with the declared amount"
         )
-        # WHY (Assumptions): rows 0, 2 and 3 carry a POSITIVE-table byte at [152], so only two
+        # WHY : Assumptions: rows 0, 2 and 3 carry a POSITIVE-table byte at [152], so only two
         #   of the five Group B windows look negative. All five are still asserted to be
         #   decodable-and-wrong, because the hazard is the successful misread and not the sign.
         misread_b = decode_zoned(group_b, _GROUP_B_INT_DIGITS, _MONEY_DEC_DIGITS, _SIGNED)
@@ -953,7 +978,7 @@ def test_the_group_a_window_is_still_present_in_both_reject_scenarios(
     :param fixture_corpus: session accessor for ``tests/fixtures``, supplied by ``conftest``.
     :returns: nothing; a drifted fixture is reported as an assertion failure.
     """
-    # WHY (Assumptions): the window is asserted against the fixtures rather than trusted from a
+    # WHY : Assumptions: the window is asserted against the fixtures rather than trusted from a
     #   comment, because a measurement written only in prose goes stale invisibly. Both
     #   scenarios are checked because they share the same daily-transaction record, so a change
     #   to one and not the other would itself be worth surfacing.
@@ -975,7 +1000,7 @@ def _display_record_holding(layout: RecordSpec, field: FieldSpec, span: str) -> 
     :returns: a record of exactly ``layout.reclen`` characters, zero-filled elsewhere.
     :raises AssertionError: if ``span`` is not the field's declared width.
     """
-    # WHY (Assumptions): the surrounding record is filled with the digit zero rather than with
+    # WHY : Assumptions: the surrounding record is filled with the digit zero rather than with
     #   blanks, so that every other display field of the record remains individually valid. A
     #   blank-filled record would make any failure ambiguous -- a reader could not tell whether
     #   the codec rejected the span under test or some unrelated field of the padding.
@@ -1001,7 +1026,7 @@ def test_a_span_of_the_wrong_width_is_refused(span: str, reason: str) -> None:
         exception class verified is
         :class:`~carddemo_migration.copybook.zoned.ZonedSpanWidthError`.
     """
-    # WHY (Assumptions): width failures carry their own exception SUBTYPE because a short or
+    # WHY : Assumptions: width failures carry their own exception SUBTYPE because a short or
     #   long slice points at record geometry -- a misaligned read -- whereas a bad body byte
     #   points at the producer's numeric representation. The two faults have different remedies,
     #   so a caller that catches only the width type is making a meaningful distinction, and
@@ -1019,7 +1044,7 @@ def test_a_non_digit_in_the_digit_body_is_refused() -> None:
     failure. The exception class verified is
     :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
     """
-    # WHY (Assumptions): the body is validated against the ten ASCII digits specifically and
+    # WHY : Assumptions: the body is validated against the ten ASCII digits specifically and
     #   not with ``str.isdigit``, which also accepts the decimal digits of other scripts. Such a
     #   character subtracted from the ASCII zero yields a digit value in the hundreds, so
     #   admitting one turns a rejected span into an amount wrong by orders of magnitude. The
@@ -1038,7 +1063,7 @@ def test_an_unrecognised_final_byte_is_refused(final_byte: str) -> None:
     :returns: nothing; an accepted byte is reported as an assertion failure. The exception class
         verified is :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
     """
-    # WHY (Assumptions): the five characters below are chosen to cover the distinct ways a final
+    # WHY : Assumptions: the five characters below are chosen to cover the distinct ways a final
     #   byte goes wrong -- punctuation, a blank left by an unwritten field, two letters that are
     #   adjacent to real table entries in the alphabet but absent from both tables, and a plain
     #   digit. ``S`` and ``Z`` matter particularly: a decoder that bounded its table by
@@ -1061,7 +1086,7 @@ def test_an_encode_magnitude_wider_than_the_field_is_refused() -> None:
     assertion failure. The exception class verified is
     :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
     """
-    # WHY (Assumptions): the alternative to refusing is truncating the high-order digits, which
+    # WHY : Assumptions: the alternative to refusing is truncating the high-order digits, which
     #   is the worst available outcome: it returns a field of exactly the declared width holding
     #   a number smaller than the one requested, so the span is well formed and nothing
     #   downstream can tell. The value below needs thirteen positions where the field holds
@@ -1080,7 +1105,7 @@ def test_encoding_is_lossless_or_throwing_and_never_rounds(value: str) -> None:
         failure. The exception class verified is
         :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
     """
-    # WHY (Alternatives Considered): rounding to the declared scale was available and was
+    # WHY : Alternatives Considered: rounding to the declared scale was available and was
     #   rejected, because a codec that chooses a rounding rule makes a business decision and
     #   records it nowhere. The two values ending in five are included deliberately: they are
     #   the inputs on which two defensible rules -- half-up and half-even -- disagree, so a
@@ -1098,7 +1123,7 @@ def test_a_negative_value_is_refused_by_an_unsigned_field_on_encode() -> None:
     assertion failure. The exception class verified is
     :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
     """
-    # WHY (Assumptions): an unsigned picture clause has nowhere to put a sign, so the only ways
+    # WHY : Assumptions: an unsigned picture clause has nowhere to put a sign, so the only ways
     #   to accept a negative value are to emit its magnitude -- losing the sign entirely -- or
     #   to emit an overpunch the field is not declared to carry, which this module's own decoder
     #   would then refuse. Both are worse than refusing at the boundary.
@@ -1112,7 +1137,7 @@ def test_bytes_are_refused_at_the_display_codec_boundary() -> None:
     Takes no parameters and returns no value; accepted bytes are reported as an assertion
     failure. The exception class verified is :class:`TypeError`.
     """
-    # WHY (Assumptions): cp037 character conversion belongs exclusively to
+    # WHY : Assumptions: cp037 character conversion belongs exclusively to
     #   ``carddemo_migration.copybook.ebcdic_codec``, and refusing bytes here is what keeps it
     #   there. The prohibition matters because what a stray decode does is charset-dependent: a
     #   single-byte codec maps all 256 values and mistranslates in silence, while a multi-byte
@@ -1135,7 +1160,7 @@ def test_a_non_display_field_is_refused_by_the_field_oriented_entry_point() -> N
     assertion failure. The exception class verified is
     :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
     """
-    # WHY (Assumptions): only ``ZONED`` and ``UINT`` are display regimes, so a mis-routed field
+    # WHY : Assumptions: only ``ZONED`` and ``UINT`` are display regimes, so a mis-routed field
     #   must be refused before its bytes are read as digits. Both a character field and a packed
     #   one are exercised, because the two mis-routings fail differently in the wild: a
     #   character field would decode to a plausible number if it happened to hold digits,
@@ -1161,7 +1186,7 @@ def test_a_record_ending_before_the_declared_field_is_refused() -> None:
     assertion failure. The exception class verified is
     :class:`~carddemo_migration.copybook.zoned.ZonedSpanWidthError`.
     """
-    # WHY (Assumptions): a short record is refused rather than padded, because padding would
+    # WHY : Assumptions: a short record is refused rather than padded, because padding would
     #   supply digits the producer never wrote and the resulting amount would be well formed.
     #   The record below stops one character before the balance field's exclusive end.
     balance = _account_field("ACCT-CURR-BAL")
@@ -1178,7 +1203,7 @@ def test_width_is_validated_before_the_digit_body_and_the_final_byte() -> None:
     raised in preference to the more general
     :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
     """
-    # WHY (Assumptions): the span below carries THREE simultaneous defects -- it is ten
+    # WHY : Assumptions: the span below carries THREE simultaneous defects -- it is ten
     #   characters where eleven are declared, it holds the letter ``O`` in its digit body, and
     #   its final byte is in neither table. Precedence is asserted rather than assumed because
     #   the width fault is the one that explains the other two: a misaligned slice naturally
@@ -1196,7 +1221,7 @@ def test_the_digit_body_is_validated_before_the_final_overpunch_byte() -> None:
     body is reported as an assertion failure. The exception class verified is
     :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
     """
-    # WHY (Assumptions): at the correct width the two remaining defects are ordered body first,
+    # WHY : Assumptions: at the correct width the two remaining defects are ordered body first,
     #   which is asserted through the diagnostic rather than the type because both faults raise
     #   the same class. The distinction is worth pinning: the body index localises the fault to
     #   one character, whereas "unrecognised overpunch" describes only the last position and
@@ -1215,7 +1240,7 @@ def test_the_final_byte_is_validated_before_the_signedness_contract() -> None:
     unrecognised byte is reported as an assertion failure. The exception class verified is
     :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
     """
-    # WHY (Assumptions): the span below is a well-formed body followed by punctuation, decoded
+    # WHY : Assumptions: the span below is a well-formed body followed by punctuation, decoded
     #   against a SIGNED contract. Two checks could fire -- the byte is in neither table, and it
     #   is not a plain digit either -- and the table check is the informative one because it
     #   names the admissible set. Asserting the order keeps a future refactor from reporting the
@@ -1232,7 +1257,7 @@ def test_a_sensitive_display_field_diagnostic_withholds_its_raw_bytes() -> None:
     omitting the field's geometry, is reported as an assertion failure. The exception class
     verified is :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
     """
-    # WHY (Trade-offs): a sensitive field's content is withheld COMPLETELY rather than masked to
+    # WHY : Trade-offs: a sensitive field's content is withheld COMPLETELY rather than masked to
     #   a last-four suffix the way a record diff renders it. A record diff needs stable width
     #   and a small identifying suffix to be readable, but an exception message is copied into a
     #   log aggregator and pasted into tickets, where even that suffix broadens disclosure. The
@@ -1255,16 +1280,40 @@ def test_a_sensitive_display_field_diagnostic_withholds_its_raw_bytes() -> None:
     assert secret_span not in message, "a sensitive diagnostic never echoes the field's bytes"
     assert "content=" not in message, "no content clause is rendered for a sensitive field"
 
-    # WHY (Assumptions): the non-sensitive comparison is asserted in the same test, because
+    # WHY : Assumptions: the non-sensitive comparison is asserted in the same test, because
     #   "no content appeared" is only evidence of suppression if content appears when the flag
     #   is absent. Without the pair, a codec that had stopped rendering content altogether
     #   would pass the suppression assertion while having lost a diagnostic feature.
-    balance = _account_field("ACCT-CURR-BAL")
-    assert balance.sensitive is False
-    disclosable = "*0000000000{"
-    account_record = _display_record_holding(layouts.layout("ACCOUNT"), balance, disclosable)
+    # WHY : Refactoring Rationale: the control used to be ACCT-CURR-BAL, and it stopped being a
+    #   valid control when the account master, its export branch and the category balance were
+    #   brought under the fail-closed master disclosure policy -- every monetary field of those
+    #   records is now sensitive, so the pair was asserting suppression against suppression and
+    #   the test failed on its own control rather than on the property.
+    # WHY : Refactoring Rationale: the control was then TRAN-AMT, on the reasoning that "a
+    #   transaction amount is the field a reject diagnostic exists to show". That reasoning does
+    #   not survive the rendering rule it has to answer to: docs/architecture/observability.md
+    #   lines 1075 to 1076 place "no monetary amount, no credit limit or balance" in the OMITTED
+    #   class with no abbreviated form, and it says so of EVERY rendering read by an operator
+    #   rather than of one record's. Every account-borne amount in the corpus is therefore
+    #   sensitive, in the transaction records as much as in the account master, and a reject
+    #   diagnostic identifies its record by key and geometry rather than by echoing the amount.
+    #   The control is now DIS-INT-RATE of the disclosure-group record, which is the one signed
+    #   display field the policy DISCLOSES on its merits: a group rate is a published product
+    #   term held against a group of accounts and not against any cardholder, and the
+    #   command-line decode of that record is the case an operator has to be able to read.
+    # WHY : Assumptions: picking a control from a different layout is the point rather than a
+    #   workaround -- a control drawn from the same record as the subject can always be swept up
+    #   by the same policy change, which is exactly how the previous two controls were lost.
+    rate = layouts.layout("DISGROUP").field("DIS-INT-RATE")
+    assert rate.sensitive is False, (
+        "the control must be a field no disclosure policy withholds; if this fails, pick"
+        " another non-sensitive signed-display field rather than weakening the assertion below"
+    )
+    assert rate.kind is Kind.ZONED
+    disclosable = "*" * (rate.length - 1) + "{"
+    group_record = _display_record_holding(layouts.layout("DISGROUP"), rate, disclosable)
     with pytest.raises(ZonedDecimalError) as disclosed:
-        decode_zoned_field(account_record, balance)
+        decode_zoned_field(group_record, rate)
     assert "content=" in str(disclosed.value)
 
 
@@ -1275,7 +1324,7 @@ def test_a_descriptor_whose_width_contradicts_its_geometry_is_refused() -> None:
     assertion failure. The exception class verified is
     :class:`~carddemo_migration.copybook.zoned.ZonedSpanWidthError`.
     """
-    # WHY (Assumptions): the descriptor and the explicit digit counts are two statements of one
+    # WHY : Assumptions: the descriptor and the explicit digit counts are two statements of one
     #   fact, so the codec cross-checks them instead of trusting whichever arrived last. This is
     #   the guard against a caller passing the transaction geometry -- nine integer positions,
     #   eleven characters -- against an account descriptor twelve characters wide, which would
@@ -1301,7 +1350,7 @@ def _computational_record_holding(layout: RecordSpec, field: FieldSpec, span: by
     :returns: a record of exactly ``layout.reclen`` bytes, NUL-filled elsewhere.
     :raises AssertionError: if ``span`` is not the field's declared width.
     """
-    # WHY (Assumptions): the padding is NUL rather than the digit character zero, because this
+    # WHY : Assumptions: the padding is NUL rather than the digit character zero, because this
     #   record is read as nibbles and not as text -- a byte of 0x30 would present as the two
     #   nibbles 3 and 0, which is a digit pair rather than the empty pad a computational field
     #   expects. The record is built as bytes throughout so no character decoder is involved.
@@ -1332,7 +1381,7 @@ def test_the_packed_width_ladder_matches_the_declared_corpus(
         real declaration it contradicts rather than an invented example.
     :returns: nothing; a differing width is reported as an assertion failure.
     """
-    # WHY (Assumptions): a packed field stores two digits per byte and reserves the low-order
+    # WHY : Assumptions: a packed field stores two digits per byte and reserves the low-order
     #   nibble of its last byte for the sign, so its width is the ceiling of one more than the
     #   digit count, halved. Every rung asserted here is a real declaration in the corpus, which
     #   is what makes a formula change fail against the data rather than against an example.
@@ -1345,7 +1394,7 @@ def test_a_twelve_digit_packed_money_field_is_seven_bytes_and_not_six() -> None:
     Takes no parameters and returns no value; a six-byte result is reported as an assertion
     failure.
     """
-    # WHY (Assumptions): twelve digit positions plus one sign nibble is thirteen nibbles, and
+    # WHY : Assumptions: twelve digit positions plus one sign nibble is thirteen nibbles, and
     #   thirteen nibbles occupy the CEILING of thirteen halved, which is seven. The figure is
     #   proven twice over from files that had no reason to agree: ``app/cpy/CVEXPORT.cpy``
     #   declares five overlay branches over one 460-byte area, and its account branch closes at
@@ -1359,7 +1408,7 @@ def test_a_twelve_digit_packed_money_field_is_seven_bytes_and_not_six() -> None:
     assert packed_width(10, 2) == 7
     assert packed_width(10, 2) != 6
 
-    # WHY (Assumptions): the width is cross-checked against the descriptors the registry already
+    # WHY : Assumptions: the width is cross-checked against the descriptors the registry already
     #   declares, so the formula and the two transcribed layouts must agree. Both are real
     #   ``PIC S9(10)V99 COMP-3`` fields -- one in the export record, one in the authorization
     #   detail segment -- and a divergence between formula and descriptor is caught here rather
@@ -1395,7 +1444,7 @@ def test_the_binary_width_step_function_selects_a_halfword_word_or_doubleword(
     :param expected_bytes: the machine unit the digit count selects, being 2, 4 or 8.
     :returns: nothing; a differing width is reported as an assertion failure.
     """
-    # WHY (Assumptions): a binary field occupies a WHOLE MACHINE UNIT chosen by its digit count
+    # WHY : Assumptions: a binary field occupies a WHOLE MACHINE UNIT chosen by its digit count
     #   rather than one byte per digit, so the width is a step function with boundaries at four
     #   and nine digits. Both boundaries are exercised from both sides -- four and five, nine and
     #   ten -- because a step function is only wrong at its transitions, and a decoder that
@@ -1410,7 +1459,7 @@ def test_the_two_binary_width_boundaries_are_where_the_layout_constants_say() ->
     Takes no parameters and returns no value; a boundary that has moved away from its constant
     is reported as an assertion failure.
     """
-    # WHY (Assumptions): the transitions are asserted against ``BINARY_HALFWORD_MAX_DIGITS`` and
+    # WHY : Assumptions: the transitions are asserted against ``BINARY_HALFWORD_MAX_DIGITS`` and
     #   ``BINARY_FULLWORD_MAX_DIGITS`` so the boundary has one authority. Writing four and nine
     #   as literals here would create a second declaration of a rule ``layouts.py`` owns, and the
     #   two could then disagree without either being obviously wrong.
@@ -1429,7 +1478,7 @@ def test_the_two_named_export_binary_declarations_take_their_documented_widths()
     Takes no parameters and returns no value; a differing width, or a registry descriptor that
     disagrees with the formula, is reported as an assertion failure.
     """
-    # WHY (Assumptions): both figures are load-bearing in the export record.
+    # WHY : Assumptions: both figures are load-bearing in the export record.
     #   ``EXPORT-SEQUENCE-NUM`` is ``PIC 9(9) COMP`` at ``app/cpy/CVEXPORT.cpy`` line 16, which
     #   this rule makes four bytes -- and reading four big-endian bytes at its offset in the real
     #   extract yields clean consecutive integers, which no other width produces. The
@@ -1461,7 +1510,7 @@ def test_each_admitted_sign_nibble_decodes_to_its_documented_sign(
     :param expected_text: the expected value as exact decimal text at scale two.
     :returns: nothing; a differing value or scale is reported as an assertion failure.
     """
-    # WHY (Assumptions): 194.00 is the first account's balance in the shipped seed, so all three
+    # WHY : Assumptions: 194.00 is the first account's balance in the shipped seed, so all three
     #   vectors share one magnitude a maintainer can cross-check by eye and differ ONLY in their
     #   final nibble. That isolation is the point: it makes the sign the single variable, so a
     #   codec that read the sign from the wrong nibble position cannot pass one case and fail
@@ -1484,7 +1533,7 @@ def test_a_digit_in_the_sign_position_is_refused(digit_nibble: int) -> None:
     :returns: nothing; an accepted digit is reported as an assertion failure. The exception class
         verified is :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
     """
-    # WHY (Assumptions): a value below 0x0A in the sign position means one of two specific
+    # WHY : Assumptions: a value below 0x0A in the sign position means one of two specific
     #   things -- the field is zoned display rather than packed, or the read is off by one
     #   nibble -- and the two have entirely different remedies. The diagnostic names both, which
     #   is why the case is asserted separately from the alternate-sign refusal rather than folded
@@ -1505,7 +1554,7 @@ def test_an_alternate_sign_nibble_is_refused(alternate: int) -> None:
         exception class verified is
         :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
     """
-    # WHY (Assumptions): this policy is READ from ``packed.py`` and not generalised from another
+    # WHY : Assumptions: this policy is READ from ``packed.py`` and not generalised from another
     #   COBOL runtime. Some runtimes treat 0x0A, 0x0B and 0x0E as positive; ``packed.py``
     #   rejects all three and states why on ``_LOWEST_SIGN_NIBBLE``: an unexpected nibble in the
     #   sign position is the clearest available evidence that the field offset is wrong, so
@@ -1534,7 +1583,7 @@ def test_a_non_digit_nibble_in_a_digit_position_is_refused(digit_nibble: int) ->
     :returns: nothing; an accepted nibble is reported as an assertion failure. The exception class
         verified is :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
     """
-    # WHY (Assumptions): a nibble above nine in a DIGIT position is not a tolerable variant; it
+    # WHY : Assumptions: a nibble above nine in a DIGIT position is not a tolerable variant; it
     #   is proof that the read is wrong -- the offset is misaligned, the field is not packed at
     #   all, or a sign nibble has been reached early. Masking it back into range would
     #   manufacture a digit that was never written, and the resulting amount would be plausible
@@ -1554,7 +1603,7 @@ def test_the_unsigned_nibble_is_refused_by_a_field_declared_with_a_sign() -> Non
     failure. The exception class verified is
     :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
     """
-    # WHY (Alternatives Considered): merely classifying the nibble and returning a sign was
+    # WHY : Alternatives Considered: merely classifying the nibble and returning a sign was
     #   available and was rejected. A mismatch means the descriptor the caller passed and the
     #   bytes on disk describe DIFFERENT fields, so whichever way it were resolved the value
     #   would have been read against a layout that does not match the data -- and that value
@@ -1574,7 +1623,7 @@ def test_a_signed_nibble_is_refused_by_a_field_declared_without_one(signed_nibbl
     :returns: nothing; an accepted mismatch is reported as an assertion failure. The exception
         class verified is :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
     """
-    # WHY (Assumptions): the positive signed nibble is refused as firmly as the negative one,
+    # WHY : Assumptions: the positive signed nibble is refused as firmly as the negative one,
     #   even though reading 0x0C on an unsigned field would produce the numerically correct
     #   value. Tolerating it would leave the declaration-versus-data disagreement unreported on
     #   exactly the half of the cases where it happens to be harmless, so the fault would only
@@ -1592,7 +1641,7 @@ def test_a_nonzero_unused_leading_nibble_is_refused() -> None:
     assertion failure. The exception class verified is
     :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
     """
-    # WHY (Assumptions): checking the pad nibble is the cheapest detector of a displaced read
+    # WHY : Assumptions: checking the pad nibble is the cheapest detector of a displaced read
     #   this codec has, and the consequence of skipping it is measurable rather than theoretical:
     #   a leading nibble of 9 on the seven-byte balance turns 158.00 into 9000000015.80 -- a
     #   number that is well formed, raises nothing anywhere downstream, and is caught only after
@@ -1614,7 +1663,7 @@ def test_an_odd_digit_packed_field_has_no_pad_nibble_to_check() -> None:
     Takes no parameters and returns no value; a field of the wrong width for its parity is
     reported as an assertion failure.
     """
-    # WHY (Assumptions): the surplus is ``width * 2 - (digits + 1)`` and is at most one, so it
+    # WHY : Assumptions: the surplus is ``width * 2 - (digits + 1)`` and is at most one, so it
     #   exists exactly when the digit count is EVEN. Twelve digits occupy seven bytes, fourteen
     #   nibbles for thirteen used, so one pads; eleven digits occupy six bytes, twelve nibbles
     #   for twelve used, so none pads. Both directions of getting the parity wrong were measured
@@ -1633,7 +1682,7 @@ def test_an_odd_digit_packed_field_has_no_pad_nibble_to_check() -> None:
     assert even_width * 2 - (even_digits + 1) == 1, "an even digit count leaves one pad nibble"
     assert odd_width * 2 - (odd_digits + 1) == 0, "an odd digit count leaves none"
 
-    # WHY (Assumptions): the no-pad case is confirmed against real bytes, not only against the
+    # WHY : Assumptions: the no-pad case is confirmed against real bytes, not only against the
     #   arithmetic. The reference compiler lays ``PIC S9(05) COMP-3`` holding 12345 down as the
     #   nibbles 1 2 3 4 5 C, whose LEADING nibble is a digit and not a pad, so a decoder that
     #   skipped a nibble here would return 234.5 and never see the one.
@@ -1649,22 +1698,29 @@ def test_a_negatively_signed_packed_zero_re_encodes_with_the_positive_nibble() -
     and returns no value; a preserved negative nibble, or any other span failing to reproduce
     itself, is reported as an assertion failure.
     """
-    # WHY (Assumptions): :class:`decimal.Decimal` has no negative zero and neither does the Java
-    #   codec's ``BigDecimal``, so the normalisation is the same accepted exception the display
-    #   regime makes for a ``'}'``-overpunched zero. Preserving the negative nibble on one side
-    #   only would make the two regimes disagree about the same amount, and preserving it in
-    #   Python but not in Java would make the two languages disagree about the same bytes.
+    # WHY : Refactoring Rationale: this comment also said ":class:`decimal.Decimal` has no
+    #   negative zero", carried over from the zoned test above, and it is false for the same
+    #   measured reason recorded there -- ``Decimal("-0.00")`` reports ``is_signed() is True``.
+    #   Only the ``BigDecimal`` half of the original sentence was ever correct.
+    # WHY : Assumptions: the normalisation is the same accepted exception the display regime
+    #   makes for a ``'}'``-overpunched zero, and it is made for the Java constraint rather than
+    #   a Python one: ``BigInteger`` has exactly one zero, so ``BigDecimal`` cannot hold a signed
+    #   one. Preserving the negative nibble on one side only would make the two regimes disagree
+    #   about the same amount, and preserving it in Python but not in Java would make the two
+    #   languages disagree about the same bytes.
     negative_zero = decode_packed(
         bytes.fromhex("0000000000000d"), _ACCOUNT_MONEY_INT_DIGITS, _MONEY_DEC_DIGITS, _SIGNED
     )
     assert negative_zero == Decimal("0.00")
-    assert negative_zero.is_signed() is False
+    assert negative_zero.is_signed() is False, (
+        "the decoder must normalise a 0x0D-signed packed zero to an UNSIGNED Decimal"
+    )
     assert negative_zero.as_tuple().exponent == -_MONEY_DEC_DIGITS
     assert encode_packed(
         negative_zero, _ACCOUNT_MONEY_INT_DIGITS, _MONEY_DEC_DIGITS, _SIGNED
     ) == bytes.fromhex("0000000000000c")
 
-    # WHY (Assumptions): the carve-out is asserted to be confined to zero, so it cannot be read
+    # WHY : Assumptions: the carve-out is asserted to be confined to zero, so it cannot be read
     #   as licence for the encoder to drop a negative nibble generally.
     negative = bytes.fromhex("00000019400d")
     assert decode_packed(negative, _TRAN_MONEY_INT_DIGITS, _MONEY_DEC_DIGITS, _SIGNED) == Decimal(
@@ -1702,7 +1758,7 @@ def test_a_binary_span_round_trips_big_endian_two_s_complement(
     :returns: nothing; a differing value, scale or re-encoded span is reported as an assertion
         failure.
     """
-    # WHY (Assumptions): binary fields are stored MOST SIGNIFICANT BYTE FIRST, and that is a
+    # Assumptions: binary fields are stored MOST SIGNIFICANT BYTE FIRST, and that is a
     #   property of the bytes already on disk rather than of the platform reading them. It is
     #   measurable: reading ``EXPORT-SEQUENCE-NUM`` as four big-endian bytes in the real export
     #   extract yields 1, 10, 266 and 509 for records 0, 9, 265 and 499, which is a sequence,
@@ -1724,7 +1780,7 @@ def test_a_scaled_binary_value_moves_its_decimal_point_without_dividing() -> Non
     Takes no parameters and returns no value; a value whose scale was applied by division, or
     whose exponent differs from the declaration, is reported as an assertion failure.
     """
-    # WHY (Alternatives Considered): dividing the stored whole number by a power of ten was
+    # Alternatives Considered: dividing the stored whole number by a power of ten was
     #   available and was rejected. Division introduces an intermediate whose precision depends
     #   on the ambient decimal context, so the same span could decode differently in two
     #   processes configured differently -- and at a low precision it would round. Moving the
@@ -1767,7 +1823,7 @@ def test_the_widest_fitting_binary_values_round_trip_at_every_tier(
     :returns: nothing; a rejected in-range extreme, or one that failed to reproduce itself, is
         reported as an assertion failure.
     """
-    # WHY (Assumptions): the extremes are derived from the DECLARED DIGIT COUNT and not from the
+    # Assumptions: the extremes are derived from the DECLARED DIGIT COUNT and not from the
     #   byte width, because the digit count is the narrower of the two constraints -- nine digits
     #   is at most 999999999 while four signed bytes reach 2147483647. Testing the byte extreme
     #   instead would assert a value the picture clause cannot describe, and the codec correctly
@@ -1787,12 +1843,18 @@ def test_a_binary_value_wider_than_its_declared_digits_is_refused_on_encode() ->
     assertion failure. The exception class verified is
     :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
     """
-    # WHY (Assumptions): the refusal is driven by the digit count rather than by whether the
-    #   number happens to fit the bytes, which is what makes it meaningful: 99999 fits two bytes
-    #   comfortably as an unsigned quantity and still cannot be described by ``PIC S9(04)``, so a
-    #   width-only check would accept a value the target column cannot store.
+    # Assumptions: the refusal is driven by the DECLARED DIGIT COUNT and not by whether the
+    #   number happens to fit the bytes, and the vector is chosen so that the two rules cannot
+    #   be confused. 32767 is exactly the largest value two signed bytes hold, and two signed
+    #   bytes are the width four declared digits select, so the storage refuses this value on no
+    #   ground at all -- only its fifth digit does, which ``PIC S9(04)`` cannot describe. A
+    #   width-only check would therefore accept a value the target column cannot store, and the
+    #   asserted diagnostic names the digit positions rather than the byte width for exactly
+    #   that reason.
+    assert binary_width(4, 0) == 2
+    assert Decimal(32767) == Decimal(2) ** 15 - 1, "the vector is the signed two-byte extreme"
     with pytest.raises(PackedDecimalError) as refusal:
-        encode_binary(Decimal(99999), 4, 0, _SIGNED)
+        encode_binary(Decimal(32767), 4, 0, _SIGNED)
     assert "digit positions" in str(refusal.value)
 
 
@@ -1803,7 +1865,7 @@ def test_a_binary_span_holding_more_digits_than_declared_is_refused_on_decode() 
     assertion failure. The exception class verified is
     :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
     """
-    # WHY (Assumptions): the span below is exactly four bytes -- the declared width for nine
+    # Assumptions: the span below is exactly four bytes -- the declared width for nine
     #   digits -- and holds 1000000000, which needs ten. The case exists because it is the one
     #   overflow a width check cannot catch: the bytes are the right length, so only comparing
     #   the stored magnitude against the declared digit positions detects it, and the
@@ -1822,7 +1884,7 @@ def test_a_binary_field_is_never_decoded_as_packed_decimal() -> None:
     reported as an assertion failure. The exception class verified is
     :class:`~carddemo_migration.copybook.packed.PackedSpanWidthError`.
     """
-    # WHY (Assumptions): the token ``COMP-3`` CONTAINS the token ``COMP``, so any dispatch that
+    # Assumptions: the token ``COMP-3`` CONTAINS the token ``COMP``, so any dispatch that
     #   matched the shortest usage token would read a seven-byte packed field as an eight-byte
     #   binary one -- and would then CASCADE a one-byte offset error through every subsequent
     #   field of the record. That is a silent-wrong-number failure and not a crash: each later
@@ -1854,7 +1916,7 @@ def test_dispatch_is_on_the_declared_kind_and_not_on_a_usage_token() -> None:
     exception class verified for each mis-routing is
     :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
     """
-    # WHY (Assumptions): the substring hazard is guarded structurally rather than only by width,
+    # Assumptions: the substring hazard is guarded structurally rather than only by width,
     #   because two fields of the same regime CAN share a width -- the packed balance and the
     #   packed cash limit of this very branch are both seven bytes. Only the kind distinguishes
     #   regimes reliably, so each field-oriented entry point is asserted to refuse a descriptor
@@ -1888,7 +1950,7 @@ def test_one_picture_clause_has_three_physical_widths_in_the_export_record() -> 
     Takes no parameters and returns no value; a differing width, a differing decoded value, or
     two spans that happen to be equal is reported as an assertion failure.
     """
-    # WHY (Assumptions): ``app/cpy/CVEXPORT.cpy`` declares ``PIC S9(10)V99`` three times inside
+    # Assumptions: ``app/cpy/CVEXPORT.cpy`` declares ``PIC S9(10)V99`` three times inside
     #   ONE overlay branch, at lines 50, 51 and 57, and gives it a different storage regime each
     #   time -- ``COMP-3``, display and ``COMP``. The same twelve declared digit positions
     #   therefore occupy seven, twelve and eight physical positions respectively, which is the
@@ -1914,7 +1976,7 @@ def test_one_picture_clause_has_three_physical_widths_in_the_export_record() -> 
     assert (len(packed_span), len(display_span), len(binary_span)) == (7, 12, 8)
     assert widths == {Kind.PACKED: 7, Kind.ZONED: 12, Kind.BINARY: 8}
 
-    # WHY (Assumptions): equal NUMERIC MEANING across three different byte counts is the property
+    # Assumptions: equal NUMERIC MEANING across three different byte counts is the property
     #   asserted, because that is what a migration must preserve: the target column holds one
     #   value regardless of which regime the source stored it in. All three decode to the same
     #   Decimal at the same exponent while sharing no representation.
@@ -1934,7 +1996,7 @@ def test_packed_decimal_reaches_persisted_data_only_where_the_corpus_declares_it
     field, or an authorization segment whose length has drifted, is reported as an assertion
     failure.
     """
-    # WHY (Assumptions): all money in the eleven base masters is zoned DISPLAY -- searching those
+    # Assumptions: all money in the eleven base masters is zoned DISPLAY -- searching those
     #   copybooks for ``COMP`` or ``COMP-3`` returns nothing -- so packed decimal reaches
     #   persisted data only in the export record and in the two authorization segments,
     #   ``CIPAUSMY.cpy`` at 100 bytes and ``CIPAUDTY.cpy`` at 200. The authorization bounded
@@ -1970,7 +2032,7 @@ def test_a_packed_span_of_the_wrong_width_is_refused(span_hex: str) -> None:
         exception class verified is
         :class:`~carddemo_migration.copybook.packed.PackedSpanWidthError`.
     """
-    # WHY (Assumptions): both directions are asserted because they arise from opposite mistakes
+    # Assumptions: both directions are asserted because they arise from opposite mistakes
     #   and neither is safe to repair. A short span is a slice that ran off the end of a record; a
     #   long one is a slice sized by the wrong rule -- most plausibly the display rule, which
     #   would give eleven bytes for these eleven digits rather than six.
@@ -1990,7 +2052,7 @@ def test_a_binary_span_of_the_wrong_width_is_refused(span_hex: str) -> None:
         exception class verified is
         :class:`~carddemo_migration.copybook.packed.PackedSpanWidthError`.
     """
-    # WHY (Assumptions): a binary width is a step function, so a three-byte or seven-byte span is
+    # Assumptions: a binary width is a step function, so a three-byte or seven-byte span is
     #   not merely short -- it is a width the rule can never produce, which means the caller
     #   computed it some other way. Refusing rather than left-padding is what surfaces that: a
     #   padded three-byte span would decode to a number of the right order of magnitude.
@@ -2007,7 +2069,7 @@ def test_a_packed_value_wider_than_its_declared_digits_is_refused_on_encode() ->
     assertion failure. The exception class verified is
     :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
     """
-    # WHY (Assumptions): the alternative is truncating high-order digits into the declared
+    # Assumptions: the alternative is truncating high-order digits into the declared
     #   nibbles, which returns a span of exactly the right byte count holding a smaller number.
     #   Nothing about the resulting bytes is detectably wrong, which is why the refusal happens
     #   before any nibble is written rather than being left to a later consistency check.
@@ -2027,7 +2089,7 @@ def test_computational_encoding_refuses_fractional_precision_it_cannot_store(
         exception class verified on both paths is
         :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
     """
-    # WHY (Assumptions): the two computational regimes are asserted together with one vector set
+    # Assumptions: the two computational regimes are asserted together with one vector set
     #   because they share one encode guard, so testing only one would leave the other's refusal
     #   unproven while looking covered. Rounding here would be a business decision recorded
     #   nowhere -- the same reason the display regime refuses it.
@@ -2045,7 +2107,7 @@ def test_a_negative_value_is_refused_by_an_unsigned_computational_field() -> Non
     assertion failure. The exception class verified on both paths is
     :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
     """
-    # WHY (Assumptions): an unsigned packed field lays down 0x0F, which carries no sign to set,
+    # Assumptions: an unsigned packed field lays down 0x0F, which carries no sign to set,
     #   and an unsigned binary field treats its leading bit as magnitude, so a negative value
     #   would become a very large positive one. Both are refused at the boundary rather than
     #   represented approximately.
@@ -2063,7 +2125,7 @@ def test_computational_encoding_refuses_float_and_bool(bad_value: object) -> Non
     :returns: nothing; an accepted value is reported as an assertion failure. The exception class
         verified on both paths is :class:`TypeError`.
     """
-    # WHY (Alternatives Considered): coercing through ``Decimal(str(value))`` was available and
+    # Alternatives Considered: coercing through ``Decimal(str(value))`` was available and
     #   was rejected for the same reason as on the display path -- a binary float cannot represent
     #   ten cents exactly, so accepting one admits an approximation into the money path that
     #   nothing downstream can detect. ``2065.0`` is included because it looks exact and is not
@@ -2081,11 +2143,15 @@ def test_text_is_refused_at_the_computational_codec_boundary() -> None:
     Takes no parameters and returns no value; accepted text is reported as an assertion failure.
     The exception class verified on both paths is :class:`TypeError`.
     """
-    # WHY (Assumptions): a computational span must be read in BINARY mode, because a character
-    #   decoder replaces the NUL bytes and sign nibbles a packed span contains -- and the
-    #   replacement need not be one character per byte, so it moves every later field offset. The
-    #   refusal is what keeps character conversion confined to ``ebcdic_codec`` and applied per
-    #   fixed-width field rather than per record.
+    # Assumptions: a computational span must stay BYTES, because character interpretation
+    #   changes what those bytes MEAN rather than how many of them there are. Every code page
+    #   ``ebcdic_codec`` admits has to decode all 256 byte values, produce exactly one character
+    #   per byte and re-encode them unchanged, so a decode moves no later field offset. What it
+    #   destroys is the meaning: a packed span's sign and digit nibbles and a binary span's
+    #   two's-complement word are storage rather than text, and the characters they map to carry
+    #   no relation to the amount stored. Refusing text at this boundary is what keeps character
+    #   conversion confined to ``ebcdic_codec`` and applied per fixed-width field rather than
+    #   per record.
     with pytest.raises(TypeError):
         decode_packed("\x00\x00\x00\x19\x40\x0c", 9, 2, _SIGNED)  # type: ignore[arg-type]
     with pytest.raises(TypeError):
@@ -2100,7 +2166,7 @@ def test_a_sensitive_packed_field_diagnostic_withholds_its_offending_nibble() ->
     exception class verified is
     :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
     """
-    # WHY (Trade-offs): a sensitive computational field discloses no nibble at all, not even in
+    # Trade-offs: a sensitive computational field discloses no nibble at all, not even in
     #   hexadecimal, and the suppression is NAMED in the message rather than left as a silent
     #   omission. Without the naming a reader cannot tell whether the codec had nothing to report
     #   or withheld it deliberately, and would reasonably suspect the diagnostic itself was
@@ -2121,7 +2187,7 @@ def test_a_sensitive_packed_field_diagnostic_withholds_its_offending_nibble() ->
     assert "0x" not in message, "a sensitive diagnostic renders no hexadecimal nibble"
     assert "withheld" in message, "the suppression is named rather than silent"
 
-    # WHY (Assumptions): the non-sensitive comparison is asserted in the same test, because "no
+    # Assumptions: the non-sensitive comparison is asserted in the same test, because "no
     #   nibble appeared" only evidences suppression if a nibble appears when the flag is absent.
     #   Without the pair a codec that had stopped rendering nibbles entirely would pass the
     #   suppression assertion while having lost a diagnostic feature.
@@ -2140,7 +2206,7 @@ def test_a_sensitive_binary_field_diagnostic_withholds_its_content() -> None:
     binary field is reported as an assertion failure. The exception class verified is
     :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
     """
-    # WHY (Assumptions): the card verification value is declared through the sensitive binary
+    # Assumptions: the card verification value is declared through the sensitive binary
     #   factory and not the plain one, and the distinction is load-bearing rather than cosmetic:
     #   the account identifier beside it is an internal key while this is the card's
     #   authentication secret, and a masked record rendering is precisely what gets pasted into a
@@ -2168,7 +2234,7 @@ def test_a_record_ending_before_a_declared_computational_field_is_refused() -> N
     failure. The exception class verified on both paths is
     :class:`~carddemo_migration.copybook.packed.PackedSpanWidthError`.
     """
-    # WHY (Assumptions): a short record is refused rather than zero-extended, because zero-padded
+    # Assumptions: a short record is refused rather than zero-extended, because zero-padded
     #   nibbles read as real digits and a zero-padded binary word reads as a smaller number.
     #   Either way the value returned would be well formed, which is the failure mode this whole
     #   module exists to prevent.
@@ -2187,11 +2253,16 @@ def test_a_display_field_is_refused_by_the_computational_entry_points() -> None:
     is reported as an assertion failure. The exception class verified on both paths is
     :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
     """
-    # WHY (Assumptions): this closes the mis-routing loop in the direction opposite to the display
+    # Assumptions: this closes the mis-routing loop in the direction opposite to the display
     #   codec's own refusal of a packed field. A zoned field is one printable digit per byte, so
     #   reading it as nibbles would find 0x3 and 0x0 pairs -- both valid digit nibbles -- and
-    #   would return a number twice as long as the field declares. Only the kind check stops it
-    #   before the bytes are misread.
+    #   would return a number twice as long as the field declares. The kind check is the earliest
+    #   and the semantically authoritative guard against that: it refuses the descriptor's regime
+    #   outright, before a single byte is read as a nibble or as a word. The width contract would
+    #   also reject THIS vector -- the field declares twelve display positions against the seven
+    #   bytes the packed geometry selects -- but that is a property of this pair of geometries
+    #   rather than the rule, because two fields declaring the same digits can share a width, and
+    #   then only the kind still separates the regimes.
     zoned_field = layouts.EXPORT_ACCOUNT_LAYOUT.field("EXP-ACCT-CREDIT-LIMIT")
     assert zoned_field.kind is Kind.ZONED
     record = bytes(layouts.EXPORT_ACCOUNT_LAYOUT.reclen)

@@ -143,7 +143,7 @@ Derived field for field from `app/cpy/CVACT02Y.cpy`, a 14-line copybook whose
 The misspelling in `CARD-EXPIRAION-DATE` is the baseline's own, and this
 document reproduces it exactly whenever the field is named, because that is its
 name. The target column is `expiration_date`
-(`services/card-service/src/main/resources/db/migration/V1__card.sql:261`).
+(`services/card-service/src/main/resources/db/migration/V1__card.sql:258`).
 That rename is a target-side naming decision and one of the three such
 corrections the migration plan records; it asserts nothing whatsoever about the
 COBOL, which keeps its own spelling.
@@ -450,8 +450,9 @@ offset 16, which is 1-based position 17, which by
 part that matters for fixture design: one account may hold many cards.
 
 That is the access path `idx_cards_account_id`
-(`V1__card.sql:375`) replaces, and the path
-`CardRepository.findByAccountIdOrderByCardNumAsc(Long)` serves.
+(`V1__card.sql:399`) replaces, and the `accountId` predicate of
+`CardRepository.findForwardFromCursor` and `findBackwardFromCursor` serves -- reached
+from `CardController.listCards` through `CardListService.list`.
 `card-by-account-corpus.txt` is the fixture that exercises it, and it has to be
 authored rather than sampled -- see the third measured proof in
 [section 8](#8-synthetic-provenance-attestation).
@@ -781,7 +782,7 @@ fixture directories use. Rejected because it conflates two materially different
 failures that need different test setups. Year `1949` is a value the schema
 stores without complaint -- `1949-06-15` is a valid `DATE` -- and only the
 validator objects. Status `X` is a value the schema refuses outright, under the
-named `ck_cards_active_status` constraint at `V1__card.sql:342`. Collapsing the
+named `ck_cards_active_status` constraint at `V1__card.sql:366`. Collapsing the
 two would let a consumer insert a Class B row and receive a constraint error
 where a validation assertion was intended, and the resulting failure names the
 database rather than the rule that was actually under test.
@@ -808,8 +809,8 @@ and that is deliberate rather than an omission.
 Assumptions: the access path this fixture exercises is declared
 `NONUNIQUEKEY` at `app/jcl/CARDFILE.jcl:86`, so an account-to-card relation of
 zero, one or many is all legitimate, and zero is the cardinality a query has to
-handle without a row to read. `CardRepository.findByAccountIdOrderByCardNumAsc(Long)`
-returns an empty list rather than an error for such an account, so the only way
+handle without a row to read. An account-filtered browse
+returns an empty page rather than an error for such an account, so the only way
 to fixture that case is to query an id the file deliberately does not contain --
 adding a record for `00000000903` would destroy the very case it was meant to
 cover.
@@ -822,7 +823,7 @@ lost. It has not: the third account's contribution is the absence itself.
 ### 9.9 Card numbers are disjoint across every fixture
 
 Assumptions: `card_num` is the primary key of `card.cards`
-(`CONSTRAINT pk_cards PRIMARY KEY (card_num)` at `V1__card.sql:332`), so two
+(`CONSTRAINT pk_cards PRIMARY KEY (card_num)` at `V1__card.sql:355`), so two
 fixtures loaded into the same table in the same test must not collide. Each
 fixture therefore draws a distinct, contiguous run of seed record positions --
 1-18, 19-22, 23-26, 27-29, 30, 31, 34-35, 36-37, 38, 39-40 and 41-42 -- and the

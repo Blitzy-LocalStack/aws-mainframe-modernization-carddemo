@@ -1,5 +1,5 @@
 /**
- * Spring wiring for the account, customer and card-cross-reference context, closed at four configuration
+ * Spring wiring for the account, customer and card-cross-reference context, closed at five configuration
  * classes that hold no business rule, no error mapping and no shared-kernel registration of their own.
  *
  * <h2>What this package is for</h2>
@@ -19,12 +19,24 @@
  * with exactly three tables, {@code accounts}, {@code customers} and {@code card_xref}. The line counts
  * are {@code wc -l} values, which is the measure this repository uses, and they are quoted because they
  * are the honest indication of how much transcribed logic each program contributes to the context these
- * four classes assemble.</p>
+ * five classes assemble.</p>
  *
- * <h2>The closed set of four configuration classes</h2>
+ * <h2>The closed set of five configuration classes</h2>
  *
- * <p>The set is <strong>closed at four</strong>. That is a constraint on what may be added here, not a
- * snapshot of what happens to exist, and each member owns exactly one concern.</p>
+ * <p>The set is <strong>closed at five</strong>, and all five exist beside this charter. That is a
+ * constraint on what may be added here as well as a listing of the directory, and each member owns
+ * exactly one concern.</p>
+ *
+ * <p>Refactoring Rationale: this section was headed "the closed set of four" and enumerated four,
+ * omitting {@code InternalApiSecurityConfig} after it landed. The omission is worse here than an
+ * ordinary stale count, because the sentence beside it -- "that is a constraint on what may be added
+ * here, not a snapshot of what happens to exist" -- instructed a reader to treat anything else in the
+ * directory as not belonging. A reader acting on that would have removed the second filter chain, and
+ * removing it does not fail a build: it makes three internal reads from the authorization context
+ * refuse authentication, which that caller reports as the dependency being unavailable, so the
+ * authorization would be redelivered until the queue dead-lettered it. The closure argument below,
+ * which grounds each member on a capability the POM declares, is extended to the fifth rather than
+ * loosened.</p>
  *
  * <ul>
  *   <li>{@code SecurityConfig} -- which tokens are accepted and what authority each route requires. It
@@ -41,6 +53,17 @@
  *       connection-pool sizing, and the migration runner's wiring.</li>
  *   <li>{@code SqsConfig} -- the listener-container factory that feeds the account-inquiry request and
  *       reply flow transcribed from {@code app/app-vsam-mq/cbl/COACCT01.cbl}.</li>
+ *   <li>{@code InternalApiSecurityConfig} -- the second filter chain, and the only one that authorises a
+ *       caller which is another service rather than a person. It matches exactly the three internal read
+ *       paths the authorization context calls and verifies a shared-symmetric-key service token on them.
+ *       Assumptions: it is ordered <b>ahead</b> of {@code SecurityConfig}'s chain, and the ordering is
+ *       absolute rather than a preference -- the framework offers a request to each chain in turn and the
+ *       first matcher that accepts it decides it, so a lower-precedence internal chain would never see a
+ *       request at all. Alternatives Considered: adding those three paths to the human chain under a
+ *       permissive rule, which would also have made the calls succeed. Rejected because the paths would
+ *       then be reachable by any authenticated cardholder and one of them resolves a primary account
+ *       number, so the permissive rule buys availability with a disclosure. Assumptions: this class is
+ *       why the set here is five where a context with no inbound service caller has four.</li>
  * </ul>
  *
  * <p>Assumptions: each member of that set rests on a capability this module actually declares, so the
@@ -49,9 +72,13 @@
  * {@code SecurityConfig} configures, the contract-documentation starter at L422 that gives
  * {@code OpenApiConfig} something to
  * describe, the database driver at L376 with the migration artifacts at L397 and L401 that
- * {@code DataSourceConfig} wires, and the queue starter at L330 that {@code SqsConfig} tunes. A fifth
- * class would therefore have to arrive with a fifth declared capability, and a reader can check that
- * claim without reading a single Java file.</p>
+ * {@code DataSourceConfig} wires, and the queue starter at L330 that {@code SqsConfig} tunes. The fifth
+ * member is grounded differently and deliberately so: {@code InternalApiSecurityConfig} rests on no
+ * additional dependency at all -- it uses the same security starter as the first member plus the shared
+ * kernel's service-token minter -- and what it rests on instead is the existence of an inbound
+ * service-to-service caller, which the sibling authorization context's client establishes. A SIXTH class
+ * would therefore have to arrive either with a sixth declared capability or with a second class of caller,
+ * and a reader can check both claims without reading a single Java file.</p>
  *
  * <h2>What this package must never own</h2>
  *

@@ -25,30 +25,71 @@ import org.springframework.context.annotation.Configuration;
  * <p>Alternatives Considered: giving this context a schema of its own, with tables and a migration
  * directory, so that its datasource configuration would look like every other service's. Rejected
  * because the reporting context reads and never writes, and every store it reads is owned
- * elsewhere. The migration that bootstraps the database creates {@code reporting} as a schema that
- * holds no table at all and exists only to house read-only cross-schema views, stated at
- * {@code data-migration/sql/V0__schemas_and_roles.sql} L542 to L549, which matches the target
+ * elsewhere. The migration that bootstraps the database creates {@code reporting} as a schema owned
+ * by a no-login role and existing to house read-only cross-schema views -- the
+ * {@code CREATE SCHEMA IF NOT EXISTS reporting AUTHORIZATION carddemo_reporting_owner} statement in
+ * section 2 of {@code data-migration/sql/V0__schemas_and_roles.sql} -- which matches the target
  * design's own entry of "(none)" against this context's owned tables. Copying those stores locally
  * to obtain a private schema would create a second truth for figures whose whole purpose is to
  * restate the first one exactly.
  *
- * <p>Assumptions: the login role this pool authenticates as can read the four views and nothing
- * else, and that is enforced by the database rather than trusted to query authors. The service
- * role receives {@code USAGE} on the {@code reporting} schema and no privilege whatsoever on
- * {@code ledger}, {@code account}, {@code card} or {@code reference}, at
- * {@code V0__schemas_and_roles.sql} L582 and L888 to L892, and that same file revokes default
- * table-level read from it in all four of those schemas at L928 to L935. A separate no-login owner
- * role holds the read privileges the views themselves execute with, so the views can read what the
- * caller cannot. That is why this class configures a pool and asserts a posture rather than
- * attempting to police access itself.
+ * <p>Assumptions: the login role this pool authenticates as can read the seven views and nothing
+ * else, and that is enforced by the database rather than trusted to query authors. Section 5 of
+ * {@code V0__schemas_and_roles.sql}, "Cross-schema privileges for the reporting role", grants it
+ * {@code USAGE ON SCHEMA reporting} and then closes everything else: {@code REVOKE CREATE ON SCHEMA
+ * reporting}, a {@code REVOKE ALL ON ALL TABLES} for each of {@code ledger}, {@code account},
+ * {@code card} and {@code reference}, a {@code REVOKE ALL ON SCHEMA} covering the same four, and an
+ * {@code ALTER DEFAULT PRIVILEGES ... REVOKE SELECT ON TABLES} per owner role so a table created
+ * later cannot arrive readable. The same section grants the read privileges the views themselves
+ * execute with to the separate no-login owner {@code carddemo_reporting_owner}, as {@code USAGE ON
+ * SCHEMA ledger, account, card, reference} plus a {@code GRANT SELECT ON ALL TABLES} per schema --
+ * so the views can read what the caller cannot. That is why this class configures a pool and asserts
+ * a posture rather than attempting to police access itself.
+ *
+ * <p>Assumptions: one physical table does exist in that schema and is unreadable by this service,
+ * which is a stronger statement than the schema being empty. It is
+ * {@code reporting.card_grouping_key}, holding the secret behind the statement grouping token; it is
+ * owned by the no-login owner, and {@code REVOKE ALL ON reporting.card_grouping_key FROM
+ * carddemo_reporting} appears twice -- once in section 5 of {@code V0__schemas_and_roles.sql} and
+ * again in {@code V1__reporting_views.sql} beside the table itself. So this context still addresses
+ * no table directly, reaching that data only through a view that reads it, and the invariant this
+ * pool depends on survives the table's existence intact.
  *
  * <p>Assumptions: the views, the roles and the grants all belong to the data-migration package and
- * never to this module. The four views are created by
+ * never to this module. The seven views are created by
  * {@code data-migration/sql/V1__reporting_views.sql}, which builds each one with a security
  * barrier, assigns it to the owner role, masks the card number every ledger-derived view publishes,
  * and grants read on each view by name. A view missing at run time is therefore a defect to report
- * against that package, and explicitly not something for this service to create for itself, as
- * {@code V0__schemas_and_roles.sql} L565 to L567 states directly.
+ * against that package, and explicitly not something for this service to create for itself, which
+ * the "No view is created here" note in section 2 of {@code V0__schemas_and_roles.sql} states
+ * directly.
+ *
+ * <p>Assumptions: the read grant is made three times over and the redundancy is deliberate, so a
+ * reader who finds only one of the three has not found the whole arrangement. Section 5 of
+ * {@code V0__schemas_and_roles.sql} sets an {@code ALTER DEFAULT PRIVILEGES} keyed on the owner role
+ * so that a view is readable the moment it is created, then issues a one-time {@code GRANT SELECT ON
+ * ALL TABLES IN SCHEMA reporting} to cover anything that already existed; {@code
+ * V1__reporting_views.sql} then grants each of the seven views by name. The wildcard forms are safe
+ * here only because they are scoped to the {@code reporting} schema, which reaches no base table in
+ * any source schema, and because the single non-view relation in it is revoked by name afterwards.
+ * The by-name grants are what make the intended surface legible in the file that defines it.
+ *
+ * <p>Refactoring Rationale: this block previously said the schema "holds no table at all", counted
+ * the views as four, and carried five citations by line number -- L542 to L549, L582, L888 to L892,
+ * L928 to L935 and L565 to L567 -- none of which pointed at the statement it was offered as evidence
+ * for. L542 to L549 was bootstrap role-membership commentary, L582 a comment about no-login owners,
+ * L888 to L892 the {@code card} schema's grants, L928 to L935 the {@code batch} schema's, and L565
+ * to L567 the end of a loop. Every claim above is now cited by the STATEMENT that substantiates it
+ * and the numbered section it sits in, and deliberately not by line number.
+ *
+ * <p>Trade-offs: citing by statement text is longer to read than "L1307" and gives no single place to
+ * jump to. It is chosen anyway because a line citation into another package is stale the moment
+ * anyone inserts a comment above it, and this very block proves how quickly that happens -- the five
+ * numbers replaced here were each accurate when written. A statement citation is found by search,
+ * survives insertion, and fails visibly if the statement is ever removed, which is the failure this
+ * block needs to be loud rather than silent. A merely approximate line citation is worse than none:
+ * it survives a spot check by a reader who does not open the file and wastes the time of the one who
+ * does, whereas an absent citation at least declares that the claim needs verifying.
  *
  * <p>Alternatives Considered: pointing this context at a read replica, which is the reflex for a
  * reporting workload. Rejected on the target design's own reasoning, that "a replica adds cost and

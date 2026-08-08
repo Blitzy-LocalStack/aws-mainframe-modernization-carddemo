@@ -6,15 +6,25 @@
 #       of this context is written against, rather than each of those being
 #       written against a fresh reading of the baseline.
 #
-#       What has landed at this checkpoint, and is therefore already bound by
-#       what follows: config/SecurityConfig.java, which enforces by HTTP method
-#       the authority each operation below declares, and the two Flyway
-#       migrations that own the six tables. Planned and NOT yet authored: every
+#       Everything this document was written upstream of now exists and is bound
+#       by what follows: config/SecurityConfig.java, which enforces by HTTP method
+#       the authority each operation below declares; the two Flyway migrations
+#       that own the six tables; the six controllers under api/ that serve these
+#       operations; and the request shapes, response shapes, entities,
+#       repositories and mappers behind them. The browser client
+#       ui/src/api/reference.ts is present too, and ui/src/api/contracts.test.ts
+#       binds it back to this file so a drift fails the SPA build.
+#
+#       Refactoring Rationale: this paragraph previously recorded that every
 #       controller, request shape, response shape, entity, repository and mapper
-#       of this module, the browser client ui/src/api/reference.ts and the shared
-#       types in ui/src/api/types.ts. So no operation below is served yet, and a
-#       reader should not expect to find a Java type implementing one -- this
-#       document is upstream of that code, not a description of it.
+#       of this module was unauthored, that the browser client did not exist, and
+#       that no operation below was served. All of that was accurate when written
+#       and is now false, so it is replaced rather than annotated. The correction
+#       changes how a mismatch must be read: while nothing served these
+#       operations, a divergence between this document and a Java type was a
+#       documentation defect to be corrected in the document; now that handlers
+#       exist, it is a contract breach in whichever side moved. What is still NOT
+#       claimed is runtime behaviour against a provisioned AWS environment.
 #
 #       springdoc serves this exact file: application.yml sets
 #       springdoc.swagger-ui.url to /reference-api.yaml and includes
@@ -60,8 +70,8 @@
 #       - security: the bearer scheme, applied to every operation by default.
 #       - x-authority-model: the machine-readable statement of which authority
 #         each operation requires, and where that requirement is enforced.
-#       - tags: the three groupings -- authenticated reads, administrative
-#         writes, and the date utilities.
+#       - tags: the three groupings -- reads available to either group,
+#         administrative writes, and the date utilities.
 #       - paths: the nineteen operations of this context across thirteen paths,
 #         ordered as a reader meets the data -- transaction types, then the
 #         categories that depend on them, then disclosure rates, then the three
@@ -228,9 +238,10 @@ servers:
 #       inherited by every operation, rather than repeated on each one with the
 #       risk that a single omission passes review unnoticed. There is no
 #       unauthenticated operation in this context: SecurityConfig.java permits
-#       only the health path and what lies beneath it without a token, and closes
-#       with a catch-all requiring one of the two group authorities rather than
-#       requiring authentication. Refactoring Rationale: this note previously
+#       only the health path and what lies beneath it without a token, guards
+#       every read with a rule requiring one of the two group authorities rather
+#       than requiring authentication, and closes with denyAll() so a route added
+#       without a rule fails closed. Refactoring Rationale: this note previously
 #       cited anyRequest().authenticated() at fixed line numbers; that rule was
 #       the missing-authorization defect the authority model below was written
 #       against, and quoted line numbers go stale on the next edit, so the rules
@@ -247,39 +258,49 @@ security:
 #       prose and tag membership. Prose and tag membership are not checkable: a
 #       reviewer can read that a write is administrative, and a generator or a
 #       gateway cannot, so the restriction would be indistinguishable from any
-#       other authenticated route. Every operation below carries
+#       other guarded route. Every operation below carries
 #       x-required-authority.
 # WHY : Assumptions: the value on each operation is not chosen here. It is
 #       derived from what SecurityConfig.java already enforces for this service:
 #       POST, PUT, PATCH and DELETE on every path each require
-#       JwtRoleConverter.ADMIN_AUTHORITY, at its lines 99 to 106, and every
-#       remaining request needs only authentication, at line 107. So every write
-#       below carries carddemo-admin and every READ carries the third value
-#       authenticated, and the document describes the filter chain rather than a
-#       second opinion about it.
-# WHY : Refactoring Rationale: an earlier revision carried carddemo-user on the
-#       reads, which stated something the filter chain does not enforce and could
-#       not be enforced without a behavioural regression. The shared converter
-#       grants exactly the groups a token presents and builds NO hierarchy -- its
-#       conversion loop admits a group only if it is one of the two recognised
-#       names -- so a token carrying carddemo-admin alone receives ADMIN_AUTHORITY
-#       and nothing else. A gateway or generator enforcing carddemo-user on the
-#       reads would therefore refuse every administrator, and the baseline refuses
-#       an administrator nothing: app/cbl/COSGN00C.cbl sends type 'A' to the
-#       administrative menu at its line 245 and every function is reachable from
-#       there. The honest declaration is the one the chain makes.
-# WHY : Alternatives Considered: granting USER_AUTHORITY to an administrator as
-#       well, so that carddemo-user could be declared and enforced on the reads.
-#       Rejected because the grant would have to be made in the shared converter,
-#       where it would change the authority set every one of the nine contexts
-#       sees, to buy nothing this service needs: a read that any authenticated
-#       caller may perform is described exactly by saying so. The two GROUP values
-#       remain exactly the two the shared converter recognises, ADMIN_AUTHORITY
-#       and USER_AUTHORITY at
-#       services/common-lib/src/main/java/com/carddemo/common/security/JwtRoleConverter.java
-#       lines 250 and 260, which are the migrated form of the two SEC-USR-TYPE
-#       values 'A' and 'U'; authenticated names a REQUIREMENT rather than a group,
-#       and the model below distinguishes the two.
+#       JwtRoleConverter.ADMIN_AUTHORITY, and every remaining request -- which is
+#       every read this document publishes -- is judged by
+#       SecurityConfig.businessAccess(), the manager built from
+#       SecurityConfig.BUSINESS_AUTHORITIES. That manager admits a token holding
+#       EITHER recognised group and refuses one holding neither, and the chain
+#       closes with denyAll() rather than a catch-all that would admit a token
+#       granted no authority at all. So every write below carries carddemo-admin
+#       and every read carries carddemo-user, and the document describes the
+#       filter chain rather than a second opinion about it.
+# WHY : Refactoring Rationale: the reads previously declared a third value,
+#       authenticated, and both this block and the authority model below carried
+#       the reasoning for it: that carddemo-user could not be declared without a
+#       behavioural regression, because the shared converter builds NO hierarchy,
+#       so a token carrying carddemo-admin alone would be refused every read and
+#       the baseline refuses an administrator nothing. That reasoning was correct
+#       for the chain it was written against, whose read rule was
+#       anyRequest().authenticated(). It is no longer correct for this chain. The
+#       read rule is now businessAccess(), which is hasAnyAuthority over BOTH
+#       group names, so an administrator-only token satisfies it and the regression
+#       the third value existed to avoid cannot occur. The value was withdrawn
+#       rather than kept because it had become the one statement in this document
+#       that no rule enforces: nothing in the chain requires only authentication,
+#       and a gateway or generator honouring authenticated on a read would admit a
+#       validly signed token carrying neither group -- which is precisely the
+#       missing-authorization defect the hardening removed. Retaining a published
+#       requirement weaker than the enforced one is worse than retaining none,
+#       because a consumer trusts the document.
+# WHY : Assumptions: the two admitted values are exactly the two group names the
+#       shared token converter recognises, ADMIN_AUTHORITY and USER_AUTHORITY in
+#       services/common-lib/src/main/java/com/carddemo/common/security/JwtRoleConverter.java,
+#       which are the migrated form of the two SEC-USR-TYPE values 'A' and 'U' at
+#       app/cpy/CSUSR01Y.cpy:22. carddemo-user on an operation means either group
+#       satisfies it, because every user of this system holds one of the two and an
+#       administrator is not denied a read; carddemo-admin means the administrative
+#       group is required and a token carrying only carddemo-user receives 403.
+#       This is the same two-value vocabulary the card, authorization and reporting
+#       contracts publish, so one reading of x-required-authority holds across
+#       every context rather than this one contract needing its own.
 # WHY : Alternatives Considered: expressing the authority as a security-scheme
 #       scope, by writing a populated scope list beside bearerAuth on the
 #       administrative operations. Rejected because the specification requires
@@ -293,18 +314,20 @@ security:
 x-authority-model:
   field: x-required-authority
   values:
-    - authenticated
+    - carddemo-user
     - carddemo-admin
   groupValues:
     - carddemo-admin
     - carddemo-user
-  authenticatedMeans: >-
-    Any caller presenting a token this service accepts, whichever of the two
-    groups it carries and even when it carries neither. This is what
-    anyRequest().authenticated() enforces, and it is the requirement every read
-    operation below declares.
+  userMeans: >-
+    Any caller whose token carries either recognised group. A token carrying
+    NEITHER group is refused, which is what SecurityConfig.businessAccess()
+    enforces on every read below, and it is why this value states a requirement
+    rather than the absence of one.
   enforcedBy: >-
     services/reference-service/src/main/java/com/carddemo/reference/config/SecurityConfig.java
+  assertedBy: >-
+    services/reference-service/src/test/java/com/carddemo/reference/dto/ReferenceWireContractTest.java
   claim: cognito:groups
   convertedBy: >-
     services/common-lib/src/main/java/com/carddemo/common/security/JwtRoleConverter.java
@@ -312,12 +335,13 @@ x-authority-model:
 tags:
   - name: reference-data
     description: >-
-      Reading reference data. Any authenticated caller may reach these
-      operations, whichever of the two groups its token carries and even when it
-      carries neither, and reference data carries no cardholder-identifying
-      value. Each operation in this group therefore declares
-      x-required-authority authenticated, which is what the filter chain
-      enforces for a request that is not a write.
+      Reading reference data. A caller holding either recognised group may reach
+      these operations, and reference data carries no cardholder-identifying
+      value, so neither group is privileged over the other for a read. Each
+      operation in this group therefore declares x-required-authority
+      carddemo-user, which is what SecurityConfig.businessAccess() enforces for
+      a request that is not a write. A validly signed token carrying neither
+      group holds neither authority and is refused.
   - name: admin-reference-data
     description: >-
       Creating, replacing and deleting reference data. Restricted to callers
@@ -349,7 +373,7 @@ paths:
       tags:
         - reference-data
       operationId: listTransactionTypes
-      x-required-authority: authenticated
+      x-required-authority: carddemo-user
       summary: List transaction types by key, one page at a time
       description: >-
         Returns one page of transaction types in ascending type-code order,
@@ -483,7 +507,7 @@ paths:
       tags:
         - reference-data
       operationId: getTransactionType
-      x-required-authority: authenticated
+      x-required-authority: carddemo-user
       summary: Read one transaction type
       description: >-
         Returns the transaction type stored under the supplied code, together
@@ -621,7 +645,7 @@ paths:
       tags:
         - reference-data
       operationId: listTransactionCategories
-      x-required-authority: authenticated
+      x-required-authority: carddemo-user
       summary: List transaction categories by key, one page at a time
       description: >-
         Returns one page of transaction categories ordered by type code and then
@@ -741,7 +765,7 @@ paths:
       tags:
         - reference-data
       operationId: getTransactionCategory
-      x-required-authority: authenticated
+      x-required-authority: carddemo-user
       summary: Read one transaction category
       description: >-
         Returns the category stored under the supplied pair of codes, together
@@ -885,7 +909,7 @@ paths:
       tags:
         - reference-data
       operationId: getDisclosureGroupRate
-      x-required-authority: authenticated
+      x-required-authority: carddemo-user
       summary: Look up an interest rate, falling back to the DEFAULT group
       description: >-
         Returns the interest rate that applies to the supplied combination of
@@ -971,7 +995,7 @@ paths:
       tags:
         - reference-data
       operationId: listUsPhoneAreaCodes
-      x-required-authority: authenticated
+      x-required-authority: carddemo-user
       summary: List accepted phone area codes by key, one page at a time
       description: >-
         Returns one page of area codes in ascending code order, optionally
@@ -1028,7 +1052,7 @@ paths:
       tags:
         - reference-data
       operationId: getUsPhoneAreaCode
-      x-required-authority: authenticated
+      x-required-authority: carddemo-user
       summary: Test whether one phone area code is accepted
       description: >-
         Returns the area code and its classification when the code is accepted,
@@ -1071,7 +1095,7 @@ paths:
       tags:
         - reference-data
       operationId: listUsStates
-      x-required-authority: authenticated
+      x-required-authority: carddemo-user
       summary: List accepted state codes by key, one page at a time
       description: >-
         Returns one page of accepted state codes in ascending order. Fifty-six
@@ -1118,7 +1142,7 @@ paths:
       tags:
         - reference-data
       operationId: getUsState
-      x-required-authority: authenticated
+      x-required-authority: carddemo-user
       summary: Test whether one state code is accepted
       description: >-
         Returns the state code when it is accepted and 404 when it is not, with
@@ -1159,7 +1183,7 @@ paths:
       tags:
         - reference-data
       operationId: listUsStateZipPrefixes
-      x-required-authority: authenticated
+      x-required-authority: carddemo-user
       summary: List accepted state and postal-prefix combinations
       description: >-
         Returns one page of accepted combinations in ascending order. Two hundred
@@ -1204,7 +1228,7 @@ paths:
       tags:
         - reference-data
       operationId: getUsStateZipPrefix
-      x-required-authority: authenticated
+      x-required-authority: carddemo-user
       summary: Test whether one state and postal-prefix combination is accepted
       description: >-
         Returns the combination when it is accepted and 404 when it is not. The
@@ -1250,8 +1274,9 @@ paths:
     #       is that the authority tier is settled by HTTP method for this whole
     #       service: SecurityConfig.java requires the administrative authority
     #       for POST, PUT, PATCH and DELETE on every path, and admits a caller
-    #       holding EITHER group through its catch-all rule, which requires one
-    #       of the two group authorities rather than mere authentication.
+    #       holding EITHER group through its read rule, businessAccess(), which
+    #       requires one of the two group authorities rather than mere
+    #       authentication.
     #       Refactoring Rationale: this note previously cited
     #       anyRequest().authenticated() at a fixed line number. Both halves were
     #       liabilities -- the rule was the missing-authorization defect this
@@ -1261,7 +1286,7 @@ paths:
     #       would therefore have put a side-effect-free date check behind the
     #       administrative group, so the very users who edit dated fields on the
     #       account and card screens -- the callers this evaluation exists for --
-    #       would each have received 403. A GET lands on the authenticated tier,
+    #       would each have received 403. A GET lands on the business-group tier,
     #       which is where the operation belongs.
     # WHY : Trade-offs: the two inputs travel in a URL, so they appear in access
     #       logs and in browser history, and the mask's literal separators must be
@@ -1274,7 +1299,7 @@ paths:
       tags:
         - date-utilities
       operationId: evaluateDate
-      x-required-authority: authenticated
+      x-required-authority: carddemo-user
       summary: Evaluate a date against a mask and return the structured verdict
       description: >-
         Evaluates the supplied date text against the supplied mask and returns

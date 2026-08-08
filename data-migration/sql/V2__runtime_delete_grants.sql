@@ -1,0 +1,221 @@
+-- =============================================================================
+-- data-migration/sql/V2__runtime_delete_grants.sql
+-- -----------------------------------------------------------------------------
+-- Purpose:
+--   Grants DELETE to three runtime service roles, on the six named tables their
+--   published operations delete from, and on no other table in any schema. This
+--   is the only file in the system that grants DELETE to a runtime role.
+--
+-- WHY : Refactoring Rationale: this file is new, and the privilege it grants was
+--   missing outright. data-migration/sql/V0__schemas_and_roles.sql grants each
+--   runtime role SELECT, INSERT and UPDATE, and recorded DELETE's absence as a
+--   deliberate measurement -- "no repository delete call, no deleteById, no
+--   deleteAll, no @Modifying delete and no DELETE statement anywhere in
+--   services/*/src/main/java". That measurement was wrong, and two published
+--   capabilities depended on it being right:
+--
+--     - reference-service publishes DELETE /transaction-types/{typeCd} and
+--       DELETE /transaction-types/{typeCd}/categories/{catCd}, served by
+--       TransactionTypeService.delete, TransactionCategoryService.delete and
+--       ReferenceBatchUpdateService, which call the repositories' delete.
+--       Without the privilege every one of those requests fails with a
+--       permission error naming the table, on a route the OpenAPI contract
+--       publishes as available.
+--     - authorization-service sweeps its transactional outbox on a schedule,
+--       through OutboxRepository.deletePublishedBefore, a @Modifying JPQL DELETE
+--       driven by OutboxPublisher.purgePublished under @Scheduled. Without the
+--       privilege that sweep fails hourly and the outbox grows without bound --
+--       a table whose every row carries a reply payload containing a primary
+--       account number, so unbounded growth is a retention failure and not only
+--       a capacity one.
+--
+--     - auth-service publishes DELETE /users/{userId}, served by
+--       UserService.delete through UserRepository.delete. It is the migration of
+--       COUSR03C, whose delete is a real record removal -- EXEC CICS DELETE
+--       against USRSEC at app/cbl/COUSR03C.cbl:307, reported to the operator as
+--       "... has been deleted ..." at L320. Without the privilege the published
+--       route fails with a permission error naming auth.users.
+--     - authorization-service purges expired pending authorizations on a
+--       schedule, through PurgeJob, which deletes the detail rows beneath a
+--       summary and then the emptied summary itself. It is the migration of
+--       CBPAUP0C, whose purge is likewise a real removal and not a status
+--       change: EXEC DLI DLET on segment PAUTDTL1 at
+--       app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl:310 and on segment
+--       PAUTSUM0 at L335. Without the privilege the sweep fails on every run and
+--       expired authorizations accumulate indefinitely -- rows carrying a card
+--       number and an authorization outcome, so the retention rule the expiry
+--       threshold expresses would never actually take effect.
+--
+--   V0's note is corrected in place to point at this file rather than to claim
+--   the privilege is unused.
+--
+-- WHY : Assumptions: the grants are TABLE-SPECIFIC and this file is separate from
+--   V0 for that exact reason. V0 runs before any table exists, so it can only
+--   express privileges through GRANT ... ON ALL TABLES IN SCHEMA and
+--   ALTER DEFAULT PRIVILEGES, and neither form can name one table -- both would
+--   give the reference role DELETE on disclosure_groups, us_phone_area_codes,
+--   us_states and us_state_zip_prefixes as well, which are seeded lookup tables
+--   with no delete operation at any layer. Naming the three tables is what keeps
+--   the grant equal to the published contract instead of merely covering it.
+--
+-- WHY : Assumptions: ALTER DEFAULT PRIVILEGES is deliberately NOT used here. A
+--   default privilege would grant DELETE on every table those owners create in
+--   future, so the next table added to either schema would arrive deletable
+--   without anyone deciding that. Every addition stays a decision, which is the
+--   same reasoning V1__reporting_views.sql records for naming each view rather
+--   than granting on the whole reporting schema.
+--
+-- WHY : Alternatives Considered: granting DELETE inside each owning service's
+--   V1__*.sql, immediately after the CREATE TABLE, where the table demonstrably
+--   exists and the executing role already owns it. Rejected because those files
+--   state, and V0 states of them, that they issue no GRANT of their own -- so the
+--   privilege graph would stop being readable in one place and an auditor would
+--   have to open nine migrations to answer what a role may do. This file keeps
+--   the graph in data-migration/sql/ alongside V0 and V1__reporting_views.sql,
+--   which is where every other grant in the system already lives.
+--
+-- WHY : Alternatives Considered: making these statements existence-guarded inside
+--   V0, so one file still carried everything. Rejected because a guard that
+--   silently skips is worse than a file that fails: on a first deployment the
+--   tables do not exist when V0 runs, so the guard would skip and nothing would
+--   report that DELETE had not been granted -- the fault would surface weeks
+--   later as a failing scheduled sweep. Ordering this file after the migrations
+--   means an unmet precondition is a loud "relation does not exist" at the moment
+--   the operator runs it.
+--
+-- Preconditions, in order. Each is a real failure if skipped, not a formality:
+--   1. data-migration/sql/V0__schemas_and_roles.sql has run, so the `auth`,
+--      `reference` and `authorization` schemas exist, the three runtime roles
+--      exist, and each already holds USAGE on its schema. A grant to a role that
+--      does not exist fails with "role does not exist".
+--   2. auth-service, reference-service and authorization-service have applied
+--      their Flyway migrations, so auth.users, reference.transaction_types,
+--      reference.transaction_categories, authorization.pending_auth_detail,
+--      authorization.pending_auth_summary and authorization.auth_reply_outbox
+--      exist. GRANT resolves its object at execution time, so running this file
+--      first fails with "relation does not exist" naming the missing table.
+--   3. This script is executed by a role that may grant on those tables: either
+--      each table's owner (carddemo_auth_owner, carddemo_reference_owner,
+--      carddemo_authorization_owner) or a superuser. A role holding only USAGE cannot grant, and PostgreSQL
+--      reports that as a permission error on the GRANT rather than on the table.
+--
+-- Return values:
+--   No object is created, altered or dropped. The only effect is six DELETE
+--   privileges in the catalogue, verifiable with
+--   data-migration/sql/verify/runtime_delete_grants.sql.
+--
+-- Run:
+--   psql "$CARDDEMO_DB_URL" -v ON_ERROR_STOP=1 \
+--        -f data-migration/sql/V2__runtime_delete_grants.sql
+--
+-- Documentation convention: docs/CODE_DOCUMENTATION_STANDARD.md. SQL has no
+-- docstring construct, so its SQL section prescribes the two forms used here --
+-- this framed file header, and a labelled rationale placed directly above the
+-- statement it explains.
+-- =============================================================================
+
+-- WHY : Trade-offs: one explicit transaction for the whole file. Six grants that
+--   together describe three services' delete capability should either all apply
+--   or none, because a half-applied set leaves one published route working and
+--   another failing, which is harder to diagnose than a clean failure. The cost
+--   is that a single unmet precondition rolls back the other five grants; that is
+--   the intended direction.
+BEGIN;
+
+-- -----------------------------------------------------------------------------
+-- auth: the one table the published user-administration contract deletes from
+-- -----------------------------------------------------------------------------
+
+-- WHY : Assumptions: auth.users is deletable by the runtime role and the row is
+--   genuinely removed rather than flagged, because that is what the reference
+--   transaction does -- COUSR03C issues EXEC CICS DELETE against USRSEC
+--   (app/cbl/COUSR03C.cbl:307) and reports the removal. A soft-delete column
+--   would have been the safer-looking choice and is not taken: the migrated
+--   contract publishes DELETE /users/{userId} with a 204, and a row that survived
+--   as a flagged tombstone would still occupy the eight-character SEC-USR-ID the
+--   record keys on, so re-adding a removed user id would fail on the primary key
+--   where the reference system accepts it.
+-- WHY : Assumptions: cognito_sub is NOT NULL UNIQUE on this table and the pool
+--   identity is withdrawn by auth-service in the same operation, so no grant is
+--   needed for the identity half -- it is an API call, not a row. The grant here
+--   covers only the database half of that pair.
+GRANT DELETE ON auth.users TO carddemo_auth;
+
+-- -----------------------------------------------------------------------------
+-- reference: the two tables whose delete operations the contract publishes
+-- -----------------------------------------------------------------------------
+
+-- WHY : Assumptions: transaction_types is deletable by the runtime role even
+--   though its child table carries ON DELETE RESTRICT, and the two facts do not
+--   conflict. The privilege decides whether the role may ATTEMPT the delete; the
+--   constraint decides whether a particular row may go. Preserving the constraint
+--   is what carries the reference Db2 index semantic -- a type with categories
+--   behind it must not be removable -- and the service turns the resulting
+--   violation into the 409 its contract publishes. Withholding the privilege
+--   instead would collapse both outcomes into one permission error, so a type
+--   that is legitimately removable and a type that is protected by its children
+--   would fail identically.
+GRANT DELETE ON reference.transaction_types TO carddemo_reference;
+
+-- WHY : Assumptions: transaction_categories is granted separately rather than
+--   inheriting anything from its parent. A privilege on a parent table conveys
+--   nothing to a child in PostgreSQL -- these are two ordinary tables joined by a
+--   foreign key, not a partition hierarchy -- so the category delete published at
+--   DELETE /transaction-types/{typeCd}/categories/{catCd} needs its own grant and
+--   would otherwise fail while the type delete succeeded.
+GRANT DELETE ON reference.transaction_categories TO carddemo_reference;
+
+-- WHY : Assumptions: the four remaining tables in this schema are NOT named here,
+--   and the omission is the point of the file. disclosure_groups,
+--   us_phone_area_codes, us_states and us_state_zip_prefixes are seeded lookup
+--   data with no delete operation at any layer -- no repository delete, no
+--   controller mapping, no batch path -- so the runtime role cannot delete from
+--   them at all. A future delete against one of them fails with a permission
+--   error naming that table, and the fix is one more line here under review, not
+--   a schema-wide grant.
+
+-- -----------------------------------------------------------------------------
+-- authorization: the transactional outbox's retention sweep, and the expiry purge
+-- -----------------------------------------------------------------------------
+
+-- WHY : Assumptions: the schema name is quoted because AUTHORIZATION is a
+--   reserved word in SQL. Unquoted, the parser reads it as the start of an
+--   AUTHORIZATION clause and reports a syntax error rather than resolving a
+--   schema, which is the same reason V0 quotes it at every mention.
+GRANT DELETE ON "authorization".auth_reply_outbox TO carddemo_authorization;
+
+-- WHY : Refactoring Rationale: this file previously granted the outbox alone and
+--   recorded that the other three tables in this schema were withheld because
+--   "the purge of expired pending authorizations is an UPDATE of match status
+--   rather than a removal". That is not the reference behaviour. CBPAUP0C deletes
+--   both segments outright -- EXEC DLI DLET on PAUTDTL1 at
+--   app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl:310 and on PAUTSUM0 at
+--   L335 -- and PurgeJob reproduces exactly that, deleting each expired detail
+--   row and then the summary once nothing pending remains beneath it. The two
+--   grants below are what let it, and withholding them left a scheduled sweep
+--   that could only ever fail.
+-- WHY : Assumptions: the detail table is granted separately from its parent even
+--   though fk_pending_auth_detail_summary carries ON DELETE CASCADE. A cascade is
+--   performed with the privileges of the referencing table's OWNER rather than of
+--   the deleting role, so the cascade alone would let the summary delete remove
+--   children the role may not delete directly -- while PurgeJob's own path, which
+--   deletes each expired detail individually so it can reverse that
+--   authorization's contribution to the summary counters first, would still fail.
+--   The counter reversal is the reason the rows are not simply cascaded away.
+GRANT DELETE ON "authorization".pending_auth_detail TO carddemo_authorization;
+
+-- WHY : Assumptions: the summary is granted DELETE, and its deletion stays gated
+--   in application code on both counters reaching zero rather than being gated by
+--   a database rule. The privilege decides whether the role may attempt the
+--   removal; whether a particular summary qualifies is the reference program's
+--   own condition, and expressing it in SQL would put half of one business rule
+--   in the schema.
+GRANT DELETE ON "authorization".pending_auth_summary TO carddemo_authorization;
+
+-- WHY : Assumptions: auth_fraud is NOT granted DELETE, and that omission is the
+--   point of naming tables one at a time. A fraud mark is never withdrawn by
+--   removing its row -- the withdrawal is itself a recorded state, written as an
+--   update -- so granting DELETE here would make an audit record removable by the
+--   online service, which no published operation asks for.
+
+COMMIT;

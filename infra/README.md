@@ -143,7 +143,7 @@ tempted to relax.
 | `required_version` | `>= 1.15.0` | the sixteen modules | Trade-offs: an open-ended floor rather than an exact pin. A module is consumed by a caller whose own CLI version it cannot control, so a floor lets Terraform intersect every constraint in the graph and select one satisfying CLI, where an exact pin in sixteen places would have to be edited in sixteen places. |
 | `required_version` | `~> 1.15.0` | the three roots | Assumptions: a root is the directory an operator actually runs, so it is the right place to bound the minor line as well as the floor. Validated on **1.15.8**. |
 | `hashicorp/aws` | `~> 6.56` | all nineteen directories | Assumptions: the provider only accepts an Aurora Serverless **minimum capacity of zero** from **5.81.0** onward, and `dev` is the environment permitted to use it, so 5.81.0 is a hard floor rather than a preference. 6.56 clears it with room to spare. Alternatives Considered: a bare `>= 5.81` was rejected because it has no upper bound and would admit a 7.x major whose resource-schema changes would land unreviewed across every module at once; an exact `= 6.56.0` was rejected because it blocks provider patch releases while buying nothing this stack needs. Verified against the Terraform Registry at 6.56.0. |
-| `hashicorp/random` | `~> 3.9` | `envs/dev`, `envs/prod`, `modules/secrets`, `modules/cognito` — and **deliberately nowhere else** | Assumptions: this provider generates the database and Cognito seed-user passwords at apply time and writes them straight into Secrets Manager, which is the mechanism that keeps generated credentials out of the repository structurally rather than by reviewer vigilance. It is declared at the two roots so Terraform resolves **one** release for the whole module graph, and in the two modules that actually generate values. It is absent from `infra/bootstrap` on purpose: nothing there generates a random value, and suffixing the state bucket name with a random identifier would make that name unreproducible for an operator who had lost the local state file. |
+| `hashicorp/random` | `~> 3.9` | all seventeen directories that declare a provider set | Assumptions: the constraint is declared uniformly so Terraform resolves **one** release for the whole module graph, rather than only in the directories that currently use it. Four directories use it today, and each uses it as an **`ephemeral`** resource or for a non-secret handle: `modules/secrets` generates each service database credential with `ephemeral "random_password"`, `envs/dev` and `envs/prod` generate the messaging-HMAC, internal-identity and pagination-cursor keys the same way, and `modules/cognito` uses `random_id` only for the opaque 128-bit handle in a secret's NAME. An ephemeral value is never written to state, which is what keeps a generated credential out of both the repository and the state file structurally rather than by reviewer vigilance. Assumptions: this provider does NOT generate the Cognito seed-user credentials — `terraform_data.seed_user_credential` in `modules/cognito` runs `seed_user_bootstrap.py`, which mints each one and writes it straight to Secrets Manager — and it does not generate the Aurora master password either, which `manage_master_user_password = true` delegates to the database service. Refactoring Rationale: this row previously named four directories and asserted the provider was declared "deliberately nowhere else", singling out `infra/bootstrap` as an intentional omission. It is in fact declared in seventeen directories including `infra/bootstrap`, and it generated neither of the two credential kinds the row credited it with. |
 
 ### 3.2 Which files in this tree are tracked in git
 
@@ -434,10 +434,15 @@ Set `CARDDEMO_ENV` to `dev` or `prod`.
 
 > Trade-offs: name the saved plan so the ignore rules actually catch it. A
 > saved plan is not a summary of a diff: it embeds the resolved value of every
-> attribute the apply will set, which for this stack includes the Aurora master
-> password and the Cognito seed-user passwords the `random` provider generates.
-> One committed plan therefore discloses the same credential set as one committed
-> state file. [`.gitignore`](../.gitignore) ignores `*.tfplan` and `*.tfplan.*`,
+> attribute the apply will set. This stack is deliberately arranged so that the
+> credential values are NOT among them — the service credentials and the three
+> platform keys are `ephemeral` resources, the Aurora master password is delegated
+> to the database service by `manage_master_user_password`, and the Cognito
+> seed-user credentials are minted by the module's bootstrap script directly into
+> Secrets Manager — but a plan still embeds every non-ephemeral attribute,
+> including secret ARNs, account identifiers and the whole resolved topology. One
+> committed plan therefore discloses the shape and the addressing of the
+> deployment even where it discloses no credential. [`.gitignore`](../.gitignore) ignores `*.tfplan` and `*.tfplan.*`,
 > and `git check-ignore -v infra/envs/dev/dev.tfplan` confirms the path above is
 > matched. That rule is a convenience, not an access-control boundary:
 > `git add -f` overrides it and a previously tracked path remains tracked. The
@@ -711,11 +716,15 @@ The constraint is that **no secret is committed to this repository**, and it is 
 structurally rather than by review vigilance. Five mechanisms carry it, and they
 are listed together because each one closes a route the others leave open:
 
-1. **The authored credential modules generate values at apply time.** The
-   `hashicorp/random` provider is configured to generate database and Cognito
-   seed-user passwords and write them to Secrets Manager. The missing
-   environment compositions still have to wire those modules before this is an
-   end-to-end deployment guarantee.
+1. **The authored credential modules generate values at apply time.** Each
+   service database credential and each of the three platform keys is produced by
+   an `ephemeral "random_password"` and written to Secrets Manager without
+   entering state; each Cognito seed-user credential is minted by
+   `modules/cognito`'s bootstrap script and written there directly; the Aurora
+   master password is generated and rotated by the database service itself. Both
+   environment roots wire every one of those modules, so the arrangement is
+   complete in the authored tree. It is not verified against a live account, which
+   is a different claim and is the one the deployment boundary above makes.
 2. **Target environment parameter files carry only sizing and retention
    values.** No environment tfvars file exists yet. When authored, neither may
    contain a secret — see the closed list in
@@ -918,12 +927,20 @@ Two target gates cover the mechanical half, and neither one can check the whole:
 | Gate | Configuration | What it checks |
 |---|---|---|
 | `tflint` | [`.tflint.hcl`](.tflint.hcl) | `terraform_documented_variables` and `terraform_documented_outputs` fail any variable or output with no `description`; the `all` preset plus the explicitly enabled structural rules also enforce typed variables, the version constraints, comment syntax and the standard module shape |
-| `terraform-docs` | [`.terraform-docs.yml`](.terraform-docs.yml) | Target gate: each directory's README must match its actual inputs and outputs — a **check**, never a rewrite. It currently fails because every target README is absent |
+| `terraform-docs` | [`.terraform-docs.yml`](.terraform-docs.yml) | Each directory's README must match its actual inputs and outputs — a **check**, never a rewrite. It passes for all nineteen directories |
 
-The prose half is **not yet delivered**: none of the sixteen module READMEs, the
-two environment READMEs or `infra/bootstrap/README.md` exists. [§5](#5-static-validation)
-checks the full nineteen-file set and reports each absence instead of sampling
-one module and calling the gate complete.
+The prose half is delivered: all sixteen module READMEs, both environment READMEs
+and `infra/bootstrap/README.md` exist, and each carries the generated
+inputs-and-outputs contract that `terraform-docs --output-check` compares against
+its directory. [§5](#5-static-validation) checks the full nineteen-file set rather
+than sampling one module and calling the gate complete.
+
+> Refactoring Rationale: this paragraph and the table row above it reported that
+> every one of those nineteen READMEs was absent and that the gate consequently
+> failed. Both statements were measured before the files landed and neither held
+> when they were read. They are corrected rather than deleted because the
+> nineteen-file scope is the part worth keeping: a gate that checked one module
+> would pass while eighteen directories drifted.
 
 > Trade-offs: the two gates verify *presence*, not *quality*. A `description`
 > that reads `"the region"` satisfies `terraform_documented_variables` completely

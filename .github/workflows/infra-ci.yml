@@ -30,40 +30,42 @@
 
 name: CardDemo Infrastructure CI
 
-# Assumptions: infrastructure, workflow, and ignore-policy changes are included
-# because each can weaken a gate. Migration-owned application and documentation
-# paths also trigger this workflow so the hard secret scan cannot be bypassed by
-# committing a credential outside infra/. Immutable parity-oracle paths remain
-# owned by tests.yml and are deliberately excluded from the scan.
+# Refactoring Rationale: these triggers were an ALLOW-LIST of migration-owned paths
+# (infra, services, ui, data-migration, config, docs, three root documents, .gitignore
+# and .github/workflows). That shape defeated the one gate this workflow exists to
+# provide. The secret scan below stages every tracked file, so it catches a credential
+# anywhere -- but only once the workflow RUNS, and a revision whose only changed path
+# sat outside the allow-list never started it. A force-added top-level `.env`,
+# `secrets.pem`, `credentials` or `terraform.tfstate` is exactly such a revision, which
+# made the ignore-file's claim that content scanning cannot be bypassed untrue.
+# Inverting to an ignore-list closes that hole by construction: any changed path that is
+# not one of the four immutable reference trees starts this workflow, so there is no
+# path a credential can be committed at without being scanned.
+#
+# Assumptions: `paths-ignore` skips a revision only when EVERY changed file matches one
+# of its patterns. A baseline-only revision therefore still skips this workflow and stays
+# owned by tests.yml, while a revision that touches a baseline file AND a root credential
+# runs, because not every changed file matched.
+# Trade-offs: this widens the trigger to paths that cannot affect Terraform -- LICENSE,
+# NOTICE and any tree added later -- so those revisions now pay for a Terraform format,
+# init, validate, lint and documentation-drift pass they cannot fail meaningfully. That
+# cost is accepted because the alternative is a security gate with a documented bypass,
+# and because narrowing the trigger again is precisely how the bypass reappeared.
 on:
   push:
     branches: [main]
-    paths:
-      - "infra/**"
-      - "services/**"
-      - "ui/**"
-      - "data-migration/**"
-      - "config/**"
-      - "docs/**"
-      - "MIGRATION_README.md"
-      - "README.md"
-      - "CONTRIBUTING.md"
-      - ".gitignore"
-      - ".github/workflows/**"
+    paths-ignore:
+      - "app/**"
+      - "tests/**"
+      - "scripts/**"
+      - "samples/**"
   pull_request:
     branches: [main]
-    paths:
-      - "infra/**"
-      - "services/**"
-      - "ui/**"
-      - "data-migration/**"
-      - "config/**"
-      - "docs/**"
-      - "MIGRATION_README.md"
-      - "README.md"
-      - "CONTRIBUTING.md"
-      - ".gitignore"
-      - ".github/workflows/**"
+    paths-ignore:
+      - "app/**"
+      - "tests/**"
+      - "scripts/**"
+      - "samples/**"
   workflow_dispatch:
     inputs:
       run_plan:
@@ -196,10 +198,258 @@ jobs:
             terraform-docs --config "$GITHUB_WORKSPACE/infra/.terraform-docs.yml" --output-check "$dir"
           done
 
+      # WHY : terraform-docs above regenerates the GENERATED table and can therefore only
+      #       detect drift in the part of a document a tool writes. Every count claim in this
+      #       package lives in the hand-written header comment ABOVE that table -- "Ten
+      #       outputs", "the fourteen inputs", "Six outputs ... where main.tf creates sixteen
+      #       resources" -- and a generator has nothing to say about those. Five files had
+      #       counts that disagreed with their own declarations, one of them omitting two
+      #       outputs the kms module reads as a cross-module contract, which is how a reader
+      #       ends up concluding a published value is not published. This gate re-derives each
+      #       claimed number from the declarations themselves.
+      #       Alternatives Considered: deleting the counts and letting the generated table
+      #       speak. Rejected because the header states what the surface IS FOR -- which values
+      #       are contracts, which are null for which instantiation -- and a table of names and
+      #       types cannot carry that. Counting is what keeps the prose checkable.
+      #       Assumptions: only the claims that are countable from HCL are asserted. Prose about
+      #       intent is not, and narrowing what a reviewer must verify by hand to exactly that
+      #       set is the purpose.
+      - name: Verify hand-written Terraform prose counts against the declarations
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PROSE'
+          import re
+          from pathlib import Path
+
+          SPELLED = {
+              "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+              "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+              "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+              "nineteen": 19, "twenty": 20, "twenty-one": 21, "twenty-two": 22,
+          }
+
+
+          def declared(path, kind):
+              """Count top-level blocks of one kind in one Terraform file."""
+              body = Path(path).read_text()
+              return len(re.findall(r'(?m)^%s "' % kind, body))
+
+
+          def spelled(path, pattern):
+              """Read one spelled number out of a file's header comment."""
+              found = re.search(pattern, Path(path).read_text())
+              assert found, f"{path}: no prose count matching {pattern}"
+              # WHY: a sentence-initial number is capitalised ("Ten outputs"), so the word is
+              #   lowered before lookup rather than the pattern being written twice.
+              word = found.group(1).lower()
+              assert word in SPELLED, f"{path}: unrecognised number word {word!r}"
+              return SPELLED[word]
+
+
+          alb_out = "infra/modules/alb/outputs.tf"
+          assert spelled(alb_out, r"([A-Za-z-]+) outputs, and every one of") == declared(alb_out, "output")
+          assert spelled(alb_out, r"variables\.tf's ([A-Za-z-]+) inputs are invisible") == declared(
+              "infra/modules/alb/variables.tf", "variable")
+          assert spelled(alb_out, r"the ([A-Za-z-]+) `variable` blocks in variables\.tf") == declared(
+              "infra/modules/alb/variables.tf", "variable")
+
+          svc_out = "infra/modules/ecs-service/outputs.tf"
+          assert spelled(svc_out, r"([A-Za-z-]+) values -- [a-z-]+ strings and one number") == declared(
+              svc_out, "output")
+          assert spelled(svc_out, r"[a-z-]+ values -- ([A-Za-z-]+) strings and one number") == declared(
+              svc_out, "output") - 1
+
+          spa_out = "infra/modules/cloudfront-spa/outputs.tf"
+          assert spelled(spa_out, r"([A-Za-z-]+) outputs, each of type string") == declared(
+              spa_out, "output")
+          assert spelled(spa_out, r"NARROW -- ([A-Za-z-]+) outputs where") == declared(spa_out, "output")
+          assert spelled(spa_out, r"main\.tf creates ([A-Za-z-]+) resources") == declared(
+              "infra/modules/cloudfront-spa/main.tf", "resource")
+          assert spelled(spa_out, r"resources and reads ([A-Za-z-]+) data sources") == declared(
+              "infra/modules/cloudfront-spa/main.tf", "data")
+
+          cluster = "infra/modules/ecs-cluster/main.tf"
+          assert spelled(cluster, r"([A-Za-z-]+) resources and deliberately nothing else") == declared(
+              cluster, "resource")
+          assert spelled(cluster, r"the ([A-Za-z-]+) customer-managed keys to `kms`") == len(
+              re.findall(r'(?m)^resource "aws_kms_key"',
+                         Path("infra/modules/kms/main.tf").read_text()))
+
+          boot = "infra/bootstrap/variables.tf"
+          assert spelled(boot, r"Parameters -- the ([A-Za-z-]+) inputs") == declared(boot, "variable")
+          assert spelled(boot, r"The ([A-Za-z-]+) nullable overrides") == len(
+              re.findall(r"(?m)^  default     = null$", Path(boot).read_text()))
+
+          print("Terraform prose counts: PASS")
+          PROSE
+
+      # WHY : This gate exists because the two failures it detects are both SILENT at review
+      #       time and only surface against a live account. A declared variable with no
+      #       default and no producer fails the apply with "No value for required variable";
+      #       a produced name that no root declares is DISCARDED -- silently for TF_VAR_, and
+      #       with a warning nobody reads for a tfvars file -- so the value simply never
+      #       arrives. Both had happened: seven required variables had no producer at all and
+      #       six produced names were declared nowhere. Reading a Terraform output that does
+      #       not exist is the same class of fault on the way back out, and three reads named
+      #       outputs the roots never published.
+      #       Alternatives Considered: relying on the credentialed plan job below to surface
+      #       these. Rejected because that job needs AWS credentials and a protected
+      #       environment, so it does not run on an ordinary pull request -- exactly the point
+      #       at which the divergence is cheapest to fix. This check reads files only.
+      - name: Verify workflow input and output closure against the roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          """Verify every root variable has a producer and every read output exists.
+
+          Parameters:
+              None.
+          Returns:
+              None. Successful completion lets the workflow step exit zero.
+          Raises:
+              AssertionError: If the two roots disagree, if a declared no-default variable
+                  has no producing workflow, if a workflow produces a name no root declares,
+                  or if a workflow reads a Terraform output no root publishes.
+          """
+
+          import re
+          from pathlib import Path
+
+          ROOTS = ("dev", "prod")
+
+
+          def declarations(root):
+              """Return (all variable names, names with no default) for one environment root."""
+              text = Path(f"infra/envs/{root}/variables.tf").read_text()
+              names, required = set(), set()
+              for match in re.finditer(r'^variable "([^"]+)" \{', text, re.M):
+                  name, start = match.group(1), match.end()
+                  depth, index = 1, start
+                  while depth:
+                      if text[index] == "{":
+                          depth += 1
+                      elif text[index] == "}":
+                          depth -= 1
+                      index += 1
+                  # Assumptions: comments are stripped before looking for "default" so that a
+                  #     variable whose prose merely DISCUSSES a default is not mistaken for one
+                  #     that declares it -- which would hide a genuinely required variable.
+                  body = "\n".join(
+                      line.split("#", 1)[0] for line in text[start:index].splitlines()
+                  )
+                  names.add(name)
+                  if not re.search(r"^\s*default\s*=", body, re.M):
+                      required.add(name)
+              return names, required
+
+
+          def outputs(root):
+              """Return the set of output names one environment root publishes."""
+              text = Path(f"infra/envs/{root}/outputs.tf").read_text()
+              return set(re.findall(r'^output "([^"]+)" \{', text, re.M))
+
+
+          def configuration(path):
+              """Return workflow text with whole-line comments removed."""
+              # Assumptions: only lines that are ENTIRELY a comment are dropped. A "#" inside an
+              #     expression or a quoted value is left alone, so nothing that actually
+              #     configures the run is discarded by this filter.
+              return "\n".join(
+                  line
+                  for line in Path(path).read_text().splitlines()
+                  if not line.strip().startswith("#")
+              )
+
+
+          declared, required = declarations(ROOTS[0])
+          for root in ROOTS[1:]:
+              other_declared, other_required = declarations(root)
+              assert declared == other_declared, (
+                  "the environment roots declare different variables: "
+                  f"{sorted(declared ^ other_declared)}"
+              )
+              assert required == other_required, (
+                  "the environment roots disagree on which variables are required: "
+                  f"{sorted(required ^ other_required)}"
+              )
+
+          published = outputs(ROOTS[0])
+          for root in ROOTS[1:]:
+              assert published == outputs(root), (
+                  f"the environment roots publish different outputs: {sorted(published ^ outputs(root))}"
+              )
+
+          deploy = configuration(".github/workflows/deploy.yml")
+          review = configuration(".github/workflows/infra-ci.yml")
+
+          # Assumptions: deploy.yml supplies variables through an auto-loaded tfvars document
+          #     rather than TF_VAR_, so its producer set is the key set of that jq object. The
+          #     match is anchored on the redirection target so it cannot drift onto another
+          #     jq invocation in the same file.
+          document = re.search(
+              r'jq -n \\(.*?)> "\$root/deployment\.auto\.tfvars\.json"', deploy, re.DOTALL
+          )
+          assert document is not None, "deploy.yml no longer writes deployment.auto.tfvars.json"
+          produced = {
+              "deploy.yml": set(re.findall(r"^\s*([a-z_][a-z0-9_]*):", document.group(1), re.M)),
+              "infra-ci.yml": set(re.findall(r"TF_VAR_([a-z_][a-z0-9_]*)", review)),
+          }
+
+          for workflow, names in produced.items():
+              assert names, f"{workflow} produces no Terraform variable at all"
+              missing = sorted(required - names)
+              assert not missing, (
+                  f"{workflow} supplies no value for required variable(s) {missing}; "
+                  "terraform plan fails with 'No value for required variable'"
+              )
+              undeclared = sorted(names - declared)
+              assert not undeclared, (
+                  f"{workflow} supplies {undeclared}, which no environment root declares; "
+                  "Terraform discards an undeclared variable rather than failing"
+              )
+
+          # Assumptions: the runbook is held to the same standard as the workflows, because the
+          #     manual path is the one a human follows and an undocumented required variable
+          #     stops it at `plan` just as surely. This is not documentation polish: the runbook
+          #     block was the ONLY place the correct variable vocabulary was written down while
+          #     both workflows used a stale one, so keeping it in the comparison is what makes
+          #     the three agree rather than making two of them agree with each other.
+          runbook = Path("docs/runbooks/deploy.md").read_text()
+          exported = set(re.findall(r"export TF_VAR_([a-z_][a-z0-9_]*)=", runbook))
+          undocumented = sorted(required - exported)
+          assert not undocumented, (
+              f"docs/runbooks/deploy.md documents no export for required variable(s) {undocumented}; "
+              "an operator following it exactly cannot reach a successful plan"
+          )
+          stale_prose = sorted(exported - declared)
+          assert not stale_prose, (
+              f"docs/runbooks/deploy.md exports {stale_prose}, which no environment root declares"
+          )
+
+          for workflow in (".github/workflows/deploy.yml", ".github/workflows/infra-ci.yml"):
+              read = set(
+                  re.findall(
+                      r"output\s+(?:-json|-raw)\s+([a-z_][a-z0-9_]*)", configuration(workflow)
+                  )
+              )
+              absent = sorted(read - published)
+              assert not absent, (
+                  f"{workflow} reads Terraform output(s) {absent} that no environment root "
+                  "publishes; the read fails after the apply it follows has already run"
+              )
+          PY
+
       # Refactoring Rationale: the immutable baseline contains known sample
       # credentials, so the scanner stages only migration-owned tracked files.
-      # This remains a hard gate for every new service, UI, ETL, infra, docs, and
-      # workflow artifact rather than suppressing findings repository-wide.
+      # This remains a hard gate rather than a repository-wide suppression, and the
+      # staged set is defined by SUBTRACTION -- every tracked path except the four
+      # reference trees -- so a file at a location nobody anticipated is scanned by
+      # default instead of being missed by an allow-list that never named it. That
+      # subtraction is what the `paths-ignore` triggers above were inverted to match:
+      # the same four trees are excluded in both places, so a path this step would
+      # scan can never be a path the trigger declines to start.
       - name: Scan migration-owned source for committed secrets
         shell: bash
         run: |
@@ -216,6 +466,36 @@ jobs:
           # Assumptions: these two exact literals are cryptographic algorithm
           # identifiers, not credentials. The allowlist matches the complete
           # assignment so a real value beside the same field name still fails.
+          #
+          # WHY the second allowlist exists -- Refactoring Rationale: widening this
+          #   workflow's trigger from an infrastructure path allow-list to a
+          #   reference-tree paths-ignore made the scan run on essentially every
+          #   commit, which is the point of the change. It also made a latent
+          #   failure manifest: the default ruleset's generic-api-key rule matches
+          #   two fabricated symmetric keys committed as TEST FIXTURES, at
+          #   InternalApiSecurityConfigTest (two constants),
+          #   MessagingIdentityConfigTest (one constant) and the account-service
+          #   test profile's signing-key. The step runs under `set -euo pipefail`
+          #   and gitleaks exits non-zero when it reports anything, so the gate
+          #   would have failed on all four every time. A gate that always fails
+          #   is strictly worse than no gate: a real leak becomes indistinguishable
+          #   from the standing noise, and the usual response is to switch the gate
+          #   off. Admitting exactly these two strings restores a gate whose red
+          #   means something.
+          # WHY match the VALUE and not the field name -- Trade-offs: allowlisting
+          #   `signing-key`, `KEY` or `RAW_KEY` by name would admit ANY value ever
+          #   assigned to those names, including a production key pasted into a
+          #   test. Pinning the two literals instead is the narrowest exception
+          #   available: the escape applies to these exact fabricated bytes and to
+          #   nothing else, so the same field names still fail on any other value.
+          #   Each literal is a visibly non-production pattern -- counting hex and
+          #   its reverse -- at exactly the minimum admissible key length, and each
+          #   is documented as fabricated at its own declaration site.
+          # Assumptions: the four fixtures prove the SHAPE of a signing boundary --
+          #   that a token signed with the shared key verifies and one signed with a
+          #   different key does not. Because the values are committed, no test using
+          #   them asserts anything about the confidentiality of a deployed key, and
+          #   none is read by any deployed profile.
           cat > "$RUNNER_TEMP/gitleaks.toml" <<'TOML'
           [extend]
           useDefault = true
@@ -226,6 +506,14 @@ jobs:
           regexes = [
             '''password_encryption"\s*=\s*"scram-sha-256"''',
             '''key_algorithm\s*=\s*"EC_prime256v1"''',
+          ]
+
+          [[allowlists]]
+          description = "Reviewed fabricated test-fixture signing keys, matched by exact value"
+          regexTarget = "line"
+          regexes = [
+            '''\b0123456789abcdef0123456789abcdef\b''',
+            '''\bfedcba9876543210fedcba9876543210\b''',
           ]
           TOML
 
@@ -325,10 +613,21 @@ jobs:
           # function can mint, so they are bounded by asserting they remain
           # caller-supplied rather than acquiring a schedule.
           assert secrets.count("checkov:skip=CKV_AWS_304:") == 1
-          assert secrets.count("checkov:skip=CKV2_AWS_57:") == 2
           assert 'automatically_after_days = var.rotation_automatically_after_days' in secrets
           assert 'resource "aws_secretsmanager_secret_rotation" "service"' in secrets
-          assert 'count = local.create_service_tls_secrets ? 1 : 0' in secrets
+          # Refactoring Rationale: two assertions were removed from this cluster because they
+          #   asserted a configuration that does not exist and so failed on every run. They
+          #   required TWO CKV2_AWS_57 exceptions in the secrets module and a
+          #   `count = local.create_service_tls_secrets ? 1 : 0` conditional; the module has
+          #   ZERO of the former and no service-TLS secret resources at all. The comment above
+          #   still described "the two TLS entries", which were removed from the module without
+          #   this gate being updated -- the same drift that left CARDDEMO_SERVER_TLS_* admitted
+          #   by infra/modules/ecs-service long after its last reader had gone.
+          # Assumptions: the absence is now asserted rather than left unstated, so a
+          #   reintroduced service-TLS secret has to come back with its exception and its
+          #   conditional together, and cannot arrive as an unbounded entry.
+          assert secrets.count("checkov:skip=CKV2_AWS_57:") == 0
+          assert "create_service_tls_secrets" not in secrets
           PY
 
       # Trade-offs: the offline Checkov distribution does not carry policy
@@ -441,15 +740,47 @@ jobs:
           TF_STATE_REGION: ${{ vars.CARDDEMO_TF_STATE_REGION }}
           TF_STATE_LOCK_TABLE: ${{ vars.CARDDEMO_TF_STATE_LOCK_TABLE }}
           TF_STATE_KMS_KEY_ID: ${{ vars.CARDDEMO_TF_STATE_KMS_KEY_ID }}
+          # Refactoring Rationale: this block supplied NINE names of which six --
+          # release_version, route53_zone_id, spa_domain_name, alb_tls_server_name,
+          # service_tls_domain_name and batch_glue_function_arns -- are declared by neither
+          # root. An undeclared TF_VAR_ is discarded in SILENCE: Terraform does not even
+          # warn, so those six looked wired and set nothing. At the same time SEVEN declared
+          # no-default variables had no producer here, and each of those is a hard
+          # "No value for required variable" -- so the plan step below could not have
+          # succeeded on any run. The set is now exactly the ten declared no-default
+          # variables, and the closure check in this same workflow compares it against
+          # variables.tf in both directions so the divergence cannot recur unnoticed.
           TF_VAR_permissions_boundary_arn: ${{ vars.CARDDEMO_PERMISSIONS_BOUNDARY_ARN }}
-          TF_VAR_image_digests: ${{ vars.CARDDEMO_IMAGE_DIGESTS_JSON }}
-          TF_VAR_release_version: ${{ github.sha }}
-          TF_VAR_route53_zone_id: ${{ vars.CARDDEMO_ROUTE53_ZONE_ID }}
-          TF_VAR_spa_domain_name: ${{ vars.CARDDEMO_SPA_DOMAIN_NAME }}
-          TF_VAR_alb_tls_server_name: ${{ vars.CARDDEMO_ALB_TLS_SERVER_NAME }}
-          TF_VAR_service_tls_domain_name: ${{ vars.CARDDEMO_SERVICE_TLS_DOMAIN_NAME }}
           TF_VAR_mask_hmac_secret_arn: ${{ vars.CARDDEMO_MASK_HMAC_SECRET_ARN }}
-          TF_VAR_batch_glue_function_arns: ${{ vars.CARDDEMO_BATCH_GLUE_FUNCTION_ARNS_JSON }}
+          TF_VAR_alb_certificate_arn: ${{ vars.CARDDEMO_ALB_CERTIFICATE_ARN }}
+          TF_VAR_internal_service_domain_name: ${{ vars.CARDDEMO_INTERNAL_SERVICE_DOMAIN_NAME }}
+          TF_VAR_cloudfront_acm_certificate_arn: ${{ vars.CARDDEMO_CLOUDFRONT_ACM_CERTIFICATE_ARN }}
+          # Assumptions: a list-typed variable is supplied to Terraform as JSON, which is
+          # valid HCL for a list, so the _JSON-suffixed environment variables carry a
+          # document such as ["app.example.com"] rather than a delimited string.
+          # cloudfront_aliases additionally validates length > 0, so an unset environment
+          # variable fails the plan rather than planning a distribution with no alias.
+          TF_VAR_cloudfront_aliases: ${{ vars.CARDDEMO_CLOUDFRONT_ALIASES_JSON }}
+          TF_VAR_github_oidc_provider_arn: ${{ vars.CARDDEMO_GITHUB_OIDC_PROVIDER_ARN }}
+          # Trade-offs: taken from the run context rather than from a protected environment
+          # variable, for the same reason deploy.yml does so -- the contract is the
+          # owner/name of the repository whose environment may assume the publication role,
+          # and that is this repository, so the context value cannot disagree with reality.
+          TF_VAR_github_repository: ${{ github.repository }}
+          # Assumptions: the review plan uses the commit under review as the image tag. It
+          # never pushes an image, so the tag only has to satisfy the variable's format
+          # rule; using the SHA keeps the planned task definitions attributable to the
+          # commit that produced the plan.
+          TF_VAR_image_tag: ${{ github.sha }}
+          TF_VAR_image_digests: ${{ vars.CARDDEMO_IMAGE_DIGESTS_JSON }}
+          # Trade-offs: an EMPTY list rather than a protected environment variable. The API
+          # endpoint does not exist until an apply creates it, and deploy.yml supplies the
+          # same empty list on its first pass before narrowing it afterwards, so a review
+          # plan has nothing truer available. The variable's own validation accepts an empty
+          # list -- its alltrue() is vacuously true -- and empty is the fail-closed value,
+          # yielding connect-src 'self'. This plan is never applied, so the narrow policy
+          # it shows is never served.
+          TF_VAR_cloudfront_api_connect_src_origins: "[]"
         run: |
           set -euo pipefail
           root="infra/envs/${{ inputs.environment }}"

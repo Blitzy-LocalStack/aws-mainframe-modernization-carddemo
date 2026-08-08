@@ -45,12 +45,26 @@
  * the COBOL parity oracle treats a warning-level aggregate as its green state belongs to that suite
  * alone, and it is never carried into a Maven, Checkstyle, Surefire or Failsafe result on this side.
  *
- * <h2>The four configuration classes</h2>
+ * <h2>The six configuration classes</h2>
  *
- * <p>Target contract: this package is to hold exactly four {@code @Configuration} classes, each
- * with a narrow and separately testable responsibility. Four is the count the parent charter at
- * {@code com.carddemo.authorization} states for this package, and the enumeration below is the
- * closed set assigned to it rather than a listing of the directory.</p>
+ * <p>Target contract: this package is to hold exactly six {@code @Configuration} classes, each with
+ * a narrow and separately testable responsibility. The enumeration below is the closed set assigned
+ * to it, and it is now also a measurement: six files beside this one carry that annotation.</p>
+ *
+ * <p>Refactoring Rationale: this heading and this count read <b>four</b>, and the enumeration
+ * stopped after the message-listener class. Two additions and one deletion have since moved the
+ * figure, and each is named here because a "closed set" that disagrees with its own directory
+ * stops being a contract a reader can rely on -- Rule 1 fails a rationale that is stale as
+ * squarely as one that is absent. The two additions are the keyed-identity classes below, both of
+ * which arrived with the security correction that took a primary account number out of queue
+ * metadata. The deletion is {@code MessagingTokenConfig}, a SECOND tokeniser configuration that
+ * bound {@code carddemo.security.mask-hmac-key} -- a property the sibling
+ * {@code application.yml} withdrew, and which {@code infra/modules/ecs-service} provisions for the
+ * extract-transform-load workload alone. It contributed an unqualified bean of the same type as
+ * {@link MessagingIdentityConfig}'s and read a property no deployment of this context supplies, so
+ * this context could not start at all under its own declared deployment. It is deleted rather than
+ * repointed at the surviving property, because two beans deriving one identity is the condition
+ * under which a consumer can silently bind the wrong key.</p>
  *
  * <ul>
  *   <li>{@code SecurityConfig} builds the resource server filter chain. Every business request
@@ -94,6 +108,26 @@
  * and a queue client on the classpath, so there is listener infrastructure here to configure; a
  * sibling context whose POM declares neither carries no such class, and adding one there would
  * configure a client that nothing can inject.
+ *
+ * <ul>
+ *   <li>{@link MessagingIdentityConfig} supplies the ONE keyed tokeniser every queue identity in
+ *       this context is derived through, from {@code carddemo.messaging.hmac-key}. It is named and
+ *       injected by qualifier rather than by type, which is what makes a second tokeniser a
+ *       compile-time decision at each call site instead of a silent rebinding. Assumptions: the key
+ *       is a deployment secret with no default, delivered as {@code CARDDEMO_MESSAGING_HMAC_KEY},
+ *       and it is a DIFFERENT secret from the extract-transform-load masking key -- the two have
+ *       different holders and different trust purposes, so sharing one value would let a migration
+ *       workload compute production queue group identities. That separation is the whole reason
+ *       this class exists rather than a method on {@code SqsConfig}: the tokeniser is a security
+ *       primitive keyed from the secret store, while {@code SqsConfig} wires a transport client.</li>
+ *   <li>{@link InternalIdentityConfig} supplies the short-lived bearer identity this context
+ *       presents when it reads the card cross-reference and the account master from the context
+ *       that owns them, from {@code carddemo.internal-identity.signing-key}. Assumptions: it is
+ *       separate from the messaging tokeniser above for the same reason the two secrets are
+ *       separate -- one authenticates this service to a sibling service, the other derives queue
+ *       metadata -- so one class holding both would make rotating either require reasoning about
+ *       both.</li>
+ * </ul>
  *
  * <h2>Deliberately absent from this package</h2>
  *

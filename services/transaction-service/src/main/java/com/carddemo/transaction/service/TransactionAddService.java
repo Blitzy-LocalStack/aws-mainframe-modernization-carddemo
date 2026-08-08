@@ -254,29 +254,56 @@ public class TransactionAddService {
     }
 
     /**
-     * Derives the next transaction identifier the way the reference derives it.
+     * Obtains the next transaction identifier from the database's own allocator.
      *
-     * <p>Assumptions: the reference positions the browse at high values, reads backwards once and adds one
-     * to the key it found, at lines 442 to 446. The equivalent here is the maximum stored key plus one,
-     * which is the same value by a different route, and the route matters only in that a descending read
-     * of one row is what both perform. A zero-length table yields the first key, which the reference also
-     * produces because its uninitialised numeric key is zero.</p>
+     * <p>Assumptions: the reference positions a browse at high values, reads backwards once and adds one
+     * to the key it found, at lines 442 to 449. The value this method returns is the same value that
+     * derivation would produce, obtained by a different route, and the route is the point.</p>
+     *
+     * <p>Refactoring Rationale: this previously read the maximum stored identifier and added one in
+     * Java, which was a faithful transcription of the reference and an unsafe one here. It had two
+     * independent defects, and each would have reached production as an unexplained failure.</p>
+     *
+     * <p>The first was concurrency. Under CICS the add and payment transactions were serialised by the
+     * region, so read-then-add was atomic in effect. Two Fargate tasks behind a load balancer are not
+     * serialised: both read the same maximum, both add one, and both attempt the same primary key, so
+     * one add fails on a constraint violation reported as an internal error. Allocating in the database
+     * makes the increment indivisible.</p>
+     *
+     * <p>The second was a parse failure that only appears after a normal night's batch. This context
+     * stores identifiers in two formats -- the sequence format this method serves, and the format the
+     * interest job composes from a business-date prefix at {@code app/cbl/CBACT04C.cbl} lines 474 to
+     * 480. Reading the MAXIMUM spans both formats, because the column is {@code CHAR(16)} and orders
+     * lexicographically, so a date-prefixed identifier sorts above every sequence-format one. The old
+     * code then called {@code Long.parseLong} on it. That is harmless while the prefix is numeric, as
+     * the baseline's own parameter is -- {@code app/jcl/INTCALC.jcl} line 22 passes {@code '2022071800'}
+     * -- but the migrated entry point admitted a separated token of the same width, which yields an
+     * identifier like {@code 2024-01-15000001} and a {@code NumberFormatException} on the next add and
+     * the next payment. The allocator removes the read entirely, so no stored value is parsed at all;
+     * the entry point's own predicate was tightened in the same change so the non-numeric prefix cannot
+     * be produced either.</p>
      *
      * @return the next identifier as sixteen digit characters, never {@code null}
-     * @throws IllegalStateException if the highest existing identifier could not be read
+     * @throws IllegalStateException if the allocator could not be reached
      */
     private String nextTransactionId() {
-        Optional<String> highest;
+        long next;
         try {
-            highest = this.transactions.findMaxTranId();
-        } catch (RuntimeException readFailure) {
-            throw new IllegalStateException(MESSAGE_TRANSACTION_LOOKUP_FAILED, readFailure);
+            next = this.transactions.allocateTransactionId();
+        } catch (RuntimeException allocationFailure) {
+            // WHY : Assumptions: the failure is reported with the SAME message the previous read
+            //       failure used, and deliberately so. From the caller's side the condition is
+            //       identical -- an identifier could not be obtained -- and the reference has one
+            //       sentence for it. Introducing a second message would be a user-visible divergence
+            //       for an internal change of mechanism.
+            throw new IllegalStateException(MESSAGE_TRANSACTION_LOOKUP_FAILED, allocationFailure);
         }
 
-        // WHY : Assumptions: the arithmetic is done on a long rather than on the character form, because
-        //       the key is sixteen digit characters and incrementing characters would have to carry by
-        //       hand. Sixteen digits exceeds an int and fits a long with four decimal orders to spare.
-        long next = highest.map(Long::parseLong).orElse(0L) + 1L;
+        // WHY : Assumptions: the allocated number is rendered zero-padded to the declared width rather
+        //       than written as its shortest form. app/cpy/CVTRA05Y.cpy L5 declares TRAN-ID PIC X(16),
+        //       an alphanumeric picture, so the full sixteen bytes are the contract and leading zeros
+        //       are significant -- the seeded extract carries values such as 0000000000683580 that a
+        //       shortest-form rendering would not match.
         return String.format("%0" + TRANSACTION_ID_WIDTH + "d", next);
     }
 

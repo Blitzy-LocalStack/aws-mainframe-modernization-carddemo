@@ -230,10 +230,17 @@ it:
 # WHAT: assert that a saved plan and its JSON rendering are both ignored before
 #       any apply writes them.
 # WHY : Assumptions: a saved plan is not a diff summary. It embeds the resolved
-#       value of every attribute the apply will set, which for the wider stack
-#       includes the Aurora master password and the Cognito seed-user passwords
-#       the random provider generates, so one committed plan discloses what one
-#       committed state file would. `git check-ignore` is the only authority on
+#       value of every attribute the apply will set. The wider stack is arranged
+#       so that its credentials are NOT among them -- service credentials and the
+#       three platform keys are ephemeral resources, the Aurora master password is
+#       delegated to the database service, and each Cognito seed credential is
+#       minted into Secrets Manager by that module's bootstrap script -- but a
+#       plan still carries every non-ephemeral attribute, including secret ARNs,
+#       the account identifier and the whole resolved topology, so one committed
+#       plan discloses the shape and addressing of the deployment.
+#       Refactoring Rationale: this comment credited the random provider with
+#       generating the Aurora master password and the Cognito seed credentials. It
+#       generates neither, and the same claim was corrected in infra/README.md. `git check-ignore` is the only authority on
 #       whether a given NAME is covered; reading the pattern list is not, because
 #       `*.tfplan` matches on the suffix and a bare `tfplan` has none.
 # WHY : Trade-offs: an ignore rule reduces accidental staging and cannot defeat

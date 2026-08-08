@@ -218,13 +218,49 @@ public class SecurityConfig {
     public static final String HEALTH_PATH = "/actuator/health/**";
 
     /**
+     * The one health group that carries detail, carved out of the permitted namespace above.
+     *
+     * <p>Refactoring Rationale: this path had no rule of its own, so {@link #HEALTH_PATH} permitted it
+     * to anyone and the ONLY thing standing between an unauthenticated caller and the contributor detail
+     * was {@code management.endpoint.health.roles} in the development overlay. That setting could not
+     * work as written and the overlay said so: the actuator's authorization test delegates to the
+     * servlet role check, which prepends the framework's {@code ROLE_} prefix to a value that does not
+     * already carry one, while {@link JwtRoleConverter} publishes the provider's group names with NO
+     * prefix. The configured value {@code carddemo-admin} therefore tested for an authority
+     * {@code ROLE_carddemo-admin} that nothing in this system ever grants, so the group failed closed
+     * for EVERY caller -- an administrator included, which is the half of the outcome that was wrong.
+     * The gate moves here, where the authority is compared as it is actually published.</p>
+     *
+     * <p>Assumptions: the pattern is the EXACT path and not a prefix, and the rule that uses it is
+     * declared BEFORE the permitted namespace, because {@code /actuator/health/**} matches this path too
+     * and the first matching rule decides. The two probe groups the orchestrator polls --
+     * {@code /actuator/health/readiness} and {@code /actuator/health/liveness} -- and the aggregate
+     * {@code /actuator/health} are deliberately NOT matched here, so opening detail to an operator
+     * cannot close the path a health check reads.</p>
+     *
+     * <p>Trade-offs: the group is declared only by the development overlay, so on every other profile
+     * this path resolves to no group and the actuator would answer 404. With this rule an
+     * unauthenticated caller receives 401 there instead of 404, which is a change and is the better of
+     * the two: a 404 confirms which group names are absent, and a caller with no token has no business
+     * distinguishing them. What is given up is the ability to discover from outside whether a
+     * deployment publishes the group at all.</p>
+     */
+    public static final String HEALTH_DIAGNOSTIC_PATH = "/actuator/health/diagnostics";
+
+    /**
      * The management namespace, named so an assertion can hold the two rules apart.
      *
-     * <p>Assumptions: this constant NAMES the namespace and no rule below grants the namespace as a
-     * whole. {@link #HEALTH_PATH} is permitted, the two endpoints this module publishes beyond health
-     * are granted by network position, and what remains under this pattern reaches no handler -- so it
-     * is left to the business rule rather than given a rule that would only ever answer for a path that
-     * does not exist.</p>
+     * <p>Assumptions: this pattern is MATCHED by a rule of its own in the chain below, and that rule
+     * DENIES. It is ordered after {@link #HEALTH_PATH} and after the two endpoints granted by network
+     * position, so each of those keeps its own more specific rule, and before the business rule, so
+     * nothing under this namespace can reach it. What the rule answers for is therefore the management
+     * addresses the exposure list withholds, which reach no handler today.</p>
+     *
+     * <p>Trade-offs: exposing a further management endpoint takes two edits rather than one -- the
+     * exposure list in {@code application.yml}, and a rule naming the new path ahead of this one. That
+     * is deliberate: the alternative left the namespace inheriting the business rule, so a newly
+     * exposed endpoint became readable by every holder of a CardDemo group authority without anything
+     * being decided or recorded.</p>
      */
     public static final String MANAGEMENT_PATH = "/actuator/**";
 
@@ -290,6 +326,36 @@ public class SecurityConfig {
      */
     public static final List<String> BUSINESS_AUTHORITIES =
             List.of(JwtRoleConverter.ADMIN_AUTHORITY, JwtRoleConverter.USER_AUTHORITY);
+
+    /**
+     * The authorization decision that guards {@link #HEALTH_DIAGNOSTIC_PATH}, exposed for assertion.
+     *
+     * <p>Assumptions: the administrator authority ALONE satisfies this rule, where the catch-all admits
+     * either group. The contributor detail this path renders names the datasource the reporting role
+     * connects with and whether that connection is up, which is an operator's question and not a
+     * cardholder's -- and {@link #BUSINESS_AUTHORITIES} deliberately admits an ordinary user, so reusing
+     * it here would have granted the detail to every cardholder holding a valid token.</p>
+     *
+     * <p>Assumptions: the predicate is in the AUTHORITY register and not the role register, for the
+     * reason recorded on {@link #businessAccess()} and repeated in effect by the defect this rule
+     * replaces: the role register silently prepends {@code ROLE_} and nothing in this system grants a
+     * prefixed authority, so a role predicate here would refuse an administrator without raising
+     * anything.</p>
+     *
+     * <p>Trade-offs: this rule is the whole gate, and the actuator's own {@code roles} list is no longer
+     * relied on -- the development overlay stops setting it, so the endpoint's own test reduces to
+     * "is the principal authenticated". That is deliberate, not a weakening: the chain admits nobody but
+     * an administrator to this path, and leaving BOTH gates in place with one of them unsatisfiable is
+     * exactly the arrangement that produced a group nobody could read. The endpoint-level test still
+     * requires authentication, so if this rule were ever widened an anonymous caller would receive the
+     * bare status word rather than the detail.</p>
+     *
+     * @return the manager that grants only a principal holding {@link JwtRoleConverter#ADMIN_AUTHORITY},
+     *     never {@code null}
+     */
+    public static AuthorizationManager<RequestAuthorizationContext> diagnosticAccess() {
+        return AuthorityAuthorizationManager.hasAuthority(JwtRoleConverter.ADMIN_AUTHORITY);
+    }
 
     /**
      * Builds the authorization decision that admits only the task-local loopback addresses.
@@ -399,6 +465,14 @@ public class SecurityConfig {
                 .sessionManagement(session -> session
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(requests -> requests
+                        // WHY : Assumptions: the diagnostic group is declared FIRST and the permitted
+                        //       health namespace second, because /actuator/health/** matches the
+                        //       diagnostic path too and the first matching rule decides. Reversing the two
+                        //       lines would silently restore the defect this rule exists to close -- the
+                        //       path would be permitted to anyone and the class would still compile,
+                        //       start and pass every assertion that reads the constants rather than the
+                        //       order.
+                        .requestMatchers(HEALTH_DIAGNOSTIC_PATH).access(diagnosticAccess())
                         .requestMatchers(HEALTH_PATH).permitAll()
                         // WHY : Assumptions: the two management endpoints are granted by NETWORK
                         //       POSITION and not by authority, because their only configured consumer
@@ -407,6 +481,32 @@ public class SecurityConfig {
                         //       is judged by position alone.
                         .requestMatchers(BUILD_IDENTITY_PATH, METRIC_SCRAPE_PATH)
                         .access(loopbackOnly())
+                        // WHY : Assumptions: the management namespace is matched HERE, after the three
+                        //       endpoints this module publishes have each been given their own rule and
+                        //       BEFORE any business rule, and it is denied. What reaches it is every
+                        //       management address other than those three, which is every address the
+                        //       exposure list withholds -- so the rule answers for paths that reach no
+                        //       handler today and exists for the ones that might tomorrow.
+                        //
+                        //       Refactoring Rationale: without this rule the namespace fell through to
+                        //       the catch-all, so exposing any further management endpoint -- an
+                        //       environment dump, a logger control, a heap dump -- would have granted
+                        //       it to every holder of a CardDemo group authority the moment it was
+                        //       exposed, by inheriting a rule written for business data. Nothing would
+                        //       have been logged and no rule would have been edited, which is what
+                        //       made it worth closing before rather than after such an endpoint
+                        //       appears. Alternatives Considered: requiring the administrator
+                        //       authority instead of denying, so an operator could reach a newly
+                        //       exposed endpoint without a code change. Rejected because it presumes
+                        //       the next endpoint is safe for any administrator token and decides that
+                        //       in advance for an endpoint nobody has looked at; denying makes
+                        //       exposing one a deliberate act that has to name its own rule here.
+                        //
+                        //       Trade-offs: an operator who exposes an endpoint and forgets this rule
+                        //       gets a 403 rather than a working endpoint. That is the intended
+                        //       failure direction -- loud and safe rather than quiet and open -- and
+                        //       the constant's own documentation records where to add the rule.
+                        .requestMatchers(MANAGEMENT_PATH).denyAll()
                         .anyRequest()
                         .access(businessAccess()))
                 .oauth2ResourceServer(server -> server

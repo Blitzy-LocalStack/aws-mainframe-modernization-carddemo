@@ -121,6 +121,36 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 //       likewise has no counterpart: it admitted one concurrent request string against the whole
 //       dataset, so two administrators listing users serialised against each other for a
 //       storage-access reason that was never a business rule. Row-level locking replaces it.
+// WHY : Alternatives Considered: @DataJpaTest, which is the narrower slice and the default choice for
+//       a repository test. Rejected, and for a concrete reason rather than a preference: this class
+//       asserts constraints that only exist because FLYWAY created them, and @DataJpaTest does not run
+//       far enough to have them. That slice replaces the application's DataSource with an embedded one
+//       where one is on the class path and, more importantly, boots only the JPA-related
+//       auto-configuration, so the three settings this module's `test` profile depends on stop being
+//       honoured together. Those settings are spring.flyway.create-schemas: true at
+//       src/test/resources/application-test.yml line 311, which is the only thing that creates the
+//       `auth` schema at all in a bare container; spring.flyway.schemas and default-schema at lines 262
+//       and 263, which put both the migrated objects and the migration history table inside that schema
+//       rather than in `public`; and spring.jpa.hibernate.ddl-auto: validate at line 219, which makes
+//       Hibernate compare its mappings against the migrated tables instead of generating its own.
+// WHY : Trade-offs: what the full slice costs is a wider context and a slower start, and what it buys
+//       is that the schema under test is the SHIPPED one. Under a generated schema every check
+//       constraint, every unique index and every column width this class asserts would be whatever
+//       Hibernate chose to emit, so a case could pass against a table the migration never produces --
+//       which is the one failure a repository integration test exists to catch. `ddl-auto: validate`
+//       only means anything when a real migration has already run, so choosing the narrower slice would
+//       have meant abandoning that setting too and asserting against a fiction.
+// WHY : Assumptions: the slice is kept as narrow as it can be while still being real, so choosing
+//       @SpringBootTest is not the same as choosing the whole application. The nested
+//       @SpringBootConfiguration at the foot of this class scans nothing: it names
+//       com.carddemo.auth.domain to @EntityScan and com.carddemo.auth.repository to
+//       @EnableJpaRepositories and stops there, so the api package, SecurityConfig's filter chain and
+//       CognitoIdentityConfig's identity-provider client are never constructed -- and that last one
+//       matters concretely, because it would otherwise want credentials and a reachable endpoint that
+//       no test supplies. webEnvironment = NONE starts no listener, which is what makes the PKCS#12
+//       keystore this module requires in production irrelevant here, and @ServiceConnection supplies
+//       the container's coordinates so no JDBC URL is written down anywhere. What boots is JPA plus
+//       Flyway plus a real engine.
 @Testcontainers
 @SpringBootTest(
         classes = UserRepositoryIT.IdentityPersistenceTestApplication.class,
@@ -962,8 +992,20 @@ class UserRepositoryIT {
     //       predicate orders lexically. Without padding the tenth identifier would sort between the
     //       first and the second, and a page boundary assertion would then be checking an order the
     //       fixture did not actually have.
+    // WHY : Assumptions: the locale is pinned to ROOT because %04d is LOCALE-SENSITIVE and the default
+    //       FORMAT locale is a property of whatever machine runs the suite. Under a locale whose decimal
+    //       digits are not ASCII -- ar-EG-u-nu-arab and hi-IN-u-nu-deva are the reachable cases -- the
+    //       same call emits that locale's digit characters, so the padding is preserved but the CODE
+    //       POINTS are not. That breaks this method's whole purpose twice over: the identifiers stop
+    //       being the ASCII values the eight-character key column accepts, and the lexical order the
+    //       comment above depends on stops matching numeric order, so the page boundary cases would fail
+    //       on a developer machine and pass in CI for a reason no assertion message would reveal.
+    // WHY : Trade-offs: ROOT rather than Locale.US, even though the two behave identically here. ROOT
+    //       states that no locale's conventions are wanted at all, where US would state that one
+    //       particular locale's are, and this value is a fixed-width machine key rather than anything a
+    //       person reads.
     private static String orderedUserId(int ordinal) {
-        return String.format("%s%04d", USER_ID_PREFIX, ordinal);
+        return String.format(Locale.ROOT, "%s%04d", USER_ID_PREFIX, ordinal);
     }
 
     /**
@@ -1229,10 +1271,23 @@ class UserRepositoryIT {
     // WHY : Assumptions: the migration tool's own history table is excluded by NAME rather than by
     //       subtracting one from a count. A count-based exclusion would absorb any unexpected third
     //       relation and let it pass, which is the opposite of what this read is for.
+    // WHY : Refactoring Rationale: the predicate was `table_name not like 'flyway%'`, which claimed an
+    //       exact exclusion while performing a PREFIX one, so it had exactly the defect the paragraph
+    //       above rejects a count for. Any application table whose name began with those seven
+    //       characters would have been filtered out of the result and the assertion built on it would
+    //       have reported the schema as clean. The name is now matched in full, so the one relation this
+    //       read tolerates is the one Flyway creates and every other relation reaches the assertion.
+    // WHY : Assumptions: `flyway_schema_history` is the correct literal for this schema rather than a
+    //       guess at the tool's default. src/test/resources/application-test.yml sets
+    //       spring.flyway.default-schema to `auth` at line 263 precisely so the history table lands
+    //       inside the schema under test, and it sets no `table` property anywhere, so the table keeps
+    //       the tool's default name. Should a future revision rename it, this read fails loudly with the
+    //       history table listed as an unexpected relation, which is the right way for that change to
+    //       surface.
     private List<String> tablesInIdentitySchema() {
         return nativeStringColumn(
                 "select table_name from information_schema.tables"
-                        + " where table_schema = ?1 and table_name not like 'flyway%'"
+                        + " where table_schema = ?1 and table_name <> 'flyway_schema_history'"
                         + " order by table_name",
                 IDENTITY_SCHEMA);
     }

@@ -5,14 +5,32 @@
 #   The hand-authored OpenAPI 3.1 contract of record for transaction-service,
 #   the LEDGER bounded context of the CardDemo mainframe-to-microservices
 #   migration. Everything that touches this context is written against it rather
-#   than against a reading of the baseline. Landed at this checkpoint: the request
-#   and response records under src/main/java/com/carddemo/transaction/dto, whose
-#   member names, widths, value domains and paging vocabulary this document and
+#   than against a reading of the baseline. Every consumer this document was
+#   written for now exists: the request and response records under
+#   src/main/java/com/carddemo/transaction/dto, whose member names, widths, value
+#   domains and paging vocabulary this document and
 #   src/test/java/com/carddemo/transaction/dto/TransactionApiContractTest.java hold
-#   to each other. Planned and NOT yet authored: the browser SPA's transaction
-#   client, and every controller, service and mapper of this module - so no
-#   operation below is served yet, and the controller tests that will assert each
-#   response body do not exist. It is served as a static classpath resource:
+#   to each other; the two controllers under
+#   src/main/java/com/carddemo/transaction/api that serve all four operations
+#   below, held to the routes and status codes declared here by
+#   src/test/java/com/carddemo/transaction/api/TransactionApiRoutingContractTest.java
+#   and asserted body-by-body by TransactionControllerTest and
+#   BillPaymentControllerTest; the six service types and two mappers behind them;
+#   and the browser SPA's transaction client at ui/src/api/transactions.ts, which
+#   ui/src/api/contracts.test.ts binds back to this file so a drift fails the SPA
+#   build.
+#
+#   Refactoring Rationale: this paragraph previously recorded that every
+#   controller, service and mapper of this module was unauthored and that no
+#   operation below was served. That was accurate when written and is now false of
+#   all of them, so it is replaced rather than annotated. Correcting it matters
+#   beyond tidiness: a reader who believed no operation was served would have read
+#   a mismatch between this document and a handler as a documentation defect, when
+#   it is now a live contract breach that TransactionApiRoutingContractTest fails
+#   the build over. What is genuinely NOT proven here is runtime behaviour against
+#   a provisioned AWS environment, which no test in this module claims.
+#
+#   It is served as a static classpath resource:
 #   application.yml adds
 #   `classpath:/openapi/` to spring.web.resources.static-locations at L601 and
 #   pins springdoc.swagger-ui.url to /transaction-api.yaml at L621, so this
@@ -1470,10 +1488,14 @@ components:
       type: object
       description: >-
         One page of transactions together with everything a caller needs to walk
-        to the adjacent pages. Row identities and request positions are separate
-        members: firstKey and lastKey identify rows the caller received, while
-        nextCursor and prevCursor are the positions a further request is issued
-        from.
+        to the adjacent pages. The envelope publishes exactly four members --
+        items, firstKey, lastKey and hasNext. firstKey and lastKey identify the
+        first and last rows the caller received, and they are also the positions a
+        further request is issued from: a forward step sends lastKey, a backward
+        step sends firstKey, with the direction carried by the request's own
+        direction parameter. Two further members named nextCursor and prevCursor
+        were WITHDRAWN, as the comment below and the card contract's own envelope
+        record, so no member of either name exists for a caller to copy.
       # WHY : Refactoring Rationale: the envelope is the FOUR members the shared
       #       response type declares -- items, firstKey, lastKey and hasNext, at
       #       services/common-lib/src/main/java/com/carddemo/common/web/PageResponse.java

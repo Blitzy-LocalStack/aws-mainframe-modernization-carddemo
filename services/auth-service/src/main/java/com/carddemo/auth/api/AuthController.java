@@ -1,7 +1,10 @@
 package com.carddemo.auth.api;
 
+import com.carddemo.auth.dto.SignOnChallengeRequest;
+import com.carddemo.auth.dto.SignOnOutcome;
 import com.carddemo.auth.dto.SignOnRequest;
 import com.carddemo.auth.dto.SignOnResponse;
+import com.carddemo.auth.dto.TokenRefreshRequest;
 import com.carddemo.auth.service.CognitoIdentityService;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ApiErrorSecurityHandlers;
@@ -90,17 +93,19 @@ import org.springframework.web.bind.annotation.RestController;
  * adapter in this migration is annotated the same way, so the convention is uniform rather than local
  * to this file.</p>
  *
- * <p>Trade-offs: two of the three operations this contract tags {@code Sign-On} are absent from this
- * class, and the omission is a decision rather than an oversight. The committed document declares
+ * <p>Refactoring Rationale: this class now serves ALL THREE operations the committed document tags
+ * {@code Sign-On}, where it previously served one. The two that were missing were
  * {@code answerSignOnChallenge} on {@code POST /api/v1/auth/challenge} and {@code refreshTokens} on
- * {@code POST /api/v1/auth/refresh} alongside the operation below, and the filter chain already opens
- * both paths. Neither is servable yet: {@link CognitoIdentityService} publishes exactly one public
- * method, and the request and response records those two exchanges need are not among the six the
- * sibling {@code com.carddemo.auth.dto} package declares. Serving them from here would mean
- * inventing a transfer object and a service capability in packages this file does not own, which
- * would put a guess where a contract belongs. What is given up is that this class does not yet cover
- * its full published roster, and the gap is recorded here so that a reader comparing the two sees a
- * boundary rather than a mistake.</p>
+ * {@code POST /api/v1/auth/refresh}, and their absence was not a tidy boundary: the filter chain
+ * already opened both paths and the edge already forwarded them, so the gateway routed two operations
+ * the service answered with 404. The challenge one mattered more than a missing route usually does.
+ * Every account the infrastructure provisions is created with a temporary password, a temporary
+ * password always raises {@code NEW_PASSWORD_REQUIRED} on first use, and with no operation to answer
+ * that challenge no provisioned user could obtain a token at all -- the first sign-on of every user
+ * answered 500. All three operations are published unauthenticated, which the committed document
+ * states by declaring {@code security: []} on each: one issues a token, one completes the exchange
+ * that issues one, and one renews a token that may already have expired, so none of the three can
+ * require one.</p>
  *
  * <p>Trade-offs: no golden-master oracle exists for this path. The online programs of this context
  * cannot run end to end without a CICS runtime, which {@code tests/README.md:83-85} records among the
@@ -120,6 +125,12 @@ public class AuthController {
     /** The segment beneath {@link #BASE_PATH} that the credential exchange is served at. */
     public static final String SIGNON_SUBPATH = "/signon";
 
+    /** The segment beneath {@link #BASE_PATH} that the challenge answer is served at. */
+    public static final String CHALLENGE_SUBPATH = "/challenge";
+
+    /** The segment beneath {@link #BASE_PATH} that the token renewal is served at. */
+    public static final String REFRESH_SUBPATH = "/refresh";
+
     // WHY : Alternatives Considered: publishing the whole path as one constant here, rather than
     //       importing com.carddemo.auth.config.SecurityConfig and reusing its SIGNON_PATH. Reusing it
     //       would guarantee the route and the permit rule could never drift, but the charter beside
@@ -132,6 +143,12 @@ public class AuthController {
     //       three files, and this class still names no path a second time.
     /** The full path of the credential exchange, as the contract and the filter chain both declare it. */
     public static final String SIGNON_PATH = BASE_PATH + SIGNON_SUBPATH;
+
+    /** The full path of the challenge answer, as the contract and the filter chain both declare it. */
+    public static final String CHALLENGE_PATH = BASE_PATH + CHALLENGE_SUBPATH;
+
+    /** The full path of the token renewal, as the contract and the filter chain both declare it. */
+    public static final String REFRESH_PATH = BASE_PATH + REFRESH_SUBPATH;
 
     // WHY : Assumptions: this sentence is the externally visible vocabulary of the refusal below, and
     //       it is reproduced character for character from app/cbl/COSGN00C.cbl:242, where the literal
@@ -232,11 +249,20 @@ public class AuthController {
      * entity as well would add a wrapper to every success for symmetry with a path that answers
      * something different.</p>
      *
+     * <p>Refactoring Rationale: the declared return type is the sealed
+     * {@link com.carddemo.auth.dto.SignOnOutcome} rather than the token set alone, because the
+     * committed document declares this operation's 200 as a choice of two shapes discriminated on
+     * {@code outcome}. The narrower type could express only one of them, so the challenge outcome had
+     * no representation and was reported as a server fault -- which, since every provisioned account is
+     * created with a temporary password, is what every user's first sign-on received. The type is sealed
+     * rather than open so the set of shapes this handler can answer with stays closed to the two the
+     * document publishes.</p>
+     *
      * @param request the submitted identifier and password, bean-validated before this method is
      *     entered so that a blank or over-length field is answered without the pool being consulted;
      *     must not be {@code null}
-     * @return the token set the pool issued, carried as the authenticated variant of the contract's
-     *     two-way success body and answered with 200; never {@code null}
+     * @return either the token set the pool issued or the challenge it raised, whichever the exchange
+     *     produced, answered with 200 and told apart by the {@code outcome} member; never {@code null}
      * @throws ClientInputException if a submitted field is absent or blank, which the shared advice
      *     renders as 400 carrying one entry per offending field, identifier first
      * @throws BadCredentialsException if the credential was refused, which
@@ -245,7 +271,7 @@ public class AuthController {
      *     advice renders as 500 carrying the baseline sentence for that outcome
      */
     @PostMapping(path = SIGNON_SUBPATH, consumes = MediaType.APPLICATION_JSON_VALUE)
-    public SignOnResponse signOn(@Valid @RequestBody SignOnRequest request) {
+    public SignOnOutcome signOn(@Valid @RequestBody SignOnRequest request) {
 
         // WHY : Assumptions: the submitted values are handed on exactly as received, because
         //       normalisation is the service's to perform and not this adapter's to anticipate. The
@@ -257,6 +283,143 @@ public class AuthController {
         //       place this migration publishes without a token; the divergence is documented on the
         //       service method that owns the exchange.
         return this.identityService.authenticate(request);
+    }
+
+    /**
+     * Sets the permanent password a sign-on challenge asked for and returns the token set it unlocks.
+     *
+     * <p>Purpose: this completes a sign-on that answered {@code outcome CHALLENGE} with
+     * {@code challengeName NEW_PASSWORD_REQUIRED}. It is the operation without which no account the
+     * infrastructure provisions could ever obtain a token, because every such account is created with a
+     * temporary password and a temporary password always raises that challenge on first use.</p>
+     *
+     * <p>Assumptions: it is published unauthenticated, which the committed document states by declaring
+     * {@code security: []} on it and which the edge already assumes -- the path is one of the three
+     * unauthenticated route keys the gateway module declares. A caller answering a challenge holds no
+     * token, that being what the exchange exists to obtain.</p>
+     *
+     * <p>Assumptions: this operation has no baseline counterpart, so none of the three sign-on sentences
+     * is reused for its failures and no message literal is transcribed for it. The reference compared a
+     * stored eight-character credential directly at {@code app/cbl/COSGN00C.cbl:211-256} and had no
+     * notion of a credential that must be changed before use. The divergence is registered as
+     * {@code D-PASSWORD-CHALLENGE} in {@code docs/architecture/cobol-to-service-traceability.md}.</p>
+     *
+     * <p>Trade-offs: it is idempotent in neither direction and must not be retried blindly. The session
+     * is single-use, so a repeat with the same value is refused and a fresh sign-on is required; the
+     * committed document says so on the operation, and the refusal below is what a repeat receives.
+     * Making it retryable would mean holding the session server-side and reissuing the token set for a
+     * second presentation of it, which is the session storage that ending the pseudo-conversational
+     * design removed.</p>
+     *
+     * @param request the identifier the challenge was raised for, the session it issued and the
+     *     permanent password to set, bean-validated before this method is entered; must not be
+     *     {@code null}
+     * @return the token set the pool issued once the password was accepted, always the authenticated
+     *     shape and never a further challenge, answered with 200; never {@code null}
+     * @throws ClientInputException if a submitted field is absent or blank, or if the pool refused the
+     *     proposed password under its own policy, which the shared advice renders as 400
+     * @throws CognitoIdentityService.SessionRefusedException if the session was not accepted, which
+     *     {@link #onRefusedSession} below renders as 401
+     * @throws IllegalStateException if the exchange could not be evaluated at all, which the shared
+     *     advice renders as 500 carrying the baseline sentence for that outcome
+     */
+    @PostMapping(path = CHALLENGE_SUBPATH, consumes = MediaType.APPLICATION_JSON_VALUE)
+    public SignOnResponse answerSignOnChallenge(
+            @Valid @RequestBody SignOnChallengeRequest request) {
+
+        // WHY : Assumptions: the submitted values are handed on exactly as received, for the reason the
+        //       sign-on handler records: normalisation is the service's to perform. It matters more here
+        //       than there, because the value being set is stored and every later sign-on compares
+        //       against it -- altering it here would set a password the caller did not type and would
+        //       lock the account out from the caller's own point of view.
+        return this.identityService.answerChallenge(request);
+    }
+
+    /**
+     * Renews an expiring token set from the refresh token a previous sign-on returned.
+     *
+     * <p>Purpose: this exists so a session outlives one access-token lifetime without the user
+     * re-entering a credential. The baseline had no counterpart, because a sign-on under the transaction
+     * monitor lasted as long as the terminal session did.</p>
+     *
+     * <p>Assumptions: it is published unauthenticated, and the reason is specific rather than a
+     * relaxation: the token it would carry is the one being renewed, and a caller whose access token has
+     * already expired must still be able to renew. Authority comes from the refresh token, which the
+     * pool verifies and which a caller cannot forge.</p>
+     *
+     * <p>Assumptions: the renewed body carries a null renewal token, because the pool does not reissue
+     * one -- the caller keeps the token it already holds. The response shape declares that member
+     * nullable for exactly this reason, which is what lets one shape serve all three operations of this
+     * tag rather than a second nearly identical shape existing for this path alone.</p>
+     *
+     * @param request the identifier the token set was issued for and the refresh token to renew it
+     *     with, bean-validated before this method is entered; must not be {@code null}
+     * @return the renewed token set, carrying a new access token and identity token and a null renewal
+     *     token, answered with 200; never {@code null}
+     * @throws ClientInputException if a submitted field is absent or blank, which the shared advice
+     *     renders as 400
+     * @throws CognitoIdentityService.SessionRefusedException if the refresh token was not accepted,
+     *     which {@link #onRefusedSession} below renders as 401
+     * @throws IllegalStateException if the renewal could not be evaluated at all, which the shared
+     *     advice renders as 500 carrying the baseline sentence for that outcome
+     */
+    @PostMapping(path = REFRESH_SUBPATH, consumes = MediaType.APPLICATION_JSON_VALUE)
+    public SignOnResponse refreshTokens(@Valid @RequestBody TokenRefreshRequest request) {
+        return this.identityService.refresh(request);
+    }
+
+    /**
+     * Renders a refused session or refresh token as the 401 the two contracts declare for them.
+     *
+     * <p>Refactoring Rationale: this is a second handler rather than a widening of the credential one
+     * below, because the two statuses carry different sentences and the credential handler renders
+     * exactly one fixed sentence by design. The reference's {@code 'Wrong Password. Try again ...'}
+     * would be actively misleading on either of these two paths: on the challenge answer the credential
+     * was accepted -- the challenge is what proves it -- and on the renewal no credential was presented
+     * at all. Rendering the message the refusal happened to carry would have kept one handler and was
+     * rejected for the reason recorded below: it would let any refusal raised anywhere put its own text
+     * on an unauthenticated 401. Two handlers, each mapping one closed type onto one fixed sentence,
+     * keeps that property while telling the two situations apart.</p>
+     *
+     * <p>Assumptions: the narrower type is matched in preference to its supertype because the framework
+     * selects the most specific declared handler for the thrown type, so no ordering between the two
+     * methods is relied on and neither shadows the other. If this handler were ever removed the refusal
+     * would fall to the credential handler rather than to a 500, which is why the refusal type extends
+     * that one.</p>
+     *
+     * <p>Assumptions: no field entry accompanies the body, matching what both contracts state. Every
+     * reason either exchange can be refused for -- an expired, already-used, altered or mismatched
+     * session, and an expired, revoked or mismatched refresh token -- reaches this one status with this
+     * one sentence, because the remedy is identical in all of them and naming which one applied would
+     * tell an unauthenticated caller a fact about the pool's state.</p>
+     *
+     * @param failure the refusal the service raised; its class is logged and neither its message nor
+     *     any other part of it reaches the body
+     * @param request the request being answered, read only for the path recorded in the body
+     * @return the 401 response carrying the shared problem shape, the sign-on-again sentence and no
+     *     field entry; never {@code null}
+     */
+    @ExceptionHandler(CognitoIdentityService.SessionRefusedException.class)
+    public ResponseEntity<ApiError> onRefusedSession(
+            CognitoIdentityService.SessionRefusedException failure, HttpServletRequest request) {
+
+        LOG.warn("event=api.session.refused code={} status=401 path={} exception={}",
+                ApiErrorSecurityHandlers.CODE_UNAUTHENTICATED, request.getRequestURI(),
+                failure.getClass().getName());
+
+        // WHY : Assumptions: the code is the same unauthenticated code the credential refusal and the
+        //       filter chain's own 401 use, so a client parsing the code field needs no second branch to
+        //       tell one 401 of this service from another. What distinguishes them for a HUMAN is the
+        //       sentence; what a machine acts on is identical in both, because the required action is
+        //       identical: obtain a token.
+        // WHY : Assumptions: the path is recorded as received rather than narrowed, as on the credential
+        //       refusal. Both of the paths that reach this handler are fixed values with no variable
+        //       segment, so there is nothing in either to withhold.
+        ApiError body = ApiError.of(ApiErrorSecurityHandlers.CODE_UNAUTHENTICATED,
+                CognitoIdentityService.MESSAGE_SESSION_REFUSED, HttpStatus.UNAUTHORIZED.value(),
+                correlationId(), request.getRequestURI(), this.clock);
+
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(body);
     }
 
     /**

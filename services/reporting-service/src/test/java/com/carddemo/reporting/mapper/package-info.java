@@ -131,8 +131,6 @@
  */
 package com.carddemo.reporting.mapper;
 
-// WHAT: places the justification block after the package declaration rather than between it and the
-//       charter above.
 // WHY : Assumptions: MissingJavadocPackage resolves the charter by looking at the comment
 //       immediately preceding the package declaration, so an intervening line comment detaches the
 //       two. This was measured rather than reasoned about: with these comments sitting above the
@@ -142,8 +140,6 @@ package com.carddemo.reporting.mapper;
 //       the declaration keeps every comment adjacent to the declaration it explains, which is what
 //       Rule 1 asks at its line 27, while leaving the charter in the only position the check
 //       accepts. Re-running the same command afterwards reported zero violations.
-// WHAT: records the determination that decided whether this file is required, and the branch it
-//       resolved to.
 // WHY : Assumptions: whether the documentation gate audits this tree at all is a property of the
 //       Maven plugin and not of config/checkstyle/checkstyle.xml, so it cannot be read from the
 //       rule set no matter how carefully that file is studied. Running
@@ -154,7 +150,6 @@ package com.carddemo.reporting.mapper;
 //       was assumed. src/test/java is therefore audited, JavadocPackage at line 245 of that rule
 //       set is a file-set check that reports any audited directory holding no package-info.java,
 //       and this file is consequently required at the validate phase before anything compiles.
-// WHAT: states why this file would exist even had that determination gone the other way.
 // WHY : Alternatives Considered: omitting the file whenever the gate does not demand it. Rejected,
 //       because user-specified Rule 1 requires a docstring on every module entry point at
 //       its line 15, and in Java the entry point of a package is its package declaration, which
@@ -165,34 +160,29 @@ package com.carddemo.reporting.mapper;
 //       between the two branches, never the correctness of having the file. The class total is
 //       given once in the charter above and is deliberately not repeated here, since a count
 //       restated inside a justification is a third place for it to fall out of step.
-// WHAT: keeps this compilation unit to a documentation block and a package declaration.
 // WHY : Assumptions: a package-info.java is read for package-level Javadoc and annotations and for
 //       nothing else, so a type, a constant, an import or a static block declared here would make
 //       it an ordinary source file that merely happens to be named package-info, and the package
 //       would then have its documentation attached to a class instead of to itself. No
 //       package-level annotation is declared either, because any this module could want would pull
 //       in an import and add a second thing to document for no assertion gained.
-// WHAT: keeps this charter to the tests and leaves the emitted contract to the production charter.
 // WHY : Trade-offs: the production charter beside this one already fixes the emitted contract, so
 //       repeating its record lengths, its regime table or its padding obligations here would create
 //       a second copy of every figure. Two copies of a count are two things to keep in step, and
 //       the one that falls behind is indistinguishable from the one that is right. The accepted
 //       cost is that a reader wanting the emitted contract opens that file; the gain is that no
 //       figure in this module has two homes.
-// WHAT: states the one-owner-per-rule boundary in this file rather than in each class separately.
 // WHY : Alternatives Considered: letting each class assert its own scope in its own header.
 //       Rejected, because a boundary is a statement about the whole set and no single member can
 //       make it: a reader who opens one class sees only what that class covers and cannot tell that
 //       a mask assertion added there duplicates one already made elsewhere. Stating it at package
 //       level puts it where somebody editing a single file in isolation still passes it.
-// WHAT: enumerates the four coexisting zero renderings in one place rather than once per owner.
 // WHY : Assumptions: the four are genuinely different byte sequences for the same value, and three
 //       of them are identical or near-identical in width, so the failure mode is substitution
 //       rather than absence. A substituted zero still fills its field and still satisfies any check
 //       that only measures length, which is why the set is written out together with each owner
 //       named: the comparison a reader has to make is between the four, and a fact split across
 //       four files cannot be compared without opening all four.
-// WHAT: calls out that FILLER is modelled on one side of this package and dropped on the other.
 // WHY : Assumptions: the two readings are opposite rather than merely different, so the natural
 //       generalisation of one FILLER policy for the whole module is wrong in one direction whichever
 //       way it is chosen. On the report side the construct carries a VALUE and is output content
@@ -200,8 +190,6 @@ package com.carddemo.reporting.mapper;
 //       record length and carries nothing a consumer can use. Stating the inversion is what stops a
 //       shared helper being written across the two, which is the concrete edit this note exists to
 //       prevent.
-// WHAT: declares the parameter, return and exception elements inapplicable in prose rather than as
-//       at-clauses.
 // WHY : Trade-offs: Rule 1 names four docstring elements and its validation gate at line 43 is
 //       conjunctive, so a reviewer auditing against it looks for all four and has to be able to
 //       tell a declared inapplicability from an oversight. Adding an empty at-clause to look
@@ -210,8 +198,6 @@ package com.carddemo.reporting.mapper;
 //       return or exception concept for a package in the first place. Declaring the inapplicability
 //       in the block above costs a sentence and is the only form that both satisfies that gate and
 //       survives it.
-// WHAT: states the collected test-name shapes as the resolved runner documents them rather than as
-//       a stricter rule of thumb.
 // WHY : Assumptions: the default test execution declares no include pattern, so the resolved
 //       maven-surefire-plugin 3.5.6 defaults govern, and that version's own goal descriptor
 //       documents them as `**/Test*.java`, `**/*Test.java`, `**/*Tests.java` and
@@ -219,7 +205,6 @@ package com.carddemo.reporting.mapper;
 //       the safer thing to write and is not true of this runner, and a maintainer who believed it
 //       could rename a working class to fix a problem that never existed. Rule 1 forbids an
 //       unfounded rationale at its line 41, so the four patterns are cited as they were read.
-// WHAT: restricts this file to printable ASCII and to Javadoc carrying no markup element.
 // WHY : Trade-offs: the repository-root tests/README.md spells a justification label with a
 //       non-breaking hyphen at its line 548, so text copied from there yields a label that looks
 //       correct and matches no search for the canonical spelling; every label here is therefore
@@ -228,7 +213,6 @@ package com.carddemo.reporting.mapper;
 //       goal is bound in this reactor, so no element is required by anything, while an unescaped
 //       angle bracket in a file that is almost entirely prose is a live hazard. The accepted cost
 //       is typographically plainer output.
-// WHAT: names ReportingFixtureRecordTest in the inventory beside the seven the plan assigns here.
 // WHY : Assumptions: the inventory exists so that a reader can navigate this package without
 //       opening its files, which makes it wrong the moment it omits one that is present. The
 //       migration plan assigns seven mapper test classes to this package and that figure is stated

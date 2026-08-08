@@ -149,11 +149,21 @@
  *       makes, and primary-account-number masking. Domain types downstream of it stay free of
  *       layout concerns, which is the entire point of concentrating those concerns in one
  *       package.</li>
- *   <li>{@code .config} - {@code SecurityConfig}, {@code OpenApiConfig},
- *       {@code DataSourceConfig} and {@code SqsConfig}. The fourth is present because this
- *       module's own POM puts a queue starter and a queue client on the classpath; a sibling
- *       context that declares neither carries no such class, and adding one there would configure
- *       a client nothing can inject.</li>
+ *   <li>{@code .config} - {@code SecurityConfig}, {@code OpenApiConfig}, {@code SqsConfig},
+ *       {@code InternalIdentityConfig} and {@code MessagingIdentityConfig}. {@code SqsConfig} is
+ *       present because this module's own POM puts a queue starter and a queue client on the
+ *       classpath; a sibling context that declares neither carries no such class, and adding one
+ *       there would configure a client nothing can inject. The two identity classes supply the
+ *       credentials this context cannot operate without: one mints the service token the account
+ *       context demands on the three calls made to it, and the other keys the tokeniser that keeps a
+ *       primary account number out of queue metadata. Refactoring Rationale: this bullet listed
+ *       {@code DataSourceConfig} and closed the set at four. That class does not exist in this
+ *       module -- the {@code authorization} search-path pin it was credited with is declared in this
+ *       module's {@code application.yml} -- and the closure at four excluded both identity classes,
+ *       so a reader acting on this bullet would have looked for a setting in a missing class and
+ *       treated two required credentials as not belonging here. The package's own charter at
+ *       {@code com.carddemo.authorization.config} is the authority and carries the full reasoning
+ *       for each entry.</li>
  * </ul>
  *
  * <p><strong>Package roots and the layering contract.</strong> Nine roots are set across the
@@ -162,9 +172,14 @@
  * {@code .batch}, {@code .authorization} and {@code .reporting}. The dependency arrow points
  * inward only: every context may depend on the shared kernel, and no context may depend on
  * another. The shared kernel depends on none of them. The only intra-reactor Maven dependency this
- * module declares is that kernel, whose contract admits 17 production types across its {@code money},
+ * module declares is that kernel, whose production types are distributed across its {@code money},
  * {@code codec}, {@code error}, {@code web}, {@code security}, {@code observability},
- * {@code time} and {@code validation} packages.
+ * {@code time} and {@code validation} packages together with one auto-configuration class at its
+ * root. Refactoring Rationale: this sentence carried an exact type count, which was already wrong by
+ * the time it was read -- the kernel has grown in every checkpoint since. The count is dropped
+ * rather than corrected, because the fact this sentence exists to establish is that the kernel is
+ * this module's ONLY intra-reactor dependency, and that fact does not depend on how many types the
+ * kernel holds; {@code services/common-lib} is the authority for its own inventory.
  *
  * <p>Transformation rule T2 of the migration plan states the import discipline in Java terms: one
  * former COBOL {@code COPY} statement becomes exactly one type import, from the single package

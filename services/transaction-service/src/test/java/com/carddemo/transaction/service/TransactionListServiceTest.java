@@ -484,6 +484,15 @@ class TransactionListServiceTest {
      * asserted absent from the page. That pins the trim as happening at the far end of the scan in
      * this direction too, rather than at the end of the displayed page, which would drop the wrong
      * row and shift the leading boundary by one.</p>
+     *
+     * <p>Refactoring Rationale: forward availability is asserted here, and its omission was the
+     * defect this paragraph records. A backward step has by definition come from somewhere ahead of
+     * it, so a further page forward always exists and the service reports it UNCONDITIONALLY for this
+     * direction rather than from the surplus row. Every other case in this class asserts availability,
+     * and this was the one direction where it was not asserted at all -- so the one branch that does
+     * not read the probe row was the branch with no case over its result. A companion case below
+     * drives the same direction with a SHORT scan, where the probe row is absent, precisely so that
+     * deriving availability from the probe would fail there rather than pass here by coincidence.</p>
      */
     @Test
     @DisplayName("a backward step reads descending and serves the page in ascending display order")
@@ -511,8 +520,60 @@ class TransactionListServiceTest {
         assertThat(openBoundary(page.lastKey()))
                 .as("the trailing boundary names the highest identifier the page actually carries")
                 .isEqualTo(tranId(TransactionMapper.PAGE_SIZE + 1));
+        assertThat(page.hasNext())
+                .as("a backward step came from a page ahead of it, so a further page forward exists")
+                .isTrue();
         verify(repository).findByTranIdLessThanOrderByTranIdDesc(
                 tranId(TransactionMapper.PAGE_SIZE + 2), probeBoundedLimit());
+        verifyNoMoreInteractions(repository);
+    }
+
+    /**
+     * A SHORT backward step still reports a further page forward, though it read no surplus row.
+     *
+     * <p>This pins the same availability arm of {@code PROCESS-PAGE-BACKWARD} as the case above, lines
+     * 358 to 370 of {@code app/cbl/COTRN00C.cbl}, on the path where the backward scan exhausts the set
+     * before it fills the page. Line 360 issues the further backward read, and the end-of-set arm at
+     * lines 362 to 366 records that no further page exists BACKWARD -- it says nothing about forward,
+     * because line 339 has already established that the caller arrived from a page ahead.</p>
+     *
+     * <p>Refactoring Rationale: this case exists to make the previous one falsifiable rather than to
+     * add a second reading of the same rule. Forward availability is derived from the surplus row for
+     * every other direction, and a page that scanned a full eleven rows reports a further page under
+     * either rule -- the correct unconditional one and the incorrect probe-derived one -- so asserting
+     * it on a full backward page alone cannot tell the two apart. A backward scan of fewer than eleven
+     * rows has NO surplus row, so the probe-derived rule would answer false here and the unconditional
+     * rule answers true. That divergence is the whole content of this case.</p>
+     *
+     * <p>Assumptions: the scan is arranged three rows short of a page rather than one, so the page is
+     * unambiguously partial and the absence of the surplus row cannot be read as a trim. The rows are
+     * the lowest identifiers in the set, which is what a backward walk that has reached the start of
+     * the set returns.</p>
+     */
+    @Test
+    @DisplayName("a short backward step reports a further page forward despite reading no probe row")
+    void aShortBackwardStepStillReportsAFurtherPageForward() {
+        int shortScanSize = TransactionMapper.PAGE_SIZE - 3;
+        when(repository.findByTranIdLessThanOrderByTranIdDesc(
+                tranId(shortScanSize + 1), probeBoundedLimit()))
+                .thenReturn(descending(rows(1, shortScanSize)));
+
+        PageResponse<TransactionListItemResponse> page =
+                list(request(null, seal(tranId(shortScanSize + 1)),
+                        TransactionListRequest.Direction.PREVIOUS));
+
+        assertThat(idsOf(page))
+                .as("every row read is served, because a short scan carries no surplus row to trim")
+                .hasSize(shortScanSize)
+                .isSorted()
+                .startsWith(tranId(1))
+                .endsWith(tranId(shortScanSize));
+        assertThat(page.hasNext())
+                .as("availability forward is unconditional for a backward step and is NOT derived "
+                        + "from the surplus row, which this scan does not hold")
+                .isTrue();
+        verify(repository).findByTranIdLessThanOrderByTranIdDesc(
+                tranId(shortScanSize + 1), probeBoundedLimit());
         verifyNoMoreInteractions(repository);
     }
 
@@ -1052,6 +1113,132 @@ class TransactionListServiceTest {
         assertThat(TransactionListService.MESSAGE_LOOKUP_FAILED)
                 .as("the capitalised spelling belongs to other programs and not to this screen")
                 .isNotEqualTo("Unable to lookup Transaction...");
+    }
+
+    /**
+     * An opening scan that fails abnormally is reported with the reference sentence and its cause.
+     *
+     * <p>This pins the {@code WHEN OTHER} arm of {@code STARTBR-TRANSACT-FILE}, line 591 of
+     * {@code app/cbl/COTRN00C.cbl}: the selection over the response code at line 603 reaches an arm
+     * the paragraph does not name at line 613, displays the diagnostic there, raises the error flag at
+     * line 614 and moves the sentence at line 615.</p>
+     *
+     * <p>Refactoring Rationale: this case and the two below replace an assertion that compared
+     * {@code MESSAGE_LOOKUP_FAILED} to two string literals and drove nothing. That assertion could not
+     * fail while the arm was absent -- and the arm WAS absent: the constant's own documentation said so
+     * in as many words, recording that nothing here selected it. So the class held a case named for a
+     * failure and a constant carrying the failure's wording, and between them no path that produced
+     * either. These cases drive a repository that raises and require the reference sentence to come
+     * back, which is the assertion that could not previously exist.</p>
+     *
+     * <p>Assumptions: the raised type is asserted alongside the message, because the message alone does
+     * not determine how the edge answers. The shared advice maps this type to a server failure, and a
+     * refusal carrying the right words as, say, an argument fault would render the same sentence under
+     * a client-error status -- which is a different observable outcome for the same reference arm.</p>
+     *
+     * <p>Assumptions: the CAUSE is asserted to be the originating failure rather than discarded. The
+     * reference displays the response and reason codes of the failed verb before it sets the message,
+     * and the failure object is the equivalent context here; a wrapper that dropped it would satisfy
+     * every other assertion in this case while losing the only diagnostic the log receives.</p>
+     */
+    @Test
+    @DisplayName("an opening scan that fails abnormally raises the reference sentence with its cause")
+    void anOpeningScanFailureCarriesTheReferenceSentence() {
+        RuntimeException storeFailure = new RuntimeException("the ordered read could not be issued");
+        when(repository.findAllByOrderByTranIdAsc(probeBoundedLimit())).thenThrow(storeFailure);
+
+        assertThatThrownBy(() -> list(request(null, null, null)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage(TransactionListService.MESSAGE_LOOKUP_FAILED)
+                .hasCause(storeFailure);
+    }
+
+    /**
+     * A forward step that fails abnormally is reported with the same sentence.
+     *
+     * <p>This pins the {@code WHEN OTHER} arm of {@code READNEXT-TRANSACT-FILE}, line 624 of
+     * {@code app/cbl/COTRN00C.cbl}: the arm at line 647, the flag at line 648 and the sentence at line
+     * 649.</p>
+     *
+     * <p>Assumptions: the forward path is driven separately from the opening one rather than trusted to
+     * share its arm, because the reference spells the arm three times and a target implementing it once
+     * has to be shown to reach it from all three. A single case over one path would leave two of the
+     * three reference arms with no counterpart under assertion.</p>
+     */
+    @Test
+    @DisplayName("a forward step that fails abnormally raises the same reference sentence")
+    void aForwardStepFailureCarriesTheReferenceSentence() {
+        RuntimeException storeFailure = new RuntimeException("the forward read could not be issued");
+        when(repository.findByTranIdGreaterThanOrderByTranIdAsc(tranId(4), probeBoundedLimit()))
+                .thenThrow(storeFailure);
+
+        assertThatThrownBy(() -> list(request(null, seal(tranId(4)),
+                TransactionListRequest.Direction.NEXT)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage(TransactionListService.MESSAGE_LOOKUP_FAILED)
+                .hasCause(storeFailure);
+    }
+
+    /**
+     * A backward step that fails abnormally is reported with the same sentence.
+     *
+     * <p>This pins the {@code WHEN OTHER} arm of {@code READPREV-TRANSACT-FILE}, line 658 of
+     * {@code app/cbl/COTRN00C.cbl}: the arm at line 681, the flag at line 682 and the sentence at line
+     * 683.</p>
+     *
+     * <p>Assumptions: this is the third of the three reference arms, so with it every browse verb the
+     * program guards has a counterpart here. The sentence is asserted to be the SAME one rather than a
+     * per-verb variant, which is what the reference does -- all three arms move one string, and the
+     * verb that failed is not observable to the user in either the baseline or this target.</p>
+     */
+    @Test
+    @DisplayName("a backward step that fails abnormally raises the same reference sentence")
+    void aBackwardStepFailureCarriesTheReferenceSentence() {
+        RuntimeException storeFailure = new RuntimeException("the backward read could not be issued");
+        when(repository.findByTranIdLessThanOrderByTranIdDesc(tranId(9), probeBoundedLimit()))
+                .thenThrow(storeFailure);
+
+        assertThatThrownBy(() -> list(request(null, seal(tranId(9)),
+                TransactionListRequest.Direction.PREVIOUS)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage(TransactionListService.MESSAGE_LOOKUP_FAILED)
+                .hasCause(storeFailure);
+    }
+
+    /**
+     * A positioning read that matches nothing is a page boundary, NOT a lookup failure.
+     *
+     * <p>This pins the not-found arm of {@code STARTBR-TRANSACT-FILE} at lines 605 to 611 of
+     * {@code app/cbl/COTRN00C.cbl}, which sits inside the SAME selection as the normal arm and sets its
+     * own message rather than reaching the catch-all at line 613.</p>
+     *
+     * <p>Refactoring Rationale: this case is the fence around the three above. The failure arm is
+     * implemented by a guard around each read, and the emptiness test for an unmatched identifier is
+     * deliberately kept OUTSIDE that guard -- so this case is what shows the guard was drawn at the
+     * right boundary. Had the emptiness test been enclosed, or had absence been signalled by raising,
+     * an ordinary unmatched search would be reported to the user as a server failure and the three
+     * cases above would all still pass. The sibling {@code TransactionViewService} records the same
+     * hazard at its own equivalent read for the same reason.</p>
+     *
+     * <p>Assumptions: the page is asserted to come back empty and to carry the not-found boundary
+     * message rather than merely to not raise. Asserting only the absence of an exception would pass
+     * against a service that swallowed a genuine failure and returned an empty page, which is the
+     * opposite error and equally silent.</p>
+     */
+    @Test
+    @DisplayName("an unmatched identifier is a page boundary and is not reported as a lookup failure")
+    void anUnmatchedIdentifierIsNotReportedAsALookupFailure() {
+        when(repository.findById(tranId(9))).thenReturn(Optional.empty());
+
+        TransactionListRequest unmatched = request(tranId(9), null, null);
+        PageResponse<TransactionListItemResponse> page = list(unmatched);
+
+        assertThat(idsOf(page)).as("an unmatched position yields no rows at all").isEmpty();
+        assertThat(this.service.boundaryMessage(unmatched, page))
+                .as("the boundary carries the not-found branch's own sentence from lines 605 to 611, "
+                        + "never the catch-all sentence from line 615")
+                .isEqualTo(TransactionListService.MESSAGE_AT_TOP)
+                .isNotEqualTo(TransactionListService.MESSAGE_LOOKUP_FAILED);
     }
 
     /**

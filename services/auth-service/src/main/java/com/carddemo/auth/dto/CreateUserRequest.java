@@ -1,5 +1,6 @@
 package com.carddemo.auth.dto;
 
+import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
@@ -400,12 +401,28 @@ import jakarta.validation.constraints.Size;
  *     authority these operations themselves require, so it is the one component here with an
  *     authorisation consequence
  */
+// WHY : Refactoring Rationale: the three text components publish a non-whitespace pattern into the
+//       GENERATED document beside their non-blank constraint, because the committed contract declares
+//       that facet on each of them and the generated document did not. A non-blank constraint renders as
+//       a minimum length alone, so the served description of this schema admitted a name of twenty spaces
+//       that this record has always refused. It is a schema-documentation annotation and not a second
+//       runtime constraint: the non-blank constraint already refuses exactly those values, so a @Pattern
+//       would add a second violation for one fault and put two entries for one property into an array the
+//       contract declares as one entry per offending field. The expression is declared once, on
+//       SignOnRequest.NON_WHITESPACE_PATTERN, where the full argument is recorded.
+// WHY : Assumptions: userType takes no such pattern, and the omission is deliberate rather than an
+//       oversight in the same edit. Its domain constraint below admits exactly "A" and "U", neither of
+//       which is blank, so a presence pattern beside it would restate a rule the domain already states
+//       more precisely -- which is the reasoning the committed schema records against the same property.
 public record CreateUserRequest(
         @NotBlank(message = MESSAGE_FIRST_NAME_REQUIRED)
+        @Schema(pattern = SignOnRequest.NON_WHITESPACE_PATTERN)
         @Size(max = NAME_MAX_LENGTH, message = MESSAGE_FIRST_NAME_TOO_LONG) String firstName,
         @NotBlank(message = MESSAGE_LAST_NAME_REQUIRED)
+        @Schema(pattern = SignOnRequest.NON_WHITESPACE_PATTERN)
         @Size(max = NAME_MAX_LENGTH, message = MESSAGE_LAST_NAME_TOO_LONG) String lastName,
         @NotBlank(message = MESSAGE_USER_ID_REQUIRED)
+        @Schema(pattern = SignOnRequest.NON_WHITESPACE_PATTERN)
         @Size(max = USER_ID_MAX_LENGTH, message = MESSAGE_USER_ID_TOO_LONG) String userId,
         @NotBlank(message = MESSAGE_USER_TYPE_REQUIRED)
         @Size(min = USER_TYPE_LENGTH, max = USER_TYPE_LENGTH,

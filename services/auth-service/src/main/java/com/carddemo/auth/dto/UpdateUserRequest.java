@@ -1,5 +1,6 @@
 package com.carddemo.auth.dto;
 
+import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
@@ -12,11 +13,36 @@ import jakarta.validation.constraints.Size;
  * answers with {@code com.carddemo.auth.dto.UserResponse}. Two of the three facts worth knowing
  * about this record are absences: it carries no identifier component and no credential component.
  * An absence documents nothing by itself, so each is argued at length below, and both arguments are
- * placed here because nothing else in this service states them. The four packages that will consume
- * this type -- {@code com.carddemo.auth.api}, {@code com.carddemo.auth.service},
- * {@code com.carddemo.auth.mapper} and {@code com.carddemo.auth.domain} -- are not yet authored, so
- * an absence left unexplained here would be indistinguishable from a field overlooked while
- * transcribing a five-field map into a three-component record.
+ * placed here because this is the only file in the service that states them.
+ *
+ * <p>Refactoring Rationale: this paragraph previously said that the four packages consuming this type
+ * -- {@code com.carddemo.auth.api}, {@code com.carddemo.auth.service},
+ * {@code com.carddemo.auth.mapper} and {@code com.carddemo.auth.domain} -- were "not yet authored",
+ * and used that as the reason the two absences had to be argued here. All four exist, so the claim was
+ * false and the reason it gave for the argument's placement no longer held. The reason is restated as
+ * ownership rather than as absence: nothing on the path below has a natural place to explain why a
+ * five-field reference map became a three-component record, because each participant sees only its own
+ * end of the transformation. What is recorded here is the actual path, so a reader can follow the value
+ * instead of inferring it.
+ *
+ * <h2>Who owns this type and what happens to an instance of it</h2>
+ *
+ * <p>Assumptions: exactly one production caller constructs an instance, and it is the framework rather
+ * than any class in this service: {@code com.carddemo.auth.api.UserController} declares this record as
+ * the request body of its update handler, so an instance is deserialised from JSON and bean-validated
+ * before that handler is entered. Nothing in this service builds one, which is why this record declares
+ * no factory and no builder.
+ *
+ * <p>Assumptions: the instance then travels one hop and stops. The handler passes it and the path
+ * identifier to {@code com.carddemo.auth.service.UserService}, which loads the addressed row, applies
+ * the ordered validation chain the annotations here cannot express -- see the section on what the
+ * annotations decide -- and hands the record to
+ * {@code com.carddemo.auth.mapper.UserMapper#applyUpdate(UpdateUserRequest, com.carddemo.auth.domain.User)}.
+ * That mapper is the only place the three components are read individually, and it is where the storage
+ * representation of each is decided. The record itself never reaches
+ * {@code com.carddemo.auth.repository}, is never persisted, and is never returned: the response of the
+ * update operation is {@code com.carddemo.auth.dto.UserResponse} built from the stored row after the
+ * write, so a caller reads back what was stored rather than what it sent.</p>
  *
  * <h2>Where the three components come from, and why their order is not a style choice</h2>
  *
@@ -417,18 +443,39 @@ import jakarta.validation.constraints.Size;
  *     and must not be blank, and it is checked second, at {@code app/cbl/COUSR02C.cbl} L192; it is a
  *     second component of the same declared width as the given name rather than a longer or shorter
  *     one
- * @param userType the user's role as it is to stand after the update, a {@code String} of exactly
- *     one character, as {@code SEC-USR-TYPE PIC X(01)} declares at {@code app/cpy/CSUSR01Y.cpy} L22,
- *     byte position 56 of that record, and as {@code USRTYPEI PIC X(1)} presents it at
- *     {@code app/cpy-bms/COUSR02.CPY} L84. It is {@code 'A'} for administrator or {@code 'U'} for
- *     ordinary user and nothing else, per {@code app/cpy/COCOM01Y.cpy} L26 to L28, which is the sole
- *     authority for that domain. It is required and must not be blank, and is checked last of the
- *     three at {@code app/cbl/COUSR02C.cbl} L204
+ * @param userType the role the submitter is ASKING for, which is not the same claim the two names
+ *     above carry and the difference is load-bearing. A {@code String} of exactly one character, as
+ *     {@code SEC-USR-TYPE PIC X(01)} declares at {@code app/cpy/CSUSR01Y.cpy} L22, byte position 56 of
+ *     that record, and as {@code USRTYPEI PIC X(1)} presents it at {@code app/cpy-bms/COUSR02.CPY} L84.
+ *     It is {@code 'A'} for administrator or {@code 'U'} for ordinary user and nothing else, per
+ *     {@code app/cpy/COCOM01Y.cpy} L26 to L28, which is the sole authority for that domain. It is
+ *     required and must not be blank, and is checked last of the three at
+ *     {@code app/cbl/COUSR02C.cbl} L204. Where the names stand as submitted once the update is applied,
+ *     this value stands only if the identity provider's group membership moved with it: the authority a
+ *     request is matched against is derived from the signed {@code cognito:groups} claim, not from
+ *     {@code auth.users.user_type}, so this component is a request for an authority change and not a
+ *     description of one. {@code com.carddemo.auth.mapper.UserMapper} refuses to apply a value here that
+ *     differs from the row's, and {@code com.carddemo.auth.service.UserAuthorityService} is what moves
+ *     both together
  */
+// WHY : Refactoring Rationale: the two name components publish a non-whitespace pattern into the
+//       GENERATED document beside their non-blank constraint, and the review that required it named this
+//       record specifically. The committed update schema declares that facet on both names; the document
+//       generated from these annotations did not, because a non-blank constraint renders as a minimum
+//       length and nothing else -- so the served description of this body admitted a name of twenty
+//       spaces that this record refuses. It is a schema-documentation annotation and not a second runtime
+//       constraint, because the non-blank constraint already refuses exactly those values and a @Pattern
+//       would report one fault twice. The expression is declared once, on
+//       SignOnRequest.NON_WHITESPACE_PATTERN, where the full argument is recorded.
+// WHY : Assumptions: userType takes no such pattern, matching both the committed schema's own note on
+//       the same property and the sibling create body. Its domain constraint admits exactly "A" and
+//       "U", so a presence pattern would restate a rule the domain states more precisely.
 public record UpdateUserRequest(
         @NotBlank(message = MESSAGE_FIRST_NAME_REQUIRED)
+        @Schema(pattern = SignOnRequest.NON_WHITESPACE_PATTERN)
         @Size(max = NAME_MAX_LENGTH, message = MESSAGE_FIRST_NAME_TOO_LONG) String firstName,
         @NotBlank(message = MESSAGE_LAST_NAME_REQUIRED)
+        @Schema(pattern = SignOnRequest.NON_WHITESPACE_PATTERN)
         @Size(max = NAME_MAX_LENGTH, message = MESSAGE_LAST_NAME_TOO_LONG) String lastName,
         @NotBlank(message = MESSAGE_USER_TYPE_REQUIRED)
         @Size(min = USER_TYPE_LENGTH, max = USER_TYPE_LENGTH,

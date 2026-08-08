@@ -76,6 +76,37 @@ aws stepfunctions redrive-execution --execution-arn "$EXECUTION_ARN"
 If the failure occurred after online writes were quiesced, confirm the cleanup
 path cleared the read-only flag before admitting interactive writes.
 
+### An execution that stopped at `OnlineWriteLeaseUnavailable`
+
+This is not a data failure and needs no redrive. It means the execution asked for
+the online-write bracket and another execution already held it, so it stopped
+before staging or posting anything — and, deliberately, without touching the other
+execution's lease. Assumptions: the schedule starts one execution per night, so the
+normal cause is that the **previous** night is still running; the action is to find
+that execution rather than to rerun this one.
+
+```bash
+# WHAT: read the lease item to find which execution holds the bracket and until when.
+# WHY : Assumptions: the lease is a DynamoDB item, not the Parameter Store flag. The
+#       flag is a derived boolean every online service reads; ownership and expiry live
+#       only here, which is why a stuck bracket is diagnosed against this table and not
+#       against the parameter. LEASE_KEY is derived from the flag parameter path, so it
+#       is spelled the same way the handler spells it.
+LEASE_TABLE="carddemo-<env>-online-write-lease"
+FLAG_PARAMETER="/carddemo/<env>/batch/online-writes-enabled"
+aws dynamodb get-item --table-name "$LEASE_TABLE" --consistent-read \
+  --key "{\"LeaseName\":{\"S\":\"online-write-gate:${FLAG_PARAMETER}\"}}"
+```
+
+Compare `expiresAt` with the current epoch second. If it is in the **future**, an
+execution legitimately holds the window: let it finish, or abort it so the
+finalizer rule releases the bracket. If it is in the **past**, no action is needed
+at all — the next acquisition will take the lease over, because the acquisition
+condition admits an expired lease. Trade-offs: that is why a crashed execution does
+not require an operator to clear anything by hand, and it is also why the item
+should not be deleted manually while `expiresAt` is still in the future — doing so
+would hand the bracket to a second execution while the first is still writing.
+
 ## Start an Ad-Hoc Report
 
 ```bash

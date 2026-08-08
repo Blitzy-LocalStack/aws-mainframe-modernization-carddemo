@@ -537,6 +537,58 @@ Presence AND completeness, never presence alone.
     -->
     <module name="CommentsIndentation"/>
 
+    <!--
+      Refactoring Rationale: two import modules are configured, and they are the
+        only two, because a duplicated import is what made a real defect
+        invisible. Two supporting authority files each declared
+        `import org.springframework.security.authorization.AuthorizationManager;`
+        twice - authorization-service's SecurityConfig and reference-service's -
+        and the second copy sat several lines below the first, past an unrelated
+        import, where no reader comparing the two files would notice it. Nothing
+        failed: the compiler accepts a repeated single-type import silently, so
+        the duplication survived review of the very files whose subject is who
+        may reach which route. These two modules make that duplication, and an
+        import left behind by a deleted reference, build failures instead.
+      Assumptions: this narrows the header's blanket exclusion of the import
+        family rather than reversing it, and the line the narrowing follows is
+        whether the finding is a FORMATTING preference or a defect. ImportOrder
+        and CustomImportOrder are preferences - they would fail a build over
+        where an import sits, which is exactly what CONTRIBUTING.md asks
+        contributors not to churn, and the second copy above was in fact
+        misordered as well without that being the problem with it. RedundantImport
+        and UnusedImports report code that has no effect: a duplicate, an import
+        of the current package, an import of java.lang, or a name nothing
+        references. Neither can be satisfied by moving a line, and neither can
+        fire on code that does something.
+      Alternatives Considered: leaving both out and relying on review, which is
+        what the header's import-family exclusion previously implied for these
+        two as well. Rejected because review is what already missed it, twice, in
+        two files; and considered too was adding AvoidStarImport for symmetry,
+        rejected because no star import exists anywhere in the reactor, so the
+        module would guard a shape nothing has and its first failure would be on
+        a style question rather than on a defect.
+      Trade-offs: an import that is unused only because the code referencing it
+        is not yet authored now fails the build rather than waiting. That is
+        accepted, and it is the smaller cost: an unreferenced import is
+        indistinguishable from a leftover, so a reader cannot tell a placeholder
+        from a mistake, whereas adding the import beside the code that uses it
+        costs one line at the moment it is needed.
+    -->
+    <module name="RedundantImport"/>
+    <module name="UnusedImports">
+      <!--
+        Assumptions: Javadoc references count as usage. A type named only in an
+          {@link} or an at-clause is referenced by the documentation this rule set
+          exists to enforce, so with this property false every such import would
+          be reported and the mechanical repair would be to delete the import and
+          break the link. That would set the two halves of Rule 1 against each
+          other - a module configured for code hygiene would degrade the very
+          Javadoc the rest of this file requires - which is why the property is
+          set explicitly here rather than left at its default.
+      -->
+      <property name="processJavadoc" value="true"/>
+    </module>
+
   </module>
 
   <!--
@@ -595,13 +647,21 @@ Trade-offs: the suppression filters below are an integrity decision rather
     list of exemptions in one place.
 
 Whole families:
-  - Naming, whitespace, imports including ImportOrder, sizes including
-    LineLength, metrics and headers. The charter of this file is Javadoc
-    enforcement. Configuring these would fail a migration build on style
-    findings Rule 1 never raises, and CONTRIBUTING.md asks for the opposite:
-    "Modify the source; please focus on the specific change you are
-    contributing. If you also reformat all the code, it will be hard for us
-    to focus on your change."
+  - Naming, whitespace, the ORDERING half of the import family including
+    ImportOrder and CustomImportOrder, sizes including LineLength, metrics and
+    headers. The charter of this file is Javadoc enforcement. Configuring these
+    would fail a migration build on style findings Rule 1 never raises, and
+    CONTRIBUTING.md asks for the opposite: "Modify the source; please focus on
+    the specific change you are contributing. If you also reformat all the code,
+    it will be hard for us to focus on your change."
+
+    Refactoring Rationale: this entry used to exclude the import family whole,
+    "imports including ImportOrder", and that was too wide by two modules.
+    RedundantImport and UnusedImports are now configured inside TreeWalker, with
+    the reasoning recorded there: both report code that has no effect rather than
+    code placed somewhere a reader would not prefer, so neither is a style finding
+    and neither can be satisfied by moving a line. The ordering modules remain
+    excluded on exactly the ground this entry states.
   - ImportControl specifically. Layering here is owned by ArchUnit, in the
     LayeringRulesTest authored once in common-lib's test tree and re-run by
     each module against its own classes: no AWS SDK or web type inside a

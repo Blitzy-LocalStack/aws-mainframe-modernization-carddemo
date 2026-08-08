@@ -299,22 +299,22 @@
  *
  * <h2>The subtree this package roots</h2>
  *
- * <p>Assumptions: this inventory is the context's <b>target contract</b> as the migration plan
- * assigns it, not a measurement of the directories present beside this one today. Eight package
- * charters make up the context at target, this one included; <b>six of the eight exist at this
- * checkpoint</b> -- this root, {@code .service}, {@code .repository}, {@code .domain},
- * {@code .dto} and {@code .config} -- while {@code .api} and {@code .mapper} are <b>planned and
- * not yet authored</b>. Each is marked as such in the list below, so a reader can tell a target
- * from a measurement without leaving this charter. Each subpackage is named for its layer, so the
- * layer a type belongs to is legible from its import alone:</p>
+ * <p>Assumptions: <b>all eight package charters that make up this context exist</b>, this one
+ * included -- this root, {@code .api}, {@code .service}, {@code .repository}, {@code .domain},
+ * {@code .dto}, {@code .mapper} and {@code .config} -- so the list below is a measurement of the
+ * directories beside this one and not a target awaiting them. Each subpackage is named for its layer,
+ * so the layer a type belongs to is legible from its import alone:</p>
  *
- * <p>Refactoring Rationale: an earlier revision of this charter stated the figure of eight
- * flatly, which read as a claim that all eight directories existed. Two did not, so the count was
- * a target presented as an inventory. The correction marks the two rather than deleting them,
- * because the plan does assign both -- {@code .api} carries the REST adapters and {@code .mapper}
- * the fixed-width boundary -- and deleting them would lose the design the authors of those
- * packages work from. This mirrors the convention already used by the test charter at
- * {@code com.carddemo.auth.api}, so the module states the distinction one way and not two.</p>
+ * <p>Refactoring Rationale: two earlier revisions of this paragraph are corrected here rather than
+ * overwritten silently, because each misled a reader in a different direction. The first stated the
+ * figure of eight flatly at a point when two directories did not exist, so a count was presented as an
+ * inventory. The second marked {@code .api} and {@code .mapper} as planned -- which was true when it
+ * was written and is now false, {@code api/AuthController.java} and {@code mapper/UserMapper.java}
+ * both being present. The second wording was the more damaging of the two: a reader looking for the
+ * REST adapter or the fixed-width boundary would have been told to expect neither and would have had no
+ * reason to open the directory that holds them. Assumptions: the correction removes the planned markers
+ * entirely rather than moving them, because no subpackage of this context is now outstanding, and a
+ * marker kept for symmetry would be the next thing to go stale.</p>
  *
  * <dl>
  *   <dt>{@code com.carddemo.auth}</dt>
@@ -322,8 +322,9 @@
  *       Records that decision D-4 declines plaintext-password parity.</dd>
  *
  *   <dt>{@code .api}</dt>
- *   <dd><b>Planned, not yet authored.</b> REST adapters only -- transport validation, HTTP
- *       status mapping, delegation. No business rules, no persistence access.</dd>
+ *   <dd>REST adapters only -- transport validation, HTTP status mapping, delegation. No business
+ *       rules, no persistence access. Holds {@code AuthController}, which serves the three pre-token
+ *       exchanges: sign-on, the sign-on challenge answer and token renewal.</dd>
  *
  *   <dt>{@code .service}</dt>
  *   <dd>COBOL paragraph-to-method business behaviour, identity exchange, transaction boundaries,
@@ -341,8 +342,8 @@
  *       page type, no local error type.</dd>
  *
  *   <dt>{@code .mapper}</dt>
- *   <dd><b>Planned, not yet authored.</b> The sole boundary at which fixed-width,
- *       trailing-blank and FILLER representation concerns may appear.</dd>
+ *   <dd>The sole boundary at which fixed-width, trailing-blank and FILLER representation concerns
+ *       may appear. Holds {@code UserMapper}.</dd>
  *
  *   <dt>{@code .config}</dt>
  *   <dd>Stateless JWT security, OpenAPI metadata, datasource and {@code search_path} wiring.</dd>

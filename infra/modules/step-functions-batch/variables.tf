@@ -663,9 +663,15 @@ variable "quiesce_function_arn" {
 #   outside the execution -- an EventBridge rule on the daily machine's terminal
 #   status, since an execution timed out at the top level or aborted by an
 #   operator runs no further state. This ARN is therefore granted to
-#   events.amazonaws.com as well as to the execution role; the handler
-#   overwrites the parameter unconditionally, so being called twice for one night
-#   costs one idempotent write.
+#   events.amazonaws.com as well as to the execution role.
+#   Refactoring Rationale: this note previously said the handler "overwrites the
+#   parameter unconditionally, so being called twice for one night costs one
+#   idempotent write". The release is no longer unconditional -- it is a conditional
+#   delete of a lease item that succeeds only for the recorded owner or an expired
+#   lease -- and unconditional is precisely what made the out-of-graph rule able to
+#   re-enable online writes underneath an execution that still held the bracket.
+#   Being called twice for one night is still cheap, but for a different reason: the
+#   second call finds no lease to delete, reports that, and writes no parameter.
 variable "resume_function_arn" {
   description = "ARN of the function invoked to clear the online read-only flag, closing the batch window. Declared by the environment root. This is the migrated form of app/jcl/OPENFIL.jcl and the counterpart of the quiesce state: it is invoked on the success path and on the failure path alike, because a chain that failed without clearing the flag it set would leave the online services read-only after the window ended. It is additionally invoked from outside the execution, by an EventBridge rule on the daily machine's terminal status, so a timed-out or operator-aborted execution -- which runs no further state and so reaches neither in-execution path -- still releases the flag."
 
@@ -732,6 +738,46 @@ variable "read_only_flag_parameter_name" {
 }
 
 # -----------------------------------------------------------------------------
+# Assumptions: this is a filesystem path inside the data-migration task, not a bucket
+#   or a URI. The staging command resolves each seed dataset to a bare source file NAME
+#   through its own registry and joins it to this directory, so the value names where
+#   those files are mounted rather than what they are called.
+# Trade-offs: a default is offered rather than the input being required, because every
+#   deployment of this stack mounts the extracts at the same conventional location and a
+#   required input would make the module unusable without restating that convention. The
+#   cost is that a deployment which mounts them elsewhere and forgets to say so gets a
+#   staging failure naming an absent file rather than a plan-time error -- acceptable,
+#   because the command reports the variable it consulted and the file it looked for, so
+#   the diagnosis is one log line rather than an investigation.
+# Assumptions: making the extracts available at this path is an OPERATOR action and is
+#   documented as one in docs/runbooks/data-migration.md. This module cannot perform it:
+#   it provisions no filesystem, and the AAP places a live deployment outside this
+#   scope. What the module owes is that the container is told where to look, which is
+#   what this input supplies.
+variable "dataset_staging_root" {
+  description = "Absolute path inside the data-migration container where the exported seed extracts are mounted. The staging command joins each dataset's registered source file name to this directory; it ships no extract in its image, so this is the only thing that tells it where to read. Populating the path is an operator action documented in docs/runbooks/data-migration.md."
+
+  type    = string
+  default = "/mnt/carddemo-extracts"
+
+  validation {
+    # Assumptions: an ABSOLUTE path is required. A relative value would resolve against
+    #   the container's working directory, which the image sets and this module does not
+    #   control, so the same configuration would read different directories if that
+    #   working directory ever changed.
+    condition     = startswith(var.dataset_staging_root, "/")
+    error_message = "dataset_staging_root must be an absolute path beginning with /."
+  }
+
+  validation {
+    # Assumptions: a trailing slash is refused rather than tolerated so the value has one
+    #   spelling. Both forms work when joined, but permitting both means two deployments
+    #   can differ in a way that shows up in logs and diffs while meaning the same thing.
+    condition     = var.dataset_staging_root == "/" || !endswith(var.dataset_staging_root, "/")
+    error_message = "dataset_staging_root must not end with a trailing slash."
+  }
+}
+
 # Seed-dataset staging -- the branches of the second state's Map
 # -----------------------------------------------------------------------------
 
@@ -746,6 +792,26 @@ variable "read_only_flag_parameter_name" {
 # Trade-offs: the list is exposed because a caller occasionally needs to stage a
 #   SUBSET -- reloading one master after a correction rather than the whole set
 #   -- which is then a tfvars change instead of a module edit.
+# Assumptions: these ten names are a CROSS-LANGUAGE CONTRACT, not a local label set.
+#   Each is passed verbatim as `--dataset` to the data-migration CLI, which resolves
+#   it through `carddemo_migration.seed_datasets` to obtain the bounded-context
+#   domain, the prefix segment, the source extract and the declared record length.
+#   The registry there is the single authority for that binding; this list is the
+#   orchestrator's half of the same vocabulary.
+# Refactoring Rationale: the two halves used to disagree completely, and every
+#   staging branch failed because of it. This variable sent plural snake-case tokens
+#   while the CLI validated `--dataset` against the copybook LAYOUT registry, whose
+#   keys are short upper-case names -- `accounts` against `ACCOUNT`, `card_xref`
+#   against `XREF` -- so no name here could ever be accepted. The orchestrator also
+#   supplied only `--dataset` and `--business-date` while `--source`, `--generation`
+#   and `--domain` were each required, so the task exited in argument parsing with
+#   status 2 before reaching any staging code. The registry closed both gaps: it
+#   accepts these tokens and derives the rest.
+# Assumptions: the agreement is ENFORCED rather than trusted. HCL and Python share
+#   no build and cannot import one another, so
+#   `data-migration/tests/test_seed_datasets.py` reads this variable's default list
+#   and asserts it names exactly the registry's tokens. A name added on either side
+#   without the other fails that test rather than a nightly execution.
 variable "seed_datasets" {
   description = "Dataset names the seed-staging state iterates over, one Map branch and one data-migration task per name. The default is the ten loaded masters, one per IDCAMS master-refresh load job in app/jcl/; DALYTRAN is absent because posting reads it directly as sequential input rather than loading it into a master table. An environment may pass a subset to restage one master without a module edit."
 

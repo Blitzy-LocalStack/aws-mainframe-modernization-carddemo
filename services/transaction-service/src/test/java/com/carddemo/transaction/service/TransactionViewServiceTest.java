@@ -145,8 +145,20 @@ class TransactionViewServiceTest {
     /** The sixteen-character identifier every case reads on, at the width the key column declares. */
     private static final String TRANSACTION_ID = "0000000000683580";
 
-    /** The account number the stored row carries, which the mapper and not this service masks. */
-    private static final String CARD_NUMBER = "4859452612877065";
+    /**
+     * The sixteen-digit primary account number the stored row carries, masked by the mapper and never
+     * by this service.
+     *
+     * <p>Refactoring Rationale: this member was described as "the account number", which names a
+     * different field. {@code TRAN-CARD-NUM} is a sixteen-digit primary account number; the account
+     * identifier is the eleven-digit {@code ACCT-ID} that reaches this context through the card
+     * cross-reference and appears nowhere on this row. The two are not interchangeable in the
+     * disclosure rule that governs both: a primary account number may be rendered THROUGH
+     * {@code CardNumberMasker} and an account identifier is omitted outright, so a reader who took
+     * this constant for an account identifier would conclude the masked rendering below was a rule
+     * violation rather than the rule being followed.</p>
+     */
+    private static final String PRIMARY_ACCOUNT_NUMBER = "4859452612877065";
 
     /** The masked rendering the mocked mapper answers with, standing for the mapper's own output. */
     private static final String MASKED_CARD_NUMBER = "************7065";
@@ -196,7 +208,7 @@ class TransactionViewServiceTest {
                 "Abshire-Lowe",
                 "North Enoshaven",
                 "72112",
-                CARD_NUMBER,
+                PRIMARY_ACCOUNT_NUMBER,
                 LocalDateTime.parse("2022-06-10T19:27:53"),
                 LocalDateTime.parse("2022-06-11T01:02:03.123456"));
     }
@@ -239,8 +251,19 @@ class TransactionViewServiceTest {
      * matters for the navigation case below, whose whole claim is about what the class does NOT
      * declare.</p>
      *
+     * <p>Refactoring Rationale: the returned order is UNSPECIFIED, and this paragraph replaces a
+     * {@code @return} that promised declaration order. Nothing guarantees that: the reflective member
+     * enumeration this helper walks is documented to return the members in no particular order, so the
+     * promise was a property of one runtime's behaviour rather than of the platform, and a run on
+     * which it did not hold would have broken a caller that relied on it. No caller does -- both
+     * consumers ask only whether a value is present or absent in the collection -- so the promise was
+     * removed rather than made true by sorting. Sorting was the alternative and was declined because
+     * it would impose an order on a collection nothing reads in order, and a reader could then take
+     * that order to be meaningful.</p>
+     *
      * @return the value of every {@code public static final String} on
-     *     {@link TransactionViewService}, in declaration order
+     *     {@link TransactionViewService}, in no guaranteed order; callers must treat the result as a
+     *     set of values rather than as a sequence
      * @throws IllegalAccessException if a member reported as publicly readable cannot be read, which
      *     would mean the reflective assumption above no longer holds
      */

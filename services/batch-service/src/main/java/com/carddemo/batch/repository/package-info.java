@@ -113,34 +113,51 @@
  * discipline that table is reached with, because the discipline is the part a caller cannot infer
  * from the name.</p>
  *
- * <p>Refactoring Rationale: each entry states LANDED or PLANNED, and at this revision THREE of the
- * eight are landed -- {@code BatchRunRepository}, {@code TransactionCategoryBalanceRepository} and
- * {@code DisclosureGroupRepository}. An earlier revision marked every entry PLANNED, including
- * {@code BatchRunRepository} whose file was already present, so a reader consulting the roster to learn
- * whether the step ledger had an interface was told it did not. The three that are here arrived with
- * the services that call them -- the ledger with {@code BatchStepLedger}, the category balances with
- * {@code CategoryBalanceService} and the rates with {@code InterestCalculationService} -- and the
- * remaining five arrive the same way, with the jobs that read and write their tables. The count is a
- * measurement against the directory and has to be re-measured whenever a file is added to it.</p>
+ * <p>Refactoring Rationale: each entry states LANDED, and at this revision ALL EIGHT are, so the roster
+ * and the directory now hold the same set. Two earlier revisions both understated it. The first marked
+ * every entry PLANNED, including {@code BatchRunRepository} whose file was already present, so a reader
+ * consulting the roster to learn whether the step ledger had an interface was told it did not. The second
+ * corrected that to THREE and left five marked PLANNED, three of which -- the feed, the ledger and the
+ * reject stream -- were already present as well. Both understatements had the same cause: the count was
+ * written from what the checkpoint had just added rather than measured against the directory. It is
+ * measured now, and it is re-measured whenever a file is added.</p>
+
+ *
+ * <p>Assumptions: the last two to arrive, {@code AccountRepository} and {@code CardXrefRepository}, came
+ * with the jobs that read them rather than with a service, which is what the earlier revisions predicted:
+ * the account master and the cross-reference are read by the posting job and by the interest accrual, and
+ * neither is reached by any rule in {@code com.carddemo.batch.service}. Every one of the eight now has at
+ * least one production caller, and each caller is a job or a service in this module rather than a
+ * test.</p>
  *
  * <dl>
  *   <dt>{@code BatchRunRepository} into {@code batch.batch_run}</dt>
  *   <dd>LANDED. The <b>only</b> table this module owns, and the only entry here with no baseline
- *       record behind it. It is the durable step ledger, and it is what makes a resumed step
- *       idempotent: a step that already recorded completion for a run becomes a no-op rather than
- *       repeating its writes. Assumptions: the uniqueness constraint that makes a row an
- *       idempotency key is {@code uq_batch_run_run_step} over the run and step pair, declared by
+ *       record behind it. It is the durable step ledger, and it is the mechanism <i>intended</i> to
+ *       make a resumed step idempotent: a step that already recorded completion for a run is meant
+ *       to become a no-op rather than repeating its writes. Assumptions: the uniqueness constraint
+ *       that makes a row an idempotency key is {@code uq_batch_run_run_step} over the run and step
+ *       pair, declared by
  *       {@code services/batch-service/src/main/resources/db/migration/V1__batch.sql} and mirrored
  *       on the {@code BatchRun} mapping, so a duplicate insert is refused by the database rather
- *       than by a prior read.</dd>
+ *       than by a prior read. Trade-offs: the repository and its table are landed, but the
+ *       idempotency they describe is <b>not operative yet</b>, because the only class that reads or
+ *       writes them -- {@code BatchStepLedger} in the sibling service package -- has no production
+ *       caller while the job beans remain unauthored. Two consequences are worth recording here
+ *       rather than at the call site that does not exist: the restart guarantee that actually holds
+ *       today is the coarser one Spring Batch gives from the identifying business-date job
+ *       parameter, and the same uniqueness constraint named above will <i>reject</i> the retry
+ *       insert that {@code BatchStepLedger} performs after a failed attempt unless the caller
+ *       removes the terminal row first, which is the caller-side obligation its own comment
+ *       records and which no caller yet discharges.</dd>
  *
  *   <dt>{@code DailyTransactionRepository} into {@code ledger.daily_transactions}</dt>
- *   <dd>PLANNED. Read-only from this module, and reached by an ordered forward walk rather than by
+ *   <dd>LANDED. Read-only from this module, and reached by an ordered forward walk rather than by
  *       key. It is the batch input stream: the preflight and posting both read it and neither
  *       writes it, which is why no write method belongs on this interface at all.</dd>
  *
  *   <dt>{@code TransactionRepository} into {@code ledger.transactions}</dt>
- *   <dd>PLANNED. Write plus one ordered walk. Posting and interest accrual both insert here, and
+ *   <dd>LANDED. Write plus one ordered walk. Posting and interest accrual both insert here, and
  *       the combine step reads the table in transaction-identifier order under the contract
  *       recorded below.</dd>
  *
@@ -155,7 +172,7 @@
  *       that a caller can still tell an insert from an update.</dd>
  *
  *   <dt>{@code TransactionRejectRepository} into {@code ledger.transaction_rejects}</dt>
- *   <dd>PLANNED <b>in this package</b>, and the qualification is load-bearing: the owning ledger
+ *   <dd>LANDED <b>in this package</b>, and the qualification is load-bearing: the owning ledger
  *       context has already authored an interface of the same name over the same table, at
  *       {@code services/transaction-service/src/main/java/com/carddemo/transaction/repository/TransactionRejectRepository.java}.
  *       The two are distinct types in distinct packages reached through distinct schema grants --
@@ -169,12 +186,12 @@
  *       produced it.</dd>
  *
  *   <dt>{@code AccountRepository} into {@code account.accounts}</dt>
- *   <dd>PLANNED. A keyed read and an update. This is the most contended table the module touches:
+ *   <dd>LANDED. A keyed read and an update. This is the most contended table the module touches:
  *       all three migrated batch programs read it and two of them rewrite it, so it is the one
  *       whose optimistic-concurrency version column the update path has to respect.</dd>
  *
  *   <dt>{@code CardXrefRepository} into {@code account.card_xref}</dt>
- *   <dd>PLANNED. Read-only, and <b>reached by two distinct access paths rather than one</b> --
+ *   <dd>LANDED. Read-only, and <b>reached by two distinct access paths rather than one</b> --
  *       by card number, and by account identifier. Assumptions: the second path is not an
  *       invention of the migration. {@code app/cbl/CBACT04C.cbl:37} declares
  *       {@code RECORD KEY IS FD-XREF-CARD-NUM} and the very next line,

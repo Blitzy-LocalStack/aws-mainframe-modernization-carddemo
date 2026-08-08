@@ -19,9 +19,9 @@
 //       browse rulings, because a citation a reader cannot verify is worse than
 //       no citation at all.
 /**
- * Data access for the reference-data bounded context: seven Spring Data JPA repository interfaces over
- * the six tables of the PostgreSQL {@code reference} schema, together with the keyset queries that
- * replace the baseline's cursor paging.
+ * Data access for the reference-data bounded context: six Spring Data JPA repository interfaces over
+ * the six tables of the PostgreSQL {@code reference} schema, one interface per table, together with the
+ * keyset queries that replace the baseline's cursor paging.
  *
  * <h2>Purpose</h2>
  *
@@ -35,7 +35,7 @@
  * to a type in this package is the one this descriptor constrains: how a row is located, and in what
  * order rows are returned.</p>
  *
- * <p>Assumptions: all seven types in this package are {@code interface} declarations with no
+ * <p>Assumptions: all six types in this package are {@code interface} declarations with no
  * implementation authored anywhere, because the persistence provider derives one at run time from the
  * method names and the query annotations. This matters for documentation rather than for behaviour:
  * {@code config/checkstyle/checkstyle.xml} lists {@code INTERFACE_DEF} first among the tokens its
@@ -52,20 +52,38 @@
  * emptiness through {@code NonEmptyAtclauseDescription}, so an invented empty tag would be reported
  * rather than credited.</p>
  *
- * <h2>The seven repositories, the entities they read, and their identities</h2>
+ * <h2>The six repositories, the entities they read, and their identities</h2>
  *
- * <p>Assumptions: all seven are landed as compilation units beside this descriptor, so a reader who
- * cannot open one has found a gap rather than the expected state. The closed set is eight compilation
- * units: this descriptor and the seven interfaces. The pairing below is settled here and enumerated
+ * <p>Assumptions: all six are landed as compilation units beside this descriptor, so a reader who
+ * cannot open one has found a gap rather than the expected state. The closed set is seven compilation
+ * units: this descriptor and the six interfaces. The pairing below is settled here and enumerated
  * nowhere else, which is why it is written out in full rather than left to be inferred from a file
  * name.</p>
  *
- * <p>Assumptions: the mapping is one interface per table for all six tables, and the area-code table
- * carries a second interface in addition, so seven interfaces address six tables. That is the one
- * departure from a file-name-shaped reading of this directory, and it is deliberate: the two
- * interfaces over that table divide by question rather than overlap, one answering which rows to show
- * and the other whether a code belongs to a named baseline list. Each of the two names the other and
- * states what it is for, so neither is to be read as a duplicate of the other.</p>
+ * <p>Assumptions: the mapping is exactly one interface per table, with no table carrying a second.</p>
+ *
+ * <p>Refactoring Rationale: this directory held NINE interfaces over these six tables. Three of them --
+ * {@code PhoneAreaCodeRepository}, {@code StateRepository} and {@code StateZipPrefixRepository} -- were
+ * second interfaces over the same three entities the {@code Us}-prefixed three already address, and this
+ * charter described the duplication as one deliberate division of one table by question. That
+ * description did not survive measurement: the duplication covered three tables rather than one, and
+ * none of the three had a single consumer anywhere in the codebase, while the {@code Us}-prefixed three
+ * are the ones {@code api/AddressLookupController} injects. Two interfaces over one entity is not a
+ * division of labour when nothing calls either side of it; it is two derivations of the same query
+ * surface that a later reader has to choose between with no basis for choosing. All three are withdrawn.
+ *
+ * <p>Assumptions: two methods went with them and their loss is accounted for rather than incidental.
+ * {@code existsByAreaCodeAndCodeClass} answered whether a code belongs to a named classification, and
+ * {@code findByAreaCode} on the surviving interface answers strictly more -- it returns the row WITH its
+ * classification, which is what the published item route serves and what the account context's adapter
+ * compares. {@code countByCodeClass} answered a per-classification census that no published route asks
+ * for. Neither had a caller.
+ *
+ * <p>Assumptions: the withdrawn area-code interface additionally claimed that the account context's
+ * address validation reaches this data through that interface's existence check. The claim named the
+ * wrong mechanism: that context holds no repository over this schema at all, and its
+ * {@code service/RestReferenceAddressLookup} reads the three published item routes over HTTP. The
+ * surviving interface makes no such claim.
  *
  * <dl>
  *   <dt>{@code TransactionTypeRepository}</dt>
@@ -93,19 +111,9 @@
  *   <dd>Over {@code UsPhoneAreaCode}, table {@code reference.us_phone_area_codes}, identity
  *       {@code String}. Six walks and a keyed finder: three over the whole table and three narrowed
  *       by the classification column, because the baseline holds one broad allow-list and two
- *       sublists of it. This is the listing surface over that table: every method here takes a bound
- *       and returns rows, and none of them answers a membership question.</dd>
- *
- *   <dt>{@code PhoneAreaCodeRepository}</dt>
- *   <dd>Over the same {@code UsPhoneAreaCode} and the same table, identity {@code String}. The
- *       membership surface: a classification-scoped existence check, a per-classification census and a
- *       full ordered enumeration of one classification, with the broad existence check inherited from
- *       the framework rather than redeclared. Assumptions: the classification-scoped check has to
- *       exist somewhere, and no method on the listing interface expresses it -- that interface
- *       declares no existence predicate at all. It is load-bearing rather than a convenience, because
- *       the only baseline program that copies this allow-list tests one of the three lists and not
- *       their union, so a broad check standing in for it would accept codes the baseline declines and
- *       report nothing. That interface documents the arithmetic and cites the program and line.</dd>
+ *       sublists of it. Assumptions: this is the ONLY interface over that table. Its keyed finder
+ *       returns the row together with its classification, which is what the published item route serves
+ *       and what a caller asking a membership question compares against.</dd>
  *
  *   <dt>{@code UsStateRepository}</dt>
  *   <dd>Over {@code UsState}, table {@code reference.us_states}, identity {@code String}. Three walks

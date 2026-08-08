@@ -302,50 +302,30 @@ CREATE TABLE card.cards (
     --       for.
     version           INTEGER      NOT NULL DEFAULT 0,
 
-    -- WHY : Refactoring Rationale: this column has NO copybook counterpart.
-    --       It was ADDED so that a published route can name one card without
-    --       putting that card's number into a request target. The baseline
-    --       never needed it because the number it navigated with never left
-    --       the region: COCRDLIC holds each rendered row's identity in its
-    --       own WORKING-STORAGE as WS-ROW-CARD-NUM, and on a row selection
-    --       moves that value straight into the COMMAREA before transferring
-    --       control (app/cbl/COCRDLIC.cbl:532-534 for the detail view,
-    --       :560-562 for the update). A COMMAREA is region storage; nothing
-    --       a user, a browser or an intermediary can read. An HTTP path is
-    --       the opposite -- load-balancer access logs retain the full target
-    --       and browsers retain history -- so carrying the number there
-    --       would disclose it to two durable stores the baseline never wrote
-    --       it to. A surrogate selector reproduces the baseline's actual
-    --       arrangement more closely than the number would.
+    -- WHY : Refactoring Rationale: a card_selector UUID column was declared
+    --       here, NOT NULL DEFAULT gen_random_uuid() with a unique
+    --       constraint, and it is REMOVED rather than wired up. Its purpose
+    --       was sound -- a published route should name one card without
+    --       putting that card's number into a request target, because a
+    --       COMMAREA is region storage nothing outside the region reads
+    --       whereas an HTTP path is retained by load-balancer access logs and
+    --       browser history alike. The defect was that a SECOND mechanism was
+    --       independently built for the same purpose and only that one is
+    --       reachable: CardMapper seals the card number into a keyed,
+    --       purpose-scoped token and opens it back to the primary key, so
+    --       findById serves the route. No repository method ever addressed
+    --       this column, so no request could resolve to a row through it.
     --
-    --       Assumptions: gen_random_uuid() is core PostgreSQL from 13
-    --       onward, so this needs no extension; the deployed engine is 17.
-    --       Values are random rather than derived, which is what makes the
-    --       column disclose nothing: there is no function from a selector
-    --       back to a card number because none was used to produce it.
-    --
-    --       Assumptions: rows reach this table two ways and BOTH generate a
-    --       selector, by different generators that agree on shape. Rows
-    --       written through the service get one from
-    --       UUID.randomUUID() in the Card constructor; rows written by the
-    --       bulk load get one from this DEFAULT, because the seed extract
-    --       app/data/ASCII/carddata.txt has no field for it. Stating both
-    --       here because a reader who saw only the DEFAULT might reasonably
-    --       assume the entity leaves the column to the database, and an
-    --       entity that did could not return the selector it had just
-    --       inserted without re-reading the row.
-    --
-    --       Trade-offs: a selector is an IDENTIFIER, not a capability. It is
-    --       unguessable, but nothing is authorised by holding one -- the
-    --       route authority table in
-    --       services/card-service/src/main/java/com/carddemo/card/config/SecurityConfig.java
-    --       decides that, and the administrative read that discloses a full
-    --       number sits behind its own authority. This is why writing a
-    --       selector to an access log is harmless in a way that writing a
-    --       card number is not, and it is recorded rather than left implied
-    --       so that nobody later treats a selector as a secret and builds a
-    --       gate out of it.
-    card_selector     UUID         NOT NULL DEFAULT gen_random_uuid(),
+    --       Alternatives Considered: keeping the column and making it the
+    --       single lookup identity, by adding a finder for it and sealing the
+    --       UUID rather than the card number. Declined because it is the
+    --       larger change for the same capability, and because it is weaker
+    --       on the property the surrogate existed for: a durable UUID is a
+    --       stable correlator across every purpose for the life of the row,
+    --       while a sealed token is scoped by purpose and outlives no key
+    --       rotation. Removing the column also removes the uq_cards_selector
+    --       constraint below and the two-generator arrangement its comment
+    --       described, neither of which has anything left to guarantee.
 
     -- WHY : Trade-offs: the record's trailing 59 bytes stop here, and their
     --       omission is a decision rather than an oversight. FILLER
@@ -371,27 +351,9 @@ CREATE TABLE card.cards (
     --       two errors this table raises in ordinary operation, and the
     --       service answers each with its own response; matching on a
     --       generated name would tie that mapping to a string no file in the
-    --       repository declares. The third, on the selector, is named for
-    --       the same reason even though it is not expected to fire.
+    --       repository declares.
     CONSTRAINT pk_cards PRIMARY KEY (card_num),
 
-    -- WHY : Assumptions: uniqueness is what makes the selector usable as a
-    --       row address at all -- a route that resolved to two cards would
-    --       have no defined answer -- and a UNIQUE constraint rather than a
-    --       plain index because the guarantee is the point and the index is
-    --       the means. The index it creates also serves the lookup every
-    --       selector-addressed route performs, so no separate index is
-    --       declared for it beside idx_cards_account_id at the foot of this
-    --       file.
-    --
-    --       Trade-offs: a collision here is a defect in the generator rather
-    --       than a condition the service can recover from, so it is left to
-    --       raise as a constraint violation instead of being retried. At 122
-    --       random bits per value the probability is negligible across any
-    --       card population this system will hold, and a silent retry loop
-    --       would hide a genuinely broken generator -- for instance one
-    --       seeded identically in every task -- behind eventual success.
-    CONSTRAINT uq_cards_selector UNIQUE (card_selector),
 
     -- WHY : Assumptions: the domain is closed at exactly two values, as
     --       FLG-YES-NO-VALID declares at app/cbl/COCRDUPC.cbl:89-91. All

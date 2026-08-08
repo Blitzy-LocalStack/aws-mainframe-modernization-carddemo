@@ -7,6 +7,8 @@ import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ApiErrorSecurityHandlers;
 import com.carddemo.common.error.GlobalExceptionHandler;
 import com.carddemo.common.web.CorrelationIdFilter;
+import io.swagger.v3.oas.models.OpenAPI;
+import io.swagger.v3.oas.models.SpecVersion;
 import java.io.InputStream;
 import java.util.List;
 import java.util.Map;
@@ -46,6 +48,22 @@ class AuthorizationApiContractTest {
 
     /** The parsed contract, loaded once because it is immutable for the run. */
     private static final Map<String, Object> CONTRACT = loadContract();
+
+    /**
+     * Returns the declared member names of the paged-listing request body.
+     *
+     * <p>Assumptions: read from the contract rather than listed here, so a member added to the body is
+     * covered by the per-field-key obligation automatically instead of when someone remembers to extend a
+     * literal list.</p>
+     *
+     * @return the body's property names, never {@code null}
+     */
+    private static List<String> pageQueryMembers() {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> properties =
+                (Map<String, Object>) schema("PendingAuthPageQuery").get("properties");
+        return List.copyOf(properties.keySet());
+    }
 
     /**
      * Reads and parses the published contract from the classpath.
@@ -109,6 +127,37 @@ class AuthorizationApiContractTest {
      */
     private static Map<String, Object> response(String name) {
         return mapping(mapping(mapping(CONTRACT, "components"), "responses"), name);
+    }
+
+    /**
+     * Confirms the generated document declares the specification version the committed contract does.
+     *
+     * <p>Assumptions: the specification FLAG and the version STRING are asserted separately because
+     * they are independent members and setting one does not set the other. Constructing the document at
+     * 3.1 leaves the string at the model's {@code 3.0.1} default, so a document carrying the flag alone
+     * declares 3.0 while carrying members that exist only in 3.1.</p>
+     *
+     * <p>Refactoring Rationale: this case exists because that was this context's state -- the flag was
+     * set and the string was not -- and nothing failed, because whether the 3.1-only members reach a
+     * reader is decided by which serialiser the library runs rather than by either member asserted here.
+     * The served document was therefore complete while mislabelling its own version, and no assertion
+     * compared it to the contract beside it. The underlying mechanism is measured once, in
+     * account-service's {@code config/OpenApiDocumentTest.java}, against the same library.</p>
+     */
+    @Test
+    @DisplayName("the generated document declares the specification version the contract declares")
+    void generatedDocumentDeclaresTheSpecificationVersionTheContractDeclares() {
+        OpenAPI published = new OpenApiConfig().authorizationServiceOpenApi();
+
+        assertThat(published.getSpecVersion())
+                .as("a 3.1 document must carry the 3.1 flag, not the model's 3.0 default")
+                .isEqualTo(SpecVersion.V31);
+        assertThat(published.getOpenapi())
+                .as("the emitted version string must equal the committed contract's")
+                .isEqualTo(String.valueOf(loadContract().get("openapi")));
+        assertThat(published.getOpenapi()).startsWith("3.1.");
+        assertThat(published.getInfo().getSummary()).isNotBlank();
+        assertThat(published.getInfo().getLicense().getIdentifier()).isNotBlank();
     }
 
     /**
@@ -318,8 +367,18 @@ class AuthorizationApiContractTest {
                     .contains(member);
         }
 
-        for (String parameter : List.of("AccountIdScope", "Cursor", "PagingDirection",
-                "AuthorizationKeyPath")) {
+        // WHY : Refactoring Rationale: AccountIdScope, Cursor and PagingDirection were
+        //   components.parameters entries and are now MEMBERS of the PendingAuthPageQuery request body,
+        //   so the per-field keys they contribute are read from that schema's property names rather than
+        //   from the parameter table. The obligation is unchanged -- every input a constraint can reject
+        //   must appear among the keys the 400 documents -- only the place the input is declared moved.
+        for (String member : pageQueryMembers()) {
+            assertThat(published)
+                    .as("the 400 must name body member %s, which a constraint on it keys", member)
+                    .contains(member);
+        }
+
+        for (String parameter : List.of("AuthorizationKeyPath")) {
             String name = String.valueOf(parameter(parameter).get("name"));
             assertThat(published)
                     .as("the 400 must name parameter %s, which a constraint on it keys", name)

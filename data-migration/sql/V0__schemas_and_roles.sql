@@ -756,9 +756,18 @@ ALTER SCHEMA "authorization" OWNER TO carddemo_authorization_owner;
 -- either. The views therefore belong to data-migration, but necessarily to a
 -- step ordered after the per-service migrations have created the tables they
 -- read, not to this one. That step is data-migration/sql/V1__reporting_views.sql,
--- which creates all four views WITH (security_barrier), assigns each to
--- carddemo_reporting_owner, masks the card number that every ledger-derived view
--- publishes, and grants SELECT on each view by name.
+-- which creates the grouping-key table and seven views WITH (security_barrier),
+-- assigns each to carddemo_reporting_owner, masks the card number that every
+-- ledger-derived view publishes, and grants SELECT on each view by name -- while
+-- revoking the grouping-key table from the service role, so the one physical
+-- relation in that schema is not readable by the context that uses the schema.
+-- WHY : Refactoring Rationale: this sentence read "creates all four views" and
+-- omitted the table. Both halves have been wrong since the statement and
+-- reference projections landed, and the omission mattered more than the
+-- undercount: a reader taking "no view is created here" above together with
+-- "creates all four views" here would conclude the reporting schema holds no
+-- table anywhere, which is the claim section 5's card_grouping_key revoke exists
+-- precisely because it is untrue.
 -- What this script does establish for that context is the
 -- schema they live in, the owner that creates them, and the USAGE grant in
 -- section 5 the service role reads through; a view missing at run time is a
@@ -813,16 +822,44 @@ ALTER SCHEMA reporting OWNER TO carddemo_reporting_owner;
 -- That is the whole point: what is granted here is auditable, and what is not
 -- granted is impossible rather than merely unused.
 --
--- WHY : Assumptions: DELETE is deliberately NOT granted, and its absence is a
--- measurement rather than an oversight. No Java module in the reactor issues a
--- delete against any of these seven schemas -- there is no repository delete call,
--- no deleteById, no deleteAll, no @Modifying delete and no DELETE statement anywhere
--- in services/*/src/main/java. Granting a privilege no code path uses is exactly
--- what least privilege forbids, so it is withheld. The consequence is stated plainly
--- for whoever adds the first delete: it will fail with a permission error naming the
--- table, and the fix is to add DELETE here for that one context under review, not to
--- widen the grant for all seven. That is the fail-closed direction, and it is why
--- the omission is recorded here rather than left to be inferred.
+-- WHY : Assumptions: DELETE is not granted by any statement in THIS file, and the
+-- six places it is genuinely needed are granted table by table in
+-- data-migration/sql/V2__runtime_delete_grants.sql instead. The reason for the split
+-- is mechanical rather than stylistic: this file runs before any table exists, so it
+-- can only express a privilege through GRANT ... ON ALL TABLES IN SCHEMA or
+-- ALTER DEFAULT PRIVILEGES, and neither form can name one table. A DELETE expressed
+-- either way would reach every table in the schema -- for reference that would include
+-- four seeded lookup tables with no delete operation at any layer -- so the privilege
+-- would end up wider than the contract that needs it. V2 names the six tables and
+-- nothing else.
+--
+-- WHY : Refactoring Rationale: this note used to state that DELETE was unnecessary
+-- everywhere, on the strength of a measurement -- "no repository delete call, no
+-- deleteById, no deleteAll, no @Modifying delete and no DELETE statement anywhere in
+-- services/*/src/main/java". The measurement was wrong, and four published capabilities
+-- were failing on it. reference-service publishes two DELETE routes, served by
+-- TransactionTypeService.delete, TransactionCategoryService.delete and
+-- ReferenceBatchUpdateService, each of which calls a repository delete; and
+-- authorization-service sweeps its outbox hourly through
+-- OutboxRepository.deletePublishedBefore, a @Modifying JPQL DELETE driven by
+-- OutboxPublisher.purgePublished under @Scheduled. auth-service publishes
+-- DELETE /users/{userId}, the migration of COUSR03C's EXEC CICS DELETE against USRSEC
+-- (app/cbl/COUSR03C.cbl:307). And authorization-service purges expired pending
+-- authorizations through PurgeJob, the migration of CBPAUP0C's two EXEC DLI DLET verbs
+-- (app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl:310 and L335), which removes the
+-- expired detail rows and then the emptied summary. So the withheld privilege was not
+-- an unused one: it made three contracted routes answer a permission error, and it
+-- left two tables growing without bound -- an outbox whose every row carries a primary
+-- account number, and a pending-authorization pair whose expiry threshold could never
+-- take effect.
+-- The correction is recorded here rather than only in V2, because this is the note a
+-- reader consults when they want to know what a runtime role may do.
+--
+-- WHY : Assumptions: the fail-closed direction still holds and still applies to every
+-- table V2 does not name. A delete against one of those fails with a permission error
+-- naming the table, and the fix is one more line in V2 for that one table under
+-- review -- never a schema-wide grant here, and never ALTER DEFAULT PRIVILEGES, which
+-- would make the NEXT table added to the schema deletable without anyone deciding it.
 --
 -- WHY : Assumptions: TRUNCATE and REFERENCES are likewise not granted. TRUNCATE
 -- bypasses row-level rules and is not something an online service should be able to

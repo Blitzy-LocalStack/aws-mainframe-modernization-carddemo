@@ -21,8 +21,25 @@
  *
  * <h2>What this package translates</h2>
  *
- * <p>Two projections are authored here, and each is cited by what it actually converts rather than by
- * what its name suggests.</p>
+ * <p>Refactoring Rationale: this roster named TWO projections, was corrected to FOUR, and the package
+ * holds FIVE. The omissions were never incidental -- {@code CustomerMapper} is the only cryptography
+ * boundary in the service and the only place either protected identifier is masked,
+ * {@code CardXrefMapper} is where the primary account number is masked to its last four digits, and
+ * {@code AccountMapper} owns the other half of the account-update request that {@code CustomerMapper}
+ * does not. A charter that listed the concerns and then omitted the files performing them would send a
+ * reader looking for the masking rule to the files that do not hold it. Twice corrected by hand is
+ * twice too many, so the enumeration is now MEASURED rather than counted: the marker line below and
+ * every class name enumerated under it are checked against this directory on every build by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
+ * so a sixth translation authored without an entry here fails the build instead of quietly making this
+ * paragraph wrong a third time.</p>
+ *
+ * <p>Five translations are authored here, and each is cited by what it actually converts rather than by
+ * what its name suggests:
+ *
+ * <pre>
+ * this directory: 6 java files = 5 classes + 1 charter
+ * </pre>
  *
  * <ul>
  *   <li>{@code AccountContextMapper} projects the two rows this context owns onto the contract a
@@ -30,11 +47,32 @@
  *       {@code com.carddemo.account.dto.AccountContextView} and
  *       {@code com.carddemo.account.domain.CardXref} to
  *       {@code com.carddemo.account.dto.CardXrefView}.</li>
+ *   <li>{@code CardXrefMapper} projects a cross-reference row onto the published
+ *       {@code com.carddemo.account.dto.CardXrefResponse}, and it is where the primary account number
+ *       of that row is masked to its last four digits. That masking is the reason it exists as a
+ *       separate projection from {@code AccountContextMapper}, whose view travels only between
+ *       services inside the private network and therefore answers a different disclosure question.</li>
+ *   <li>{@code CustomerMapper} translates the 500-byte customer record in both directions -- onto
+ *       {@code com.carddemo.account.dto.CustomerResponse} at RECORD widths, onto the nested customer
+ *       group of {@code com.carddemo.account.dto.AccountViewResponse} at SCREEN widths, and from
+ *       {@code com.carddemo.account.dto.AccountUpdateRequest} back to
+ *       {@code com.carddemo.account.domain.Customer}. It is the only cryptography boundary in this
+ *       service: it declares the port through which a clear identifier becomes stored ciphertext,
+ *       {@code com.carddemo.account.service.CustomerIdentifierCipher} implements it, and both output
+ *       shapes publish the national identifier and the government-issued identifier as a fixed
+ *       withholding marker. It is also the only projection here that produces two shapes from one row,
+ *       which is what makes the record-versus-screen width rule below load-bearing rather than
+ *       advisory.</li>
  *   <li>{@code AccountInquiryReplyMapper} encodes the fixed-layout reply of the inquiry flow, and it
- *       is the wider of the two because a fixed-layout reply is assembled field by declared width
- *       rather than by field name. Its four private helpers each carry one width or one sign
- *       convention, and they are private precisely so that no caller can assemble a reply field by
- *       any other route.</li>
+ *       is wider than its two exported methods suggest because a fixed-layout reply is assembled field
+ *       by declared width rather than by field name. Its private helpers each carry one width or one
+ *       sign convention, and they are private precisely so that no caller can assemble a reply field
+ *       by any other route.</li>
+ *   <li>{@code AccountMapper} owns the ACCOUNT region of the account-update request -- the components
+ *       {@code CustomerMapper} does not -- and is the counterpart of that class. It mutates a loaded
+ *       row where its counterpart constructs one, because {@code com.carddemo.account.domain.Account}
+ *       declares setters and {@code com.carddemo.account.domain.Customer} declares none, and the
+ *       reason that difference is forced rather than chosen is recorded on the class itself.</li>
  * </ul>
  *
  * <p>Three baseline record contracts stand behind those projections, and each is a fixed record

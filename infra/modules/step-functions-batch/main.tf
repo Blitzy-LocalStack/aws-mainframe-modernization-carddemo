@@ -517,7 +517,56 @@ locals {
           ResultPath     = "$.quiesce"
           Retry          = local.lambda_retry
           Catch          = local.common_catch
-          Next           = "StageSeedDatasets"
+          Next           = "CheckQuiesceLeaseAcquired"
+        }
+
+        # WHY : Refactoring Rationale: the quiesce state used to continue STRAIGHT to
+        #       StageSeedDatasets, whether or not it had acquired the bracket. The lease
+        #       was therefore computed, reported and then ignored on the success edge --
+        #       the only place the graph consulted it was the FAILURE edge, at
+        #       CheckQuiesceLeaseOwnership below, which decided whether to release it.
+        #       So an execution starting while a previous night still held the window went
+        #       on to post transactions and accrue interest with online writes enabled,
+        #       which is the exact condition the bracket exists to prevent. This state is
+        #       what makes the lease decide whether the chain runs at all.
+        # WHY : Alternatives Considered: a Wait-and-retry loop instead of failing. Rejected
+        #       because the schedule starts one execution per night, so a refused
+        #       acquisition means the PREVIOUS night is still running -- waiting would
+        #       stack a second full chain behind a run that is already overdue and hide
+        #       that fact, where failing surfaces it while the first execution keeps the
+        #       bracket it legitimately holds.
+        CheckQuiesceLeaseAcquired = {
+          Type = "Choice"
+          Choices = [{
+            # Assumptions: IsPresent is tested before BooleanEquals, matching
+            #   CheckQuiesceLeaseOwnership below. An absent path in a Choice comparison is a
+            #   runtime error rather than a false, so the guard is what keeps a malformed
+            #   lambda result a routed failure instead of an unhandled States.Runtime error.
+            And = [
+              {
+                Variable  = "$.quiesce.leaseAcquired"
+                IsPresent = true
+              },
+              {
+                Variable      = "$.quiesce.leaseAcquired"
+                BooleanEquals = true
+              },
+            ]
+            Next = "StageSeedDatasets"
+          }]
+          Default = "OnlineWriteLeaseUnavailable"
+        }
+
+        # WHY : Assumptions: this failure path does NOT pass through any resume state, and
+        #       that is the whole point of it. Reaching here means another execution owns
+        #       the bracket, so clearing the flag would re-enable online writes underneath
+        #       a run that is still inside its window -- the very outcome the conditional
+        #       release was added to refuse. Ending the execution leaves the owner's
+        #       bracket exactly as it found it.
+        OnlineWriteLeaseUnavailable = {
+          Type  = "Fail"
+          Error = "OnlineWriteLeaseUnavailable"
+          Cause = "Another execution holds the online-write bracket; this execution stopped without staging or posting anything, and without touching the other execution's lease"
         }
 
         StageSeedDatasets = {
@@ -550,12 +599,42 @@ locals {
                       "Command.$" = "States.Array('stage-dataset', States.Format('--dataset={}', $.dataset), States.Format('--business-date={}', $.businessDate))"
                       Environment = [
                         {
+                          # WHY : Assumptions: this is not only a logging correlator here. The
+                          #       staging command keys its GENERATION RESERVATION on this value,
+                          #       so it is what makes a retried Map branch reuse the generation
+                          #       its first attempt reserved instead of consuming a second one
+                          #       for a byte-identical copy. The execution name is the right
+                          #       identity for that because Step Functions holds it constant
+                          #       across a redrive, which is precisely the case that must
+                          #       replay rather than reallocate.
                           Name      = "CARDDEMO_BATCH_RUN_ID"
                           "Value.$" = "$$.Execution.Name"
                         },
                         {
                           Name  = "CARDDEMO_DATASET_BUCKET"
                           Value = var.dataset_bucket_name
+                        },
+                        {
+                          # WHY : Refactoring Rationale: this variable completes the staging
+                          #       contract, and without it the branch could not run. The command
+                          #       receives only a dataset token and a business date -- it resolves
+                          #       the domain, the prefix segment, the source file name, the record
+                          #       geometry and the retention limit from its own seed-dataset
+                          #       registry -- but a file NAME still has to be found somewhere.
+                          #       The image deliberately ships no extract (its Dockerfile copies
+                          #       only src/ and sql/), so the directory has to come from the
+                          #       deployment, and this is where it is stated.
+                          # WHY : Alternatives Considered: baking the extracts into the image was
+                          #       rejected because it would put a copy of the baseline data in
+                          #       every published image layer and make refreshing an extract an
+                          #       image rebuild. Passing an S3 URI and having the command fetch
+                          #       was rejected as the wider change: the staging step already
+                          #       writes to S3, and giving it a second, read side would duplicate
+                          #       the transfer discipline -- the single held descriptor, the
+                          #       digest, the geometry check -- against a different source kind.
+                          #       A filesystem path keeps one code path for the read.
+                          Name  = "CARDDEMO_DATASET_STAGING_ROOT"
+                          Value = var.dataset_staging_root
                         },
                       ]
                     }]
@@ -1385,20 +1464,33 @@ resource "aws_cloudwatch_event_target" "daily_finalizer" {
   #       on the two in-graph paths -- an action and the parameter to clear.
   #       Forwarding the raw event would give the function a second,
   #       differently-shaped input to parse for one caller.
-  # WHY : Assumptions: this release is deliberately UNCONDITIONAL and carries no
-  #       expectedLeaseOwner. The two in-graph edges name the owner so that a chain
-  #       which never acquired the bracket cannot clear it; this rule exists for the
-  #       opposite case -- an execution that DID acquire it and then stopped without
-  #       releasing it -- so requiring an owner here would refuse exactly the
-  #       invocation the rule was added for. The function reads an absent
-  #       expectedLeaseOwner as "clear it", which is what a watchdog must mean.
-  # WHY : Refactoring Rationale: an earlier revision passed the terminating
-  #       execution's ARN as expectedLeaseOwnerArn. It was removed because nothing
-  #       compared it: the function's conditional release reads expectedLeaseOwner
-  #       and matches it against an execution NAME, so an ARN under a similar key
-  #       advertised a check that could not run. terminalStatus and releasedBy remain
-  #       because they are read where this rule is read -- in the rule definition and
-  #       in the invocation record -- and claim no comparison.
+  # WHY : Refactoring Rationale: this release now NAMES the owner it means to clear, where
+  #       it was deliberately unconditional and carried no expectedLeaseOwner at all. The
+  #       old reasoning was that a watchdog must be able to clear a bracket whose owner
+  #       stopped without releasing it, and that requiring an owner would refuse exactly
+  #       the invocation the rule exists for. That was true only while the function had no
+  #       durable owner to compare against -- it stored the bracket as a bare boolean, so
+  #       "unconditional" was the only release it could implement. The consequence was that
+  #       this rule could clear a bracket a HEALTHY execution still held: the rule fires per
+  #       terminating execution, so a chain that lost the lease and failed fast triggered a
+  #       release that re-enabled online writes underneath the execution which legitimately
+  #       owned the window.
+  # WHY : Assumptions: the owner is available here and always was -- the transformer already
+  #       extracts $.detail.name, the terminating execution's NAME, which is exactly the
+  #       value the function records as the lease owner. So naming it costs nothing and
+  #       makes this rule checkable like every other caller: it can clear the lease of the
+  #       execution that just terminated, and no other. An earlier revision passed the
+  #       execution ARN under expectedLeaseOwnerArn and it was removed because nothing
+  #       compared it; the difference now is that this key IS the one the condition reads
+  #       and the value IS a name rather than an ARN.
+  # WHY : Trade-offs: a lease whose owner terminated WITHOUT this rule delivering is still
+  #       recoverable, because the function's release condition also admits an expired
+  #       lease and the graph records an expiry equal to the state machine's own timeout.
+  #       So the watchdog is now the fast path rather than the only path, and losing an
+  #       event delays the bracket's release to its expiry instead of stranding it.
+  #       terminalStatus and releasedBy remain because they are read where this rule is
+  #       read -- in the rule definition and in the invocation record -- and claim no
+  #       comparison.
   input_transformer {
     input_paths = {
       executionName = "$.detail.name"
@@ -1411,6 +1503,7 @@ resource "aws_cloudwatch_event_target" "daily_finalizer" {
       finalizer             = true
       releasedBy            = "batch-finalizer"
       "executionName"       = "<executionName>"
+      "expectedLeaseOwner"  = "<executionName>"
       "terminalStatus"      = "<status>"
     })
   }

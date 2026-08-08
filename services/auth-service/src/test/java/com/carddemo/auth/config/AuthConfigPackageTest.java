@@ -7,6 +7,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import io.swagger.v3.oas.models.OpenAPI;
+import io.swagger.v3.oas.models.SpecVersion;
 import java.io.InputStream;
 import java.sql.Connection;
 import java.sql.ResultSet;
@@ -54,6 +55,37 @@ class AuthConfigPackageTest {
 
     /** The schema this context owns, and the only one its unqualified statements may resolve in. */
     private static final String OWNED_SCHEMA = "auth";
+
+    /**
+     * Confirms the published document declares the specification version its members come from.
+     *
+     * <p>Assumptions: the specification FLAG and the version STRING are asserted separately, because
+     * they are set separately, both default to a 3.0 value, and only the string survives the clone the
+     * publishing library assembles the served document through. An assertion comparing the two to each
+     * other would therefore pass on a document that declared 3.0 twice.</p>
+     *
+     * <p>Refactoring Rationale: this case exists because the document was constructed without either,
+     * while carrying two members -- the summary and the licence identifier compared below -- that exist
+     * only in 3.1. Nothing failed, because the configured serialiser emits both regardless; but the
+     * served document declared 3.0.1 where the committed contract declares 3.1.1, and no assertion
+     * compared the two. The mechanism behind the difference is measured in account-service's
+     * config/OpenApiDocumentTest.java against the same library.</p>
+     */
+    @Test
+    @DisplayName("the published document declares the specification version its members come from")
+    void publishedDocumentDeclaresTheSpecificationVersionItsMembersComeFrom() {
+        OpenAPI published = new OpenApiConfig().authServiceOpenApi();
+
+        assertThat(published.getSpecVersion())
+                .as("a 3.1 document must carry the 3.1 flag, not the model's 3.0 default")
+                .isEqualTo(SpecVersion.V31);
+        assertThat(published.getOpenapi())
+                .as("the emitted version string must equal the committed contract's")
+                .isEqualTo(String.valueOf(contract().get("openapi")));
+        assertThat(published.getOpenapi()).startsWith("3.1.");
+        assertThat(published.getInfo().getSummary()).isNotBlank();
+        assertThat(published.getInfo().getLicense().getIdentifier()).isNotBlank();
+    }
 
     /**
      * Confirms the published metadata agrees with the committed contract's information block.

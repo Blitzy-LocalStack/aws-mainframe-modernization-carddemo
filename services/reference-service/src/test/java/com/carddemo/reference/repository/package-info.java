@@ -187,17 +187,34 @@
  * accepted in exchange for making those three assertions real rather than notional, and it is the
  * reason a shared base type exists at all.</p>
  *
- * <p>Assumptions: <b>the connection details are published to the context through Spring's
- * dynamic-property mechanism.</b> The declarative alternative, {@code @ServiceConnection}, is not
- * available and this is settled rather than open: {@code spring-boot-testcontainers} is deliberately
- * absent from {@code services/reference-service/pom.xml}, whose test-scoped third-party dependencies
- * are exactly {@code spring-boot-starter-test}, {@code spring-security-test},
- * {@code org.testcontainers:testcontainers}, {@code testcontainers-junit-jupiter},
- * {@code testcontainers-postgresql} and {@code archunit-junit5}, alongside the shared kernel's test
- * artifact. <b>No dependency is to be added to obtain the declarative form.</b> Refactoring
- * Rationale: adding one would widen the module's test class path to gain a shorter annotation, and the
- * dependency list is the module's statement of what its tests are allowed to reach for, so growing it
- * to obtain a shorter annotation would remove the value the list has.</p>
+ * <p>Assumptions: <b>the connection details are published to the context declaratively, through
+ * {@code @ServiceConnection} on the shared base's container field.</b> {@code spring-boot-testcontainers}
+ * is therefore a test-scoped dependency of {@code services/reference-service/pom.xml}, which records the
+ * reason at the declaration.</p>
+ *
+ * <p>Refactoring Rationale: this ruling was the opposite. It required the dynamic-property mechanism and
+ * stated that no dependency was to be added to obtain the declarative form, on the grounds that the
+ * module's test dependency list is its statement of what its tests may reach for. The ruling is WITHDRAWN,
+ * for two reasons that were measured rather than argued.
+ *
+ * <p>First, it was not satisfiable. Publishing the three {@code spring.datasource} keys leaves
+ * {@code spring.flyway.user} bound to an unset {@code SPRING_FLYWAY_USER} placeholder, because Boot reads
+ * Flyway's credentials through a separate connection-details bean rather than from the datasource, and
+ * every context load then failed authenticating as the literal placeholder text. Publishing Flyway's two
+ * keys as well would have restated keys this same charter forbids a class here from restating, so neither
+ * direction met the ruling.
+ *
+ * <p>Second, this module's own {@code src/test/resources/application-test.yml} already DEPENDED on the
+ * declarative form. That file omits Flyway's user and password deliberately and records, as its own
+ * measured finding, that the container's {@code @ServiceConnection} is adapted into a Flyway
+ * connection-details bean so the container's generated credential migrates the schema and no stand-in
+ * credential has to be invented for a role this profile never creates with a password. A charter and a
+ * landed configuration file cannot both be authoritative about one mechanism; the configuration was
+ * followed, because it is executable and its note was verified by running it.
+ *
+ * <p>Trade-offs: the dependency list did grow by one entry, which is the cost the withdrawn ruling was
+ * protecting against. What is bought is a suite that runs at all, and one mechanism rather than two
+ * descriptions of one.
  *
  * <p>Assumptions: {@code src/test/resources/application-test.yml} already supplies every property that
  * makes both migrations run against a bare container, and <b>no class here may duplicate or contradict

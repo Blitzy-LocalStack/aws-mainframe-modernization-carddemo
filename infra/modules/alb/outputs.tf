@@ -3,7 +3,7 @@
 # -----------------------------------------------------------------------------
 # Purpose:
 #   The COMPLETE public contract of the `alb` module. main.tf's load-balancing
-#   and access-log resources and variables.tf's fourteen inputs are invisible
+#   and access-log resources and variables.tf's fifteen inputs are invisible
 #   to a caller: every value that crosses the module boundary OUTWARD crosses
 #   here, and nothing
 #   else about the module is visible at all. Ten outputs, and every one of
@@ -26,7 +26,7 @@
 #
 # Parameters:
 #   None. An `output` block takes no parameters. The module's parameters are
-#   the fourteen `variable` blocks in variables.tf, each carrying its own type,
+#   the fifteen `variable` blocks in variables.tf, each carrying its own type,
 #   description and plan-time validation. This section says so explicitly
 #   rather than being left out, because a reader who finds no Parameters
 #   heading cannot tell whether it was considered and found inapplicable or
@@ -95,8 +95,9 @@
 #     withholding the URL keeps this file from undermining the same posture at
 #     the configuration layer.
 #   - Assumptions: nothing here is `sensitive`, and that is a decision rather
-#     than a default left in place. Not one of the seven is a credential -- an
-#     ARN, an ARN suffix, a DNS name, a hosted-zone id and a request path are
+#     than a default left in place. Not one of the ten is a credential -- an
+#     ARN, an ARN suffix, a DNS name, a hosted-zone id, two bucket identifiers,
+#     a server name, a map of rule ARNs and a request path are
 #     all non-secret infrastructure identifiers. Marking them would redact them
 #     from `terraform output` and from plan diffs, which is precisely where an
 #     operator following the deploy and teardown runbooks confirms the wired

@@ -62,21 +62,44 @@
  * <p>Refactoring Rationale: the pairings above are the target shape and are NOT a description of the
  * current directory, and stating them as though they were is the single most misleading thing this
  * charter could do -- the production charter records the same hazard against its own inventory.
- * Measured at this revision the directory holds two test types, not four:
- * {@code PostingValidationServiceTest} has landed against the first pairing, and
- * {@code BatchServicesTest} covers the remaining three subjects together with
- * {@code BatchStepLedger}, holding each subject in its own nested grouping. So every subject in the
- * roster is under assertion and no ruling below is unasserted; what has not happened is the split of
- * the aggregate into the three separately named types. A reader consulting this list to find where
- * the accrual is asserted would otherwise search for a file that is not there.</p>
+ * Measured at this revision the directory holds <b>three</b> test types, not two and not four:
+ *
+ * <ul>
+ *   <li>{@code PostingValidationServiceTest} -- landed against the first pairing, 9 cases.</li>
+ *   <li>{@code DatasetGenerationServiceTest} -- landed against the fourth pairing, 15 cases.</li>
+ *   <li>{@code BatchServicesTest} -- 18 cases across four nested groupings: the category-balance
+ *       arms and the interest accrual, which are the two roster subjects still unsplit; the
+ *       generation discipline; and the durable step ledger.</li>
+ * </ul>
+ *
+ * <p>So every subject in the roster is under assertion and no ruling below is unasserted. What has
+ * not happened is the split of the aggregate into the two remaining separately named types,
+ * {@code CategoryBalanceServiceTest} and {@code InterestCalculationServiceTest}. A reader consulting
+ * this list to find where the accrual is asserted would otherwise search for a file that is not
+ * there.</p>
+ *
+ * <p>Assumptions: the generation subject is consequently asserted in TWO places -- its own landed
+ * type and the aggregate's third grouping -- and that overlap is recorded rather than removed. The
+ * two are not redundant in substance: the named type drives {@code DatasetGenerationService} directly
+ * with mocked collaborators, while the grouping holds the retention rule as one of the aggregate's
+ * no-container rulings. Deleting either would be a filing change that removes landed, passing
+ * assertions, which is the same trade this charter already declines below.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph said the directory held two types and named
+ * {@code BatchServicesTest} as covering three subjects, and it had already instructed its own
+ * amendment -- "the claim to re-measure is the count ... correct only until a type is added or
+ * split". A type was added and the count was not re-measured, so the charter under-reported its own
+ * coverage: a reader looking for the generation assertions was sent to a nested grouping inside the
+ * aggregate and not to the named type that had landed for exactly that subject. The counts are now
+ * stated per type so a future divergence is arithmetic rather than impression.</p>
  *
  * <p>Trade-offs: the aggregate is left as it stands rather than split to match the roster. What is
  * given up is the property that a subject's assertions are locatable from its name alone, which is
  * the whole point of the naming convention. What is bought is that no landed, passing assertion is
  * moved by a change whose only motive is filing -- and a nested grouping per subject already keeps
  * the subjects separately reportable, so the coverage boundary the roster describes survives even
- * while the file boundary does not. The claim to re-measure is the count: this paragraph is correct
- * only until a type is added or split, at which point it is the paragraph to amend.</p>
+ * while the file boundary does not. The claim to re-measure is the count above: it is correct only
+ * until a type is added or split, at which point it is the paragraph to amend.</p>
  *
  * <h2>The rulings this package settles</h2>
  *

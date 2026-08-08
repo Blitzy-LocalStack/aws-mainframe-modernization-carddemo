@@ -147,8 +147,14 @@ class ContractPublicationTest {
         @SuppressWarnings("unchecked")
         Map<String, Object> paths = (Map<String, Object>) contract().get("paths");
 
+        // WHY : Refactoring Rationale: the listing moved from PendingAuthController.BASE_PATH to that
+        //   base plus SEARCH_PATH, and its method from GET to POST, because its REQUIRED account scope is
+        //   an account identifier and a query string is part of the request line the load balancer writes
+        //   into its access log before any application code runs. Composing the expectation from the
+        //   controller's own constants rather than from a literal is what makes this assertion fail if
+        //   only one of the two sides moves.
         assertThat(paths.keySet()).containsExactlyInAnyOrder(
-                PendingAuthController.BASE_PATH,
+                PendingAuthController.BASE_PATH + PendingAuthController.SEARCH_PATH,
                 PendingAuthController.BASE_PATH + "/{key}",
                 FraudController.FRAUD_PATH);
 

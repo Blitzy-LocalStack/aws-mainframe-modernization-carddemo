@@ -207,10 +207,17 @@ public class SecurityConfig {
      * {@code application.yml} -- describes the deployment rather than answering a business question, so it
      * belongs to the operator rather than to every holder of a valid token.</p>
      *
-     * <p>Assumptions: this constant NAMES the namespace and no rule below grants the namespace as a
-     * whole. The endpoints the module actually publishes are each named and granted by network
-     * position; what remains under this pattern reaches no handler, so it is left to the catch-all
-     * rather than given a rule that would only ever answer for a path that does not exist.</p>
+     * <p>Assumptions: this pattern is MATCHED by a rule of its own in the chain below, and that rule
+     * DENIES. It is ordered after the three endpoints the module publishes -- health, and the two
+     * granted by network position -- so each of those keeps its own more specific rule, and before
+     * every business rule, so nothing under this namespace can reach one. What the rule answers for is
+     * therefore the management addresses the exposure list withholds, which reach no handler today.</p>
+     *
+     * <p>Trade-offs: exposing a further management endpoint takes two edits rather than one -- the
+     * exposure list in {@code application.yml}, and a rule naming the new path ahead of this one. That
+     * is deliberate: the alternative left the namespace inheriting the business rule, so a newly
+     * exposed endpoint became readable by every holder of a CardDemo group authority without anything
+     * being decided or recorded.</p>
      */
     public static final String MANAGEMENT_PATH = "/actuator/**";
 
@@ -417,6 +424,32 @@ public class SecurityConfig {
                         //       sidecar, which presents no token. See LOOPBACK_RANGES.
                         .requestMatchers(BUILD_IDENTITY_PATH, METRIC_SCRAPE_PATH)
                         .access(loopbackOnly())
+                        // WHY : Assumptions: the management namespace is matched HERE, after the three
+                        //       endpoints this module publishes have each been given their own rule and
+                        //       BEFORE any business rule, and it is denied. What reaches it is every
+                        //       management address other than those three, which is every address the
+                        //       exposure list withholds -- so the rule answers for paths that reach no
+                        //       handler today and exists for the ones that might tomorrow.
+                        //
+                        //       Refactoring Rationale: without this rule the namespace fell through to
+                        //       the catch-all, so exposing any further management endpoint -- an
+                        //       environment dump, a logger control, a heap dump -- would have granted
+                        //       it to every holder of a CardDemo group authority the moment it was
+                        //       exposed, by inheriting a rule written for business data. Nothing would
+                        //       have been logged and no rule would have been edited, which is what
+                        //       made it worth closing before rather than after such an endpoint
+                        //       appears. Alternatives Considered: requiring the administrator
+                        //       authority instead of denying, so an operator could reach a newly
+                        //       exposed endpoint without a code change. Rejected because it presumes
+                        //       the next endpoint is safe for any administrator token and decides that
+                        //       in advance for an endpoint nobody has looked at; denying makes
+                        //       exposing one a deliberate act that has to name its own rule here.
+                        //
+                        //       Trade-offs: an operator who exposes an endpoint and forgets this rule
+                        //       gets a 403 rather than a working endpoint. That is the intended
+                        //       failure direction -- loud and safe rather than quiet and open -- and
+                        //       the constant's own documentation records where to add the rule.
+                        .requestMatchers(MANAGEMENT_PATH).denyAll()
                         // WHY : Assumptions: the two internal-only subtrees are DENIED here, and the
                         //       rule is not dead. The earlier-ordered internal chain matches the two
                         //       exact internal paths beneath them, so what reaches this rule is every

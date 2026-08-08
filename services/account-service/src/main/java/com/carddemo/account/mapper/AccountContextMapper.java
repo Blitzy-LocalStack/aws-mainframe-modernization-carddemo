@@ -3,8 +3,10 @@ package com.carddemo.account.mapper;
 import com.carddemo.account.domain.Account;
 import com.carddemo.account.domain.CardXref;
 import com.carddemo.account.dto.AccountContextView;
+import com.carddemo.account.dto.AccountViewResponse;
 import com.carddemo.account.dto.CardXrefView;
 import com.carddemo.common.money.Money;
+import java.time.LocalDate;
 import java.util.Objects;
 import org.springframework.stereotype.Component;
 
@@ -77,5 +79,59 @@ public class AccountContextMapper {
                 Money.of(row.getCreditLimit()),
                 Money.of(row.getCashCreditLimit()),
                 Money.of(row.getCurrentBalance()));
+    }
+
+    /**
+     * Projects an account row onto the HUMAN view's ten account fields.
+     *
+     * <p>Purpose: this is the account half of the account-view screen, whose moves are the block at
+     * {@code app/cbl/COACTVWC.cbl} that fills the account region of {@code app/cpy-bms/COACTVW.CPY}. It
+     * is a different shape from {@link #toAccountContextView(Account)}, which serves a neighbouring
+     * bounded context and carries three amounts only, and the two are deliberately separate methods
+     * rather than one wider shape: a machine caller that needs three amounts must not be handed an
+     * account's dates and status, and a screen that needs ten fields cannot be served by three.</p>
+     *
+     * <p>Assumptions: the five amounts are carried as {@link Money} and never as a primitive or a
+     * {@code double}, so the exact fixed-point representation survives to the boundary and the shared
+     * serialiser renders each as a string. The three dates are rendered as their ISO text, which is what
+     * the stored columns already hold in order -- the baseline stores them as {@code PIC X(10)} in
+     * year-month-day order, so the ISO rendering is the stored form rather than a reformatting of it.</p>
+     *
+     * <p>Assumptions: a null date renders as {@code null} rather than as an empty string or a zero date.
+     * The reissue date is the one of the three that a row can legitimately lack, and collapsing absent to
+     * blank would make an unissued account indistinguishable from one whose date failed to load.</p>
+     *
+     * @param row the account row to project; must not be {@code null}
+     * @return the human view's account detail, never {@code null}
+     * @throws NullPointerException if {@code row} is {@code null}
+     * @throws ArithmeticException if a stored amount cannot be held at the scale the contract publishes
+     */
+    public AccountViewResponse.AccountDetail toAccountDetail(Account row) {
+        Objects.requireNonNull(row, "row must not be null");
+        return new AccountViewResponse.AccountDetail(
+                row.getActiveStatus(),
+                isoDate(row.getOpenDate()),
+                Money.of(row.getCreditLimit()),
+                isoDate(row.getExpirationDate()),
+                Money.of(row.getCashCreditLimit()),
+                isoDate(row.getReissueDate()),
+                Money.of(row.getCurrentBalance()),
+                Money.of(row.getCurrentCycleCredit()),
+                row.getGroupId(),
+                Money.of(row.getCurrentCycleDebit()));
+    }
+
+    /**
+     * Renders a stored date as its ISO text, preserving the absent state.
+     *
+     * <p>Assumptions: {@code LocalDate.toString()} emits exactly the ten-character year-month-day form the
+     * baseline columns hold, so no formatter is constructed. Introducing one would add a second place the
+     * pattern is written and a chance for the two to disagree.</p>
+     *
+     * @param value the stored date, which may be {@code null}
+     * @return the ISO text, or {@code null} when the column holds nothing
+     */
+    private static String isoDate(LocalDate value) {
+        return value == null ? null : value.toString();
     }
 }

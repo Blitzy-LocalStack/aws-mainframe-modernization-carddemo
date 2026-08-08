@@ -72,16 +72,32 @@
  * <p>Refactoring Rationale: this paragraph previously justified the absence of a count partly on the
  * grounds that no {@code openapi} directory existed under
  * {@code services/account-service/src/main/resources} for one to be read from. That is no longer true.
- * {@code openapi/account-api.yaml} now exists and is the contract of record for the three internal
- * read operations this package publishes to the pending-authorization context, and the sentence was
- * corrected rather than left standing because a charter that misdescribes its own module is worse than
- * one that says less. The document deliberately declares ONLY those three operations and not the
- * account view or account update surface named in the roster above, and the reason is recorded in its
- * own header: those three are already consumed by a deployed caller, so the document records an
- * agreement that currently binds two running services rather than a plan. The contract test at
- * {@code src/test/java/com/carddemo/account/api/AccountContextContractTest.java} asserts that
- * correspondence in both directions, so neither the document nor this package can gain an operation
+ * {@code openapi/account-api.yaml} now exists and is the contract of record for EVERY operation this
+ * package publishes, and the sentence was corrected rather than left standing because a charter that
+ * misdescribes its own module is worse than one that says less.</p>
+ *
+ * <p>Refactoring Rationale: the sentence that replaced it was corrected a second time, and the
+ * correction is worth recording because the first version described a state that had already been left
+ * behind. It said the document declares ONLY the three internal read operations and deliberately not
+ * the account view or account update named in the roster above -- which was true when the view and the
+ * update did not exist. They were then built and mounted here, and the document was not extended, so
+ * three routes served requests that no contract described. That is the same defect as a contract
+ * publishing an operation with no handler, in the opposite direction, and it is closed the same way:
+ * the document now declares both surfaces and marks each operation with the surface it belongs to, and
+ * the contract test at
+ * {@code src/test/java/com/carddemo/account/api/AccountContextContractTest.java} compares the mapping
+ * annotations of all three controllers with the operations the document declares and fails on any
+ * difference in EITHER direction. Neither the document nor this package can gain or lose an operation
  * without the other.</p>
+ *
+ * <p>Assumptions: the two surfaces share the account address rather than being separated by a path
+ * prefix -- the machine read is a {@code GET} on {@code /api/v1/accounts/{accountId}} and the end-user
+ * edit is a {@code PUT} on the same address -- and they are separated by filter CHAIN instead, which
+ * {@code SecurityConfig.ACCOUNT_PATH_PATTERN} records in full. One consequence is load bearing enough
+ * to state here: the matcher that selects the internal chain has to name the METHOD and not the path
+ * alone, because a path-only matcher claims every method at that address and would demand a
+ * service-minted token for the end-user edit, which no browser holds. That property is asserted by
+ * {@code InternalApiSecurityConfigTest}.</p>
  *
  * <h2>The layer boundary, and the two prohibitions that define it</h2>
  *

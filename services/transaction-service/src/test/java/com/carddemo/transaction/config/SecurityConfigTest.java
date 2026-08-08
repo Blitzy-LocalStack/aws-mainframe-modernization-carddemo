@@ -51,8 +51,14 @@ class SecurityConfigTest {
      *
      * <p>Assumptions: both the aggregate path and a probe group are asserted, because enabling the probe
      * groups publishes {@code /actuator/health/readiness} and {@code /actuator/health/liveness}
-     * alongside {@code /actuator/health} and an orchestrator check may poll any of the three with no
-     * credential.</p>
+     * alongside {@code /actuator/health}, and the pattern has to admit all three whether or not any of
+     * them is polled today. The two current consumers -- this service's container health check and the
+     * load balancer's target group -- both poll the AGGREGATE path only, and this module's
+     * {@code application.yml} records that the groups exist so a future orchestrator check can
+     * distinguish "started but not ready" from "failed". Refactoring Rationale: this paragraph read as
+     * though a check already polled the probe paths, which no configuration in this repository sets up;
+     * the reason to assert them is that they are published and unauthenticated, not that something
+     * calls them.</p>
      */
     @Test
     @DisplayName("the health group is open and the wider management namespace is not")

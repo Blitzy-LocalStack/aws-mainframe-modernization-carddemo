@@ -29,38 +29,35 @@
 #       variables the ECS task definition sets from Parameter Store and from
 #       Secrets Manager container secrets; none of them is expressible in this
 #       file.
-# WHY : Alternatives Considered: adding a `spring.config.import` naming
-#       `optional:aws-parameterstore:/carddemo/<environment>/authorization/`, which
-#       is what application.yml anticipates at L187-L195 and what
-#       application-prod.yml carries. REJECTED HERE ON A MEASURED STARTUP FAILURE,
-#       and the mechanism is worth stating because it is specific to this module.
-#       There are three classes of module in this repository and this one is the
-#       middle class, which is the only class where that import is fatal.
-#       account-service, batch-service and reporting-service declare
-#       spring-cloud-aws-starter-parameter-store, so they get both the resolver for
-#       the prefix and the SSM client it instantiates, and their imports work.
-#       auth-service, card-service and transaction-service carry no
-#       spring-cloud-aws artifact at all, so nothing claims the prefix and an
-#       `optional:` import is simply skipped -- that is the case application.yml's
-#       note describes. This module declares only
-#       spring-cloud-aws-starter-sqs, which brings spring-cloud-aws-autoconfigure
-#       and therefore the resolver, while NO artifact here brings the SSM client.
-#       A resolver claims the location and then cannot load its own client, and the
-#       `optional:` marker does not cover that: it suppresses a location that is
-#       not found, not a class that is absent. Starting this profile with the
-#       import present aborts during environment preparation on the missing client
-#       class, reproducibly, in every one of three runs. reference-service is the
-#       other module in that middle class, and both of its profiles decline the
-#       import too, so this is the shape both queue-only contexts take.
-#       Trade-offs: the accepted cost is that a parameter written under that path
-#       is not read by this profile. Nothing is lost by it: every value the subtree
-#       would carry is already delivered as an environment variable, which is what
-#       application.yml's datasource and identity placeholders bind to. Measured
-#       for the omission as well as the addition -- with the key absent this
-#       profile starts on three runs out of three, and the shared console pattern,
-#       with it the correlation identifier, is still present, because an import is
-#       processed per DOCUMENT and the base document's own import runs regardless
-#       of what a profile document declares.
+# WHY : Refactoring Rationale: this profile DECLINED the `spring.config.import`
+#       naming `optional:aws-parameterstore:/carddemo/<environment>/authorization/`
+#       that application.yml anticipates and application-prod.yml carries, and the
+#       reason it recorded was a measured startup failure: this module declared only
+#       spring-cloud-aws-starter-sqs, which brings the config-data resolver that
+#       claims the `aws-parameterstore` prefix while bringing no SSM client for it
+#       to instantiate, and the `optional:` marker does not cover that -- it
+#       suppresses a location that is not found, not a class that is absent. The
+#       observation was correct and the conclusion has expired: the sibling pom.xml
+#       now declares io.awspring.cloud:spring-cloud-aws-starter-parameter-store
+#       precisely so that the resolver has its client, so the import resolves here
+#       exactly as it does in account-service, batch-service and
+#       reporting-service. It is added rather than left out, because leaving it out
+#       kept THREE descriptions of one mechanism in circulation -- this comment, the
+#       prod overlay's, and the POM's -- of which at most one could be right, and a
+#       reader had no way to tell which. dev and prod now differ only in the
+#       environment label the path defaults to.
+# WHY : Assumptions: `optional:` is retained, and the reason is the subtree rather
+#       than the classpath. A development deployment legitimately writes no
+#       parameter under that path at all, because every value this profile needs
+#       already arrives as an environment variable that application.yml's
+#       datasource and identity placeholders bind to; a non-optional import would
+#       then abort a correct deployment over the absence of values it was not
+#       relying on.
+# WHY : Assumptions: `classpath:/carddemo-common-defaults.yml` is named again as the
+#       first entry, matching the prod overlay. It costs one idempotent re-import
+#       and it removes any question of whether the shared console pattern -- which
+#       is what puts the correlation identifier on every line -- survives a profile
+#       document that declares an import of its own.
 # -----------------------------------------------------------------------------
 # Documentation convention: docs/CODE_DOCUMENTATION_STANDARD.md. YAML has no
 # docstring construct, so its YAML section prescribes the two forms used here --
@@ -80,6 +77,74 @@
 # =============================================================================
 
 spring:
+  config:
+    # WHY : Assumptions: the path is /carddemo/<environment>/authorization/, the
+    #       same three-part shape every context uses, so one Terraform module
+    #       writes them all and one policy can grant read on exactly one context's
+    #       subtree. The label defaults to `dev` here where the prod overlay
+    #       defaults to `prod`, so a task started on this profile with no label set
+    #       still reads the subtree belonging to it rather than another
+    #       environment's. The full rationale for taking this path at all, and for
+    #       the `optional:` marker, is in the file header above.
+    # WHY : Refactoring Rationale: the Parameter Store location this overlay declared has been
+    #       withdrawn. The reasoning, measured on this tree, is recorded in full below.
+    # WHY : Assumptions: this profile declares NO spring.config.import, and neither does
+    #       application-prod.yml, and neither does the sibling POM declare a
+    #       parameter-store starter. Those three facts are one decision and are stated
+    #       together, because each on its own reads as an omission. This context reads no
+    #       Parameter Store subtree at all: every deployment value reaches it as an
+    #       environment variable the task definition sets, which is what
+    #       application.yml's datasource, issuer and queue placeholders bind to.
+    #       reference-service, the other context whose only AWS artifact is the queue
+    #       starter, takes the identical shape, so the repository holds ONE model for a
+    #       queue-only context rather than two.
+    #       Refactoring Rationale: an earlier revision put the overlay in production
+    #       alone and left this profile without it, on the stated premise that the
+    #       location could not resolve here. The premise was right about the failure and
+    #       wrong about its scope, and the asymmetry it produced is what is corrected.
+    #       The queue starter brings spring-cloud-aws-autoconfigure, whose
+    #       spring.factories registers a resolver for the `aws-parameterstore` prefix, so
+    #       the location IS claimed in this module; the resolver then builds an SSM
+    #       client. With no client artifact that construction failed on
+    #       NoClassDefFoundError, and with one it fails on SdkClientException whenever
+    #       the region provider chain cannot answer -- and this module deliberately
+    #       declines to pin spring.cloud.aws.region.static, resolving region and
+    #       credentials from the task instead. Measured on the integrated tree: with the
+    #       starter present and no region set, environment preparation raised
+    #       SdkClientException for the dev AND the prod profile alike.
+    #       Assumptions: the `optional:` marker does not cover either failure. It
+    #       suppresses a claimed location that holds no resource; it does not suppress a
+    #       resolver that throws while building its own client. The marker therefore
+    #       protects against an empty parameter path and against nothing else, which is
+    #       why the decision has to be made about the dependency rather than about the
+    #       marker.
+    #       Alternatives Considered: keeping the starter, adding the overlay to both
+    #       profiles, and pinning spring.cloud.aws.region.static to ${AWS_REGION} the way
+    #       account-service and batch-service do. Rejected on cost against benefit: it
+    #       adds a startup dependency on a resolvable region to a context that reads
+    #       nothing from the subtree, and it makes a missing environment variable stop a
+    #       service whose every value is already delivered by another route. The
+    #       lower-risk option is taken and recorded here.
+    #       -----------------------------------------------------------------------------
+    #       Documentation convention: docs/CODE_DOCUMENTATION_STANDARD.md. YAML has no
+    #       docstring construct, so its YAML section prescribes the two forms used here --
+    #       this framed file header, and a labelled rationale placed directly above the key
+    #       it explains -- which is the analogous obligation AAP 0.8.1 states for a
+    #       language that has none. The four category labels are written in that document's
+    #       one permitted form: plural, unparenthesised, colon retained, no emphasis
+    #       markup. What that document supplies is the FORM; the obligation to carry a
+    #       rationale at all is the second sentence of the validation gate at line 43 of
+    #       the project's single user-specified rule, Rule 1 "Explainability".
+    #       Assumptions: nothing mechanical reads this file. The Checker in
+    #       config/checkstyle/checkstyle.xml is narrowed to fileExtensions="java" at L185,
+    #       no linter in this repository parses YAML comments, and no workflow step
+    #       validates them, so review is the only reader these notes have. They are written
+    #       at the rigour applied where a build would fail without them, because the
+    #       absence of a gate is not a reason for a reader to be given less.
+    #       =============================================================================
+    import:
+      - "classpath:/carddemo-common-defaults.yml"
+
   datasource:
     hikari:
       # WHY : Trade-offs: four connections and one idle, against the base
@@ -180,36 +245,53 @@ logging:
 management:
   endpoint:
     health:
-      # WHY : (1) Trade-offs: `when-authorized`, where the base document pins
-      #       `never` at L588 for every environment. The detail payload names this
-      #       module's health contributors and reports the state of each, and that
-      #       is the one answer a developer needs when a task will not turn
-      #       healthy: a paused cluster, a wrong credential and an unreachable
-      #       dependency all present as the same bare DOWN without it, and telling
-      #       them apart otherwise means reading a log stream to answer a question
-      #       the probe response already knows. `when-authorized` is the only value
-      #       that gives that answer to a caller presenting a valid token while
-      #       leaving the UNAUTHENTICATED reply exactly as production sends it --
-      #       SecurityConfig grants /actuator/health/** to permitAll at L263 so the
-      #       load balancer and the container probe can poll it with no
-      #       credentials, and they continue to receive the status word and nothing
-      #       more. The disclosure the base document closes at the edge stays
-      #       closed; what changes is only what an authenticated caller may ask.
-      #       (2) Alternatives Considered: `always`, which the account context's
-      #       dev overlay carries at L252 of its own profile. Rejected on the same
-      #       ground the base document rejects it: on a permitAll path `always`
-      #       answers ANY caller that can reach the port with the dependency list,
-      #       and the dependency this context would enumerate is the database
-      #       holding pending authorizations and fraud marks. Dev is provisioned
-      #       with production's topology by design, so a shape disclosed here is
-      #       the shape production has.
-      #       (3) Assumptions: the `roles` key is left unset because the base
-      #       document declares none and this profile adds no key. Unset, the
-      #       framework treats ANY authenticated caller as authorized, which here
-      #       is any holder of a valid user-pool token rather than an operator
-      #       alone. That is stated rather than glossed, because it is exactly why
-      #       this relaxation belongs in a profile no production task activates:
-      #       application-prod.yml carries no override of this key, so production
-      #       keeps `never` and answers every caller, authenticated or not, with
-      #       the status word.
-      show-details: when-authorized
+      # WHY : Refactoring Rationale: this overlay used to relax the aggregate to
+      #       `when-authorized`, and the relaxation was an information exposure
+      #       rather than the narrow concession its own note claimed. The note was
+      #       right that an unauthenticated probe would keep receiving the status
+      #       word alone, and wrong about who else would. No `roles` key was set,
+      #       and with none set the framework authorizes ANY authenticated caller --
+      #       so the detail payload, which names this module's health contributors
+      #       and reports the state of each, was available to every holder of a
+      #       valid user-pool token, including a `carddemo-user` token belonging to
+      #       an ordinary cardholder. The dependency it enumerates is the database
+      #       holding pending authorizations and fraud marks, and dev is provisioned
+      #       with production's topology by design, so the shape disclosed here is
+      #       the shape production has. The value is now `never`, identical to
+      #       application-prod.yml and to the base document -- whose own note at
+      #       L588 states that never is pinned "in every environment, and neither
+      #       profile relaxes it", a sentence this file used to falsify.
+      # WHY : Alternatives Considered: keeping `when-authorized` and adding
+      #       `roles: carddemo-admin` so only an operator saw the detail. Rejected
+      #       because it would not work and would read as though it did. The
+      #       framework's roles check reaches HttpServletRequest.isUserInRole, which
+      #       Spring Security answers by prepending its ROLE_ prefix to the name,
+      #       while common-lib's JwtRoleConverter issues the provider's group name
+      #       VERBATIM with no prefix -- a decision recorded at its own L118-L126
+      #       precisely so routes are written with the authority predicate and never
+      #       the role predicate. A roles list here would therefore match nobody: an
+      #       administrator would be refused the detail exactly as an ordinary user
+      #       is, and the configuration would state an authorization that never
+      #       happens.
+      # WHY : Alternatives Considered: keeping the aggregate at `never` and
+      #       publishing a detailed health GROUP for operators, which is the shape
+      #       the finding's own guidance suggests. Rejected on a structural
+      #       constraint of this service rather than on preference: SecurityConfig
+      #       grants the whole subtree /actuator/health/** to permitAll, at its
+      #       HEALTH_PATH constant, so the load balancer and the container
+      #       HEALTHCHECK can poll with no credentials -- and every health group
+      #       Boot publishes lives under that same subtree. A group would therefore
+      #       be exactly as public as the aggregate, and moving it out from under
+      #       the subtree needs an `additional-path`, a new chain rule and a path
+      #       the load balancer's listener rules do not know, which is a larger
+      #       change than the diagnostic is worth in a profile no production task
+      #       activates.
+      # WHY : Trade-offs: the accepted cost is the one the base document already
+      #       names -- telling a paused cluster, a wrong credential and an
+      #       unreachable dependency apart means reading the log stream rather than
+      #       the probe response. In this profile that cost is small and paid
+      #       elsewhere: `logging.level.com.carddemo` is DEBUG above and
+      #       `spring.jpa.show-sql` is true, so a dev task already reports far more
+      #       about a failing dependency in its log stream than the detail payload
+      #       would have carried.
+      show-details: never

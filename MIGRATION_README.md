@@ -100,12 +100,18 @@ npm run dev
 
 Use [the data-migration runbook](docs/runbooks/data-migration.md) to validate
 the package, stage byte-preserved source extracts, create schemas/roles and
-masked reporting views, and verify database trust boundaries.
+masked reporting views, verify database trust boundaries, bulk-load each dataset,
+and run all three verification passes.
 
-The current checkout does not contain the fixed-width reader/bulk-loader CLI
-described by the target architecture. Therefore source-record cutover remains
-closed; schema and security validation success must not be reported as a
-complete data migration.
+The fixed-width readers, the Aurora bulk loader and the three verification passes
+are implemented and are reachable as the `load-dataset`, `verify-row-counts`,
+`verify-checksum` and `verify-money-parity` subcommands. Source-record cutover
+nevertheless remains **closed**, for one specific and documented reason:
+`load-dataset` refuses `CUSTOMER` and `CARD`, whose tables declare ciphertext
+columns as `BYTEA NOT NULL` under a key the owning services hold and this package
+does not. The runbook's cutover-gate section states what that requires. Schema
+and security validation success must not be reported as a complete data
+migration, and neither must a partial load.
 
 ## Validate
 

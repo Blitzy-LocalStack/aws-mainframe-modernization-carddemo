@@ -64,21 +64,55 @@ spring:
     #       defaults to `dev`, so a task started on this profile with no label set
     #       still reads the subtree belonging to it rather than another
     #       environment's.
-    # WHY : Trade-offs: this list REPLACES the base document's single import
-    #       rather than extending it, which is why the shared defaults document is
-    #       named again as the first entry. Omitting it would drop the shared
-    #       console pattern that carries the correlation identifier, and would drop
-    #       it in production alone -- the environment where a request that cannot
-    #       be traced across two services costs the most to investigate.
-    # WHY : Assumptions: the import is `optional:`, matching the dev overlay. The
-    #       sibling POM declares no parameter-store starter, so no resolver claims
-    #       this location prefix; without `optional:` startup would abort on the
-    #       config location itself rather than on any value being absent, which
-    #       reports the wrong fault, because the values this overlay would supply
-    #       already arrive as environment variables the task definition sets.
+    # WHY : Trade-offs: the shared defaults document is named again as the first
+    #       entry rather than being left to the base document alone. It costs one
+    #       idempotent re-import and it removes any question of whether the shared
+    #       console pattern -- which is what carries the correlation identifier on
+    #       every line -- survives a profile document that declares an import of its
+    #       own, and it removes it in production, the environment where a request
+    #       that cannot be traced across two services costs the most to investigate.
+    # WHY : Assumptions: the import is `optional:`, matching the dev overlay, and the
+    #       reason is the SUBTREE rather than the classpath. The sibling pom.xml
+    #       declares io.awspring.cloud:spring-cloud-aws-starter-parameter-store, so a
+    #       resolver claims this prefix and holds the SSM client it needs; what
+    #       `optional:` covers is a deployment that writes no parameter under the
+    #       path at all, because every value this overlay would supply also arrives
+    #       as an environment variable the task definition sets. Without the marker,
+    #       such a deployment would abort on the empty location rather than start.
+    # WHY : Refactoring Rationale: this note previously stated that the sibling POM
+    #       declares no parameter-store starter. It does declare one, and while that
+    #       sentence stood, this overlay, the dev overlay and the POM each described
+    #       a different mechanism -- so the correction is not cosmetic: the dev
+    #       overlay had declined this import ON that premise, and both overlays now
+    #       take the one path the POM makes resolvable.
+    # WHY : Refactoring Rationale: the Parameter Store location this overlay declared has been
+    #       withdrawn. The reasoning, measured on this tree, is recorded in full below.
+    # WHY : Refactoring Rationale: this overlay carried
+    #       `optional:aws-parameterstore:/carddemo/<environment>/authorization/` and no
+    #       longer does, and the withdrawal is a startup correction rather than a
+    #       simplification. The queue starter brings spring-cloud-aws-autoconfigure,
+    #       whose spring.factories registers a resolver for the `aws-parameterstore`
+    #       prefix, so the location was claimed here and the resolver then built an SSM
+    #       client. That construction resolves a region through the default provider
+    #       chain, and this module deliberately declines to pin
+    #       spring.cloud.aws.region.static -- so environment preparation raised
+    #       SdkClientException wherever the chain could not answer. Measured on the
+    #       integrated tree: with the parameter-store starter present and no region
+    #       set, preparing this profile failed on that exception, and the `optional:`
+    #       marker did not suppress it, because that marker covers a claimed location
+    #       holding no resource and not a resolver that throws while building its own
+    #       client.
+    #       Alternatives Considered: keeping the overlay and pinning the region to
+    #       ${AWS_REGION} the way account-service and batch-service do. Rejected
+    #       because it makes a service that reads nothing from the subtree depend on
+    #       one more environment variable to start, and every value the subtree would
+    #       supply already arrives as an environment variable the task definition sets.
+    #       Assumptions: what remains is the shape reference-service takes -- the other
+    #       context whose only AWS artifact is the queue starter -- so both queue-only
+    #       contexts now read their environment the same way, and the dev overlay
+    #       declares no import either.
     import:
       - "classpath:/carddemo-common-defaults.yml"
-      - "optional:aws-parameterstore:/carddemo/${CARDDEMO_ENVIRONMENT:prod}/authorization/"
 
   datasource:
     hikari:

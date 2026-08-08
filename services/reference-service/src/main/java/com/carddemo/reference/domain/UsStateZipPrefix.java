@@ -185,13 +185,18 @@ public class UsStateZipPrefix {
     /**
      * Creates an empty instance for the persistence provider to populate.
      *
-     * <p>Assumptions: the provider needs a no-argument constructor in order to materialise a row
-     * it has read, and it sets the field afterwards rather than through a constructor. The
-     * package charter records why an entity here is an ordinary class with mutable state rather
-     * than a record, and the constructor is public rather than protected so that this service's
-     * mapper and fixtures can build an instance without reflection.</p>
+     * <p>Assumptions: the specification requires a persistence entity to declare a constructor taking
+     * no arguments, which the provider invokes before writing the mapped columns into the members
+     * above. It is {@code protected} rather than public, which is the policy every other entity in this
+     * codebase already follows: 30 of the 33 entity declarations across the eight services declare it
+     * protected, and the five public ones were all in this package. The provider reaches a protected
+     * constructor, and application code outside this package cannot allocate an unpopulated row and
+     * pass it on as though it had been loaded.
+     *
+     * <p>Refactoring Rationale: this was public, and each of the five gave its own reason -- that a
+     * mapper or a test needs to assemble a row member by member. Narrowing costs those callers nothing: the mapper uses the argument-taking form, which stays public, and no fixture constructs this type without arguments at all.
      */
-    public UsStateZipPrefix() {
+    protected UsStateZipPrefix() {
         // WHY : Assumptions: the body is empty by contract rather than by oversight. Any default
         //       for the key would be indistinguishable from a value read out of a row, so the
         //       field is left unset for the provider or the caller to supply.

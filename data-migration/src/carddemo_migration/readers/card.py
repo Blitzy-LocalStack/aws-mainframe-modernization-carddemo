@@ -34,20 +34,21 @@ identifier survives. This record declares no signed display, packed or binary fi
 decoded value is ever a number, this module has no money path, and the value type is
 therefore ``str`` rather than the account reader's wider union.
 
-Two spans present in the bytes are absent from the mapping, and each for its own distinct
-reason: the trailing pad, which carries no data, and the card verification value, which this
-module suppresses outright. See :data:`DROPPED_FIELD_NAMES` and
-:data:`SUPPRESSED_FIELD_NAMES`.
+One span present in the bytes is absent from the mapping -- the trailing pad, which carries no
+data -- and one is present under a type that renders as nothing: the card verification value.
+See :data:`DROPPED_FIELD_NAMES` and :data:`PROTECTED_FIELD_NAMES`.
 
 Card-data exposure control
 --------------------------
 Three of this record's six data fields are marked sensitive by the descriptor, and they are
 NOT all treated alike, because they are not all needed downstream to the same degree:
 
-* The card verification value is **suppressed**. It is never decoded, never a key in a
-  returned mapping, and never named in a diagnostic. Suppression is strictly stronger than
-  redaction, and the reason it is warranted is specific rather than precautionary; see the
-  design note below.
+* The card verification value is **protected**. It is decoded, because its target column
+  ``card.cards.cvv_encrypted`` has to be populated from an extract, and it is decoded into a
+  :class:`ProtectedValue` rather than a ``str``, so every ordinary rendering route -- ``repr``,
+  ``str``, an f-string with or without a specification, a rendering of the enclosing mapping,
+  a traceback, a test diff -- yields a constant marker. One explicit accessor, ``reveal``,
+  hands the characters to the encryption boundary and appears nowhere else.
 * The primary account number and the embossed name are **emitted** in the decoded mapping,
   because the card table keys on the one and stores the other, and **masked** in every
   diagnostic rendering this module produces.
@@ -55,24 +56,42 @@ NOT all treated alike, because they are not all needed downstream to the same de
 
 Design decisions (WHY)
 ----------------------
+Refactoring Rationale:
+    **The card verification value was SUPPRESSED and is now PROTECTED, and the change is a
+    correction rather than a relaxation.** Suppression meant the span was excluded before a
+    byte of it was read, on the reasoning -- recorded here at length and reproduced in the
+    predicate that implemented it -- that "the correct handling of a value that must never be
+    reproduced is not to reproduce it". The disclosure half of that reasoning was right and
+    the completeness half was wrong: the migration contract requires the value PRESERVED into
+    an encrypted column, so a reader that never decodes it makes that column impossible to
+    populate from an extract, and the migration would have delivered a card table whose
+    verification values were absent rather than protected. Nothing downstream could repair it,
+    because the plaintext exists only in the extract. Suppression was the right instinct
+    applied one layer too early.
 Alternatives Considered:
-    **The card verification value is suppressed rather than masked.** Masking it was
-    evaluated first, because the descriptor already marks it sensitive and the shared
-    masking helper already redacts it to a same-width tag, so redaction was available at no
-    cost. It was rejected: redaction changes only how the value RENDERS and would still
-    carry the value itself through this module's return path, where any caller could read
-    it from the mapping. The value has no legitimate downstream consumer to justify that.
-    The migration plan states that no endpoint ever returns a verification value and that
-    its target column is encrypted, so nothing this reader feeds needs the plaintext, and
-    the correct handling of a value that must never be reproduced is not to reproduce it.
+    **Masking it instead**, which was the alternative this note originally evaluated and
+    rejected. It is still rejected, and for the reason first given: redaction changes only how
+    a value RENDERS while leaving the value itself readable from the mapping as a plain
+    ``str``, so it protects the diagnostic and not the return path. The carrier inverts that --
+    the value is unreadable by accident and readable only by a call that says so.
+Alternatives Considered:
+    **Encrypting inside this reader**, so that only ciphertext ever left it. Rejected because
+    this package holds no key and reaches no key service by design; the loaders own the
+    datastore boundary and the encryption that sits on it, and moving a key dependency into the
+    decode layer would make every reader test require one.
 Trade-offs:
-    **What suppression costs is that a verification-value mismatch between the two corpora
-    cannot be diagnosed from this reader's output**, because neither the value nor a
-    comparable digest of it is emitted. That cost is accepted deliberately: a reader that
-    could confirm a verification value is a reader that could disclose one, and for this
-    particular field the ability to disclose is the larger risk of the two. A caller needing
-    to prove the two corpora agree byte for byte over the whole record can compare the raw
-    images without decoding them through this module at all.
+    **What the carrier costs is that a verification-value mismatch between the two corpora
+    still cannot be diagnosed from a rendering**, because no rendering carries the value or a
+    digest of it. That cost is unchanged from the suppressed design and is accepted for the
+    same reason: a reader that could confirm a verification value is a reader that could
+    disclose one. What has changed is that a caller with a legitimate need can now compare two
+    decoded records directly, because :class:`ProtectedValue` defines equality between two
+    carriers -- and deliberately NOT against a plain string, so the comparison cannot be used
+    to confirm a guessed value one candidate at a time.
+Assumptions:
+    **The carrier is a guard rail, not a cryptographic boundary.** Any holder can call
+    ``reveal``. What it removes is the accidental route, which is how a value of this kind
+    actually escapes; the deliberate route is left open because the load path needs it.
 Assumptions:
     **Every offset, length, storage regime and record length is imported, never declared.**
     This module states no byte position of its own. That is the Python analogue of compiling
@@ -110,14 +129,14 @@ import pathlib
 from collections.abc import Iterable, Iterator
 from typing import Final
 
-# WHY (Assumptions): these imports are the entire reason this module has a dependency on
+# WHY : Assumptions: these imports are the entire reason this module has a dependency on
 #   the copybook package, and they are absolute and rooted at the distribution package
 #   rather than relative. A relative import is how the single-sourcing guarantee gets
 #   broken quietly: a module moved between `readers/` and `loaders/` keeps importing
 #   successfully but against a different sibling, and the project's ruff configuration
 #   bans relative imports outright for that reason. The record descriptor named below is
 #   the ONLY statement of this record's geometry anywhere in the package.
-# WHY (Alternatives Considered): the PER-FIELD decoder is imported from the EBCDIC codec
+# WHY : Alternatives Considered: the PER-FIELD decoder is imported from the EBCDIC codec
 #   rather than its record-oriented sibling, which the account reader uses. The
 #   record-oriented form decodes every field the layout declares and returns them all,
 #   which would mean decoding the verification value and then discarding it. Both forms
@@ -136,13 +155,15 @@ from carddemo_migration.copybook.layouts import (
     mask_field,
     mask_record,
 )
+from carddemo_migration.copybook.zoned import decode_zoned_field
 
 __all__ = [
     "CARD_LAYOUT",
     "DROPPED_FIELD_NAMES",
     "LOADED_FIELDS",
-    "SUPPRESSED_FIELD_NAMES",
+    "PROTECTED_FIELD_NAMES",
     "DecodedCard",
+    "ProtectedValue",
     "decode_ascii_card",
     "decode_ebcdic_card",
     "iter_ascii_cards",
@@ -150,17 +171,181 @@ __all__ = [
     "read_ascii_cards",
     "read_ebcdic_cards",
     "render_masked_card_field",
+    "record_key",
     "render_masked_card_record",
 ]
 
-# WHY (Assumptions): the decoded value type is `str` alone, and not the account reader's
+
+class ProtectedValue:
+    """A decoded value that is carried to the encryption boundary and rendered nowhere.
+
+    Purpose
+    -------
+    Hold one field's decoded characters so a loader can encrypt them, while making every
+    ordinary route by which a value reaches a log, a traceback or a diagnostic yield a constant
+    marker instead of the value. The card verification value is the only field in this record
+    that needs it: the migration contract requires it PRESERVED into ``card.cards.cvv_encrypted``
+    and simultaneously requires that no endpoint and no rendering ever reproduce it.
+
+    Refactoring Rationale: this reader previously resolved that tension by not decoding the field
+    at all -- the predicate now named ``_is_protected_field`` was called ``_is_suppressed_field``
+    and excluded the span
+    before a byte of it was read, and the module documented the value as "excluded from every
+    decoded record". That is safe and it is also lossy in a way nothing downstream can repair:
+    the encrypted column the contract names could never be populated from an extract, so the
+    migration would silently deliver a card table whose verification values were absent rather
+    than protected. Suppression was the right instinct applied one layer too early. Decoding into
+    a carrier that cannot be rendered keeps the disclosure property the suppression was for and
+    restores the value the contract requires.
+
+    Assumptions: the protection here is a GUARD RAIL and not a cryptographic boundary. Any caller
+    holding the instance can call :meth:`reveal`; what the type removes is the accidental route --
+    an f-string, a ``print``, a ``repr`` of the enclosing dict, a pytest assertion diff, an
+    exception rendering its arguments. Those are how a value of this kind actually escapes, and a
+    plain ``str`` makes every one of them silent.
+
+    Alternatives Considered: subclassing ``str`` and overriding ``__repr__``. Rejected because a
+    ``str`` subclass IS a string everywhere it matters -- ``"%s" % value``, ``str.join``,
+    ``json.dumps`` and every C-level consumer read the underlying characters directly and never
+    consult the override -- so the guard would appear to work while leaking through the paths
+    most likely to be used.
+
+    Alternatives Considered: holding the value as ``bytes`` rather than ``str``. Rejected because
+    the field is a display-text span in both of its declared layouts and the encryption boundary
+    encodes on its own terms; converting here would put a character-set decision in the reader,
+    which is the one place in this package that deliberately makes none.
+    """
+
+    __slots__ = ("_value",)
+
+    #: The constant every rendering of a protected value yields.
+    MARKER: Final[str] = "[PROTECTED]"
+
+    def __init__(self, value: str) -> None:
+        """Wrap one decoded field value.
+
+        Parameters
+        ----------
+        value : str
+            The field's decoded characters, exactly as sliced at its declared width.
+
+        Returns
+        -------
+        None
+            Nothing; the instance holds the value.
+
+        Raises
+        ------
+        TypeError
+            If the value is not a ``str``, which would mean a caller wrapped a decoded value of
+            a regime this record does not declare.
+        """
+        if not isinstance(value, str):
+            raise TypeError(
+                "a protected value wraps the decoded characters of a display-text field;"
+                f" received {type(value).__name__}"
+            )
+        self._value = value
+
+    def reveal(self) -> str:
+        """Return the protected characters, for the encryption and load boundary only.
+
+        Returns
+        -------
+        str
+            The field's decoded characters at their declared width.
+        """
+        # WHY : Assumptions: the accessor is named `reveal` rather than `value` or `get` so that
+        #   every call site reads as a deliberate disclosure at the point it happens. A property
+        #   spelled `.value` would appear in a loader beside a dozen ordinary attribute reads and
+        #   be indistinguishable from them in review, which is the only control this type has.
+        return self._value
+
+    def __repr__(self) -> str:
+        """Return the marker, so a container or traceback rendering discloses nothing.
+
+        Returns
+        -------
+        str
+            The constant :data:`MARKER`.
+        """
+        # WHY : Assumptions: `__repr__` and not only `__str__`, because a dict, list or tuple
+        #   renders its members through `repr` -- so a decoded record printed whole would emit
+        #   the value if only `__str__` were overridden. That is the single most likely route.
+        return self.MARKER
+
+    def __str__(self) -> str:
+        """Return the marker, so an f-string or ``print`` discloses nothing.
+
+        Returns
+        -------
+        str
+            The constant :data:`MARKER`.
+        """
+        return self.MARKER
+
+    def __format__(self, format_spec: str) -> str:
+        """Return the marker whatever format specification is requested.
+
+        Parameters
+        ----------
+        format_spec : str
+            The requested specification, ignored.
+
+        Returns
+        -------
+        str
+            The constant :data:`MARKER`.
+        """
+        # WHY : Assumptions: overridden as well as `__str__` because `format(value, ">16")` and
+        #   an f-string carrying any specification bypass `__str__` entirely and would otherwise
+        #   fall through to `object.__format__`, which calls `str` only for an EMPTY spec.
+        return self.MARKER
+
+    def __eq__(self, other: object) -> bool:
+        """Compare two protected values by the characters they carry.
+
+        Parameters
+        ----------
+        other : object
+            The value to compare against.
+
+        Returns
+        -------
+        bool
+            ``True`` when both are protected values carrying equal characters.
+        """
+        # WHY : Trade-offs: equality is defined between two protected values ONLY, and a
+        #   comparison against a plain string returns NotImplemented rather than unwrapping. A
+        #   permissive comparison would turn this type into an oracle: a caller could confirm a
+        #   candidate value one guess at a time without ever calling `reveal`, which is exactly
+        #   the confirmation attack the shared masking helper is keyed to prevent.
+        if not isinstance(other, ProtectedValue):
+            return NotImplemented
+        return self._value == other._value
+
+    def __hash__(self) -> int:
+        """Hash by the characters carried, so equal protected values hash equally.
+
+        Returns
+        -------
+        int
+            The hash of the wrapped characters.
+        """
+        # WHY : Assumptions: defined because `__eq__` is; a type with equality and no hash is
+        #   unhashable, and a decoded record may legitimately be placed in a set by a caller
+        #   comparing two extracts.
+        return hash(self._value)
+
+
+# WHY : Assumptions: the decoded value type is `str` alone, and not the account reader's
 #   `str | Decimal` union, because this record declares only the two display-text regimes.
 #   Widening it to match the sibling would oblige every caller to narrow a case this record
 #   cannot produce, and narrowing a case that cannot occur is how a caller ends up with an
 #   unreachable branch that no test can cover.
-DecodedCard = dict[str, str]
+DecodedCard = dict[str, str | ProtectedValue]
 
-# WHY (Assumptions): the trailing pad is identified by NAME and not by position, and the
+# WHY : Assumptions: the trailing pad is identified by NAME and not by position, and the
 #   convention was measured rather than assumed: across every registered layout the pad is
 #   named either `FILLER` or, where the copybook qualified it, with that word as its final
 #   hyphenated component. Testing the name keeps this module free of any byte position of
@@ -169,7 +354,7 @@ DecodedCard = dict[str, str]
 _PAD_FIELD_NAME: Final[str] = "FILLER"
 _PAD_NAME_SUFFIX: Final[str] = f"-{_PAD_FIELD_NAME}"
 
-# WHY (Assumptions): the suppressed field is identified by a NAME COMPONENT rather than by
+# WHY : Assumptions: the suppressed field is identified by a NAME COMPONENT rather than by
 #   its full name, its offset or an equality test against one string, and the component was
 #   measured across the whole registry rather than guessed. Every field in the corpus that
 #   holds a card verification value carries that abbreviation as one hyphen-delimited
@@ -177,13 +362,16 @@ _PAD_NAME_SUFFIX: Final[str] = f"-{_PAD_FIELD_NAME}"
 #   overlay of it are the two that exist, and they agree on the convention while sharing no
 #   prefix. Matching a component therefore covers both spellings without also matching an
 #   unrelated field that merely contains those letters inside a longer word.
-# WHY (Alternatives Considered): the alternative was to key suppression off the
+# WHY : Alternatives Considered: the alternative was to key suppression off the
 #   descriptor's `sensitive` flag, which is already set on this field. It was rejected
 #   because that flag is also set on the primary account number and the embossed name, both
 #   of which this reader MUST emit for the loader to populate the card table -- so
 #   suppressing everything marked sensitive would empty the record of the columns it exists
 #   to carry. Sensitivity selects what gets redacted in a rendering; this predicate selects
-#   what is never decoded at all, and the two are deliberately different questions.
+#   what is decoded into a non-renderable carrier, and the two are deliberately different
+#   questions: the primary account number and the embossed name are masked in a rendering and
+#   returned as ordinary strings, while the verification value is masked in a rendering AND
+#   returned as a carrier.
 _VERIFICATION_VALUE_COMPONENT: Final[str] = "CVV"
 _NAME_COMPONENT_SEPARATOR: Final[str] = "-"
 
@@ -215,15 +403,18 @@ def _is_padding_field(field: FieldSpec) -> bool:
     return field.name == _PAD_FIELD_NAME or field.name.endswith(_PAD_NAME_SUFFIX)
 
 
-def _is_suppressed_field(field: FieldSpec) -> bool:
+def _is_protected_field(field: FieldSpec) -> bool:
     """Report whether a field must never be decoded or published at all.
 
     Purpose
     -------
     Decide, from the field's declared name alone, whether it holds a card verification
     value. This is the single place that judgement is made, and it is consulted BEFORE any
-    byte of the field is read, so a suppressed field is never decoded rather than being
-    decoded and then withheld.
+    byte of the field is read, so a protected field is decoded into a
+    :class:`ProtectedValue` rather than into a plain ``str``. Refactoring Rationale: this
+    predicate formerly selected fields to EXCLUDE from the decode entirely, which is what left
+    the encrypted target column unpopulatable; it now selects the fields whose decoded value is
+    wrapped.
 
     Parameters
     ----------
@@ -243,7 +434,7 @@ def _is_suppressed_field(field: FieldSpec) -> bool:
     ------
     None
     """
-    # WHY (Assumptions): the test is a POSITIVE property of the descriptor, evaluated over
+    # WHY : Assumptions: the test is a POSITIVE property of the descriptor, evaluated over
     #   every field the layout declares, rather than the removal of one known key after the
     #   fact. The difference is what happens when the layout gains a field: a predicate
     #   applied to every field covers the new one automatically, whereas a `del` of one
@@ -253,28 +444,31 @@ def _is_suppressed_field(field: FieldSpec) -> bool:
     return _VERIFICATION_VALUE_COMPONENT in field.name.split(_NAME_COMPONENT_SEPARATOR)
 
 
-# WHY (Assumptions): the pad is DROPPED from every decoded record because its 59 trailing
+# WHY : Assumptions: the pad is DROPPED from every decoded record because its 59 trailing
 #   bytes pad the record out to its fixed 150-byte length and carry no data -- the copybook
 #   declares them as an unnamed filler and no program reads them. The EBCDIC record decoder
 #   deliberately returns it, stating that dropping it is a projection decision belonging to
 #   the reader that maps a record onto a table, so this is that decision and this is where
 #   it is taken.
-# WHY (Trade-offs): all three names below are PUBLISHED rather than kept private, so that
+# WHY : Trade-offs: all three names below are PUBLISHED rather than kept private, so that
 #   what a decoded record omits is a fact a caller and a verification pass can assert
 #   instead of a silent omission that would make a decoded record a partial description of
 #   the bytes it came from. Publishing the suppressed set names the field WITHOUT emitting
 #   any instance of its value, which is the distinction that makes it safe to publish: a
 #   test can prove the suppression holds without ever handling a verification value.
+# WHY : Refactoring Rationale: this tuple excluded the protected field, which is what made the
+#   verification value unreachable rather than merely unrenderable. It now excludes the pad ONLY.
+#   The protected field is decoded like any other and differs in the TYPE it decodes to -- a
+#   ProtectedValue rather than a str -- so the exclusion that used to live in this projection now
+#   lives in the value's own renderings, where it protects the value without discarding it.
 LOADED_FIELDS: Final[tuple[FieldSpec, ...]] = tuple(
-    field
-    for field in CARD_LAYOUT.fields
-    if not _is_padding_field(field) and not _is_suppressed_field(field)
+    field for field in CARD_LAYOUT.fields if not _is_padding_field(field)
 )
 DROPPED_FIELD_NAMES: Final[frozenset[str]] = frozenset(
     field.name for field in CARD_LAYOUT.fields if _is_padding_field(field)
 )
-SUPPRESSED_FIELD_NAMES: Final[frozenset[str]] = frozenset(
-    field.name for field in CARD_LAYOUT.fields if _is_suppressed_field(field)
+PROTECTED_FIELD_NAMES: Final[frozenset[str]] = frozenset(
+    field.name for field in CARD_LAYOUT.fields if _is_protected_field(field)
 )
 
 
@@ -302,7 +496,7 @@ def _field_containing(offset: int) -> FieldSpec | None:
     ------
     None
     """
-    # WHY (Trade-offs): the search walks EVERY declared field, including the suppressed one
+    # WHY : Trade-offs: the search walks EVERY declared field, including the suppressed one
     #   and the pad, rather than only the published ones. Locating a fault is a different
     #   question from publishing a value: a bad byte inside the verification value's span
     #   still has to be reported as being in that span, or the offset would be attributed to
@@ -344,7 +538,7 @@ def _require_single_byte_record(record: str, number: int) -> str:
         If any character is outside the single-byte range. The record's declared width would
         then differ from its width in bytes.
     """
-    # WHY (Assumptions): a multi-byte character satisfies a CHARACTER-count check while
+    # WHY : Assumptions: a multi-byte character satisfies a CHARACTER-count check while
     #   occupying more than one byte, so it passes the shared iterator's declared-length test
     #   and then desynchronises every offset after it -- and because a record read one byte
     #   out of alignment still decodes to plausible characters, nothing later would raise. On
@@ -352,7 +546,7 @@ def _require_single_byte_record(record: str, number: int) -> str:
     #   account number would be the wrong sixteen, so the card table would key on a number
     #   that appears in no corpus. Requiring single-byte characters makes the character count
     #   provably equal the byte count, which is what the offsets assume.
-    # WHY (Assumptions): this check, and every other validation in this module, is enforced
+    # WHY : Assumptions: this check, and every other validation in this module, is enforced
     #   by an explicit `raise` and never by an `assert`. Running the interpreter with `-O`
     #   strips assert statements outright, so an assertion is not a validation at all: it is a
     #   check that silently disappears in exactly the deployment where a misaligned record
@@ -365,7 +559,7 @@ def _require_single_byte_record(record: str, number: int) -> str:
     offset = next(index for index, char in enumerate(record) if not char.isascii())
     field = _field_containing(offset)
 
-    # WHY (Trade-offs): the message names the record number, the zero-based offset and the
+    # WHY : Trade-offs: the message names the record number, the zero-based offset and the
     #   containing field's geometry, and it quotes NO part of the record -- not the offending
     #   character and not its code point. That shows exactly WHERE the record failed while
     #   emitting none of its content, so the diagnostic is safe to log wherever its consumer
@@ -411,28 +605,62 @@ def _decode_text_field_value(record: str, field: FieldSpec) -> str:
     LayoutError
         If the field declares a storage regime that cannot occur in a character record, which
         is any signed display, computational or mixed-regime area.
+    ZonedDecimalError
+        If an unsigned display field's characters are not the digits its picture clause requires.
+        Raised by the display codec, which names the field and its geometry and withholds the
+        content of a field the descriptor marks sensitive.
     """
-    # WHY (Assumptions): both display regimes are sliced identically, by the descriptor's own
+    # WHY : Assumptions: both display regimes are sliced identically, by the descriptor's own
     #   span, because both yield characters at full declared width -- the copybook's `PIC 9`
     #   fields on this record are identifiers rather than quantities, and an integer
     #   conversion would drop the leading zeros that are significant in an eleven-digit
     #   account identifier. The two regimes are still named separately rather than merged
     #   into one test, so that the trailing raise keeps its meaning.
-    # WHY (Trade-offs): unlike the EBCDIC path, this path does not additionally PROVE that an
-    #   unsigned display field holds only digits. The check belongs to the display codec,
-    #   which is deliberately outside this reader's dependency set because this record
-    #   declares no signed value for that codec to decode, and reaching for it here to
-    #   validate content would pull a money path into a module that has none. The EBCDIC path
-    #   gets the same check for free, as a by-product of having to decode a code page at all,
-    #   and the project's README fixes the EBCDIC extracts as authoritative wherever both
-    #   forms exist -- so the stricter check runs on the form whose verdict governs. What is
-    #   accepted is that a corrupt ASCII seed row could carry a non-digit through this path;
-    #   what is preserved is that the field's width, offset and content are otherwise
-    #   untouched, so the two forms still decode equal for every conforming record.
+    # WHY : Refactoring Rationale: this path DOES prove that an unsigned display field holds
+    #   only digits, and it previously declined to. The argument for declining was that the check
+    #   belongs to the display codec, that this record declares no signed value for that codec to
+    #   decode, and that the EBCDIC extracts are authoritative wherever both forms exist -- so the
+    #   stricter check would run on the form whose verdict governs. Two things are wrong with it.
+    #   First, it made the two entry points of ONE reader enforce DIFFERENT contracts: a
+    #   `CARD-ACCT-ID` holding a letter was refused by the byte path and returned verbatim by this
+    #   one, so the same defective record decoded differently depending on which corpus it arrived
+    #   in -- and a reader whose two paths disagree cannot be used to compare the corpora, which is
+    #   the one job the matching decoded shape exists for. Second, "authoritative wherever both
+    #   exist" is not "the only form loaded": the ASCII seeds are loaded on their own, so a
+    #   non-digit in an eleven-digit account identifier would have reached the account join column
+    #   as text with nothing having objected.
+    # WHY : Trade-offs: the decimal the codec returns is DISCARDED and the characters are returned
+    #   instead, which costs one parse whose result is thrown away. What it buys is exactly the
+    #   content check the picture clause states, while keeping the identifier a digit string of
+    #   declared width -- an integer would drop the leading zero that is significant in an
+    #   eleven-digit account identifier. It is the same call-and-discard the sibling account reader
+    #   makes, so the two readers now enforce one contract rather than two.
+    # WHY : Alternatives Considered: validating with `str.isdigit` here rather than calling the
+    #   codec. Rejected because `isdigit` is true for characters no picture clause admits --
+    #   superscripts and other Unicode digit forms among them -- and it would be a second,
+    #   independent statement of what a display digit is, which is the drift the single-sourcing
+    #   rule exists to prevent. The codec is also the party that names the field and its geometry
+    #   in the rejection and that withholds the content of a field the descriptor marks sensitive,
+    #   both of which a local check would have had to reimplement.
     if field.kind is Kind.TEXT or field.kind is Kind.UINT:
-        return record[field.start : field.end]
+        if field.kind is Kind.UINT:
+            decode_zoned_field(record, field)
+        span = record[field.start : field.end]
+        # WHY : Assumptions: the protection is applied HERE, at the point a character span becomes
+        #   a decoded value on THIS path. The byte path does not reach this function -- it decodes
+        #   each field through the EBCDIC codec -- so it applies the same predicate in
+        #   `_require_decoded_characters`, which is the single point every field of that path passes
+        #   through. Two application sites for two paths, one predicate deciding both: that is what
+        #   makes the two forms decode equal, and the corpus comparison asserts it.
+        # WHY : Trade-offs: the check is per field rather than hoisted into the caller's loop. It
+        #   costs one set membership test per field, and it buys the property that no caller of
+        #   this function can obtain an unwrapped protected value by reaching it directly -- which
+        #   a hoisted check in one loop would not give.
+        if _is_protected_field(field):
+            return ProtectedValue(span)
+        return span
 
-    # WHY (Assumptions): every regime this record declares is named explicitly above and
+    # WHY : Assumptions: every regime this record declares is named explicitly above and
     #   anything else raises, rather than the last branch doubling as a default. A signed
     #   display, computational or mixed-regime area cannot be read from a character record at
     #   all: its bytes are sign overpunches, packed nibbles, machine words or a differently
@@ -446,6 +674,53 @@ def _decode_text_field_value(record: str, field: FieldSpec) -> str:
         " and a signed display, computational or mixed-regime area must be read from the byte"
         " image through the EBCDIC codec"
     )
+
+
+def record_key(record: str) -> str:
+    """Return the primary key of one character record, sliced by the descriptor.
+
+    Purpose
+    -------
+    Expose the key a loader upserts on and a verification pass groups by, taken from the
+    descriptor's own key offset and length rather than from a width written here.
+
+    Parameters
+    ----------
+    record : str
+        One whole record at exactly the declared character width.
+
+    Returns
+    -------
+    str
+        The key characters at their full declared width, untrimmed, so a significant leading
+        zero survives.
+
+    Raises
+    ------
+    RecordLengthError
+        If the record is shorter than the declared width, which would make the sliced key short.
+    """
+    # WHY : Refactoring Rationale: this reader published no key accessor while every sibling
+    #   reader publishes one, so a loader keying this record had to slice it itself -- which is
+    #   the single-sourcing guarantee broken at the one place it matters most, because a key
+    #   sliced one character short does not raise. It collides with a sibling record instead, and
+    #   a loader resolves that as an upsert onto the wrong row.
+    # WHY : Trade-offs: this record's key IS its primary account number, so this function
+    #   returns a sensitive value where the masked renderings below return none. The two serve
+    #   different callers and the split is deliberate: a loader must hold the real key to write
+    #   the row at all, whereas a diagnostic must not, and collapsing them would either give the
+    #   loader a tag it cannot key on or give the diagnostic a number it must not print. The
+    #   named entry point is what makes the distinction visible at each call site.
+    # WHY : Assumptions: the key is sliced by `key_offset` and `key_length` from the descriptor,
+    #   never by a literal, so this function states no width of its own.
+    if len(record) < CARD_LAYOUT.reclen:
+        raise RecordLengthError(
+            f"a {CARD_LAYOUT.name} record of {len(record)} characters is shorter than the"
+            f" declared {CARD_LAYOUT.reclen}, so its"
+            f" {CARD_LAYOUT.key_length}-character key cannot be sliced"
+        )
+    start = CARD_LAYOUT.key_offset
+    return record[start : start + CARD_LAYOUT.key_length]
 
 
 def decode_ascii_card(record: str, *, number: int = 1) -> DecodedCard:
@@ -482,7 +757,7 @@ def decode_ascii_card(record: str, *, number: int = 1) -> DecodedCard:
     LayoutError
         If a declared field's storage regime cannot be decoded from a character record.
     """
-    # WHY (Trade-offs): a record of the WRONG width is rejected here rather than padded or
+    # WHY : Trade-offs: a record of the WRONG width is rejected here rather than padded or
     #   cut to fit. Truncation would silently discard real data and padding would invent it,
     #   and either way the row would still decode to well-formed characters, so a wrong-width
     #   record would load a card under a misread number with nothing reporting it. The
@@ -497,7 +772,7 @@ def decode_ascii_card(record: str, *, number: int = 1) -> DecodedCard:
 
     checked = _require_single_byte_record(record, number)
 
-    # WHY (Assumptions): the fields are walked in the descriptor's declaration order, which
+    # WHY : Assumptions: the fields are walked in the descriptor's declaration order, which
     #   is the record's byte order, so the resulting mapping iterates the record left to
     #   right. Both the pad and the verification value are excluded by iterating the published
     #   field tuple rather than by decoding all seven fields and filtering afterwards, which
@@ -536,7 +811,7 @@ def iter_ascii_cards(source: str | Iterable[object]) -> Iterator[DecodedCard]:
         If a line is longer than the declared record width, or a record holds a character
         outside the single-byte range.
     """
-    # WHY (Assumptions): the record cut is DELEGATED and not written again here. That iterator
+    # WHY : Assumptions: the record cut is DELEGATED and not written again here. That iterator
     #   owns one statement of the text-mode contract for the whole package: it splits on the
     #   separator, removes AT MOST ONE trailing carriage return and separator per row so that
     #   trailing blanks stay data, drops the single phantom empty piece a text ending in a
@@ -548,7 +823,7 @@ def iter_ascii_cards(source: str | Iterable[object]) -> Iterator[DecodedCard]:
     #   is exactly the drift this dependency edge exists to prevent, and it would be
     #   invisible: two readers stripping terminators slightly differently both return
     #   well-formed records.
-    # WHY (Trade-offs): that iterator's tolerance for a SHORT line -- padding it on the right
+    # WHY : Trade-offs: that iterator's tolerance for a SHORT line -- padding it on the right
     #   with blanks -- is inherited deliberately rather than overridden. It exists because one
     #   shipped seed conversion lost its trailing pad entirely, and padding on the right cannot
     #   move a field that is present; the characters added are precisely the pad the text form
@@ -556,7 +831,7 @@ def iter_ascii_cards(source: str | Iterable[object]) -> Iterator[DecodedCard]:
     #   engages here, and overriding it would fork the contract for one reader.
     records = iter_ascii_text_records(source, CARD_LAYOUT.reclen)
 
-    # WHY (Trade-offs): records are YIELDED one at a time rather than collected, so memory is
+    # WHY : Trade-offs: records are YIELDED one at a time rather than collected, so memory is
     #   constant in the record count. The cost is a single forward pass -- a caller wanting a
     #   second reading must re-open the source -- and what it buys is that this reader behaves
     #   identically on the small committed seed and on a production extract many orders of
@@ -596,7 +871,7 @@ def read_ascii_cards(path: pathlib.Path) -> Iterator[DecodedCard]:
         If a line is longer than the declared record width, or a record holds a character
         outside the single-byte range.
     """
-    # WHY (Assumptions): the caller supplies an EXPLICIT file, and this function never globs a
+    # WHY : Assumptions: the caller supplies an EXPLICIT file, and this function never globs a
     #   directory to find one. The seed directories make that concrete: the EBCDIC directory
     #   holds a zero-byte placeholder beside the datasets, so a pattern match over the
     #   directory would sweep it up along with whatever else matched. A zero-byte file is
@@ -604,7 +879,7 @@ def read_ascii_cards(path: pathlib.Path) -> Iterator[DecodedCard]:
     #   include exactly that case for this dataset -- so it must yield nothing rather than
     #   raise, and only an explicit path makes the difference between "empty" and "wrong file"
     #   the caller's to state.
-    # WHY (Alternatives Considered): the file is decoded through a single-byte code page that
+    # WHY : Alternatives Considered: the file is decoded through a single-byte code page that
     #   is total over all 256 byte values, rather than through a strict ASCII decode. Both
     #   reject a non-conforming file, but they differ in WHERE and HOW. A strict decode would
     #   fail inside the interpreter's reader with an encoding error, which is untyped with
@@ -615,7 +890,7 @@ def read_ascii_cards(path: pathlib.Path) -> Iterator[DecodedCard]:
     #   non-conforming shapes then land on that one typed error: a multi-byte sequence widens
     #   the row past the declared width and the iterator rejects it, while a single high byte
     #   leaves the width intact and the guard rejects it.
-    # WHY (Assumptions): line splitting is pinned to the separator alone, matching the shared
+    # WHY : Assumptions: line splitting is pinned to the separator alone, matching the shared
     #   iterator's own whole-text scanner exactly, so streaming this handle line by line and
     #   passing the whole text produce identical records. Leaving the default in place would
     #   let the interpreter translate and split on a carriage return as well, which would move
@@ -653,14 +928,14 @@ def _require_full_record_image(record: bytes | bytearray | memoryview) -> bytes:
     RecordLengthError
         If the image is not exactly the declared record length.
     """
-    # WHY (Alternatives Considered): the whole-record length check is performed HERE rather
+    # WHY : Alternatives Considered: the whole-record length check is performed HERE rather
     #   than inherited from the record-oriented EBCDIC decoder, which is where the account
     #   reader gets it. Using that decoder would have supplied this check for free, but only
     #   by decoding every declared field -- including the verification value -- which is
     #   precisely what this module refuses to do. Re-stating the check is the smaller cost:
     #   it compares against the layout's own declared length and so still introduces no byte
     #   position of this module's own.
-    # WHY (Trade-offs): the image is normalised to `bytes` rather than being passed on as
+    # WHY : Trade-offs: the image is normalised to `bytes` rather than being passed on as
     #   whatever view arrived. A memoryview reports its length in ITEMS, not bytes, so a view
     #   with a wider element format would satisfy a naive length test while spanning a
     #   different number of bytes; converting first makes the length compared here the length
@@ -678,14 +953,30 @@ def _require_full_record_image(record: bytes | bytearray | memoryview) -> bytes:
     return image
 
 
-def _require_decoded_characters(value: str | bytes, field: FieldSpec) -> str:
-    """Require that a per-field decode produced characters rather than raw bytes.
+def _require_decoded_characters(value: str | bytes, field: FieldSpec) -> str | ProtectedValue:
+    """Require that a per-field decode produced characters, and protect it if the field is.
 
     Purpose
     -------
     Narrow the per-field decoder's two-part result to the characters this record's regimes
-    always yield, and refuse the byte-valued outcome explicitly instead of letting it reach a
-    caller typed to receive text.
+    always yield, refuse the byte-valued outcome explicitly instead of letting it reach a
+    caller typed to receive text, and wrap a protected field's characters in the carrier that
+    keeps them out of a rendering.
+
+    Refactoring Rationale: the wrapping was applied ONLY on the character path, whose comment
+    recorded that "both of them reach this function for every field they emit". That was true of
+    the reader it was written in and is not true here: the byte path does not reach that
+    function at all -- it decodes each field through the EBCDIC codec and passes the result
+    through this one. So the verification value arrived wrapped from an ASCII seed and BARE from
+    an EBCDIC extract, which is the wrong way round for a defect to fall: the thirteen EBCDIC
+    datasets are the authoritative extracts, so every guard the carrier provides was absent on
+    the only path a real migration runs. Applying it here as well is what makes the two paths
+    decode equal, which is the property the corpus comparison in
+    ``data-migration/tests/test_readers.py`` asserts and the reason it caught this.
+
+    Assumptions: the decision is taken from the SAME predicate the character path uses, rather
+    than from a second list of names, so the two paths cannot disagree about which fields are
+    protected even if the set changes.
 
     Parameters
     ----------
@@ -698,8 +989,9 @@ def _require_decoded_characters(value: str | bytes, field: FieldSpec) -> str:
 
     Returns
     -------
-    str
-        ``value`` unchanged, once it is proven to be characters.
+    str | ProtectedValue
+        ``value`` unchanged once it is proven to be characters, or those characters inside the
+        protecting carrier when the field is one this record protects.
 
     Raises
     ------
@@ -708,9 +1000,9 @@ def _require_decoded_characters(value: str | bytes, field: FieldSpec) -> str:
         regime that this reader publishes no representation for.
     """
     if isinstance(value, str):
-        return value
+        return ProtectedValue(value) if _is_protected_field(field) else value
 
-    # WHY (Trade-offs): the rejection names the field's geometry and never renders the bytes
+    # WHY : Trade-offs: the rejection names the field's geometry and never renders the bytes
     #   themselves, not even as a length-bounded excerpt. A computational span is exactly where
     #   an amount or an identifier would sit, and this record's neighbouring spans hold a
     #   primary account number and a verification value, so a diagnostic that dumped an
@@ -744,9 +1036,9 @@ def decode_ebcdic_card(record: bytes | bytearray | memoryview) -> DecodedCard:
     -------
     DecodedCard
         One entry per emitted data field, keyed by the field name exactly as the copybook
-        spells it, in declaration order, with the pad dropped and the verification value
-        suppressed. The shape is identical to the ASCII path's, which is what makes the two
-        corpora comparable.
+        spells it, in declaration order, with the pad dropped and the verification value carried
+        inside :class:`ProtectedValue`. The shape is identical to the ASCII path's -- including
+        which values are protected -- which is what makes the two corpora comparable.
 
     Raises
     ------
@@ -766,14 +1058,14 @@ def decode_ebcdic_card(record: bytes | bytearray | memoryview) -> DecodedCard:
     """
     image = _require_full_record_image(record)
 
-    # WHY (Assumptions): the conversion is DELEGATED per field and never performed on the
+    # WHY : Assumptions: the conversion is DELEGATED per field and never performed on the
     #   record as a whole. That codec decodes each declared span on its own, dispatching on the
     #   descriptor's regime BEFORE any character set is applied, so no span of packed nibbles
     #   or low-value padding is ever handed to a character decoder. Decoding a whole record
     #   through a code page is the single most likely mistake on this path and the most
     #   damaging: it succeeds, preserves the declared width, and yields a record that looks
     #   almost right.
-    # WHY (Assumptions): iterating the published field tuple is what makes suppression hold on
+    # WHY : Assumptions: iterating the published field tuple is what makes suppression hold on
     #   this path too. The verification value's three bytes are inside `image` and are never
     #   passed to the decoder, so no decoded form of that value exists at any point in this
     #   function -- which is a stronger guarantee than decoding the record and dropping the
@@ -827,7 +1119,7 @@ def iter_ebcdic_cards(
         If the source is neither a byte image nor readable nor iterable, or produces a piece
         that is not a byte object, or a published field decodes to raw bytes.
     """
-    # WHY (Assumptions): the dataset is cut on the declared record length ALONE, and no line
+    # WHY : Assumptions: the dataset is cut on the declared record length ALONE, and no line
     #   terminator is looked for, honoured, stripped or padded on this path. A fixed-length
     #   blocked dataset carries no terminators, so a byte that happens to equal a newline is
     #   field data -- a low-order digit of an identifier or a pad byte -- and splitting on it
@@ -835,12 +1127,12 @@ def iter_ebcdic_cards(
     #   the middle of a field. The correctness test for this dataset is that its size divides by
     #   the declared record length with no remainder, which the delegated iterator checks before
     #   it yields the first record, and which the shipped extract satisfies exactly.
-    # WHY (Assumptions): the text form's tolerances must never reach here. Right-padding a short
+    # WHY : Assumptions: the text form's tolerances must never reach here. Right-padding a short
     #   piece or stripping a trailing byte would turn a genuine length failure into a plausible
     #   record, which is why this path reaches a different entry point of the copybook package
     #   and shares no code with the text one.
     for record in iter_ebcdic_records(source, CARD_LAYOUT):
-        # WHY (Trade-offs): records are yielded one at a time for the same reason the text path
+        # WHY : Trade-offs: records are yielded one at a time for the same reason the text path
         #   streams -- constant memory in the record count, at the cost of one forward pass --
         #   so a caller can compare the two corpora record by record without either side
         #   holding a dataset in memory.
@@ -882,14 +1174,14 @@ def read_ebcdic_cards(path: pathlib.Path) -> Iterator[DecodedCard]:
     LayoutError
         If a published field decodes to raw bytes.
     """
-    # WHY (Assumptions): the caller supplies an EXPLICIT file here too, and the hazard is
+    # WHY : Assumptions: the caller supplies an EXPLICIT file here too, and the hazard is
     #   concrete rather than theoretical: the EBCDIC seed directory holds a zero-byte
     #   placeholder alongside more than a dozen datasets, so a directory pattern would match it
     #   and whatever else the pattern happened to catch. A zero-byte file is legitimately a
     #   dataset with no records, so it must yield nothing rather than raise -- and because that
     #   is indistinguishable from a placeholder once globbed, naming the file is what keeps
     #   "this dataset is empty" from being confused with "the pattern found the wrong thing".
-    # WHY (Alternatives Considered): the path is handed to the codec rather than opened here and
+    # WHY : Alternatives Considered: the path is handed to the codec rather than opened here and
     #   passed as a stream. The codec validates the file size against the declared record length
     #   BEFORE yielding a first record, so a truncated dataset fails up front instead of part
     #   way through a load, and it owns the open, the forward-only read and the close. Opening
@@ -924,7 +1216,7 @@ def render_masked_card_record(record: str) -> str:
         If the record is not the declared width. Raised by the shared masking helper, whose
         width check is the reason this rendering can be relied on to stay byte-aligned.
     """
-    # WHY (Trade-offs): the primary account number and the embossed name are MASKED here
+    # WHY : Trade-offs: the primary account number and the embossed name are MASKED here
     #   rather than emitted, even though this same module emits both in full from its decode
     #   entry points. The two calls answer different questions: a decoded record feeds a loader
     #   that must write the real values, while this rendering feeds a human or a log. Masking
@@ -934,13 +1226,13 @@ def render_masked_card_record(record: str) -> str:
     #   changed and whether two masked records are equal. A random mask would destroy that
     #   property and a plaintext rendering would over-disclose, so the deterministic mask is
     #   the only one of the three that is both safe and diagnostically useful.
-    # WHY (Assumptions): the redaction is delegated to the shared helper rather than applied
+    # WHY : Assumptions: the redaction is delegated to the shared helper rather than applied
     #   here, so marking a field sensitive in the layout remains the ONLY change ever needed to
     #   redact it in this rendering. The helper reveals at most the trailing four characters of
     #   a payment number and otherwise substitutes a keyed tag that contains no part of the
     #   value, and it has no path that returns the plaintext of a sensitive field -- so a
     #   masking failure cannot degrade into disclosure, it can only raise.
-    # WHY (Assumptions): the suppressed field's span is present in this rendering as a
+    # WHY : Assumptions: the suppressed field's span is present in this rendering as a
     #   redaction rather than removed from it, and that is deliberate: the descriptor marks the
     #   field sensitive, so the helper replaces it with a tag holding none of its value, while
     #   keeping the rendering the declared width. Excising the span instead would shorten the
@@ -980,7 +1272,7 @@ def render_masked_card_field(record: str, field_name: str) -> str:
         or if the sliced span is not the field's declared width, which happens when the record
         is short.
     """
-    # WHY (Alternatives Considered): a suppressed field is REFUSED here rather than rendered as
+    # WHY : Alternatives Considered: a suppressed field is REFUSED here rather than rendered as
     #   a redaction, even though the shared helper would redact it safely and the whole-record
     #   rendering above does exactly that. The alternative was to allow it for consistency with
     #   that rendering, and it was rejected because the two cases differ in what the caller is
@@ -990,14 +1282,14 @@ def render_masked_card_field(record: str, field_name: str) -> str:
     #   uniform across every entry point, so the field cannot be reached through one door after
     #   being excluded from another -- and the caller learns the field is suppressed instead of
     #   receiving a tag it might mistake for a value it could compare.
-    if field_name in SUPPRESSED_FIELD_NAMES:
+    if field_name in PROTECTED_FIELD_NAMES:
         raise LayoutError(
             f"field {field_name!r} of record {CARD_LAYOUT.name} is suppressed by this reader and"
             " has no rendering; it is excluded from every decoded record, so there is no value"
             " here to redact and none is produced"
         )
 
-    # WHY (Assumptions): the field is resolved through the layout by name and then sliced by its
+    # WHY : Assumptions: the field is resolved through the layout by name and then sliced by its
     #   own declared span, so this module still states no offset of its own and an unknown name
     #   fails loudly here rather than silently rendering the wrong bytes.
     field = CARD_LAYOUT.field(field_name)

@@ -1,6 +1,7 @@
 package com.carddemo.authorization.service;
 
 import com.carddemo.authorization.domain.AuthReplyOutbox;
+import com.carddemo.authorization.domain.OutboxMessage;
 import com.carddemo.authorization.repository.OutboxRepository;
 import java.time.Clock;
 import java.time.LocalDateTime;
@@ -446,7 +447,7 @@ public class OutboxPublisher {
     }
 
     /**
-     * Builds the send request for one reply.
+     * Builds the send request for one reply, from the publication the row describes.
      *
      * <p>Assumptions: the group identifier and the deduplication identifier are the purpose-scoped KEYED
      * TOKENS stored on the row, not the card number and the acquirer's transaction identifier they stand
@@ -458,23 +459,43 @@ public class OutboxPublisher {
      * <p>Assumptions: both are taken from the row rather than recomputed here, so this publisher holds no
      * key material and a row whose payload cannot be parsed is still publishable.</p>
      *
+     * <p>Refactoring Rationale: the row is projected through {@link OutboxMessage#from(AuthReplyOutbox)}
+     * and this method reads the projection, where it previously read seven columns off the entity
+     * directly. The values sent are identical -- the projection copies each column without altering it --
+     * and what changes is that the description of what a reply publication CONSISTS OF now lives in one
+     * type instead of two. Before this, that type existed and neither side called it: the deciding
+     * listener assembled the row through the entity's constructor and this method took it apart column by
+     * column, so the two halves of one contract were written twice and could drift with no test able to
+     * see it. Projecting here also refuses a row whose stored format label is not the one the durable row
+     * can carry, which reading columns silently accepted.</p>
+     *
+     * <p>Trade-offs: one short-lived projection object is allocated per published reply. That is accepted
+     * because the send it precedes is a network call, so the allocation is not measurable beside it, and
+     * because the projection's own construction re-checks that every column a message requires is
+     * populated -- moving a fault that would otherwise surface as a rejected send to the moment the row is
+     * read.</p>
+     *
      * @param row the claimed outbox row; must not be {@code null}
      * @return the send request, never {@code null}
+     * @throws NullPointerException if a column the publication requires is unpopulated on the row
+     * @throws IllegalArgumentException if a column on the row is blank or wider than the publication
+     *     admits
      */
     private SendMessageRequest requestFor(AuthReplyOutbox row) {
+        OutboxMessage publication = OutboxMessage.from(row);
         Map<String, MessageAttributeValue> attributes = new HashMap<>();
-        attributes.put(ATTRIBUTE_CONTENT_TYPE, stringAttribute(row.getContentType()));
-        if (row.getCorrelationId() != null) {
-            attributes.put(ATTRIBUTE_CORRELATION_ID, stringAttribute(row.getCorrelationId()));
+        attributes.put(ATTRIBUTE_CONTENT_TYPE, stringAttribute(publication.contentType()));
+        if (publication.correlationId() != null) {
+            attributes.put(ATTRIBUTE_CORRELATION_ID, stringAttribute(publication.correlationId()));
         }
-        if (row.getExpiresAt() != null) {
-            attributes.put(ATTRIBUTE_EXPIRES_AT, stringAttribute(row.getExpiresAt().toString()));
+        if (publication.expiresAt() != null) {
+            attributes.put(ATTRIBUTE_EXPIRES_AT, stringAttribute(publication.expiresAt().toString()));
         }
         return SendMessageRequest.builder()
-                .queueUrl(row.getReplyQueueUrl())
-                .messageBody(row.getPayload())
-                .messageGroupId(row.getOrderGroupToken())
-                .messageDeduplicationId(row.getDeduplicationToken())
+                .queueUrl(publication.replyQueueUrl())
+                .messageBody(publication.payload())
+                .messageGroupId(publication.orderGroupToken())
+                .messageDeduplicationId(publication.deduplicationToken())
                 .messageAttributes(attributes)
                 .build();
     }

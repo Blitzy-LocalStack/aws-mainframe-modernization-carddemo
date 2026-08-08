@@ -37,7 +37,9 @@ import org.springframework.data.repository.query.Param;
  *   <li>A rewrite becomes {@code save(Card)}, also inherited and also not redeclared. The reference
  *       rewrites the card in the block at {@code app/cbl/COCRDUPC.cbl:1477-1483}, with the verb
  *       itself on {@code :1478}.</li>
- *   <li>The second, account-keyed access path becomes {@link #findByAccountIdOrderByCardNumAsc}.</li>
+ *   <li>The second, account-keyed access path becomes the OPTIONAL {@code accountId} predicate the two
+ *       keyset queries below each carry, so one browse serves both the unfiltered and the
+ *       account-filtered path and both resolve through the same secondary index.</li>
  * </ul>
  *
  * <p>Assumptions: the two inherited methods carry no documentation obligation here, because the
@@ -143,9 +145,8 @@ import org.springframework.data.repository.query.Param;
  * {@code :72}.</p>
  *
  * <p>Alternatives Considered: naming these two predicates in the method names instead, which is how
- * the equivalent browse repository in the transaction context expresses its own paths, and how
- * {@link #findByAccountIdOrderByCardNumAsc} below is written. It is not available for the two keyset
- * queries. A predicate derived from a method name is always applied, and there is no derived form
+ * the equivalent browse repository in the transaction context expresses its own paths. It is not
+ * available for the two keyset queries. A predicate derived from a method name is always applied, and there is no derived form
  * that means restrict on this argument only when the caller supplied one, so each filter would have
  * to be either always on or always off. Expressing both that way would take four methods per
  * direction, one for each combination of the two being present and absent, and all eight would have
@@ -236,8 +237,10 @@ import org.springframework.data.repository.query.Param;
  * <h2>The second access path, and the three artifacts that no longer reach it</h2>
  *
  * <p>Assumptions: reaching an account's cards is an indexed path rather than a scan, and its index is
- * non-unique by declaration rather than by caution. The provenance is complete and is recorded on
- * {@link #findByAccountIdOrderByCardNumAsc} itself. What belongs here is the consequence: this
+ * non-unique by declaration rather than by caution -- {@code app/jcl/CARDFILE.jcl:86} declares the
+ * alternate index with a non-unique key, so one account may hold many cards, and zero, one and many
+ * are all legitimate cardinalities. It is reached through the {@code accountId} predicate of the two
+ * keyset queries below. What belongs here is the consequence: this
  * interface owns no other context's data. No account, customer or cross-reference type appears in it,
  * and that absence traces to the reference rather than to a target simplification. Both maintenance
  * programs include the customer layout without referencing a single field of it, at
@@ -389,43 +392,25 @@ public interface CardRepository extends JpaRepository<Card, String> {
             @Param("cardNum") String cardNum,
             Limit limit);
 
-    /**
-     * Reads every card on one account, in ascending card-number order.
-     *
-     * <p>This is the target form of the reference's second access path. That path is an alternate
-     * index defined at {@code app/jcl/CARDFILE.jcl:83}, related to the same base cluster at
-     * {@code :84}, keyed at {@code :85} on the eleven bytes at position sixteen of the record -- which
-     * is the account identifier -- and declared with a non-unique key at {@code :86} and as upgraded
-     * at {@code :87}. A path over it is defined at {@code :100-102}, and that path is the object the
-     * online region is given as a file of its own, at {@code app/csd/CARDDEMO.CSD:13-14}, enabled for
-     * browse, read, update and delete at {@code :19}. Its target form is the secondary index the
-     * migration creates.</p>
-     *
-     * @param accountId the eleven-digit account identifier whose cards are wanted
-     * @return every card on that account in ascending card-number order, and an empty list when the
-     *     account holds none, which is a legitimate cardinality rather than an error
-     */
-    // WHY : Assumptions: the index this reads through is non-unique, and that is the declared
-    //       contract rather than a cautious default: app/jcl/CARDFILE.jcl:86 declares the alternate
-    //       index with a non-unique key, so one account may hold many cards. A unique index would
-    //       refuse the second card on an account, which the reference admits by design. This is also
-    //       why the return is a list and why an account with no cards yields an empty one -- zero,
-    //       one and many are all legitimate here, and the fixture set carries an account with no
-    //       records at all in order to hold the zero case.
-    // WHY : Assumptions: the justification for this method is the definition of that index and not
-    //       any browse that runs, because every artifact of the account-keyed path in the online
-    //       programs is unreachable, as the interface documentation records. The index-building step
-    //       at app/jcl/CARDFILE.jcl:110-112 has no target counterpart either: the migration plan
-    //       retires it, because the target store maintains an index as part of the transaction that
-    //       changes a row rather than as a separate job step.
-    // WHY : Alternatives Considered: accepting a row bound on this method as well, as the two keyset
-    //       queries do. Declined because the cardinality here is bounded by how many cards an account
-    //       holds rather than by how many rows fit a screen, and no reference path pages through it --
-    //       the paragraph that would have done so is the unreachable one. Adding a bound would invite
-    //       a caller to page a result that has no cursor contract defined for it.
-    // WHY : Assumptions: the ordering is stated in the method name rather than left to the index, so
-    //       that the result is deterministic. The index orders by account identifier alone, so two
-    //       cards on one account have no defined order under it; ordering by card number gives the
-    //       same sequence the base cluster is keyed in and that the browse above returns.
-    List<Card> findByAccountIdOrderByCardNumAsc(Long accountId);
+    // WHY : Refactoring Rationale: a findByAccountIdOrderByCardNumAsc(Long) method stood here,
+    //       declared as this interface's "second access path" and justified by the definition of the
+    //       alternate index rather than by any caller. It is REMOVED, because the index it read is
+    //       already read by the two keyset queries above: each takes an OPTIONAL accountId predicate,
+    //       so an account-filtered browse resolves through idx_cards_account_id exactly as the removed
+    //       method did, and that browse has a live route in api/CardController.listCards and a test
+    //       that verifies the filter reaches the query rather than being applied after it. The removed
+    //       method had no caller at all -- production or test -- so the alternate index had no reader
+    //       through it, which is the opposite of what its own documentation claimed.
+    // WHY : Alternatives Considered: keeping it and giving it a caller. Declined because there is no
+    //       operation that wants an UNBOUNDED card set: the published contract's five operations page
+    //       every list, so a caller reaching for this method would be paging a result with no cursor
+    //       contract defined for it -- which is the objection the method's own documentation raised
+    //       against adding a row bound to it, arriving at the opposite conclusion. Two readers of one
+    //       index with different bounding semantics and one caller between them is the same
+    //       duplication the removed card_selector column represented, and it is resolved the same way:
+    //       keep the mechanism that is reachable.
+    // WHY : Assumptions: the fixture authored for this path, card-by-account-corpus.txt, is NOT
+    //       orphaned by the removal. Its consumer is fixtures/CardFixtureContractTest, which asserts
+    //       its shape and its four-row cardinality, and it exercises the account-filtered browse -- the
+    //       same index and the same one-account-many-cards property the removed method was for.
 }

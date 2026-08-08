@@ -330,6 +330,29 @@
       <scope>test</scope>
     </dependency>
 
+        <!--
+          WHY : Refactoring Rationale: this module declared the Testcontainers engine and its JUnit
+                integration but not the framework's Testcontainers support, and the repository
+                integration tests its own test package charter enumerates could not run without it.
+                @ServiceConnection lives here, and this module's src/test/resources/application-test.yml
+                already DEPENDS on it: that file deliberately omits spring.flyway.user and
+                spring.flyway.password and records, as a measured finding, that the container's
+                @ServiceConnection is adapted into a Flyway connection-details bean so the container's
+                own generated credential migrates the schema.
+          WHY : Alternatives Considered: @DynamicPropertySource, which needs no extra artifact and which
+                that test package's charter ruled for. Tried and MEASURED to fail: publishing only the
+                three spring.datasource keys leaves spring.flyway.user bound to an unset SPRING_FLYWAY_USER
+                placeholder, and every context load failed authenticating as the literal placeholder text.
+                Publishing Flyway's credentials as well would have restated keys the same charter forbids a
+                test class from restating, so the ruling could not be satisfied in either direction. The
+                sibling ledger context resolves this the same way this module now does.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+
     <!-- Assumptions: the interest rate this service serves is one of exactly two
          operands in app/cbl/CBACT04C.cbl line 464 to line 465, which computes
          WS-MONTHLY-INT as ( TRAN-CAT-BAL * DIS-INT-RATE ) / 1200, so a float or a

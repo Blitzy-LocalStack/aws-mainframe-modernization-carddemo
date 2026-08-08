@@ -223,14 +223,22 @@ import jakarta.validation.constraints.Size;
  *
  * <p>Assumptions: a page of these rows is answered inside
  * {@code com.carddemo.common.web.PageResponse}, the single such envelope in the reactor, whose
- * seven components and one type parameter carry the rows together with the sealed boundary
- * positions and the two more-to-come flags, as its declaration at L210 to L217 shows. This record
- * is the element type that envelope is parameterised with, and the controller composes the
- * envelope; so the envelope is named in this prose and is deliberately not imported, because an
+ * FOUR components and one type parameter carry the rows together with the two sealed boundary
+ * positions and the single more-to-come flag -- {@code items}, {@code firstKey}, {@code lastKey} and
+ * {@code hasNext}, declared at
+ * {@code services/common-lib/src/main/java/com/carddemo/common/web/PageResponse.java} L231 to L235.
+ * This record is the element type that envelope is parameterised with, and the controller composes
+ * the envelope; so the envelope is named in this prose and is deliberately not imported, because an
  * import that no declaration here needs would assert a dependency edge that does not exist. Its
- * boundary positions are sealed tokens for the reason at L172 to L179, and its forward
- * more-to-come flag is settled by the one-extra-row contract at L106 to L113 rather than by
- * counting the matching rows.
+ * boundary positions are sealed tokens, and its more-to-come flag is settled by the one-extra-row
+ * contract rather than by counting the matching rows.
+ *
+ * <p>Refactoring Rationale: this paragraph said SEVEN components and two more-to-come flags, and
+ * cited lines that do not carry the declaration. Both were wrong: the envelope has four components
+ * and one flag. The correction is recorded rather than made silently because the inflated figure was
+ * not harmless -- a reader building a client against this prose would have expected a backward
+ * more-to-come flag that does not exist, and would have had to discover from behaviour that a
+ * backward-reached page reports its forward flag unconditionally instead.
  *
  * <p>Assumptions: the cursor ordering on this surface is the card number then the transaction
  * identifier, which is exactly {@code TRNX-KEY}'s composition at
@@ -617,5 +625,55 @@ public record StatementTransactionResponse(
      */
     public String processingTimestamp() {
         return processingTimestamp;
+    }
+
+    /**
+     * The stand-in a withheld value is rendered as.
+     */
+    private static final String REDACTED = "REDACTED";
+
+    /**
+     * Renders this transaction line without the card number, the amount or the merchant free text.
+     *
+     * <p>Refactoring Rationale: this override exists because the record-generated {@code toString}
+     * renders a primary account number, a monetary amount and four merchant fields including a free-text
+     * name. A page of these rows is the element type of the shared envelope, so a single interpolation of
+     * a page into a diagnostic renders every row it holds -- which makes this the highest-volume
+     * disclosure of the five records corrected together, not merely one more of them.</p>
+     *
+     * <p>Assumptions: the merchant NAME and CITY are withheld while the merchant IDENTIFIER is not.
+     * The identifier is an opaque code from a closed set that an operator needs in order to
+     * attribute a posting problem to a merchant; the name and city are free text a cardholder's own
+     * activity is described by, and a name plus a city plus an amount on one line describes where a
+     * person was and what they spent.</p>
+     *
+     * <p>Assumptions: the transaction identifier, the two codes, the source and the two timestamps ARE
+     * rendered. Those six are what a posting or statement defect is actually investigated with -- they
+     * locate the row, name the rule that applied to it and place it in the processing window -- and none
+     * of them is attributable to a person once the card number and the amount are withheld.</p>
+     *
+     * <p>Assumptions: the DESCRIPTION is withheld even though it looks like a bounded code field. It is
+     * not: the reference carries a free-text description that includes values composed at run time, and
+     * a description is the field most likely to have had a merchant name or an account reference written
+     * into it by an upstream producer.</p>
+     *
+     * @return a rendering safe to write to any log or exception message, never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "StatementTransactionResponse[cardNumber=" + REDACTED
+                + ", transactionId=" + transactionId
+                + ", typeCode=" + typeCode
+                + ", categoryCode=" + categoryCode
+                + ", source=" + source
+                + ", description=" + REDACTED
+                + ", amount=" + REDACTED
+                + ", merchantId=" + merchantId
+                + ", merchantName=" + REDACTED
+                + ", merchantCity=" + REDACTED
+                + ", merchantZip=" + REDACTED
+                + ", originTimestamp=" + originTimestamp
+                + ", processingTimestamp=" + processingTimestamp
+                + "]";
     }
 }

@@ -159,7 +159,7 @@ class BillPaymentEvaluationOrderTest {
                 new AccountContextClient.AccountBalance(ACCOUNT_ID, Money.of("100.00"))));
         when(this.accounts.findCardXrefByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(
                 new AccountContextClient.CardXref(ACCOUNT_ID, CARD_NUMBER)));
-        when(this.transactions.findMaxTranId()).thenReturn(Optional.of("0000000000000008"));
+        when(this.transactions.allocateTransactionId()).thenReturn(9L);
         when(this.transactions.save(any())).thenAnswer(call -> call.getArgument(0));
         org.mockito.Mockito.doThrow(new AccountContextClient.AccountContextUnavailableException(
                         "payment not applied", null))

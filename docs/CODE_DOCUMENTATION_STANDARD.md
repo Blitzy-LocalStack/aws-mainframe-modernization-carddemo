@@ -27,14 +27,28 @@
 > checked gate delivers is not an enforcement mechanism, so the gap remains a
 > review failure until the configuration or review process enforces it.
 >
-> **Current state.** The Java Checkstyle, TypeScript/JavaScript ESLint, Python
-> Ruff, Terraform lint/documentation, and workflow validation gates are present
-> and build-failing. The four migration workflows under `.github/workflows/`
-> run those checks with pinned actions. All sixteen Terraform module READMEs and
-> both environment-root READMEs are generated; the bootstrap README documents
-> the separately applied state backend. Machine success covers presence and
-> syntax only—semantic accuracy and rationale quality remain mandatory Rule 1
-> review obligations.
+> **Current state.** Four documentation gates are present and build-failing: Java
+> Checkstyle, TypeScript/JavaScript ESLint, Python Ruff, and the Terraform
+> lint/documentation pair. There is **no** workflow-validation gate — nothing lints
+> `.github/**` — and the YAML row of the enforcement summary states that plainly;
+> workflow rationale, `permissions` scoping and SHA pinning are review obligations.
+>
+> Those four gates run in **three** workflows: `services-ci.yml` carries the Java and
+> the Python gates, `ui-ci.yml` the TypeScript gate, and `infra-ci.yml` the HCL gate. A
+> fourth workflow, `deploy.yml`, is not a documentation gate — it is what builds all ten
+> committed Dockerfiles and assumes the deployment role — and it is counted separately
+> here for that reason. All sixteen Terraform module READMEs and both environment-root
+> READMEs are generated; the bootstrap README documents the separately applied state
+> backend. Machine success covers presence and syntax only — semantic accuracy and
+> rationale quality remain mandatory Rule 1 review obligations.
+>
+> Refactoring Rationale: this block previously listed a "workflow validation" gate among
+> the build-failing ones and attributed the checks to "the four migration workflows". The
+> first contradicted the enforcement summary in this same document, which measured that no
+> linter, action-pin checker or policy scanner runs over `.github/**`; the second conflated
+> the three gate workflows with the deploy workflow. Both are stated precisely because a
+> reader who believed a workflow gate existed would not add the review step that is in
+> fact the only check on those files.
 
 
 ## Why this document exists
@@ -367,10 +381,18 @@ direction. The first named public and package-private methods only. The second
 claimed presence stopped at package scope and left private methods to review, which
 is now false in the configuration and was the more damaging of the two: a reader who
 trusted it would leave private methods undocumented and be rejected at `validate`,
-with the failure pointing at a check the prose said did not apply to them. The
-ruleset is the authority under this document's precedence clause — where this prose
-and the configuration could be read differently, the configuration wins — so the
-prose is what moves.
+with the failure pointing at a check the prose said did not apply to them. The prose is
+what moves here, and the reason is narrower than "the configuration wins". Under the
+precedence clause above, the AAP and Rule 1 govern; the configuration is authoritative
+only as the record of **what the build currently enforces**, which is exactly the
+question this paragraph answers. Where a configuration setting enforces MORE than the
+prose describes, as here, the prose was understating a real gate and must be corrected
+to it. Where a setting enforced LESS than Rule 1 requires, the configuration would be
+the thing at fault and the gap would remain a review failure until the setting was
+widened — the configuration could not narrow the obligation by being narrower than it.
+Assumptions: the distinction is stated because collapsing it into "the configuration
+wins" would invert the precedence clause twenty pages earlier and make a linter's
+limitation a licence.
 
 **Mechanical gate — live today.**
 [`config/checkstyle/checkstyle.xml`](../config/checkstyle/checkstyle.xml) with
@@ -538,10 +560,16 @@ element of Rule 1. Two `linterOptions` complete the gate: `noInlineConfig` is
 than honoured, and `reportUnusedDisableDirectives` is `error`, so such a comment
 cannot survive a run looking load-bearing. Every prohibited shape this paragraph
 claims is caught has a committed negative probe in
-[`ui/src/test/documentationGate.test.ts`](../ui/src/test/documentationGate.test.ts),
+[`ui/documentationGate.test.ts`](../ui/documentationGate.test.ts),
 which lints deliberately non-conforming sources through the ESLint Node API
 against this very configuration, so a future relaxation fails a test rather than
-passing quietly. The plugin's dependency is pinned in `ui/package.json`,
+passing quietly. Refactoring Rationale: this link named
+`ui/src/test/documentationGate.test.ts`, a path that does not exist -- `ui/src/test/`
+holds `setup.ts` and nothing else. The probe sits at the `ui/` root because that is
+where the configuration it lints sits, and the correction matters more than a broken
+link normally would: a reader following it found nothing and had no way to tell whether
+the probe was missing or merely misfiled, which is the difference between a gate with a
+negative test and a gate with none. The plugin's dependency is pinned in `ui/package.json`,
 which fixes the version the gate runs at. `.github/workflows/ui-ci.yml` invokes
 that same script as a required step, so the gate runs both locally and on every
 push.
@@ -1060,7 +1088,7 @@ decides whether prose is true.
 | Python | module, class and function docstrings; Args / Returns / Raises | docstring **presence** and formatting only, in two halves: formatting everywhere plus presence on **public** declarations — pydocstyle `D` family under `[tool.ruff.lint]` in `data-migration/pyproject.toml`; presence at **every** visibility and **every** nesting depth — `data-migration/tests/test_docstring_gate.py` | **Args / Returns / Raises completeness** (no `D` rule checks a docstring against a signature, and a presence walker cannot judge content), accuracy, `WHY` quality | **live** locally and in `.github/workflows/services-ci.yml` |
 | HCL | file header, `description` on every `variable` and `output`, why-comment per non-obvious argument | `description` presence and the declared file set — `infra/.tflint.hcl`; generated-table freshness — `infra/.terraform-docs.yml` | the file-header block and every why-comment; the prose in all sixteen module READMEs, both environment READMEs, and the bootstrap README | **live** through TFLint and terraform-docs checks in `.github/workflows/infra-ci.yml` |
 | SQL | header block, why-comment per non-obvious constraint or index | **none** | the whole obligation | review only |
-| Dockerfile | header, justification on the base-image pin and layer ordering | that the base-image pin **resolves**, and that the image builds at all — the eight service images are built by the `java-services` job under a count assertion, so a broken pin or a failed build fails the run | the header and every justification, including the pin's | **live** for the eight service Dockerfiles through `.github/workflows/services-ci.yml`; review only for `data-migration/Dockerfile` and `ui/Dockerfile`, which no workflow builds |
+| Dockerfile | header, justification on the base-image pin and layer ordering | that the base-image pin **resolves**, and that the image builds at all — the eight service images are built by the `java-services` job of `services-ci.yml` under a count assertion, and all **ten** committed Dockerfiles, the eight service images plus `ui/Dockerfile` and `data-migration/Dockerfile`, are built by `.github/workflows/deploy.yml`, so a broken pin or a failed build fails the run | the header and every justification, including the pin's | **live** for all ten Dockerfiles — the eight service images on every pull request through `services-ci.yml`, and all ten at deploy time through `deploy.yml` |
 | YAML | header, justification on job ordering and caching, least-privilege `permissions`, SHA-pinned actions | **none for the documentation semantics.** GitHub itself rejects a syntactically invalid workflow at dispatch, and a mistyped `uses:` reference fails the step that runs it — but neither is a gate this repository configures, and NO linter, action-pin checker or policy scanner runs over `.github/**` (measured: no `actionlint`, `zizmor`, `ratchet` or equivalent appears anywhere under `.github/`) | the header and every rationale; least-privilege review of each `permissions` block; and confirming by inspection that every `uses:` carries a 40-character commit SHA rather than a moving tag | review only — the four migration workflows exist and each carries the required header, `permissions` block and SHA pins, but nothing mechanically enforces that they keep doing so |
 
 **What the gates in that table do NOT check.** Assumptions: every gate above is a
@@ -1087,6 +1115,14 @@ The existing COBOL suite's pipeline,
 [`.github/workflows/tests.yml`](../.github/workflows/tests.yml), is **unchanged**
 and appears in this table nowhere. It keeps its own workflow, and the gates above
 are wired into new workflows beside it.
+
+Refactoring Rationale: the Dockerfile row above previously said `ui/Dockerfile` and
+`data-migration/Dockerfile` were review-only because "no workflow builds" them.
+[`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) does: its image matrix
+names all ten Dockerfiles and runs `docker build` over each. Left standing, that sentence
+would have understated the gate in the direction that matters — a contributor editing
+either file would have believed a broken base-image pin could only be caught by review,
+when it in fact fails a build.
 
 Two boundaries are worth stating plainly, because a table of gates can read as a
 claim about a running system.

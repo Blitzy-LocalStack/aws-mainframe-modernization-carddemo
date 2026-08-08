@@ -199,13 +199,21 @@
  *
  * <h2>Contents of this package</h2>
  *
- * <p>Target contract: two {@code .java} files and no others -- this descriptor, and
- * {@code MoneyTest}, which is to exercise the money types the {@code com.carddemo.common.money}
- * package of the main source tree is to hold. Both that test and the two production classes it
- * covers are authored at later indexes of the same plan, so at this checkpoint the directory holds
- * this descriptor alone. Fixture bytes are to be quoted inside the expectations rather than copied
- * into a test resource directory, so this package owns no resources and introduces no nested
- * directory.</p>
+ * <p>This package holds three {@code .java} files and no others: this descriptor, {@code MoneyTest},
+ * which exercises money arithmetic, the posting boundaries and the wire behaviour of the
+ * {@code com.carddemo.common.money} types, and {@code MoneyModuleTest}, which pins the JSON wire
+ * form of an amount against the Jackson release this build resolves. Fixture bytes are quoted
+ * inside the expectations rather than copied into a test resource directory, so this package owns
+ * no resources and introduces no nested directory.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph declared a two-file target contract and recorded that at
+ * its authoring checkpoint the directory held this descriptor alone. Both statements are
+ * superseded: {@code MoneyTest} landed, the two production classes it covers landed with it, and
+ * {@code MoneyModuleTest} arrived beside it as a third file the earlier contract did not admit.
+ * The roster is restated at three rather than kept at two with an exception noted underneath,
+ * because a contract that excludes a file which exists reads as governance while the governed
+ * thing sits outside it -- and this package's whole purpose is to be the one place the money rule
+ * is checked, so a reader must be able to see every file that checks it.</p>
  *
  * <h2>Relationship to the reference test suite</h2>
  *

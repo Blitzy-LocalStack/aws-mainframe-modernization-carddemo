@@ -2,8 +2,10 @@ package com.carddemo.authorization.repository;
 
 import com.carddemo.authorization.domain.AuthFraud;
 import com.carddemo.authorization.domain.AuthFraudKey;
+import java.time.LocalDate;
 import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
 
 /**
  * The only route to table {@code auth_fraud}, the fraud-tagged authorizations.
@@ -15,9 +17,9 @@ import org.springframework.data.jpa.repository.JpaRepository;
  * {@code app/app-authorization-ims-db2-mq}, which is reference material this migration reads and never
  * modifies.
  *
- * <p>Refactoring Rationale: this interface declares NO method of its own, and the emptiness is the
- * design rather than an unfinished state. The reference program reaches this table by its full primary
- * key and by nothing else -- the insert names every column positionally, and the update's
+ * <p>Refactoring Rationale: this interface declares no derived FINDER of its own, and the absence is
+ * the design rather than an unfinished state. The reference program reaches this table by its full
+ * primary key and by nothing else -- the insert names every column positionally, and the update's
  * {@code WHERE} clause at L226 to L228 matches the card number and the composed timestamp exactly and
  * nothing besides -- so {@code findById}, {@code save} and {@code existsById}, which the inherited
  * interface already supplies over {@link AuthFraudKey}, are the complete access path. A derived
@@ -66,4 +68,29 @@ public interface AuthFraudRepository extends JpaRepository<AuthFraud, AuthFraudK
      *     which case the caller takes the insert path
      */
     Optional<AuthFraud> findById(AuthFraudKey id);
+
+    /**
+     * Reads the database server's own current date, which is what a fraud report is dated by.
+     *
+     * <p>Assumptions: the value comes from the SERVER and not from this process, because that is what
+     * the reference system wrote and because the two can disagree. A container's clock, its configured
+     * zone and the database session's zone are three independent settings, and a report raised in the
+     * minutes either side of midnight is dated a day apart when they differ -- which is the case where
+     * the date matters most, since it is the date an investigator filters on.
+     *
+     * <p>Assumptions: the query is native and reads no table, so it costs one round trip and no lock.
+     * A round trip is accepted because the caller already holds a pessimistic lock on the authorization
+     * being marked and is therefore already inside a transaction with an open connection; the
+     * alternative of deriving the date from a row's own default would date the report from whenever the
+     * ROW was written rather than from when the report was made.
+     *
+     * <p>Alternatives Considered: {@code CURRENT_TIMESTAMP} truncated to a date, which would also make
+     * the time available. Rejected because the column the value is written into is a date, so the time
+     * would be discarded anyway, and because two callers truncating the same timestamp differently is
+     * exactly the kind of divergence sourcing the value once is meant to remove.
+     *
+     * @return the database server's current date; never {@code null}
+     */
+    @Query(value = "SELECT CURRENT_DATE", nativeQuery = true)
+    LocalDate currentDate();
 }

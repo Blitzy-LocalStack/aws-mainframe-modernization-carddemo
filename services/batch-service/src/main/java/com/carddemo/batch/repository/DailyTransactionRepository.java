@@ -190,10 +190,26 @@ public interface DailyTransactionRepository extends Repository<DailyTransaction,
     // Assumptions: the fetch-size hint is what makes this stream actually stream. The driver opens a
     //     server-side cursor only when a positive fetch size and a non-auto-commit connection both
     //     hold; with either missing it buffers the whole result client-side, which on a large feed is
-    //     heap exhaustion rather than a slowdown. The value matches the module-wide
-    //     hibernate.jdbc.fetch_size in this module's application.yml deliberately, so the two cannot
-    //     disagree, and it is declared HERE as well so the streaming contract of this method does not
-    //     depend on a property another profile could change.
+    //     heap exhaustion rather than a slowdown. Only POSITIVITY carries that property, so the
+    //     streaming contract of this method rests on the value being above zero and not on which value
+    //     it is.
+    // Refactoring Rationale: this note used to say the value matches the module-wide
+    //     hibernate.jdbc.fetch_size "so the two cannot disagree". They can, and in two of the three
+    //     profiles they do. The base declares 100 at application.yml:764, which is where the numeric
+    //     agreement comes from, but application-dev.yml:215 narrows the session default to 25 and
+    //     application-prod.yml:426 widens it to 250, each for a reason argued at the key. A query hint
+    //     is a compile-time constant and cannot track any of them, so the old sentence claimed an
+    //     invariant that no mechanism enforces -- and it contradicted its own next clause, which
+    //     correctly observed that a profile can change the property.
+    // Trade-offs: this hint is therefore an intentional per-query OVERRIDE, not an echo. It governs
+    //     the statement it annotates, so this walk reads 100 rows per round trip under every profile:
+    //     four times the dev session default and rather less than half the prod one. What is given up
+    //     is per-environment tuning of exactly this walk -- prod cannot widen it by editing a property
+    //     -- and what is bought is that the one unbounded read in this interface has a window that is
+    //     fixed at the method rather than inherited from configuration, so it cannot be set to zero
+    //     from outside and turned into a full client-side buffer. Aligning the constant with the base
+    //     value keeps the default deployment's behaviour identical whichever of the two governs, which
+    //     is why 100 rather than an unrelated number.
     // Alternatives Considered: a fetch size of one, which would reproduce the reference's
     //     record-at-a-time input-output pattern literally. Rejected because parity is owed to the
     //     semantics and not to the round-trip count: app/cbl/CBTRN02C.cbl:202-219 advances one record

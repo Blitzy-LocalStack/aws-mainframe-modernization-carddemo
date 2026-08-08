@@ -3,6 +3,7 @@ package com.carddemo.authorization.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.jsonPath;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withServerError;
@@ -324,8 +325,15 @@ class RestAccountContextClientTest {
     @DisplayName("a complete account body yields the three amounts")
     void aCompleteAccountBodyYieldsTheAmounts() {
         Harness harness = harness();
-        harness.server().expect(requestTo(ORIGIN + "/api/v1/accounts/" + ACCOUNT_ID))
-                .andExpect(method(HttpMethod.GET))
+        // WHY : Refactoring Rationale: the expectation was a GET on /api/v1/accounts/<identifier>. It is
+        //   now a POST on a fixed path with the identifier asserted in the BODY, which is the whole point
+        //   of the change: an account identifier in a target is written verbatim into the load balancer's
+        //   access log before any application code runs, and that record is one the migration's
+        //   sensitive-data logging contract forbids it to hold. Asserting the body rather than merely the
+        //   new path is what proves the value still reaches the callee.
+        harness.server().expect(requestTo(ORIGIN + "/api/v1/accounts/lookup"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(jsonPath("$.accountId").value(ACCOUNT_ID))
                 .andRespond(withSuccess("{\"creditLimit\":\"5000.00\",\"cashCreditLimit\":\"1000.00\","
                         + "\"currentBalance\":\"250.75\"}", MediaType.APPLICATION_JSON));
 
@@ -342,7 +350,7 @@ class RestAccountContextClientTest {
     @DisplayName("an explicit not-found on the account read yields an empty optional")
     void anExplicitAccountNotFoundYieldsEmpty() {
         Harness harness = harness();
-        harness.server().expect(requestTo(ORIGIN + "/api/v1/accounts/" + ACCOUNT_ID))
+        harness.server().expect(requestTo(ORIGIN + "/api/v1/accounts/lookup"))
                 .andRespond(withStatus(HttpStatus.NOT_FOUND));
 
         assertThat(harness.client().findAccount(ACCOUNT_ID)).isEmpty();
@@ -367,7 +375,7 @@ class RestAccountContextClientTest {
 
         for (String body : partialBodies) {
             Harness harness = harness();
-            harness.server().expect(requestTo(ORIGIN + "/api/v1/accounts/" + ACCOUNT_ID))
+            harness.server().expect(requestTo(ORIGIN + "/api/v1/accounts/lookup"))
                     .andRespond(withSuccess(body, MediaType.APPLICATION_JSON));
 
             assertThatThrownBy(() -> harness.client().findAccount(ACCOUNT_ID))
@@ -388,19 +396,24 @@ class RestAccountContextClientTest {
     @DisplayName("the customer probe distinguishes present, absent and unavailable")
     void theCustomerProbeDistinguishesThreeOutcomes() {
         Harness present = harness();
-        present.server().expect(requestTo(ORIGIN + "/api/v1/customers/" + CUSTOMER_ID))
-                .andExpect(method(HttpMethod.HEAD))
+        // WHY : Refactoring Rationale: the probe was issued with HEAD on
+        //   /api/v1/customers/<identifier>. It is a POST on a fixed path carrying the identifier in a
+        //   body, for the same reason as the account read above. The response is still bodyless, so the
+        //   property HEAD was chosen for is retained -- only the identifier's position changed.
+        present.server().expect(requestTo(ORIGIN + "/api/v1/customers/lookup"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(jsonPath("$.customerId").value(CUSTOMER_ID))
                 .andRespond(withSuccess());
         assertThat(present.client().customerExists(CUSTOMER_ID)).isTrue();
         present.server().verify();
 
         Harness absent = harness();
-        absent.server().expect(requestTo(ORIGIN + "/api/v1/customers/" + CUSTOMER_ID))
+        absent.server().expect(requestTo(ORIGIN + "/api/v1/customers/lookup"))
                 .andRespond(withStatus(HttpStatus.NOT_FOUND));
         assertThat(absent.client().customerExists(CUSTOMER_ID)).isFalse();
 
         Harness broken = harness();
-        broken.server().expect(requestTo(ORIGIN + "/api/v1/customers/" + CUSTOMER_ID))
+        broken.server().expect(requestTo(ORIGIN + "/api/v1/customers/lookup"))
                 .andRespond(withServerError());
         assertThatThrownBy(() -> broken.client().customerExists(CUSTOMER_ID))
                 .isInstanceOf(AccountContextUnavailableException.class);
@@ -420,8 +433,15 @@ class RestAccountContextClientTest {
     void theThreePublishedPathsArePinned() {
         assertThat(RestAccountContextClient.PATH_CARD_XREF_LOOKUP)
                 .isEqualTo("/api/v1/card-xrefs/lookup");
-        assertThat(RestAccountContextClient.PATH_ACCOUNT).isEqualTo("/api/v1/accounts/{accountId}");
-        assertThat(RestAccountContextClient.PATH_CUSTOMER).isEqualTo("/api/v1/customers/{customerId}");
+        // WHY : Refactoring Rationale: both were path TEMPLATES carrying a variable. They are fixed
+        //   paths now, and pinning them as fixed is what fails if a keyed template is reintroduced --
+        //   which would silently restore the disclosure this change removed.
+        assertThat(RestAccountContextClient.PATH_ACCOUNT).isEqualTo("/api/v1/accounts/lookup");
+        assertThat(RestAccountContextClient.PATH_CUSTOMER).isEqualTo("/api/v1/customers/lookup");
+        assertThat(RestAccountContextClient.PATH_ACCOUNT)
+                .as("no account-context path may carry a variable segment")
+                .doesNotContain("{");
+        assertThat(RestAccountContextClient.PATH_CUSTOMER).doesNotContain("{");
     }
 
     /**

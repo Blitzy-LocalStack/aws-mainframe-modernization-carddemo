@@ -590,13 +590,42 @@ resource "aws_lb" "this" {
   #       own error bodies -- which is worth having and is a different exposure. The
   #       bound on this log therefore has to be that the value never enters the
   #       request line, which is a contract property and not a logging one.
-  #       Trade-offs: OTHER selectors are still retained here in the clear -- an
-  #       account identifier, a customer identifier, a transaction identifier, a
-  #       user identifier. That is accepted and named rather than claimed away: none
-  #       of them is cardholder data, each is an internal identifier that confers no
-  #       access on its own, and the destination bounds who can read them. What is
-  #       refused is the one value whose retention would be a durable copy of
-  #       cardholder data.
+  #       Refactoring Rationale: this position claimed that "an account identifier, a
+  #       customer identifier, a transaction identifier, a user identifier" were all
+  #       "still retained here in the clear", and defended retaining them on the
+  #       ground that "none of them is cardholder data" and each "confers no access on
+  #       its own". Two of the four were retained, and that defence was refuted by this
+  #       migration's own sensitive-data logging contract, which names ACCOUNT AND
+  #       CUSTOMER IDENTIFIERS in the same sentence as the primary account number --
+  #       docs/architecture/observability.md records the same reading being made and
+  #       rejected in two other files. An account identifier is also the join key to
+  #       every other row about a cardholder, so a record holding it and a timestamp
+  #       locates the customer, the cards and the transactions without holding any of
+  #       them.
+  #       The code was brought up to the contract rather than the sentence softened to
+  #       match the code. NO PUBLISHED OPERATION NOW CARRIES AN ACCOUNT OR CUSTOMER
+  #       IDENTIFIER IN A REQUEST LINE. Six operations moved to reach that: the card
+  #       listing and the pending-authorization listing take their account narrowing in
+  #       a request body at /api/v1/cards/search and /api/v1/authorizations/search; the
+  #       account-context read and the customer existence check became
+  #       /api/v1/accounts/lookup and /api/v1/customers/lookup, the latter collapsing a
+  #       HEAD and a GET into one POST; and the account-keyed cross-reference read and
+  #       the bill-payment write moved their identifier into the body each already
+  #       carried. Each is asserted from both sides -- the services' contract tests pin
+  #       the published method and path, and the browser client's contract-agreement
+  #       test compares its own declarations against the same documents.
+  #       Trade-offs: TWO of the four are still retained here in the clear, and they
+  #       are named rather than claimed away -- a transaction identifier at
+  #       /api/v1/transactions/{transactionId} and a user identifier at
+  #       /api/v1/auth/users/{userId}. Neither appears in the prohibition that contract
+  #       states: it enumerates the full primary account number, account and customer
+  #       identifiers, card-verification values, national and government identifiers,
+  #       passwords, tokens, bodies carrying credentials, and persistence-bound values,
+  #       and neither of these two is any of them. Each is an internal identifier that
+  #       confers no access on its own and names no person, and the destination bounds
+  #       who can read them. So the residue accepted here is exactly the residue the
+  #       contract permits, which is what the earlier note asserted without it being
+  #       true.
   #       Second, the destination is not a general log
   #       bucket: it is created above with public access blocked, bucket-owner
   #       enforced ownership, versioning, an exact-source delivery policy and no
@@ -681,11 +710,19 @@ resource "aws_lb_listener" "https" {
   #       invented. CICS rejected an unrecognised four-character transaction
   #       identifier instead of dispatching it to an arbitrary program, so "no
   #       such route" is the baseline's own answer to the same question.
-  #       Assumptions: the body is JSON, and specifically the SAME SHAPE the
-  #       services' own error payload uses -- a numeric `status`, a
-  #       human-readable `message`, and a `fieldErrors` array -- so a client
-  #       parses this response with the reader it already has rather than needing
-  #       a second one for the one error this layer composes itself. An ad-hoc
+  #       Assumptions: the body is JSON, and every member it carries is a member
+  #       of the services' own error payload under the same name and the same
+  #       type -- a numeric `status`, a human-readable `message` and a
+  #       `fieldErrors` array -- so a client parses this response with the reader
+  #       it already has rather than needing a second one for the one error this
+  #       layer composes itself. It is a SUBSET of that payload and not the whole
+  #       of it: the shared kernel's error record declares eleven members, and the
+  #       eight this body omits -- the two codes, the severity, the subsystem, the
+  #       correlation identifier, the path, the timestamp and the abend detail --
+  #       are omitted because none can be composed at apply time from a request
+  #       this listener never sees. A client reading this body therefore finds
+  #       fewer members than a service response carries, which is why the reader
+  #       has to tolerate an absent optional member rather than require every one. An ad-hoc
   #       body such as a lone `error` member was the alternative and is rejected:
   #       it is valid JSON that no service ever emits, so every client would have
   #       to special-case the shape of a 404 arriving from here, and the special
@@ -694,8 +731,8 @@ resource "aws_lb_listener" "https" {
   #       `fieldErrors` unconditionally need not distinguish absent from empty.
   #       It is built with `jsonencode` rather than as an escaped string literal
   #       so the quoting cannot be got wrong.
-  #       Trade-offs: the shape is deliberately INCOMPLETE -- it carries no
-  #       correlation identifier, where every service-composed error does. A
+  #       Trade-offs: the omission that costs an operator most is the correlation
+  #       identifier, which every service-composed error carries. A
   #       listener fixed response is a static string fixed at apply time and
   #       returned with no access to the request, so there is no mechanism here
   #       to interpolate a per-request value at all. Two ways to gain one were

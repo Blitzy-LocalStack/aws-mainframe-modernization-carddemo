@@ -61,7 +61,7 @@
  *       {@code NOT NULL} and do not, so the choice is per column and cannot be applied wholesale.</li>
  * </ul>
  *
- * <h2>The four mappers this package charters</h2>
+ * <h2>The five mappers this package charters</h2>
  *
  * <ul>
  *   <li>{@code PendingAuthDetailMapper} carries the 200-byte child segment declared at
@@ -72,13 +72,20 @@
  *       L19 group header and its L54 padding field are set aside. The same mapper also carries the
  *       206-byte unload child record, whose shape is declared at {@code cbl/PAUDBUNL.CBL} L46 to
  *       L48 as a {@code PIC S9(11) COMP-3} parent key occupying six bytes ahead of a
- *       {@code PIC X(200)} segment image. This mapper defines the per-field render helpers the other
+ *       {@code PIC X(200)} segment image. Its segment and unload conversions are consumed by
+ *       {@code service.LoadService} and {@code service.UnloadService}, the migrated forms of
+ *       {@code cbl/PAUDBLOD.CBL} and of {@code cbl/PAUDBUNL.CBL} with {@code cbl/DBUNLDGS.CBL}; its
+ *       27-component response projection is NOT consumed by an HTTP path, for the reason recorded
+ *       below. This mapper defines the per-field render helpers the other
  *       three share, so a width or a sign convention is expressed once for the package.</li>
  *   <li>{@code PendingAuthSummaryMapper} carries the 100-byte root segment declared at
  *       {@code ims/DBPAUTP0.dbd} L28 to the {@code PendingAuthSummary} entity and on to the
  *       62-component summary response, that count being the field components of the symbolic map
  *       {@code cpy-bms/COPAU00.cpy}. It also carries the 100-byte unload root record declared at
- *       {@code cbl/PAUDBUNL.CBL} L44. The five-slot status array of
+ *       {@code cbl/PAUDBUNL.CBL} L44, which for this segment is the segment image itself because the
+ *       parent record carries no prefix; that conversion is consumed by {@code service.LoadService}
+ *       and {@code service.UnloadService}. Its 62-component response projection is NOT consumed by an
+ *       HTTP path, for the reason recorded below. The five-slot status array of
  *       {@code cpy/CIPAUSMY.cpy} L22 is split here.</li>
  *   <li>{@code AuthFraudMapper} carries a {@code PendingAuthDetail} to the {@code auth_fraud} row
  *       and carries the fraud-mark request and response pair. The baseline shape is
@@ -94,7 +101,35 @@
  *       declared at {@code cpy/CCPAURLY.cpy} L19 to L24 and emitted at {@code cbl/COPAUA0C.cbl}
  *       L722 to L727. The error-log record is declared at {@code cpy/CCPAUERY.cpy} L20 to L40,
  *       whose eleven component widths sum to 122.</li>
+ *   <li>{@code PendingAuthViewMapper} carries the two entities to the HTTP bodies
+ *       {@code src/main/resources/openapi/authorization-api.yaml} publishes, and is the only mapper
+ *       here that is a Spring bean rather than a static utility -- it holds the cursor signer, so it
+ *       cannot be static. It is the live adapter for the list and detail operations:
+ *       {@code service.PendingAuthSummaryService} and {@code service.PendingAuthDetailService} both
+ *       route through it.</li>
  * </ul>
+ *
+ * <p>Refactoring Rationale: this list read "four mappers" while the package held five, omitting the one
+ * that actually serves the HTTP boundary. A closed-set count is a claim, and a reader checking which
+ * mapper served a response would have found the four listed here and concluded that none did.</p>
+ *
+ * <h2>Why two response projections exist, and which one the contract serves</h2>
+ *
+ * <p>Assumptions: the flat map projections on the two SEGMENT mappers and the view types on
+ * {@code PendingAuthViewMapper} are not duplicates and neither supersedes the other. The segment
+ * mappers' projections are the record of what the 3270 terminal displayed, field for field against the
+ * symbolic maps {@code cpy-bms/COPAU00.cpy} and {@code cpy-bms/COPAU01.cpy}; the view types are the
+ * HTTP bodies. The published contract states the distinction itself at
+ * {@code openapi/authorization-api.yaml} L1702 to L1706: the flat summary projection "is not a
+ * candidate for this body", because it carries no cursor member and six screen-chrome positions a
+ * browser client renders for itself.</p>
+ *
+ * <p>Trade-offs: keeping the terminal projections means two shapes exist for one aggregate, and a
+ * reader can mistake the unused one for a defect. Removing them would discard the field-for-field
+ * correspondence with the symbolic maps, which is the evidence that the migrated field set is complete
+ * -- the 27 and 62 component counts above are derived from those maps and are checked against these
+ * projections. The distinction is therefore recorded here rather than resolved by deletion, and the
+ * contract's own sentence is cited so the decision is not this package's alone.</p>
  *
  * <p>Assumptions: with a string-format payload the field order and the delimiter are themselves the
  * contract, so two details of the reply are recorded here rather than left to be rediscovered. The

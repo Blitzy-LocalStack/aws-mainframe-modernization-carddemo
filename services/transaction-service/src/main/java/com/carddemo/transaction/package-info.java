@@ -92,9 +92,17 @@
  *   <li><b>{@code api}</b> -- the REST layer. It validates its input and
  *       delegates, and holds no business rule. Two controllers:
  *       {@code TransactionController} and {@code BillPaymentController}.</li>
- *   <li><b>{@code service}</b> -- the business rules, transcribed paragraph by
- *       paragraph from the COBOL: {@code TransactionListService},
- *       {@code TransactionAddService} and {@code BillPaymentService}.</li>
+ *   <li><b>{@code service}</b> -- the business rules, transcribed paragraph
+ *       by paragraph from the COBOL: {@code TransactionListService},
+ *       {@code TransactionViewService}, {@code TransactionAddService} and
+ *       {@code BillPaymentService}, together with the outbound port
+ *       {@code AccountContextClient} and its HTTP implementation
+ *       {@code RestAccountContextClient}. Assumptions: the port and its
+ *       implementation belong in this layer rather than in {@code repository},
+ *       because what they reach is another bounded context over HTTP and not
+ *       this context's own schema; filing a cross-context call under data
+ *       access would invite a reader to expect a transaction to enclose
+ *       it.</li>
  *   <li><b>{@code repository}</b> -- data access, including the
  *       keyset-paginated queries that replace the CICS browse.</li>
  *   <li><b>{@code domain}</b> -- the JPA entities, one per copybook record:
@@ -104,9 +112,11 @@
  *       from the copybook and symbolic-map layouts.</li>
  *   <li><b>{@code mapper}</b> -- the anti-corruption layer, and the only place
  *       copybook representation concerns may appear.</li>
- *   <li><b>{@code config}</b> -- Spring wiring. Three classes:
- *       {@code SecurityConfig}, {@code OpenApiConfig} and
- *       {@code DataSourceConfig}.</li>
+ *   <li><b>{@code config}</b> -- Spring wiring. Four classes:
+ *       {@code SecurityConfig}, {@code OpenApiConfig}, {@code DataSourceConfig}
+ *       and {@code InternalIdentityConfig}, the last of which mints the service
+ *       token the account context requires on the two cross-context reads this
+ *       module issues.</li>
  * </ul>
  *
  * <p>Trade-offs: confining fixed-width padding, sign overpunch, {@code FILLER},
@@ -134,27 +144,29 @@
  * the negative boundary near the foot of this file rests on arithmetic that can
  * be re-checked rather than on an argument that has to be re-made.
  *
- * <p>Assumptions: that eight is this module's <b>target contract</b> as the migration plan
- * assigns it, not a measurement of the directory, and the same is true of every class named
- * in the subpackage map above. Measured at the checkpoint that authored this paragraph, seven
- * of the eight charters are present -- this root and the charters in {@code service},
- * {@code repository}, {@code domain}, {@code dto}, {@code mapper} and {@code config} -- and
- * the eighth is <b>planned</b>, not missing: the {@code api} package does not exist yet, so
- * neither does its charter. Of the classes named above, twenty have landed; the two
- * controllers, {@code TransactionController} and {@code BillPaymentController}, and the three
- * services, {@code TransactionListService}, {@code TransactionAddService} and
- * {@code BillPaymentService}, arrive with the endpoints they serve.
+ * <p>Assumptions: eight is both this module's target contract as the migration
+ * plan assigns it and a measurement of the directory, because all eight
+ * charters are now present -- this root and the charters in {@code api},
+ * {@code service}, {@code repository}, {@code domain}, {@code dto},
+ * {@code mapper} and {@code config}. Beside them the module holds thirty-two
+ * production classes: two controllers, six service types, six repository
+ * types, four entities, seven request and response records, two mappers,
+ * four configuration classes and the application entry point.
  *
- * <p>Refactoring Rationale: the count canon was stated in the present tense with no
- * accompanying statement of what exists, so a reader reconciling "exactly eight package
- * charter files" against the tree would find seven and have no way to tell which
- * reading was wrong -- the arithmetic, or their own listing. The canon itself is
- * correct and is left at eight, because the negative boundary at the foot of this file
- * derives from it and because the sibling {@code dto} charter cites this paragraph by
- * number when distinguishing its own file count from this one. What was missing is the
- * distinction between the target and the measurement, so it is added here rather than by
- * lowering the canon to match today's directory, which would break both dependants and
- * would have to be raised again with each package that lands.
+ * <p>Refactoring Rationale: this paragraph used to record that the {@code api}
+ * package did not exist, that seven of the eight charters were present, and
+ * that the two controllers and three of the services were still to arrive
+ * with the endpoints they served. Every one of those statements has been
+ * overtaken by delivery, so they are replaced rather than annotated.
+ * Trade-offs: the class total above is a measured figure and will therefore
+ * age, which is the same failure the superseded text suffered. It is kept
+ * because the canon of eight charters is load-bearing -- the negative
+ * boundary near the foot of this file derives from it, and the sibling
+ * {@code dto} charter cites this paragraph by number when distinguishing its
+ * own file count from this one -- and a reader reconciling that canon
+ * against the tree needs to know what else the directories hold. The
+ * per-package enumerations in the subpackage map above, not this total, are
+ * the authority for which classes exist.
  *
  * <h2>Shared kernel: the Java equivalent of one copybook include path</h2>
  *
@@ -706,12 +718,23 @@
  *
  * <p>Trade-offs: prose is wrapped at 80 columns to match the sibling charters
  * and build manifests in this tree, even though the ruleset enables no
- * line-length check and so does not require it. Six lines exceed that width
- * deliberately and should be left as they are. Four are the label definitions
- * above, which are preformatted: they are quoted, and their alignment is what
- * makes four labels legible as a column rather than as a paragraph. The other
- * two are the layering test path and the migration path, neither of which can
- * be broken, because a line break inside an inline code span would insert the
- * comment margin into the rendered path.
+ * line-length check and so does not require it. Two kinds of line exceed that
+ * width deliberately and should be left as they are. The first is the block of
+ * label definitions above, which is preformatted: the labels are quoted, and
+ * their alignment is what makes them legible as a column rather than as a
+ * paragraph. The second is any line carrying a path inside an inline code span
+ * -- the layering test path and the migration path among them -- because a
+ * break inside such a span would insert the comment margin into the rendered
+ * path. Assumptions: the exception is stated as those two kinds rather than as
+ * a line count, and the choice is the same one made in {@code services/pom.xml}
+ * and {@code data-migration/pyproject.toml}: an exact figure here would be a
+ * second, unmaintained copy of something the file itself already answers, and
+ * it goes stale on the next paragraph edited. Refactoring Rationale: a count of
+ * six stood here. It never matched the file -- the wrapped-prose paragraph
+ * describing the layering test-jar chain runs a few columns over throughout,
+ * which the figure did not account for -- so a reader who checked it found a
+ * different number and had to decide which of the two to distrust. The kinds
+ * are what a maintainer actually needs, because they say which long lines may
+ * be rewrapped and which may not.
  */
 package com.carddemo.transaction;

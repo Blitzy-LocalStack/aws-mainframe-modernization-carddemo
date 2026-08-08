@@ -147,4 +147,34 @@ package com.carddemo.account.dto;
  *     leading zero significant on the same ground
  */
 public record CardXrefResponse(String cardNumberMasked, String customerId, String accountId) {
+
+    /**
+     * Renders this projection for a log line, carrying only the value already masked.
+     *
+     * <p>Refactoring Rationale: a record's generated rendering prints every component, so this type
+     * emitted the customer identifier and the account identifier in full wherever an instance reached a
+     * diagnostic -- and one reaches a diagnostic on every serialisation or validation failure the
+     * framework reports. The sensitive-data logging contract in
+     * {@code docs/architecture/observability.md} names both identifiers among its prohibited values and
+     * states that a prohibited value is OMITTED rather than abbreviated, so the generated form was a
+     * disclosure and neither identifier is shortened here -- both are gone.</p>
+     *
+     * <p>Trade-offs: what survives is the card-number component, and it survives because the value it
+     * holds is already masked to its last four digits by the mapping layer before it ever reaches this
+     * record. That is the one sanctioned abbreviation the same contract allows, and allowing it here
+     * applies no new rule: this record neither masks nor unmasks anything. The cost is that a log line
+     * can no longer say which customer or which account a cross-reference row links, which is what the
+     * correlation identifier on every request-scoped line is for.</p>
+     *
+     * <p>Assumptions: the marker text is not restated here and the component is emitted as it stands. A
+     * literal repeated beside the value it describes is a second statement of the masking rule, and two
+     * statements of one rule are how the two come to disagree.</p>
+     *
+     * @return a rendering naming the type and the already-masked card number, and neither identifier,
+     *     never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "CardXrefResponse[cardNumberMasked=" + this.cardNumberMasked + ']';
+    }
 }

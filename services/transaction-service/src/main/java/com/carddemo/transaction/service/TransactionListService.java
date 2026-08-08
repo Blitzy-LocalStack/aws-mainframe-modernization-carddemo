@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Supplier;
 import org.springframework.data.domain.Limit;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -304,12 +305,22 @@ public class TransactionListService {
      * {@code app/cbl/COBIL00C.cbl}. Those are a different constant belonging to those screens, and
      * the two are never merged.
      *
-     * <p>Trade-offs: this constant is published and is not selected by any method here, because the
-     * condition it describes is an abnormal data-access response rather than a page boundary, and
-     * such a failure travels on {@code com.carddemo.common.error.GlobalExceptionHandler} instead of
-     * on a page. Publishing it keeps the message catalogue of this screen complete and single
-     * sourced; omitting it would leave the only surviving copy of a reference string in a
-     * client-side catalogue with nothing tying it to the three lines it came from.
+     * <p>Assumptions: this constant IS selected, by {@link #guardedRead(Supplier)}, which every read
+     * in this class routes through. The condition it describes is an abnormal data-access response
+     * rather than a page boundary, so it does not travel on a page: it is raised as an
+     * {@link IllegalStateException} carrying this sentence as its message, and
+     * {@code com.carddemo.common.error.GlobalExceptionHandler} answers that as a server failure while
+     * logging the attached cause once with the request path and correlation identity.
+     *
+     * <p>Refactoring Rationale: this paragraph read "this constant is published and is not selected
+     * by any method here", and that was true of the code as it then stood -- which was the defect
+     * rather than a design. The reference spells this sentence at three of its own browse verbs, so a
+     * class that transcribes those verbs and never produces the sentence had transcribed the normal
+     * and boundary arms of each selection and dropped the third. The observable consequence was that a
+     * failed read reached the edge carrying the shared advice's generic wording instead of the
+     * reference one, and no test could tell, because the only assertion on this constant compared it
+     * to a literal. The arm is now implemented and driven; a test that fails when it is removed is
+     * what keeps this paragraph honest.
      */
     public static final String MESSAGE_LOOKUP_FAILED = "Unable to lookup transaction...";
 
@@ -423,6 +434,10 @@ public class TransactionListService {
      * @throws com.carddemo.common.web.CursorToken.InvalidCursorException if a supplied cursor is not
      *     a token this sealer issued for this query and this subject, or was issued longer ago than
      *     its lifetime
+     * @throws IllegalStateException if an ordered read answers abnormally, carrying
+     *     {@link #MESSAGE_LOOKUP_FAILED} and the originating failure as its cause; this is the
+     *     {@code WHEN OTHER} arm the reference carries at each of its three browse verbs and is
+     *     distinct from the page boundaries, which are reported on the envelope instead
      */
     @Transactional(readOnly = true)
     public PageResponse<TransactionListItemResponse> listTransactions(TransactionListRequest request,
@@ -626,11 +641,17 @@ public class TransactionListService {
      */
     private List<Transaction> processEnterKey(TransactionListRequest request) {
         if (!request.hasTransactionIdFilter()) {
-            return transactionRepository.findAllByOrderByTranIdAsc(probeBoundedLimit());
+            return guardedRead(() -> transactionRepository.findAllByOrderByTranIdAsc(
+                    probeBoundedLimit()));
         }
 
         String startKey = request.transactionIdFilter();
-        Optional<Transaction> positionedRow = transactionRepository.findById(startKey);
+
+        // WHY : Assumptions: the emptiness test below sits OUTSIDE the guard deliberately. An
+        //       identifier matching no record is the reference's not-found arm at lines 605 to 611,
+        //       which is a page boundary handled beside the normal arm rather than a failure; folding
+        //       it inside the guard would report a routine unmatched search as a server failure.
+        Optional<Transaction> positionedRow = guardedRead(() -> transactionRepository.findById(startKey));
         if (positionedRow.isEmpty()) {
             return List.of();
         }
@@ -639,8 +660,8 @@ public class TransactionListService {
         //   second is bounded to the page size rather than to the page size plus one because the
         //   positioned row already occupies the first of the eleven. Asking for eleven here would
         //   read twelve rows in total and report a further page one row too early.
-        List<Transaction> followingRows = transactionRepository
-                .findByTranIdGreaterThanOrderByTranIdAsc(startKey, Limit.of(TransactionMapper.PAGE_SIZE));
+        List<Transaction> followingRows = guardedRead(() -> transactionRepository
+                .findByTranIdGreaterThanOrderByTranIdAsc(startKey, Limit.of(TransactionMapper.PAGE_SIZE)));
 
         List<Transaction> scanned = new ArrayList<>(followingRows.size() + 1);
         scanned.add(positionedRow.get());
@@ -727,8 +748,8 @@ public class TransactionListService {
      *     that the surplus row can settle forward availability
      */
     private List<Transaction> processPageForward(String cursorKey) {
-        return transactionRepository.findByTranIdGreaterThanOrderByTranIdAsc(cursorKey,
-                probeBoundedLimit());
+        return guardedRead(() -> transactionRepository.findByTranIdGreaterThanOrderByTranIdAsc(cursorKey,
+                probeBoundedLimit()));
     }
 
     /**
@@ -755,8 +776,8 @@ public class TransactionListService {
      *     holding up to one row beyond the page
      */
     private List<Transaction> processPageBackward(String cursorKey) {
-        return transactionRepository.findByTranIdLessThanOrderByTranIdDesc(cursorKey,
-                probeBoundedLimit());
+        return guardedRead(() -> transactionRepository.findByTranIdLessThanOrderByTranIdDesc(cursorKey,
+                probeBoundedLimit()));
     }
 
     /**
@@ -940,6 +961,56 @@ public class TransactionListService {
      */
     private Limit probeBoundedLimit() {
         return Limit.of(TransactionMapper.PAGE_SIZE + 1);
+    }
+
+    /**
+     * Issues one ordered read, reporting an abnormal data-access response the way the reference does.
+     *
+     * <p>This transcribes the {@code WHEN OTHER} arm that each of the three browse verbs of
+     * {@code app/cbl/COTRN00C.cbl} carries: the browse-start selection sets its message at line 615,
+     * the forward read at line 649 and the backward read at line 683. All three move the same
+     * sentence, so all three are this one arm and every read in this class routes through it.
+     *
+     * <p>Refactoring Rationale: the arm is implemented ONCE here rather than repeated at each of the
+     * four read sites. The reference spells it three times because a COBOL selection cannot be
+     * shared, and copying that repetition would put four copies of one refusal in this class, each
+     * free to drift from the constant and from the others. What the three reference arms genuinely
+     * differ in -- which verb failed -- is not observable in the message they produce, so nothing the
+     * screen shows is lost by sharing the arm, and the failure object itself carries the query that
+     * raised it for anyone reading the log.
+     *
+     * <p>Alternatives Considered: catching the persistence layer's translated data-access supertype
+     * rather than every runtime failure. Rejected for the reason the sibling
+     * {@code TransactionViewService} records at its own equivalent arm: the arm being transcribed is a
+     * catch-all over every response code other than the normal and boundary ones, so a driver failure
+     * that escaped translation would slip past a narrower catch and reach the edge carrying the shared
+     * advice's generic sentence instead of the reference one -- which is the single observable thing
+     * this arm exists to produce.
+     *
+     * <p>Assumptions: only the READ sits inside the guarded block, and each caller keeps its own
+     * emptiness test outside it. That separation is the reference's: the not-found and end-of-file
+     * arms are page boundaries handled beside the normal arm, not failures, so enclosing an emptiness
+     * test here would let a routine boundary be reported as a server failure. It is also why this
+     * method returns whatever the read returns, including an empty result, without inspecting it.
+     *
+     * <p>Assumptions: the cause is attached rather than logged here. Lines 616, 650 and 684 display
+     * the response and reason codes of the failed verb, and the equivalent context in this target is
+     * the failure object, which {@code com.carddemo.common.error.GlobalExceptionHandler} logs once at
+     * the edge together with the request path and correlation identity it alone holds. Attaching it
+     * also feeds that advice's classifier, which walks the cause chain for contention conditions.
+     *
+     * @param <T> the shape the read answers with, a single optional row or a list of rows
+     * @param read the repository read to issue; must not be {@code null}
+     * @return whatever the read answered, unexamined, including an empty result
+     * @throws IllegalStateException if the read raises, carrying {@link #MESSAGE_LOOKUP_FAILED} and
+     *     the originating failure as its cause
+     */
+    private <T> T guardedRead(Supplier<T> read) {
+        try {
+            return read.get();
+        } catch (RuntimeException lookupFailure) {
+            throw new IllegalStateException(MESSAGE_LOOKUP_FAILED, lookupFailure);
+        }
     }
 
 }

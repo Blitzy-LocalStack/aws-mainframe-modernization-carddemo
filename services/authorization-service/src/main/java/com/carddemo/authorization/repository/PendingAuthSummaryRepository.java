@@ -2,7 +2,9 @@ package com.carddemo.authorization.repository;
 
 import com.carddemo.authorization.domain.PendingAuthSummary;
 import jakarta.persistence.LockModeType;
+import java.util.List;
 import java.util.Optional;
+import org.springframework.data.domain.Limit;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
 
@@ -54,4 +56,31 @@ public interface PendingAuthSummaryRepository extends JpaRepository<PendingAuthS
      * @return the summary, or an empty optional when the account has none yet
      */
     Optional<PendingAuthSummary> findByAccountId(Long accountId);
+
+    /**
+     * Returns the summaries whose account is strictly beyond a stated position, in key order.
+     *
+     * <p>Purpose: this is the sequential walk of the root segment that the unload and purge programs
+     * perform. Both drive the whole database in key order -- {@code PAUDBUNL.CBL} paragraph
+     * {@code 2000-FIND-NEXT-AUTH-SUMMARY} at L207 and {@code CBPAUP0C.cbl} at its L216 both issue an
+     * unqualified get-next against the root and stop when the database is exhausted -- and the root's
+     * sequence field is the account identifier, declared unique at {@code ims/DBPAUTP0.dbd} L30.
+     *
+     * <p>Alternatives Considered: {@code findAll(Sort)} with an offset page. Rejected for the reason
+     * recorded across this migration: an offset walk over a table another process is inserting into skips
+     * and repeats rows, and this walk's caller DELETES from the very table it is walking, which is the
+     * case where an offset shifts under the reader by construction. Keying the walk on the position
+     * already read reproduces the get-next it stands for exactly.
+     *
+     * <p>Assumptions: the opening call passes an identifier below every real one rather than a null, so
+     * one predicate serves the whole walk. An account identifier is positive, so zero is that value and
+     * the caller does not need a separate first-page query.
+     *
+     * @param accountId the account of the last summary already read, or a value below every real
+     *     identifier to start the walk; must not be {@code null}
+     * @param limit the maximum number of summaries to return; must not be {@code null}
+     * @return up to {@code limit} summaries in ascending account order, empty when the walk is done
+     */
+    List<PendingAuthSummary> findByAccountIdGreaterThanOrderByAccountIdAsc(Long accountId,
+            Limit limit);
 }

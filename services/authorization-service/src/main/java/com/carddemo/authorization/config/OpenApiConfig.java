@@ -151,6 +151,17 @@ public class OpenApiConfig {
     /** The published interface's version, as the committed contract states it. */
     private static final String CONTRACT_VERSION = "1.0.0";
 
+    /**
+     * The OpenAPI specification version this document declares, reproduced from the committed
+     * contract so a comparison of the two finds the member equal.
+     *
+     * <p>This is the specification's own version and not the API's; {@link #CONTRACT_VERSION} carries
+     * the latter. It is set explicitly because the constructor's specification flag does NOT set it:
+     * a document constructed at 3.1 still reports the model's {@code 3.0.1} default string until this
+     * value is applied -- see the rationale recorded at the assembly site.</p>
+     */
+    private static final String SPEC_VERSION = "3.1.0";
+
     /** The one-sentence account of this context's published surface. */
     private static final String CONTRACT_SUMMARY = """
             Pending-authorization summary list, pending-authorization detail and fraud tagging for \
@@ -351,7 +362,21 @@ public class OpenApiConfig {
         //       has to be explicitly overridden to be lost. Its scope list is empty because the
         //       specification requires an empty list for a scheme that is neither oauth2 nor
         //       openIdConnect, so the empty list is the correct value rather than an omission.
+        // WHY : Assumptions: the specification flag and the version STRING are two separate members
+        //       and setting one does not set the other. Constructing at 3.1 leaves the string at the
+        //       model's 3.0.1 default, so a document that carried the flag alone was served declaring
+        //       3.0.1 while this context's committed contract declares 3.1.0 and while the document
+        //       carries members -- the summary on the information block, the SPDX identifier on the
+        //       licence -- that exist only in 3.1. Both are therefore set here.
+        //
+        //       Refactoring Rationale: the flag was already correct and the string was not, which is
+        //       why nothing failed: whether those 3.1-only members reach a reader is decided by which
+        //       serialiser the library runs, selected by the springdoc.api-docs.version key in
+        //       application.yml, so the emitted document was complete while mislabelling its own
+        //       version. The mechanism is measured in account-service's config/OpenApiDocumentTest.java
+        //       against the same library.
         return new OpenAPI(SpecVersion.V31)
+                .openapi(SPEC_VERSION)
                 .info(contractInfo())
                 .addServersItem(new Server()
                         .url(ORIGIN_RELATIVE_SERVER_URL)

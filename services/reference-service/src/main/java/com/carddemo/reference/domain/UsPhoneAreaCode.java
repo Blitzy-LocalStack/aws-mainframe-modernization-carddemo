@@ -186,15 +186,18 @@ public class UsPhoneAreaCode {
     /**
      * Creates an empty instance for the persistence provider to populate.
      *
-     * <p>Assumptions: the persistence specification requires an entity to declare a constructor
-     * taking no arguments, which the provider invokes before writing the {@code area_cd} and
-     * {@code code_class} columns into the two members above. Visibility is public rather than
-     * narrowed because this type is a mutable mapping with declared setters, so a caller assembling
-     * a row member by member -- a mapper, or a test building a lookup row -- needs the same entry
-     * point the provider uses, and offering it a narrower one would only invite reflection to reach
-     * past it. </p>
+     * <p>Assumptions: the specification requires a persistence entity to declare a constructor taking
+     * no arguments, which the provider invokes before writing the mapped columns into the members
+     * above. It is {@code protected} rather than public, which is the policy every other entity in this
+     * codebase already follows: 30 of the 33 entity declarations across the eight services declare it
+     * protected, and the five public ones were all in this package. The provider reaches a protected
+     * constructor, and application code outside this package cannot allocate an unpopulated row and
+     * pass it on as though it had been loaded.
+     *
+     * <p>Refactoring Rationale: this was public, and each of the five gave its own reason -- that a
+     * mapper or a test needs to assemble a row member by member. For this type the reason has been withdrawn outright along with the two setters it rested on: with no setter to assemble through, member-by-member assembly was never available here in the first place.
      */
-    public UsPhoneAreaCode() {
+    protected UsPhoneAreaCode() {
         // Assumptions: the body is empty by design rather than unfinished. The provider assigns both
         // members directly after construction on every load, so a default written here would be
         // overwritten before any caller could observe it. Defaulting the classification to either
@@ -242,16 +245,6 @@ public class UsPhoneAreaCode {
         return areaCode;
     }
 
-    /**
-     * Replaces the three-character area code this row is keyed by.
-     *
-     * @param areaCode the {@code String} area code to store in the {@code area_cd} column, three
-     *     characters wide
-     *     per {@code app/cpy/CSLKPCDY.cpy} L24
-     */
-    public void setAreaCode(String areaCode) {
-        this.areaCode = areaCode;
-    }
 
     /**
      * Returns the baseline class this area code belongs to.
@@ -263,15 +256,19 @@ public class UsPhoneAreaCode {
         return codeClass;
     }
 
-    /**
-     * Replaces the baseline class this area code belongs to.
-     *
-     * @param codeClass the {@code String} class to store in the {@code code_class} column, either
-     *     {@link #CODE_CLASS_GENERAL_PURPOSE} or {@link #CODE_CLASS_EASILY_RECOGNISABLE}
-     */
-    public void setCodeClass(String codeClass) {
-        this.codeClass = codeClass;
-    }
+
+    // WHY : Refactoring Rationale: this type published setAreaCode and setCodeClass and nothing called
+    //       either. The first mutated the @Id, so a loaded row could be given a different identity while
+    //       the provider still held it under the old one -- which the provider resolves by INSERTING a
+    //       second row rather than by refusing, so the defect surfaces as duplicated seed data and not as
+    //       an error. The second was equally unreachable: the classification is seed content copied from
+    //       the allow-lists in app/cpy/CSLKPCDY.cpy, this service publishes no route that edits it, and
+    //       the check constraint in db/migration/V1__reference.sql admits only two letters. Both are
+    //       withdrawn rather than narrowed, because the provider maps these members by FIELD -- the @Id
+    //       annotation sits on the field declaration -- so no setter is required for persistence at all.
+    //       Alternatives Considered: keeping setCodeClass for a future maintenance route. Rejected: an
+    //       accessor with no caller is indistinguishable from one whose caller was lost, and the entity
+    //       reads as editable when nothing edits it.
 
     /**
      * Reports whether another object denotes the same area-code row as this one.

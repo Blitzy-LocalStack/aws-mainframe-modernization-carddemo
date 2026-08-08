@@ -434,6 +434,50 @@ carddemo:
       expected-token-use: access
       required-scope: aws.cognito.signin.user.admin
 
+    # WHY : (1) Assumptions: a value is REQUIRED here for the same reason the client
+    #       id above is. config/CustomerIdentifierProtectionConfig reads this key
+    #       through @Value with no default and refuses a blank one, so without this
+    #       line every context-loading test in this module would abort on bean
+    #       creation before its first assertion. The base document deliberately
+    #       supplies no fallback.
+    #       (2) Assumptions: this is an ALIAS NAME, not a key, not a key identifier
+    #       that resolves anywhere, and not a credential. It is visibly
+    #       non-production and names nothing that exists, and no test in this module
+    #       reaches the key-management service at all: the wiring test supplies its
+    #       own client bean, and the mapper's own cases substitute the port. What the
+    #       value buys is that the protection bean is CONSTRUCTED, which is what
+    #       proves the port the mapper requires is satisfiable.
+    #       (3) Trade-offs: naming a test alias rather than letting the property be
+    #       absent and the bean conditional. The cost is one more line here; the
+    #       benefit is that the production wiring path is the one under test, so a
+    #       future change that made the key mandatory in a new way would fail here
+    #       rather than in a deployment.
+    customer-identifier:
+      key-id: alias/carddemo-customer-identifier-test
+
+  reference-context:
+    # WHY : (1) Assumptions: a value is REQUIRED here because the base document declares
+    #       this key as a fallback-free placeholder and service/RestReferenceAddressLookup
+    #       binds it through @Value, so any context-loading test in this module would abort
+    #       on an unresolvable placeholder before reaching its first assertion. No such
+    #       test exists in this module today -- it holds no @SpringBootTest at all -- and
+    #       the line is supplied anyway, because the first one added would otherwise fail
+    #       for a reason that has nothing to do with what it was written to check.
+    #       (2) Assumptions: this address points at nothing and is NOT a credential. The
+    #       discard-prefixed host name is reserved for exactly this use and resolves
+    #       nowhere, so a test that reached the network through it would fail on connection
+    #       rather than silently talk to something. RestReferenceAddressLookupTest does not
+    #       use this value: it stands up a real loopback server on an ephemeral port and
+    #       constructs the adapter against that, which is why the timeouts below can stay
+    #       at deployment-like values here.
+    #       (3) Trade-offs: the two timeouts are repeated rather than inherited so that the
+    #       complete shape of this seam is readable in one place, at the cost that a
+    #       deliberate change in the base document must be mirrored here -- which is
+    #       precisely the diff a reviewer should be made to see.
+    base-url: http://reference-service.invalid
+    connect-timeout-ms: 2000
+    read-timeout-ms: 3000
+
   account:
     inquiry:
       # WHY : (1) Assumptions: these are queue NAMES, not URLs, ARNs, account
@@ -466,6 +510,29 @@ carddemo:
     #       proves is the shape of the boundary: that a token signed with this key
     #       verifies and that a token signed with any other does not.
     signing-key: 0123456789abcdef0123456789abcdef
+
+  reference-context:
+    # WHY : (1) Assumptions: a value is REQUIRED here for the same reason the signing
+    #       key above is -- the base document declares this key as a fallback-free
+    #       placeholder and service/RestReferenceAddressLookup.java reads it through
+    #       @Value, so a context-loading test in this module would abort on an
+    #       unresolvable placeholder before reaching its first assertion.
+    #       (2) Assumptions: the value is HTTPS and names a host that resolves
+    #       nowhere, and both properties are deliberate. HTTPS is required because the
+    #       adapter refuses any other scheme at construction, so a cleartext value
+    #       here would make every context-loading test fail with a start-up error
+    #       rather than exercise what it was written for. A host that resolves nowhere
+    #       means a test which reaches the adapter by accident fails by timing out
+    #       against nothing rather than by contacting a real service.
+    #       (3) Trade-offs: the two timeouts are lowered well below the base
+    #       document's values. What is given up is that no test here exercises the
+    #       production bound; what is bought is that a test which does reach the
+    #       adapter unintentionally fails in well under a second instead of stalling
+    #       the suite for five, which is the difference between a visible mistake and
+    #       a suite that merely got slower.
+    base-url: https://reference-service.invalid
+    connect-timeout-ms: 250
+    read-timeout-ms: 250
 
 # Register of deliberate omissions -- each one is a value a reasonable
 # alternative would have set, and each would change what the test profile proves

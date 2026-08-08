@@ -381,7 +381,14 @@ export interface ScreenHeaderProps {
    * formats themselves stay verbatim, so only the clock and the zone differ, never
    * the shape of what is rendered.
    */
-  readonly now?: Date;
+  //       Assumptions: the type is `Date | undefined` and not bare `Date`, although the `?` already
+  //       makes the property optional. `ui/tsconfig.json` sets `exactOptionalPropertyTypes`, under
+  //       which `?` permits OMITTING the property but not passing `undefined` for it -- and the
+  //       callers now pass `useServerInstant()`, whose result is legitimately `undefined` before any
+  //       response has been observed. Without the union each call site would need a conditional spread
+  //       to avoid a type error, which is four places expressing "maybe absent" in a more obscure way
+  //       than the type itself can.
+  readonly now?: Date | undefined;
 }
 
 /**

@@ -90,7 +90,7 @@ all.
 Assumptions: Lambda remains the right host for exactly three of the eleven states
 in the nightly chain, which is what "glue" means here precisely — state 1
 `QuiesceOnlineWrites` sets a read-only flag in Parameter Store, state 10
-`AnalyzeTables` runs `ANALYZE`, and state 11 `ResumeOnlineWrites` clears
+`AnalyzeTables` runs `VACUUM ANALYZE`, and state 11 `ResumeOnlineWrites` clears
 the flag. Each is short, stateless and well inside the ceiling. The
 data-moving states between them are the ones that need a task, and they run in
 this cluster. See [ADR-005](../../../docs/adr/ADR-005-batch-orchestration.md) and

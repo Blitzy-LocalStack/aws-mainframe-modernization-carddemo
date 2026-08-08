@@ -659,6 +659,13 @@ carddemo:
     cvv:
       key-id: alias/carddemo-card-cvv-test
 
+    # WHY : Assumptions: a fixed literal, and deliberately not a random one. A selector sealed in
+    #       one test and opened in another must open, and a random per-run key would make a
+    #       fixture selector unusable across cases. Its length clears SealedSelector.MIN_KEY_LENGTH
+    #       so the bean constructs; it is test-only material and seals nothing real.
+    card-selector:
+      signing-key: carddemo-card-selector-test-key-material-0123456789
+
 
 # =============================================================================
 # Register of deliberate absences

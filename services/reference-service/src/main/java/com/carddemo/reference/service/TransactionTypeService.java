@@ -1,5 +1,7 @@
 package com.carddemo.reference.service;
 
+import com.carddemo.common.error.ApiError;
+import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.error.RecordConflictException;
 import com.carddemo.common.web.CursorToken;
 import com.carddemo.common.web.PageResponse;
@@ -11,6 +13,7 @@ import com.carddemo.reference.dto.TransactionTypeResponse;
 import com.carddemo.reference.dto.TransactionTypeUpdateRequest;
 import com.carddemo.reference.mapper.TransactionTypeMapper;
 import com.carddemo.reference.repository.TransactionTypeRepository;
+import com.carddemo.common.validation.FieldValidationFlag;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -53,11 +56,36 @@ public class TransactionTypeService {
     /**
      * The number of rows one page publishes.
      *
-     * <p>Assumptions: ten rows, which is the number of detail rows the baseline list screen displays.
-     * The repository is asked for one more than this so that a further-page flag can be established
-     * without a count query, which is how the baseline establishes it too.</p>
+     * <p>Assumptions: SEVEN rows, taken from the program and not from a count of fields on a map.
+     * {@code app/app-transaction-type-db2/cbl/COTRTLIC.cbl} declares
+     * {@code 05 WS-MAX-SCREEN-LINES PIC S9(4) COMP VALUE 7.} at physical line 60 and reads it at
+     * physical lines 940, 1004, 1018, 1334, 1386, 1657 and 1736, and eight of its arrays are declared
+     * over seven occurrences. The repository is asked for one more than this so that a further-page flag
+     * is established from a surplus row rather than from a count, which is how the baseline establishes
+     * it too at physical lines 1657 to 1673.
+     *
+     * <p>Refactoring Rationale: this constant read ten, and its own note claimed ten was the number of
+     * detail rows the baseline screen displays. That was not so, and the error was not cosmetic: at ten
+     * a page carried three rows the baseline never showed together, so page boundaries, the further-page
+     * flag and every sealed position differed from the reference. The seven-row window is documented at
+     * length in {@code repository/package-info.java}, which was correct while this constant was not.
      */
-    public static final int PAGE_SIZE = 10;
+    public static final int PAGE_SIZE = 7;
+
+    /** The response-field identity of the type-code filter. */
+    public static final String FIELD_TYPE_CODE = "typeCode";
+
+    /** The response-field identity of the description filter. */
+    public static final String FIELD_DESCRIPTION = "description";
+
+    /**
+     * The verbatim refusal when a supplied filter matches no row anywhere in the table.
+     *
+     * <p>Assumptions: carried character for character from physical line 1264 of
+     * {@code app/app-transaction-type-db2/cbl/COTRTLIC.cbl}, including its capital R.
+     */
+    public static final String MESSAGE_NO_RECORDS_FOR_FILTER =
+            "No Records found for these filter conditions";
 
     /** The verbatim refusal when no type carries the code asked for. */
     public static final String MESSAGE_TYPE_NOT_FOUND = "Transaction type NOT found...";
@@ -94,6 +122,8 @@ public class TransactionTypeService {
      * @return one page of types, with the positions sealed and a flag saying whether more follow
      * @throws com.carddemo.common.web.CursorToken.InvalidCursorException if a supplied position is not
      *     a position this browse minted
+     * @throws ClientInputException if a supplied filter matches no row anywhere in the table, which the
+     *     baseline reports as a field error on the filter rather than as an empty page
      */
     @Transactional(readOnly = true)
     public PageResponse<TransactionTypeResponse> list(
@@ -105,8 +135,41 @@ public class TransactionTypeService {
         boolean backward = request.direction() == PageDirection.PREVIOUS;
         Limit limit = Limit.of(PAGE_SIZE + 1);
 
+        // WHY : Refactoring Rationale: the two filters were validated, documented and published and then
+        //       never reached a query, so a request narrowing the browse to one type code was answered
+        //       with the whole table. Normalising them here through the repository's own helpers is what
+        //       makes an absent, blank or metacharacter-bearing value mean the same thing at the query as
+        //       the contract says it means at the boundary.
+        String typeCodeFilter = TransactionTypeRepository.typeCodeFilter(request.typeCode());
+        String descriptionFilter =
+                TransactionTypeRepository.descriptionFilterPattern(request.description());
+        boolean filtered = typeCodeFilter != null || descriptionFilter != null;
+
+        if (filtered) {
+            requireFilterMatchesSomething(typeCodeFilter, descriptionFilter, request);
+        }
+
         List<TransactionType> rows;
-        if (position == null) {
+        if (filtered) {
+            // WHY : Assumptions: a filtered BACKWARD walk needs a position, because its query compares
+            //       against one unguarded. There is no filtered first page read backward: a first page
+            //       is read forward by definition, and the forward member admits a null position.
+            if (backward && position != null) {
+                rows = new ArrayList<>(this.types.findFilteredPageBefore(
+                        typeCodeFilter, descriptionFilter, position, limit));
+                Collections.reverse(rows);
+            } else {
+                rows = this.types.findFilteredPageAfter(
+                        typeCodeFilter, descriptionFilter, position, limit);
+            }
+        } else if (position == null) {
+            // WHY : Assumptions: the unfiltered walks are kept for the unfiltered case rather than every
+            //       page being routed through the filtered members with two null arguments. Each derived
+            //       name states its own bound and order, and the three optional arms a filtered query
+            //       carries are arms the database has to evaluate per row for a browse that never
+            //       narrows. Trade-offs: two paths rather than one, which is the shape the baseline has
+            //       as well -- its cursor arms are flag-guarded precisely so an unset filter costs
+            //       nothing.
             rows = this.types.findAllByOrderByTypeCdAsc(limit);
         } else if (backward) {
             rows = new ArrayList<>(
@@ -118,6 +181,49 @@ public class TransactionTypeService {
 
         return ReferencePaging.page(rows, PAGE_SIZE, backward, CURSOR_BINDING, cursorToken,
                 TransactionTypeMapper::toResponse, TransactionType::getTypeCd);
+    }
+
+    /**
+     * Refuses a filter that matches no row anywhere in the table, as the baseline cross-edit does.
+     *
+     * <p>This is {@code 1290-CROSS-EDITS} at physical lines 1239 to 1267 of
+     * {@code app/app-transaction-type-db2/cbl/COTRTLIC.cbl}. That paragraph runs only when at least one
+     * filter is supplied, performs the aggregate at {@code 9100-CHECK-FILTERS}, and on a zero count sets
+     * {@code INPUT-ERROR}, marks each SUPPLIED filter field not-OK and displays the sentence at line
+     * 1264.
+     *
+     * <p>Assumptions: this is a FIELD refusal and not an empty page. The two are different answers to
+     * different questions -- the aggregate carries no comparison against the cursor position at all, so
+     * it reports whether the filter matches anything anywhere, where an empty page reports only that
+     * nothing further lies in the direction asked for. Reporting the first as the second would leave a
+     * caller paging forever through a filter that can never match.
+     *
+     * <p>Assumptions: only the filters the CALLER supplied are named, matching the two guarded flag
+     * assignments at lines 1253 to 1259. Naming a filter the caller left absent would mark a control it
+     * never filled in.
+     *
+     * @param typeCodeFilter the normalised type-code filter, or {@code null} when absent
+     * @param descriptionFilter the normalised description pattern, or {@code null} when absent
+     * @param request the submitted request, read to name only the filters it carried; must not be
+     *     {@code null}
+     * @throws ClientInputException if no row in the table satisfies the supplied filters
+     */
+    private void requireFilterMatchesSomething(String typeCodeFilter, String descriptionFilter,
+            TransactionTypeListRequest request) {
+
+        if (this.types.countFilterMatches(typeCodeFilter, descriptionFilter) > 0) {
+            return;
+        }
+
+        List<String> offending = new ArrayList<>(2);
+        if (typeCodeFilter != null) {
+            offending.add(FIELD_TYPE_CODE);
+        }
+        if (descriptionFilter != null) {
+            offending.add(FIELD_DESCRIPTION);
+        }
+        throw new ClientInputException(ApiError.CODE_VALIDATION, List.copyOf(offending),
+                FieldValidationFlag.NOT_OK, MESSAGE_NO_RECORDS_FOR_FILTER);
     }
 
     /**

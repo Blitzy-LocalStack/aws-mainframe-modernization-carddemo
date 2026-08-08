@@ -355,4 +355,50 @@ public interface TransactionRepository extends JpaRepository<Transaction, String
     //     identifier is the service layer's work; reading the maximum is this one's.
     @Query("select max(t.tranId) from Transaction t")
     Optional<String> findMaxTranId();
+
+    /**
+     * Allocates the next transaction identifier atomically, from the database's own allocator.
+     *
+     * <p>This is the target form of the two maximum-key-plus-one derivations the reference performs.
+     * {@code app/cbl/COTRN02C.cbl} positions a browse at high values at line 444, reads backwards at
+     * line 446 and adds one to the key it found at line 449; {@code app/cbl/COBIL00C.cbl} performs the
+     * same four steps at lines 212 to 217. Under CICS those two transactions were serialised by the
+     * region, so read-then-add was safe there.</p>
+     *
+     * <p>Refactoring Rationale: this method exists because read-then-add is NOT safe here, and
+     * {@link #findMaxTranId()} was being used for it. Two Fargate tasks behind a load balancer are not
+     * serialised: both read the same maximum, both add one, and both attempt the same primary key. One
+     * succeeds and the other fails on a constraint violation that reaches the caller as an internal
+     * error rather than as anything it can act on. Allocating in the database makes the increment
+     * indivisible, so the two callers receive different values without either waiting on the other.</p>
+     *
+     * <p>Assumptions: a NATIVE query, because sequence allocation has no expression in the object
+     * query language -- there is no portable way to say "advance a sequence" in it. The sequence is
+     * named in full, schema included, so the statement does not depend on the connection's search path
+     * being set to this schema at the moment it runs.</p>
+     *
+     * <p>Assumptions: the value is returned as a {@code Long} and the caller renders it as sixteen
+     * zero-padded digit characters. The rendering is deliberately NOT done here: the column is
+     * {@code CHAR(16)} because {@code app/cpy/CVTRA05Y.cpy} line 5 declares an alphanumeric picture and
+     * leading zeros are significant, and formatting is presentation rather than data access. Rule T5
+     * turns file verbs into repository members, and rendering is neither.</p>
+     *
+     * <p>Assumptions: the allocation is NOT undone by a rollback, which is a property of sequences
+     * rather than an oversight. A transaction that allocates and then fails leaves a gap in the
+     * identifier space, and nothing in the reference tree reads a gap as meaningful -- the report job
+     * orders by processing timestamp and card number rather than by identifier arithmetic. Gapless
+     * allocation would require serialising every writer behind a single lock, which is the cost this
+     * method exists to avoid.</p>
+     *
+     * <p>Assumptions: this serves the two INTERACTIVE write paths only. The interest job composes its
+     * identifiers from a business-date prefix and a per-run suffix, at
+     * {@code app/cbl/CBACT04C.cbl} lines 474 to 480, and does not allocate here -- which is why the
+     * allocator's own migration filters to all-digit identifiers when it positions itself past the
+     * loaded data.</p>
+     *
+     * @return the next identifier as a positive number, never {@code null}; the caller pads it to
+     *     sixteen digit characters
+     */
+    @Query(value = "select nextval('ledger.transaction_id_seq')", nativeQuery = true)
+    Long allocateTransactionId();
 }

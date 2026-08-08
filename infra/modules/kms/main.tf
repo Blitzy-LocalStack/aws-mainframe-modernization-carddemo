@@ -1438,14 +1438,34 @@ resource "aws_kms_alias" "sqs" {
 # is a larger departure than adding a key to the module whose entire subject is
 # keys, and it would split key administration across two directories.
 #
-# Assumptions: the value this key protects is the card verification value. The
-# baseline holds CARD-CVV-CD as three display digits in the clear at
-# app/cpy/CVACT02Y.cpy line 7, on files declared JOURNAL(NO) and RECOVERY(NONE);
-# the migrated schema declares cvv_encrypted BYTEA instead, and a column name
-# does not encrypt anything. com.carddemo.card.service.CardVerificationValueCipher
-# obtains one data key per value from this key, enciphers locally under an
-# authenticated cipher, and stores the enciphered data key inside a
-# self-describing envelope beside the ciphertext.
+# Assumptions: this key protects THREE values across TWO bounded contexts, and
+# each is a value the baseline held in the clear on a file declared JOURNAL(NO)
+# and RECOVERY(NONE). The card verification value CARD-CVV-CD is three display
+# digits at app/cpy/CVACT02Y.cpy line 7 and becomes cvv_encrypted BYTEA; the
+# national identifier CUST-SSN is nine display digits at app/cpy/CVCUS01Y.cpy
+# line 17 and the government-issued identifier CUST-GOVT-ISSUED-ID is twenty
+# characters at line 18, and the two become ssn_encrypted BYTEA and
+# govt_issued_id_encrypted BYTEA. A column name does not encrypt anything;
+# com.carddemo.card.service.CardVerificationValueCipher and
+# com.carddemo.account.service.CustomerIdentifierCipher are what do. Each obtains
+# one data key per value from this key, enciphers locally under an authenticated
+# cipher, and stores the enciphered data key inside a self-describing envelope
+# beside the ciphertext.
+#
+# Refactoring Rationale: this block named the card verification value as the only
+# value protected here, and account-service's two identifiers were already
+# specified to land in encrypted columns. Naming one of three understated the
+# key's blast radius, which is the number a reader uses to judge whether a
+# rotation or a deletion window is safe.
+#
+# Trade-offs: one key for two contexts rather than one key each. The two task
+# roles are separated by their own encryption-context conditions -- the card
+# role's names card-cvv, the account role's names customer-identifier -- so
+# neither can reach the other's ciphertext. What is given up is separation of the
+# key MATERIAL, so a compromise of this key reaches both. That is accepted
+# because a sixth key adds an alias, a rotation schedule and a monthly charge for
+# two workloads already condition-separated, and because the values share one
+# data classification and one retention.
 #
 # Assumptions: NO kms:ViaService condition, and its absence is deliberate rather
 # than forgotten. The other four keys are reached through a service, so that
@@ -1515,7 +1535,7 @@ data "aws_iam_policy_document" "application" {
 }
 
 resource "aws_kms_key" "application" {
-  description             = "CardDemo ${var.environment}: customer-managed key the application generates envelope data keys from, protecting the card verification value the baseline held as three display digits in the clear."
+  description             = "CardDemo ${var.environment}: customer-managed key the application generates envelope data keys from, protecting the card verification value and the two customer identifiers the baseline held in the clear."
   enable_key_rotation     = var.enable_key_rotation
   deletion_window_in_days = var.deletion_window_in_days
 

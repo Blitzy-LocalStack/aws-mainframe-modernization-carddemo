@@ -372,6 +372,17 @@ public class Account {
      * primitive rather than a boxed type because the provider always supplies a value and the column is
      * declared with a default of zero, so there is no absent state to represent.</p>
      */
+    // WHY : Assumptions: this member is READ-ONLY to application code -- there is a getter and
+    //       deliberately no setter. The counter belongs to the persistence provider: it reads it on
+    //       load, compares it on flush and advances it on a successful update, which is the whole
+    //       mechanism by which a concurrent change is detected. A setter let application code assign
+    //       it, and the two ways that goes wrong are both silent. Assigning the value just read makes
+    //       the comparison always succeed, so the concurrent-change detection is disabled while the
+    //       column still looks like a version. Assigning anything else makes a correct update fail as
+    //       though someone else had written the row. Refactoring Rationale: a public setVersion(long)
+    //       existed here and had no caller anywhere in the reactor, so removing it costs nothing and
+    //       closes both routes. The client-supplied precondition travels in the If-Match header and is
+    //       compared by the service, never assigned onto the entity.
     @Version
     @Column(name = "version", nullable = false)
     private long version;
@@ -557,7 +568,6 @@ public class Account {
     }
 
 
-    // WHAT: mutators for all thirteen members, each rejecting a null where the column forbids one.
     // WHY : Assumptions: the persistence annotations above sit on the fields, so the provider uses
     //       field access and never calls an accessor declared here. That is what makes validating in
     //       these mutators safe -- a null check in a mutator cannot interfere with materialising a row,
@@ -713,20 +723,6 @@ public class Account {
         this.groupId = Objects.requireNonNull(groupId, "groupId must not be null");
     }
 
-    /**
-     * Replaces the optimistic-concurrency counter.
-     *
-     * <p>Assumptions: this exists so that a counter read by an earlier request can be carried back in
-     * on a detached instance before it is merged, which is how a stateless request expresses the check
-     * the reference performed with its before-image. Application code that has a managed instance
-     * should leave this alone: the provider maintains the counter, and writing a fabricated value into
-     * it defeats the very check it exists to perform.</p>
-     *
-     * @param version the counter value to assign, as previously read from the row
-     */
-    public void setVersion(long version) {
-        this.version = version;
-    }
 
     /**
      * Compares this account with another object for equality by account identifier alone.
@@ -780,24 +776,38 @@ public class Account {
     }
 
     /**
-     * Renders this row for a log line or a diagnostic, disclosing no monetary detail.
+     * Renders this row for a log line or a diagnostic, disclosing no protected value at all.
      *
-     * <p>Assumptions: the five amounts and the postal code are withheld while the identifier, the
-     * status, the expiry and the version are shown. That split follows what the reader of an incidental
-     * log line actually needs -- the identifier says which row, the status and expiry say whether it is
-     * usable, and the version says which revision was in hand -- none of which is account detail. A
-     * balance printed beside an account identifier is, and the paths that legitimately need it read it
-     * through the accessors instead.</p>
+     * <p>Refactoring Rationale: this rendering carried the ACCOUNT IDENTIFIER, on the reasoning that
+     * the identifier says which row and is not account detail. That reasoning is refuted by the
+     * sensitive-data logging contract in {@code docs/architecture/observability.md}, which names account
+     * identifiers explicitly among the prohibited values and covers persistence-bound values as a class.
+     * The rule that section states has three parts, and the first is decisive here: a prohibited value
+     * is OMITTED and not abbreviated, because abbreviating a protected value is masking and masking has
+     * exactly one owner per bounded context, in that context's {@code mapper} package. So the identifier
+     * is gone rather than shortened, and what remains is the identity the same section admits -- a status
+     * code, a date and a version counter.</p>
      *
-     * @return a rendering carrying the identifier, the status, the expiry and the version, never
-     *     {@code null}
+     * <p>Trade-offs: a log line naming this row can no longer be joined to a specific account by
+     * identifier, and that is a real cost rather than a nominal one. It is paid down by the correlation
+     * identifier the shared kernel's request filter already puts on every request-scoped line and, for
+     * batch work, by the step ledger -- both of which locate an event without naming a protected value.
+     * The alternative was a keyed opaque token in place of the identifier, and the same section rejects
+     * it for this position specifically: this method takes no argument and the persistence provider
+     * instantiates this class, so no tokeniser could be handed to it, and reaching one through static
+     * mutable state would make a diagnostic method depend on start-up ordering.</p>
+     *
+     * <p>Assumptions: the five amounts and the postal code were already withheld and remain so. Nothing
+     * in this rendering is parsed by anything, and it is not the fixed-width form used for parity
+     * comparison, so narrowing it cannot disturb any compared output.</p>
+     *
+     * @return a rendering carrying the status, the expiry and the version and no identifier or amount,
+     *     never {@code null}
      */
     @Override
     public String toString() {
-        return "Account[accountId=" + this.accountId
-                + ", activeStatus=" + this.activeStatus
+        return "Account[activeStatus=" + this.activeStatus
                 + ", expirationDate=" + this.expirationDate
                 + ", version=" + this.version + ']';
     }
 }
-

@@ -289,13 +289,56 @@ public class UserMapper {
     }
 
     /**
-     * Applies an accepted update request to a row already loaded, mutating it in place.
+     * Applies an accepted update request to a row already loaded, mutating the two descriptive values in
+     * place and refusing any request that would move the row's authority.
      *
-     * <p>This method returns nothing and constructs nothing. It assigns the three updatable values
-     * onto the {@code User} it is given, which the caller obtained inside the current transaction, so
-     * the persistence provider observes the change against its own loaded snapshot and issues a
-     * statement only for what actually differs. The identifier is not among the three: it locates the
-     * row rather than describing it, and {@code User} exposes no way to change it.</p>
+     * <p>This method returns nothing and constructs nothing. It assigns the two descriptive values onto
+     * the {@code User} it is given, which the caller obtained inside the current transaction, so the
+     * persistence provider observes the change against its own loaded snapshot and issues a statement
+     * only for what actually differs. The identifier is not among them: it locates the row rather than
+     * describing it, and {@code User} exposes no way to change it. Neither is the reference type,
+     * although the request carries one -- see below.</p>
+     *
+     * <p>Refactoring Rationale: this method previously assigned all three values, including the
+     * reference type, and that assignment was wrong in a way that was invisible from here. The column it
+     * wrote, {@code auth.users.user_type}, NAMES an authority and confers none: every authority a
+     * request is matched against comes from the signed {@code cognito:groups} claim by way of
+     * {@code com.carddemo.common.security.JwtRoleConverter}, and the membership behind that claim is
+     * held by the identity provider. So an update moving a user from {@code "U"} to {@code "A"}
+     * committed a row saying the user was an administrator while every administrative route continued to
+     * refuse them, and an update moving an administrator to {@code "U"} committed a row saying the
+     * authority had been withdrawn while it had not been. The second direction is the one that matters:
+     * an operator revoking administrative access was told it was done.</p>
+     *
+     * <p>Refactoring Rationale: that analysis stands and the remedy has moved. This method briefly
+     * REFUSED a submitted type change outright, to force the caller through a provider-first path. The
+     * refusal is withdrawn because it made the only published route for the change unusable:
+     * {@code UpdateUserRequest} declares {@code userType} REQUIRED
+     * ({@code src/main/resources/openapi/auth-api.yaml}), and that property's own description states
+     * that changing it "grants or removes that user's carddemo-admin authority at their next sign-on",
+     * so {@code PUT /api/v1/auth/users/{userId}} is the operation the contract publishes for it and no
+     * second route exists. A mapper that threw on the required field of the only route turned the
+     * documented capability into a permanent server error.</p>
+     *
+     * <p>Assumptions: the guarantee the refusal was protecting is preserved, and it is preserved where
+     * it can actually be honoured rather than where it can only be blocked. The sole caller,
+     * {@code com.carddemo.auth.service.UserService#update}, passes BOTH the previously stored type and
+     * the newly requested one to {@code CognitoUserProvisioningService#synchronise} inside the same
+     * transaction that writes this row, and that call moves the provider group whenever the two differ.
+     * So the column and the membership move together or neither does: a provider failure propagates and
+     * rolls the row back, and a row written without the provider being reached is not a reachable state.
+     * The invariant is therefore unchanged -- this column is never left naming an authority the provider
+     * does not confer -- while the published operation works.</p>
+     *
+     * <p>Alternatives Considered: keeping the refusal and routing the service through
+     * {@code com.carddemo.auth.service.UserAuthorityService}, which moves the membership first and
+     * registers a rollback compensation. Rejected for this route, not as unsound: it would move the
+     * provider before the row is written, which is the opposite ordering from the one
+     * {@code UserService#update} documents and depends on -- there the database rollback IS the
+     * compensation, so no compensating provider call has to succeed after the failure that caused it.
+     * Preferring an ordering that needs a compensating remote call over one that needs none is the
+     * higher-risk choice, and both close the same window. That class remains the provider-first
+     * primitive for a caller that has no transaction of its own to roll back.</p>
      *
      * @param request the validated {@code UpdateUserRequest} whose three components have already
      *     satisfied their declared constraints, so none is re-checked here
@@ -334,16 +377,21 @@ public class UserMapper {
         //   and reimplementing the arms would duplicate a decision already made one layer down.
         // Assumptions: had a comparison been written here it would have had to compare logical
         //   values, not stored images, because each baseline arm compares a space-padded screen field
-        //   against a space-padded record field whereas these three values are ordinary strings
-        //   against VARCHAR(20) and a one-character CHAR(1). Delegating the comparison removes that
-        //   hazard from this path entirely rather than solving it.
-        // Assumptions: three arms rather than four, because the fourth has nothing to test. The
-        //   credential arm at L227 to L229 compares a submitted credential against the stored one and
-        //   marks the row modified when they differ; with no credential on this boundary a request
-        //   that changed only that value cannot be expressed, so it is simply absent from the shape
-        //   rather than handled and discarded. The baseline tests four values; the Java carries
-        //   three; the divergence is documented, and it follows from the omission recorded on the
-        //   creation path above rather than being a separate decision.
+        //   against a space-padded record field whereas the two values assigned here are ordinary
+        //   strings against VARCHAR(20). Delegating the comparison removes that hazard from this path
+        //   entirely rather than solving it. The one comparison this method DOES make, the reference-type
+        //   refusal below, is exempt from the hazard for the reason recorded beside it: CHAR(1) over a
+        //   two-character domain has no padding to normalise.
+        // Assumptions: three assignments rather than the baseline's four arms, and the one absence is
+        //   the credential. The credential arm at L227 to L229 compares a submitted credential against
+        //   the stored one and marks the row modified when they differ; with no credential on this
+        //   boundary a request that changed only that value cannot be expressed, so it is absent from
+        //   the shape rather than handled and discarded, which follows from the omission recorded on the
+        //   creation path above. The reference-type arm at L231 to L233 IS expressible here and IS
+        //   applied, and the block above this method records why applying it is safe: in the baseline
+        //   that byte WAS the authority, in the target it only names one, and the sole caller moves the
+        //   provider membership in the same transaction so the two cannot part company. The baseline
+        //   tests four values and this method carries three; that divergence is documented.
         // Trade-offs: two concurrent updates to one row resolve last-writer-wins inside the
         //   database's row lock, because auth.users declares no version column and this method
         //   therefore carries no conflict token to refuse one of them with. That is the baseline's
@@ -353,6 +401,18 @@ public class UserMapper {
         //   unlike app/cbl/COACTUPC.cbl, which does implement such a check for the account flows.
         //   Refusing an update here would be a new observable behaviour rather than a migrated one,
         //   so the semantic is documented, not altered.
+        // Assumptions: the type is assigned WITHOUT being compared against the stored one first, and
+        //   that is not an oversight. This method is reached only after
+        //   com.carddemo.auth.service.UserService#update has established that at least one of the three
+        //   values differs, and it hands the PREVIOUSLY stored type to the provider itself -- read
+        //   before this call, precisely so the comparison that decides whether a group has to move is
+        //   made by the component that can move it. A second comparison here could only duplicate that
+        //   decision, and a duplicated decision is one that can drift.
+        // Assumptions: no blank handling is needed on this value, unlike the two names. user_type is
+        //   CHAR(1) and its whole domain is the two single characters at app/cpy/COCOM01Y.cpy L27 and
+        //   L28, so a stored value is one character with no padding to strip, and the request's value
+        //   has already satisfied a length-exactly-one constraint and a pattern admitting only those
+        //   two characters.
         user.setFirstName(request.firstName());
         user.setLastName(request.lastName());
         user.setUserType(request.userType());

@@ -3,12 +3,14 @@ package com.carddemo.card.config;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
+import com.carddemo.card.api.CardController;
 import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.common.security.JwtRoleConverter;
 import com.carddemo.common.security.SealedSelector;
 import com.carddemo.common.web.CorrelationIdFilter;
-import com.carddemo.common.web.CursorToken;
 import java.io.InputStream;
+import java.lang.annotation.Annotation;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -17,6 +19,10 @@ import java.util.Map;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.yaml.snakeyaml.Yaml;
 
 /**
@@ -132,7 +138,13 @@ class CardApiContractTest {
      * a user typed, in a body, which neither access log records.</p>
      */
     private static final List<String> CONTRACTED_OPERATIONS = List.of(
-            "get /api/v1/cards",
+            // WHY : Refactoring Rationale: this entry was "get /api/v1/cards". The listing is a POST on
+            //   a literal /search segment because its account narrowing is an account identifier, and a
+            //   query string is part of the request line the load balancer writes into its access log
+            //   itself, before any application code runs. The migration's sensitive-data logging
+            //   contract names account identifiers alongside the primary account number, so the
+            //   narrowing had to leave the request line exactly as the card number already had.
+            "post /api/v1/cards/search",
             "post /api/v1/cards/lookup",
             "get /api/v1/cards/{cardKey}",
             "put /api/v1/cards/{cardKey}",
@@ -348,6 +360,77 @@ class CardApiContractTest {
                 .as("the published operation set is closed: an addition is as much a divergence as an"
                         + " omission, because each one is a route a client may be typed against")
                 .containsExactlyInAnyOrderElementsOf(CONTRACTED_OPERATIONS);
+    }
+
+    /**
+     * Asserts that every operation the contract publishes is actually mounted by an adapter.
+     *
+     * <p>Assumptions: this closes the dimension the assertion above does not reach. That one checks the
+     * published SET is exactly the five contracted operations, and it held while this context served none
+     * of them -- there was no adapter and no service at all, so every published route answered 404 while
+     * the contract, the filter chain and the repository charter all described a working surface. A closed
+     * published set says nothing about whether anything answers on it.
+     *
+     * <p>Assumptions: the mounted set is read from the mapping annotations rather than from a running
+     * context, so the assertion needs no container and cannot be satisfied by a stub. The adapter class is
+     * named explicitly, which is the intended friction: a second adapter would have to be enrolled here.
+     *
+     * <p>This test takes no parameter and returns no value.
+     */
+    @Test
+    @DisplayName("every published operation is mounted by a handler, so none of them answers 404")
+    void everyPublishedOperationIsMounted() {
+
+        Map<Class<? extends Annotation>, String> verbs = Map.of(
+                GetMapping.class, "get",
+                PostMapping.class, "post",
+                PutMapping.class, "put",
+                DeleteMapping.class, "delete");
+
+        List<String> mounted = new ArrayList<>();
+        for (Method handler : CardController.class.getDeclaredMethods()) {
+            for (Map.Entry<Class<? extends Annotation>, String> candidate : verbs.entrySet()) {
+                Annotation mapping = handler.getAnnotation(candidate.getKey());
+                if (mapping != null) {
+                    mounted.add(candidate.getValue() + " " + declaredPath(mapping));
+                }
+            }
+        }
+
+        assertThat(mounted)
+                .as("the mounted set and the published set must agree in both directions: a published"
+                        + " operation with no handler answers 404 while three artifacts describe it as"
+                        + " present, and a mounted operation the contract omits is an unpublished surface")
+                .containsExactlyInAnyOrderElementsOf(operationsByPathAndMethod().keySet());
+    }
+
+    /**
+     * Reads the single declared path of a mapping annotation without knowing its concrete type.
+     *
+     * <p>Alternatives Considered: a branch per annotation type reading {@code path()} directly, which is
+     * type-safe. Rejected because the four annotations declare that member independently rather than
+     * through a shared supertype, so a branch per type would be four near-identical blocks that a fifth
+     * annotation would silently escape.
+     *
+     * @param mapping the mapping annotation to read
+     * @return the one path the annotation declares
+     * @throws IllegalStateException if the annotation publishes no readable {@code path} member, or
+     *     declares none, either of which would mean this walk had been pointed at something that is not a
+     *     mounted handler
+     */
+    private static String declaredPath(Annotation mapping) {
+
+        try {
+            String[] declared =
+                    (String[]) mapping.annotationType().getMethod("path").invoke(mapping);
+            if (declared.length == 0) {
+                throw new IllegalStateException("a mounted handler declared no path: " + mapping);
+            }
+            return declared[0];
+        } catch (ReflectiveOperationException unreadable) {
+            throw new IllegalStateException(
+                    "a mapping annotation did not publish a path member: " + mapping, unreadable);
+        }
     }
 
     /**
@@ -614,15 +697,31 @@ class CardApiContractTest {
     @Test
     @DisplayName("paging is one cursor plus a lower-case direction, and never a row identity")
     void pagingInputsAreOneCursorAndALowerCaseDirection() {
-        Map<String, Object> parameters = mapping(mapping(contract, "components"), "parameters");
-        assertThat(mapping(parameters, "Cursor").get("name")).isEqualTo("cursor");
-        assertThat(mapping(parameters, "PagingDirection").get("name")).isEqualTo("direction");
-        assertThat(parameters.keySet())
-                .as("no request parameter may be named after a row identity")
-                .doesNotContain("ForwardCursor", "BackwardCursor");
+        // WHY : Refactoring Rationale: the paging inputs were components.parameters entries named
+        //   Cursor and PagingDirection and are now MEMBERS of the CardPageQuery request body, so this
+        //   assertion reads the schema rather than the parameter table. The property NAMES are what the
+        //   original defect was about -- two request inputs named after the response's row identities,
+        //   which are null on exactly the page whose cursors are not -- and a member name collides just
+        //   as a parameter name did, so the assertion is unchanged in substance.
+        Map<String, Object> schemas = mapping(mapping(contract, "components"), "schemas");
+        Map<String, Object> pageQuery = mapping(schemas, "CardPageQuery");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> queryProperties = (Map<String, Object>) pageQuery.get("properties");
+        assertThat(queryProperties.keySet())
+                .as("paging is expressed as exactly one cursor plus one direction, alongside the"
+                        + " optional account narrowing")
+                .containsExactlyInAnyOrder("accountId", "cursor", "direction");
+        assertThat(queryProperties.keySet())
+                .as("no request member may be named after a row identity")
+                .doesNotContain("ForwardCursor", "BackwardCursor", "firstKey", "lastKey");
 
-        Map<String, Object> direction =
-                mapping(mapping(mapping(contract, "components"), "schemas"), "PageDirection");
+        Map<String, Object> parameters = mapping(mapping(contract, "components"), "parameters");
+        assertThat(parameters.keySet())
+                .as("no paging input survives as a query parameter, which is what keeps the account"
+                        + " narrowing out of the request line")
+                .doesNotContain("Cursor", "PagingDirection", "AccountIdFilter");
+
+        Map<String, Object> direction = mapping(schemas, "PageDirection");
         @SuppressWarnings("unchecked")
         List<String> values = (List<String>) direction.get("enum");
         assertThat(values)

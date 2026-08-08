@@ -214,9 +214,11 @@ public record BusinessDate(String token) {
      *   <li>It exists <b>only</b> so that a job can compare a business date against a range. It
      *       has no other sanctioned use.</li>
      *   <li>Its result is <b>never</b> the value used to build a generated transaction identifier.
-     *       Identifier construction reads {@link #token()} and nothing else, because
-     *       {@code app/cbl/CBACT04C.cbl:476-480} concatenates the parameter as supplied and any
-     *       re-rendering here would change the identifier bytes.</li>
+     *       Identifier construction reads {@link #identifierPrefix()}, which returns the compact
+     *       numeric ten characters that {@code app/cbl/CBACT04C.cbl:476-480} concatenates with its
+     *       six-digit suffix. This note previously said construction reads {@link #token()} and
+     *       nothing else; that was corrected when {@link #identifierPrefix()} was introduced, because
+     *       reading the raw token let a separated token produce a non-numeric identifier.</li>
      *   <li>It <b>throws</b> when the token is not in the separated ISO layout, and a caller must
      *       expect that for a compact {@code YYYYMMDDnn} token. The baseline's own driver supplies
      *       exactly such a token: {@code app/jcl/INTCALC.jcl:22} injects
@@ -243,4 +245,144 @@ public record BusinessDate(String token) {
         //       apart from a successful parse of a token that was already separated.
         return LocalDate.parse(token);
     }
+
+    /**
+     * Returns the ten characters that lead a generated transaction identifier, always numeric.
+     *
+     * <p>This is the value a job concatenates with its six-digit run suffix to form
+     * {@code TRAN-ID PIC X(16)}, reproducing what {@code app/cbl/CBACT04C.cbl} does at lines 474 to 480
+     * -- it adds one to {@code WS-TRANID-SUFFIX PIC 9(06)} declared at line 173 and strings the
+     * parameter and the suffix together into the identifier.</p>
+     *
+     * <p>This operation accepts no parameters.</p>
+     *
+     * <h2>Why this exists rather than callers reading {@link #token()}</h2>
+     *
+     * <p>Refactoring Rationale: identifier construction previously read {@link #token()} directly, on
+     * the stated ground that the baseline concatenates its parameter as supplied and any re-rendering
+     * would change the identifier bytes. That reasoning is correct for the baseline and was wrong here,
+     * because it assumed the two tokens are the same. The baseline's token is COMPACT and NUMERIC --
+     * {@code app/jcl/INTCALC.jcl} line 22 injects {@code PARM='2022071800'} -- so its identifier is
+     * sixteen digits. This module's entry point additionally accepts a SEPARATED token of the same
+     * width, since {@code DatasetGeneration.partitionDate()} resolves both layouts, and a separated
+     * token concatenated as supplied yields an identifier like {@code 2024-01-15000001}: sixteen
+     * characters, but not a number.</p>
+     *
+     * <p>Assumptions: that identifier is storable and is not detectably wrong until something reads it
+     * back arithmetically, which is exactly what the interactive add and bill-payment paths used to do
+     * when they derived their own next key from the stored maximum. The column is {@code CHAR(16)} and
+     * orders lexicographically, so a date-prefixed identifier sorts above every sequence-format one and
+     * became the maximum after a single night's interest run -- at which point the next add and the next
+     * payment failed on a numeric parse. Those two paths now allocate from a database sequence and parse
+     * nothing, and this method closes the other half: it guarantees that the value entering an
+     * identifier is numeric whichever layout the operator supplied.</p>
+     *
+     * <p>Assumptions: normalisation is to the COMPACT layout and not to the separated one, because the
+     * compact layout is what the baseline's own production parameter carries. For a token already in the
+     * compact layout this method returns it byte-for-byte, so the reference's identifiers are reproduced
+     * exactly; only a separated token is rewritten, and a separated token has no baseline counterpart to
+     * diverge from.</p>
+     *
+     * <p>Assumptions: a separated token normalises by dropping its two hyphens and appending two zero
+     * digits, so {@code 2024-01-15} becomes {@code 2024011500}. The two trailing zeros are what the
+     * baseline's own parameter carries in those positions, so the normalised form is the token the
+     * baseline would have been given for the same day rather than an invented shape.</p>
+     *
+     * <p>Alternatives Considered: refusing a separated token at the entry point instead, so that only
+     * the compact layout ever exists and no normalisation is needed. Rejected because
+     * {@code DatasetGeneration.partitionDate()} already accepts both and documents the separated layout
+     * as supported, so refusing it here would make one module's two components disagree about what a
+     * valid invocation is -- and the failure would appear as a rejected command line for an operator
+     * following the dataset documentation. Normalising at the one point where the layout actually
+     * matters keeps both layouts usable and keeps every stored identifier numeric.</p>
+     *
+     * @return exactly {@link #TOKEN_LENGTH} characters, every one an ASCII digit; never {@code null}
+     * @throws IllegalStateException if the token is in neither the compact nor the separated layout, so
+     *     no numeric prefix can be derived from it; the message quotes the token because an operator
+     *     supplied it on a command line and needs to see which value was refused
+     */
+    public String identifierPrefix() {
+        // WHY : Assumptions: the compact case is tested FIRST and returns the token untouched, so the
+        //       reference baseline's own parameter takes the shortest path through this method and is
+        //       provably unmodified. Testing the separated case first would give the same answer but
+        //       would put the baseline's value through a branch that exists for the other layout.
+        if (isAllAsciiDigits(token)) {
+            return token;
+        }
+
+        // WHY : Assumptions: the separated layout is recognised by hyphens at the two fixed positions
+        //       with digits everywhere else, matching what DatasetGeneration recognises. A looser test
+        //       -- stripping every hyphen wherever it fell -- would accept a value like '20-24-01-15'
+        //       and silently produce a prefix for a day nobody named.
+        if (token.charAt(YEAR_MONTH_HYPHEN_INDEX) == HYPHEN
+                && token.charAt(MONTH_DAY_HYPHEN_INDEX) == HYPHEN
+                && isAllAsciiDigits(token.substring(0, YEAR_MONTH_HYPHEN_INDEX))
+                && isAllAsciiDigits(
+                        token.substring(YEAR_MONTH_HYPHEN_INDEX + 1, MONTH_DAY_HYPHEN_INDEX))
+                && isAllAsciiDigits(token.substring(MONTH_DAY_HYPHEN_INDEX + 1))) {
+            return token.substring(0, YEAR_MONTH_HYPHEN_INDEX)
+                    + token.substring(YEAR_MONTH_HYPHEN_INDEX + 1, MONTH_DAY_HYPHEN_INDEX)
+                    + token.substring(MONTH_DAY_HYPHEN_INDEX + 1)
+                    + COMPACT_TRAILING_DIGITS;
+        }
+
+        throw new IllegalStateException("business-date token '" + token + "' is in neither the compact"
+                + " layout YYYYMMDDnn nor the separated layout YYYY-MM-DD, so no numeric identifier"
+                + " prefix can be derived from it and no transaction identifier can be composed");
+    }
+
+    /**
+     * Reports whether every character of a value is an ASCII digit.
+     *
+     * <p>Assumptions: the range is tested explicitly rather than delegated to the platform's
+     * is-a-digit predicate, which accepts every decimal digit in Unicode. An Arabic-Indic or fullwidth
+     * digit would pass that predicate and then occupy more than one byte in a fixed-width record,
+     * shifting every field after it -- the same reasoning the module entry point's own predicate
+     * records, and the same test, so the two cannot disagree about what a digit is.</p>
+     *
+     * @param value the value to inspect; must not be {@code null}
+     * @return {@code true} when the value is non-empty and every character is in the range zero to
+     *     nine; {@code false} on the first character that is not, and for an empty value
+     */
+    private static boolean isAllAsciiDigits(String value) {
+        if (value.isEmpty()) {
+            return false;
+        }
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            if (character < '0' || character > '9') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * The index at which a separated token carries the hyphen between year and month, four.
+     */
+    private static final int YEAR_MONTH_HYPHEN_INDEX = 4;
+
+    /**
+     * The index at which a separated token carries the hyphen between month and day, seven.
+     */
+    private static final int MONTH_DAY_HYPHEN_INDEX = 7;
+
+    /**
+     * The character a separated token uses between its date parts.
+     *
+     * <p>Assumptions: ASCII hyphen-minus specifically, and not any of the several Unicode dashes that
+     * render similarly. A token pasted from a document could carry an en dash, and accepting it would
+     * put a multi-byte character into the position a fixed-width record reserves for one byte.</p>
+     */
+    private static final char HYPHEN = '-';
+
+    /**
+     * The two digits a normalised prefix carries after the eight date digits.
+     *
+     * <p>Assumptions: two zeros, because that is what the baseline's own driver supplies in those
+     * positions -- {@code app/jcl/INTCALC.jcl} line 22 injects {@code PARM='2022071800'}. Choosing any
+     * other filler would make a normalised identifier differ from the one the baseline would have
+     * produced for the same day, which is the divergence this normalisation exists to avoid.
+     */
+    private static final String COMPACT_TRAILING_DIGITS = "00";
 }

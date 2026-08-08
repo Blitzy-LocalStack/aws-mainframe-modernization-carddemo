@@ -78,15 +78,25 @@
 > so the spelling is part of
 > the contract.
 >
-> **Measured consumer status.** Five per-service Flyway files are authored across
-> four services: auth V1, batch V1, reference V1 plus V2, and transaction V1. The
-> extract-transform-load layout module exists, as do the batch, messaging and
-> security sibling documents. Reporting has one DTO and one mapper utility, but no
-> other service has an authored DTO/mapper implementation, and the traceability
-> matrix remains absent. Assumptions: a path naming an absent document is a code
-> span; an existing document is linked, per
-> [`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md). This
-> prevents a target consumer from being presented as delivered.
+> **Measured consumer status.** Every consumer this document was written for now
+> exists. Eight per-service Flyway files are authored across all seven table-owning
+> services — account V1, auth V1, authorization V1, batch V1, card V1, reference V1
+> plus V2, and transaction V1 — and `data-migration/sql/V0__schemas_and_roles.sql`
+> creates the schemas they populate. The extract-transform-load layout module exists,
+> as do the batch, messaging and security sibling documents and
+> [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md). Every one of
+> the eight services has an authored `dto` package and an authored `mapper` package.
+> Assumptions: a path naming an absent document is a code span; an existing document is
+> linked, per [`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md).
+> This prevents a target consumer from being presented as delivered.
+>
+> Refactoring Rationale: this block put the Flyway count at five files across four
+> services, said no service but reporting had an authored DTO or mapper, and said the
+> traceability matrix was absent. All three are now false, and this document contained
+> a second, differently-wrong copy of the same census further down, which is the reason
+> for restating rather than patching: two stale snapshots of one measurement disagreed
+> with each other, so a reader could not tell which to distrust. The census is stated
+> once, here, and the passage that duplicated it now defers to this one.
 >
 > **Caveats.** Four, stated up front rather than buried. First, this describes a
 > **target design**: the infrastructure is partially authored and statically checked
@@ -1187,7 +1197,10 @@ against that migration applied to a live PostgreSQL 17 database.
 >
 > Assumptions: **the bootstrap re-run is part of the sequence and has been
 > performed.** The order is `V0__schemas_and_roles.sql` → each service's Flyway
-> migration → `data-migration/sql/V1__reporting_views.sql` → `V0` once more. `V0` is
+> migration → `data-migration/sql/V1__reporting_views.sql` →
+> `data-migration/sql/V2__runtime_delete_grants.sql` → `V0` once more. `V2` sits at that
+> position for the same reason `V1` does: it names individual tables, and a table cannot
+> be named in a grant before the migration that creates it has run. `V0` is
 > idempotent by construction, so the second pass is the documented sequence rather
 > than a workaround; on that pass the `to_regclass` guard finds the table, the
 > conditional grant takes its `IF` branch and the notice falls silent.
@@ -1426,7 +1439,13 @@ recording.
 > the JCL tree — the only one present is commented out — and no checkpoint
 > declaration at all. `batch_run` therefore gives each step a durable idempotency
 > key so that a resumed step which already completed is a no-op, and it is
-> documented here as a **capability the target adds**. Describing it as a migration
+> documented here as a **capability the target adds**. Trade-offs: the table is
+> authored and so is the class that would maintain it, but that class has no
+> production caller while `batch-service`'s `Job` beans remain unauthored, so the
+> idempotency this note describes is a **designed capability rather than an operative
+> one**. The guarantee available today is coarser — the business date is an
+> identifying job parameter, so a repeated business date is recognised, while a
+> resumed step within one night is not. Describing it as a migration
 > of an existing mechanism would misrepresent the baseline, which recovers from a
 > failed step by resubmitting from a step the operator selects. The orchestration
 > that uses this table is in
@@ -2074,13 +2093,20 @@ visible beside that hard gate. The same table, with the per-check detail, is in
 **One consequence for this document specifically.** The schemas described above are
 created by
 [`../../data-migration/sql/V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql),
-which exists, and the tables in them by the per-service Flyway migrations, of which
-**six files across five of the seven table-owning services** exist: auth V1,
-authorization V1, batch V1, reference V1 plus V2, and transaction V1. Account and
-card migrations are absent, and for those two the derivation below remains
-authoritative rather than a provisioned table. Separately,
-`data-migration/sql/V1__reporting_views.sql` authors the four reporting views, which
-own no tables of their own.
+and the tables in them by the per-service Flyway migrations, all of which are now
+authored — the census is stated once, in the **Measured consumer status** paragraph of
+this document's opening purpose block, and is deliberately not repeated here.
+Separately,
+[`../../data-migration/sql/V1__reporting_views.sql`](../../data-migration/sql/V1__reporting_views.sql)
+authors the four reporting views, which own no tables of their own.
+
+Refactoring Rationale: this paragraph carried its own copy of the migration census,
+put at six files across five services with the account and card migrations absent. Both
+have since landed, and the copy is removed rather than corrected because the duplication
+was itself the defect: one measurement stated in two places drifts in two directions,
+and this document already had the two figures disagreeing. What this paragraph is for —
+saying which artifact creates the schemas and which creates the tables — survives
+without restating the count.
 
 ### Explicitly out of scope
 

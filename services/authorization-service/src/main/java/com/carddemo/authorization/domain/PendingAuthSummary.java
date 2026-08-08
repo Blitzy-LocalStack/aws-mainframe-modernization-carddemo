@@ -5,6 +5,7 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import java.math.BigDecimal;
+import java.util.Objects;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
@@ -132,6 +133,46 @@ public class PendingAuthSummary {
      * to 293, so a negative bound is the correct floor for a signed running total.</p>
      */
     private static final int COUNTER_MIN = -9999;
+
+    /**
+     * The width of the authorization-status column.
+     *
+     * <p>Assumptions: {@code PA-AUTH-STATUS PIC X(01)} at {@code cpy/CIPAUSMY.cpy} L21, stored as
+     * {@code auth_status CHAR(1)}. One character is the whole of the field, so a longer value is a decode
+     * fault rather than a value to truncate.</p>
+     */
+    private static final int AUTH_STATUS_MAX_LENGTH = 1;
+
+    /**
+     * How many status occurrences the segment declares.
+     *
+     * <p>Assumptions: five, from {@code PA-ACCOUNT-STATUS PIC X(02) OCCURS 5 TIMES} at
+     * {@code app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy} line 22. The arity is fixed by that
+     * clause, which is why the five occurrences are five discrete members here rather than a collection:
+     * the schema then enforces the arity instead of the application checking it. This constant exists so
+     * the bulk-load factory can refuse a wrongly-sized array against the declaration rather than against
+     * a literal.</p>
+     */
+    private static final int ACCOUNT_STATUS_OCCURRENCES = 5;
+
+    /**
+     * The width of each of the five account-status slots.
+     *
+     * <p>Assumptions: {@code PA-ACCOUNT-STATUS PIC X(02) OCCURS 5 TIMES} at {@code cpy/CIPAUSMY.cpy} L22,
+     * stored as five discrete two-character columns rather than an array, for the reason recorded in
+     * {@code docs/architecture/data-model-and-schema-mapping.md}: the fixed arity of five is then enforced
+     * by the schema itself.</p>
+     */
+    private static final int ACCOUNT_STATUS_MAX_LENGTH = 2;
+
+    /**
+     * The number of decimal places every monetary column on this row stores.
+     *
+     * <p>Assumptions: the four amounts are {@code NUMERIC(11,2)}, from the {@code S9(09)V99} pictures the
+     * segment declares. Scale two is the contract rather than a display choice, so a value of greater scale
+     * is refused on the way in instead of being rounded to fit.</p>
+     */
+    private static final int MONEY_SCALE = 2;
 
     /**
      * The account this summary belongs to, and the row's whole key.
@@ -377,6 +418,201 @@ public class PendingAuthSummary {
     }
 
     /**
+     * Reconstitutes a summary that already exists in the store, in whatever state it holds.
+     *
+     * <p>Purpose: this is the rehydration entry point, and it exists because neither the constructor above
+     * nor the two decision operations below can serve one. That constructor creates the segment state an
+     * account's FIRST authorization finds -- every numeric field zero, the two identifiers set -- and the
+     * decision operations move a counter, a total and a balance together by arithmetic. A stored row
+     * carries arbitrary values in all sixteen components, and there was no way to express one at all: the
+     * extract load decoded a populated segment and was then refused, because the only representable state
+     * was the empty one.
+     *
+     * <p>Refactoring Rationale: the mapper previously guarded its own crossing by REFUSING any segment
+     * whose status, balances, counters or totals were populated, and documented that refusal as
+     * deliberate. The refusal was the right response to the type it had -- populating four of sixteen
+     * components and returning the object would have let a caller overwrite a real balance with a
+     * constructor's zero -- but it made the load path unimplementable, so the aggregate could not be
+     * loaded from the very data this deployment is seeded with. The correct resolution is a factory that
+     * accepts and validates ALL SIXTEEN, which is what this is: nothing is defaulted, so nothing can be
+     * silently discarded, and the guard that stood in for it is withdrawn.
+     *
+     * <p>Assumptions: the ONLINE rules are untouched and stay narrower. A caller deciding an
+     * authorization still cannot set a counter or a balance directly -- the only way to move either is
+     * {@link #recordApproved(BigDecimal)} or {@link #recordDeclined(BigDecimal)}, which move the members
+     * that belong together in one step and refuse a counter leaving its four-digit domain. This factory is
+     * for the load path, which is not deciding anything: it is restating a state that already exists.
+     *
+     * <p>Assumptions: every value is validated against the same rule its column declares, so a summary
+     * this factory accepts is one the row can hold. The counters are bounded to the four decimal digits
+     * {@code PIC S9(04) COMP} declares at {@code cpy/CIPAUSMY.cpy} L27 and L28, which is also the schema's
+     * {@code ck_pending_auth_summary_counts}; the status characters are bounded to the widths their columns
+     * declare; the four amounts are required present, because their columns are {@code NOT NULL}, and are
+     * required to be exact at scale two, because a value of greater scale would be rounded on the way into
+     * a {@code NUMERIC(11,2)} column and money is never rounded silently in this migration.
+     *
+     * <p>Alternatives Considered: taking the mapper's decoded carrier as a single parameter instead of
+     * sixteen values. Rejected because it would make this domain type depend on a mapper type, which the
+     * layering rule this module is tested against forbids in that direction, and because the carrier holds
+     * {@code Money} rather than the exact decimals the columns store. The accepted cost is a long
+     * parameter list, mitigated by the load path being the only caller.
+     *
+     * @param accountId the account this summary belongs to; must not be {@code null} and must be positive
+     * @param customerId the customer the account belongs to; must not be {@code null} and must be positive
+     * @param authStatus the one-character authorization status, or {@code null} when the slot is blank
+     * @param accountStatus1 the first two-character account status slot, or {@code null} when blank
+     * @param accountStatus2 the second slot, or {@code null} when blank
+     * @param accountStatus3 the third slot, or {@code null} when blank
+     * @param accountStatus4 the fourth slot, or {@code null} when blank
+     * @param accountStatus5 the fifth slot, or {@code null} when blank
+     * @param creditLimit the account's mirrored credit limit, exact at scale two; must not be {@code null}
+     * @param cashLimit the account's mirrored cash credit limit, exact at scale two; must not be
+     *     {@code null}
+     * @param creditBalance the balance of authorizations taken and not yet posted, exact at scale two;
+     *     must not be {@code null}
+     * @param cashBalance the cash balance the reference program only ever zeroes, exact at scale two; must
+     *     not be {@code null}
+     * @param approvedAuthCount the count of approved authorizations; must not be {@code null} and must lie
+     *     within the four-digit domain
+     * @param declinedAuthCount the count of declined authorizations; must not be {@code null} and must lie
+     *     within the four-digit domain
+     * @param approvedAuthAmount the running total of approved amounts, exact at scale two; must not be
+     *     {@code null}
+     * @param declinedAuthAmount the running total of declined amounts, exact at scale two; must not be
+     *     {@code null}
+     * @return the reconstituted summary, never {@code null}
+     * @throws NullPointerException if either identifier, either counter or any of the four amounts is
+     *     {@code null}
+     * @throws IllegalArgumentException if an identifier is not positive, a counter is outside the
+     *     four-digit domain, a status character is wider than its column, or an amount carries more than
+     *     two decimal places
+     */
+    public static PendingAuthSummary rehydrated(Long accountId, Long customerId, String authStatus,
+            String accountStatus1, String accountStatus2, String accountStatus3,
+            String accountStatus4, String accountStatus5, BigDecimal creditLimit,
+            BigDecimal cashLimit, BigDecimal creditBalance, BigDecimal cashBalance,
+            Short approvedAuthCount, Short declinedAuthCount, BigDecimal approvedAuthAmount,
+            BigDecimal declinedAuthAmount) {
+
+        PendingAuthSummary summary = new PendingAuthSummary(
+                requirePositive(accountId, "accountId"),
+                requirePositive(customerId, "customerId"));
+        summary.authStatus = requireWithin(authStatus, "authStatus", AUTH_STATUS_MAX_LENGTH);
+        summary.accountStatus1 =
+                requireWithin(accountStatus1, "accountStatus1", ACCOUNT_STATUS_MAX_LENGTH);
+        summary.accountStatus2 =
+                requireWithin(accountStatus2, "accountStatus2", ACCOUNT_STATUS_MAX_LENGTH);
+        summary.accountStatus3 =
+                requireWithin(accountStatus3, "accountStatus3", ACCOUNT_STATUS_MAX_LENGTH);
+        summary.accountStatus4 =
+                requireWithin(accountStatus4, "accountStatus4", ACCOUNT_STATUS_MAX_LENGTH);
+        summary.accountStatus5 =
+                requireWithin(accountStatus5, "accountStatus5", ACCOUNT_STATUS_MAX_LENGTH);
+        summary.creditLimit = requireExactAmount(creditLimit, "creditLimit");
+        summary.cashLimit = requireExactAmount(cashLimit, "cashLimit");
+        summary.creditBalance = requireExactAmount(creditBalance, "creditBalance");
+        summary.cashBalance = requireExactAmount(cashBalance, "cashBalance");
+        summary.approvedAuthCount = requireCounterInDomain(approvedAuthCount, "approvedAuthCount");
+        summary.declinedAuthCount = requireCounterInDomain(declinedAuthCount, "declinedAuthCount");
+        summary.approvedAuthAmount = requireExactAmount(approvedAuthAmount, "approvedAuthAmount");
+        summary.declinedAuthAmount = requireExactAmount(declinedAuthAmount, "declinedAuthAmount");
+        return summary;
+    }
+
+    /**
+     * Returns an identifier once it is known to be present and positive.
+     *
+     * <p>Assumptions: the value itself is NOT quoted in the refusal. The sensitive-data logging contract in
+     * {@code docs/architecture/observability.md} names account and customer identifiers in a clause of
+     * their own, so a message naming the component is as much as can be said.</p>
+     *
+     * @param candidate the identifier supplied; must not be {@code null}
+     * @param component the component's name, reproduced in the refusal
+     * @return {@code candidate} unchanged, once it is known to be positive
+     * @throws NullPointerException if {@code candidate} is {@code null}
+     * @throws IllegalArgumentException if {@code candidate} is not positive
+     */
+    private static Long requirePositive(Long candidate, String component) {
+        Objects.requireNonNull(candidate, component + " must not be null");
+        if (candidate <= 0L) {
+            throw new IllegalArgumentException(
+                    component + " must be a positive identifier, and the value supplied was not");
+        }
+        return candidate;
+    }
+
+    /**
+     * Returns a status character once it is known to fit the column that stores it.
+     *
+     * <p>Assumptions: an absent value is admitted and returned unchanged, because every one of these
+     * columns is nullable -- the reference segment leaves a blank slot blank and the decode maps a blank
+     * field to absence. Only a PRESENT value is width-checked, which is the difference between a slot
+     * nobody filled and one filled with more than it can hold.</p>
+     *
+     * @param candidate the status characters supplied; may be {@code null}
+     * @param component the component's name, reproduced in the refusal
+     * @param maxLength the width the storing column declares
+     * @return {@code candidate} unchanged, once it is known to be absent or within the width
+     * @throws IllegalArgumentException if {@code candidate} is present and wider than {@code maxLength}
+     */
+    private static String requireWithin(String candidate, String component, int maxLength) {
+        if (candidate != null && candidate.length() > maxLength) {
+            throw new IllegalArgumentException(component + " is " + candidate.length()
+                    + " characters but the column declares " + maxLength);
+        }
+        return candidate;
+    }
+
+    /**
+     * Returns an amount once it is known to be present and exact at the scale its column stores.
+     *
+     * <p>Assumptions: a value of SMALLER scale is widened to scale two rather than refused, because two
+     * and {@code 2.00} are the same quantity and a decoded packed field of scale zero is an ordinary
+     * occurrence. A value of GREATER scale is refused rather than rounded: rounding money silently is
+     * forbidden throughout this migration, and a third decimal place in a stored summary is a decode fault
+     * worth reporting rather than absorbing.</p>
+     *
+     * @param candidate the amount supplied; must not be {@code null}
+     * @param component the component's name, reproduced in the refusal
+     * @return the amount at exactly scale two, never {@code null}
+     * @throws NullPointerException if {@code candidate} is {@code null}
+     * @throws IllegalArgumentException if {@code candidate} carries more than two decimal places
+     */
+    private static BigDecimal requireExactAmount(BigDecimal candidate, String component) {
+        Objects.requireNonNull(candidate, component + " must not be null");
+        if (candidate.scale() > MONEY_SCALE) {
+            throw new IllegalArgumentException(component + " carries " + candidate.scale()
+                    + " decimal places where the column stores " + MONEY_SCALE
+                    + ", and money is never rounded silently");
+        }
+        return candidate.setScale(MONEY_SCALE);
+    }
+
+    /**
+     * Returns a counter once it is known to be present and within the domain its picture declares.
+     *
+     * <p>Assumptions: the bound is the PICTURE's and not the storage type's, for the reason recorded on
+     * {@link #incremented(Short, String)} -- {@code PIC S9(04) COMP} holds -9999 through 9999 while the
+     * halfword that stores it reaches 32767, and the schema's own check constraint enforces the narrower
+     * range. A load admitting the wider range would put a value in the aggregate that the row refuses.</p>
+     *
+     * @param candidate the counter supplied; must not be {@code null}
+     * @param component the component's name, reproduced in the refusal
+     * @return {@code candidate} unchanged, once it is known to be in domain
+     * @throws NullPointerException if {@code candidate} is {@code null}
+     * @throws IllegalArgumentException if {@code candidate} is outside the four-digit domain
+     */
+    private static Short requireCounterInDomain(Short candidate, String component) {
+        Objects.requireNonNull(candidate, component + " must not be null");
+        if (candidate < COUNTER_MIN || candidate > COUNTER_MAX) {
+            throw new IllegalArgumentException(component + " is " + candidate
+                    + ", which is outside the range " + COUNTER_MIN + " to " + COUNTER_MAX
+                    + " that PIC S9(04) COMP can hold");
+        }
+        return candidate;
+    }
+
+    /**
      * Copies the account's two limits onto this summary.
      *
      * <p>Assumptions: this is {@code MOVE ACCT-CREDIT-LIMIT TO PA-CREDIT-LIMIT} and
@@ -611,6 +847,91 @@ public class PendingAuthSummary {
     }
 
     /**
+     * Withdraws a previously approved authorization from this summary as it expires.
+     *
+     * <p>Purpose: this is the approved arm of {@code 4000-CHECK-IF-EXPIRED} at
+     * {@code app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl} lines 288 to 289, which the purge program
+     * runs against the root it is positioned on for each expired child it is about to delete: subtract one
+     * from the approved count, and subtract the child's approved amount from the approved total.
+     *
+     * <p>Assumptions: the credit balance is deliberately NOT reduced, and the asymmetry with
+     * {@link #recordApproved(BigDecimal)} -- which DOES add to it -- is the reference program's own. The
+     * purge program's approved arm carries exactly two statements and touches no balance field anywhere in
+     * its 386 lines. This is recorded because the pairing looks incomplete: a reader who sees the listener
+     * add an approved amount to the credit balance will expect the purge to give it back, and it does not,
+     * so an account whose authorizations all expire retains the reserved balance until some other
+     * process releases it. Reproducing that is required for parity; correcting it here would change an
+     * observable balance the reference system leaves standing, which Rule T9 forbids without a documented
+     * divergence, and there is no reference behaviour to derive the correction from.
+     *
+     * @param amount the approved amount recorded against the expiring authorization, at scale two;
+     *     must not be {@code null}
+     * @throws IllegalStateException if the approved count is already at the four-digit minimum, so the
+     *     decrement would leave the domain {@code PIC S9(04) COMP} declares; the summary is left unchanged
+     */
+    public void reverseApproved(BigDecimal amount) {
+        this.approvedAuthCount = decremented(this.approvedAuthCount, "approvedAuthCount");
+        this.approvedAuthAmount = this.approvedAuthAmount.subtract(amount);
+    }
+
+    /**
+     * Withdraws a previously declined authorization from this summary as it expires.
+     *
+     * <p>Purpose: this is the declined arm of {@code 4000-CHECK-IF-EXPIRED} at
+     * {@code app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl} lines 291 to 292: subtract one from the
+     * declined count, and subtract the child's amount from the declined total.
+     *
+     * <p>Assumptions: the two arms take their amount from DIFFERENT fields of the same expiring
+     * authorization -- the approved arm subtracts the approved amount at line 289 while this arm subtracts
+     * the transaction amount at line 292 -- so the caller must supply the field its response code selects
+     * and cannot pass one amount to whichever arm it takes. That distinction is invisible from inside this
+     * type, which sees only a scale-two amount, so it is stated here and enforced at the call site in the
+     * purge job.
+     *
+     * @param amount the transaction amount of the expiring authorization, at scale two; must not be
+     *     {@code null}
+     * @throws IllegalStateException if the declined count is already at the four-digit minimum, so the
+     *     decrement would leave the domain {@code PIC S9(04) COMP} declares; the summary is left unchanged
+     */
+    public void reverseDeclined(BigDecimal amount) {
+        this.declinedAuthCount = decremented(this.declinedAuthCount, "declinedAuthCount");
+        this.declinedAuthAmount = this.declinedAuthAmount.subtract(amount);
+    }
+
+    /**
+     * Subtracts one from a counter in a wider type and refuses a result the reference field cannot hold.
+     *
+     * <p>Assumptions: the arithmetic is performed in {@code int} and the result checked before it is
+     * narrowed, for the same reason {@link #incremented(Short, String)} does so -- a cast applied to the
+     * result of the subtraction would be a narrowing conversion that wraps without any diagnostic.
+     *
+     * <p>Trade-offs: the bound checked is -9999 rather than zero, so a counter already at zero decrements
+     * to minus one rather than being refused. That looks like a missing guard and is a deliberate one. The
+     * reference field is SIGNED four digits at {@code cpy/CIPAUSMY.cpy} lines 27 and 28, the reference
+     * program subtracts with no floor test of its own, and the schema's own check constraint
+     * {@code ck_pending_auth_summary_counts} admits the negative half of that range -- so a negative
+     * counter is a representable state of the reference system that a caller may legitimately be
+     * reproducing from an extract. Refusing it here would make this type stricter than both the copybook
+     * and the column, and would turn an out-of-step extract into an unrecoverable load failure rather than
+     * a value a reader can see and question.
+     *
+     * @param counter the current counter value; must not be {@code null}
+     * @param fieldName the counter's name, used to identify it in the refusal
+     * @return the decremented value, always within the four-digit domain
+     * @throws IllegalStateException if the decrement would leave the four-digit domain the reference
+     *     field declares
+     */
+    private static Short decremented(Short counter, String fieldName) {
+        int next = counter - 1;
+        if (next > COUNTER_MAX || next < COUNTER_MIN) {
+            throw new IllegalStateException(fieldName + " would reach " + next
+                    + ", which is outside the range " + COUNTER_MIN + " to " + COUNTER_MAX
+                    + " that PIC S9(04) COMP can hold");
+        }
+        return Short.valueOf((short) next);
+    }
+
+    /**
      * Adds one to a counter in a wider type and refuses a result the reference field cannot hold.
      *
      * <p>Refactoring Rationale: the increment was written as {@code (short) (counter + 1)}, and the cast
@@ -651,5 +972,97 @@ public class PendingAuthSummary {
                     + " that PIC S9(04) COMP can hold");
         }
         return Short.valueOf((short) next);
+    }
+
+    /**
+     * Reconstitutes a summary that already carries running state, for the bulk-load path only.
+     *
+     * <p>Purpose: the ordinary constructor above creates a summary in the shape
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} lines 801 to 806 produce -- every
+     * numeric zeroed, every status unset -- and the running totals move from there only through
+     * {@link #recordApproved(java.math.BigDecimal)} and {@link #recordDeclined(java.math.BigDecimal)}.
+     * That is the correct and only shape for the authorization decision path. It is NOT sufficient for
+     * the segment load, whose input is an extract of a database that has been running: a parent record
+     * written by {@code cbl/PAUDBUNL.CBL} carries the account's authorization status, its five status
+     * occurrences, both balances and all four counters, and every one of those is state this aggregate
+     * would otherwise drop on the floor.</p>
+     *
+     * <p>Alternatives Considered: replaying the stored counters through {@code recordApproved} and
+     * {@code recordDeclined} so that no new entry point was needed. Rejected on two independent grounds:
+     * the counters and the amounts are stored independently, so no sequence of replays reproduces an
+     * arbitrary pair of them, and neither operation can assign a status occurrence or a balance at all.
+     * A replay would therefore have produced a summary that differed from the extract it was built
+     * from, silently.</p>
+     *
+     * <p>Alternatives Considered: exposing setters for the twelve components instead. Rejected because
+     * that would let the decision path assign a balance or a counter directly, which is exactly the
+     * mutation this aggregate exists to prevent -- the running totals are its invariant. A single named
+     * factory whose name says what it is for keeps the decision path unable to reach it by accident,
+     * because the factory returns a NEW instance and cannot be applied to one the decision path holds.
+     * </p>
+     *
+     * <p>Trade-offs: the parameter list is wide, and a wide list invites a positional mistake. It is
+     * preferred to a carrier type because the only carrier available is the mapper's own decoded record,
+     * and taking that here would make this domain type depend on the mapper package -- an inversion the
+     * module's layering rules forbid and an architecture test enforces. The mapper is the only caller,
+     * it builds the call from its own named components, and its round-trip test is what would catch a
+     * transposition.</p>
+     *
+     * @param accountId the account key; must not be {@code null}
+     * @param customerId the owning customer; must not be {@code null}
+     * @param storedAuthStatus the stored authorization status, or {@code null} when unset
+     * @param storedStatuses the five stored status occurrences in order, any of which may be
+     *     {@code null}; must not be {@code null} and must hold exactly five entries
+     * @param storedCreditLimit the stored credit limit at scale two; must not be {@code null}
+     * @param storedCashLimit the stored cash credit limit at scale two; must not be {@code null}
+     * @param storedCreditBalance the stored credit balance at scale two; must not be {@code null}
+     * @param storedCashBalance the stored cash balance at scale two; must not be {@code null}
+     * @param storedApprovedCount the stored approved counter; must not be {@code null}
+     * @param storedDeclinedCount the stored declined counter; must not be {@code null}
+     * @param storedApprovedAmount the stored approved total at scale two; must not be {@code null}
+     * @param storedDeclinedAmount the stored declined total at scale two; must not be {@code null}
+     * @return a summary holding exactly the stated state, never {@code null}
+     * @throws NullPointerException if a parameter documented as required is {@code null}
+     * @throws IllegalArgumentException if {@code storedStatuses} does not hold exactly five entries
+     */
+    public static PendingAuthSummary fromExtract(Long accountId, Long customerId,
+            String storedAuthStatus, String[] storedStatuses,
+            BigDecimal storedCreditLimit, BigDecimal storedCashLimit,
+            BigDecimal storedCreditBalance, BigDecimal storedCashBalance,
+            Short storedApprovedCount, Short storedDeclinedCount,
+            BigDecimal storedApprovedAmount, BigDecimal storedDeclinedAmount) {
+        Objects.requireNonNull(storedStatuses, "storedStatuses must not be null");
+        if (storedStatuses.length != ACCOUNT_STATUS_OCCURRENCES) {
+            throw new IllegalArgumentException("storedStatuses must hold exactly "
+                    + ACCOUNT_STATUS_OCCURRENCES + " entries, matching the OCCURS clause the segment"
+                    + " declares, but held " + storedStatuses.length);
+        }
+
+        PendingAuthSummary restored = new PendingAuthSummary(
+                Objects.requireNonNull(accountId, "accountId must not be null"),
+                Objects.requireNonNull(customerId, "customerId must not be null"));
+        restored.authStatus = storedAuthStatus;
+        restored.accountStatus1 = storedStatuses[0];
+        restored.accountStatus2 = storedStatuses[1];
+        restored.accountStatus3 = storedStatuses[2];
+        restored.accountStatus4 = storedStatuses[3];
+        restored.accountStatus5 = storedStatuses[4];
+        restored.creditLimit = Objects.requireNonNull(storedCreditLimit,
+                "storedCreditLimit must not be null, because the column is declared not null");
+        restored.cashLimit = Objects.requireNonNull(storedCashLimit,
+                "storedCashLimit must not be null, because the column is declared not null");
+        restored.creditBalance = Objects.requireNonNull(storedCreditBalance,
+                "storedCreditBalance must not be null, because the column is declared not null");
+        restored.cashBalance = Objects.requireNonNull(storedCashBalance,
+                "storedCashBalance must not be null, because the column is declared not null");
+        restored.approvedAuthCount = Objects.requireNonNull(storedApprovedCount,
+                "storedApprovedCount must not be null, because the column is declared not null");
+        restored.declinedAuthCount = Objects.requireNonNull(storedDeclinedCount,
+                "storedDeclinedCount must not be null, because the column is declared not null");
+        restored.approvedAuthAmount = Objects.requireNonNull(storedApprovedAmount,
+                "storedApprovedAmount must not be null, because the column is declared not null");
+        restored.declinedAuthAmount = Objects.requireNonNull(storedDeclinedAmount,
+                "storedDeclinedAmount must not be null, because the column is declared not null");
+        return restored;
     }
 }

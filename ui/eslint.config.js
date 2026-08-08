@@ -87,10 +87,19 @@
  *
  * Governed surface: everything under `ui/src` -- entry module, router, screens,
  * typed API modules, route helpers, message catalog, theme bridge and test setup
- * -- plus the two root configuration modules `vite.config.ts` and
- * `vitest.config.ts`. Every one of the 21 screen routes the plan assigns is
- * admitted by the rules below rather than by an exemption written for it, which
- * is what keeps the gate from being narrowed to fit whatever it is pointed at.
+ * -- plus all THREE root-level TypeScript modules: `vite.config.ts`,
+ * `vitest.config.ts` and `documentationGate.test.ts`, the last being the negative
+ * probe that lints deliberately non-conforming sources against this very
+ * configuration. Every one of the 21 screen routes the plan assigns is admitted by
+ * the rules below rather than by an exemption written for it, which is what keeps
+ * the gate from being narrowed to fit whatever it is pointed at.
+ *
+ * Refactoring Rationale: this statement named two root modules and omitted
+ * `documentationGate.test.ts`. The omission was the wrong one to leave: that file
+ * is the only committed check that this configuration has not been relaxed, so a
+ * reader taking the surface statement literally would have concluded the probe sat
+ * outside the gate it guards. It is governed by `TYPESCRIPT_FILES` like every other
+ * module, and always was -- only the description was short.
  */
 
 // Alternatives Considered: the conventional first line of a flat config is
@@ -869,7 +878,12 @@ export default defineConfig([
     // Assumptions: this is the whole authored surface of the package apart from
     // this configuration file -- `src` (the 21 screens, the app shell, the theme
     // bridge, the API clients, the message catalog, the hooks and the tests) plus
-    // the two root-level Vite and Vitest config files.
+    // all three root-level TypeScript modules: the Vite config, the Vitest config
+    // and `documentationGate.test.ts`. Refactoring Rationale: this comment said
+    // "the two root-level Vite and Vitest config files", which undercounted the
+    // root by one and, worse, left out the probe that guards this very file. Both
+    // surface statements in this configuration now name the same three modules, so
+    // a reader comparing them cannot be told two different things.
     files: TYPESCRIPT_FILES,
 
     extends: [

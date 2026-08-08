@@ -1125,7 +1125,7 @@ public final class StatementTextMapper {
         //       recorded golden output runs on -- so escaping here would break parity on the one side
         //       that has an oracle, in order to protect a side that is not this one. Escaping belongs
         //       at each sink, and the markup sink performs it: StatementHtmlMapper routes every value
-        //       it embeds through StatementHtmlMapper's own text-node escaping, and the divergence
+        //       it embeds through the shared HtmlTextEncoder text-node encoding, and the divergence
         //       that creates is registered as D-STMT-HTML-ESCAPING in
         //       docs/architecture/cobol-to-service-traceability.md.
         // WHY : Assumptions: the consequence for a consumer of this artifact is stated because it is

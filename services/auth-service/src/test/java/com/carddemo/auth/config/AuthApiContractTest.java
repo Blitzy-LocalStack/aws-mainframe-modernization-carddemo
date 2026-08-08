@@ -3,19 +3,30 @@ package com.carddemo.auth.config;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
+import com.carddemo.auth.api.AuthController;
+import com.carddemo.auth.api.UserController;
 import com.carddemo.common.security.JwtRoleConverter;
 import com.carddemo.common.web.CorrelationIdFilter;
+import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotBlank;
 import java.io.InputStream;
+import java.lang.annotation.Annotation;
+import java.lang.reflect.Method;
 import java.lang.reflect.RecordComponent;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
 import org.yaml.snakeyaml.Yaml;
 
 /**
@@ -47,6 +58,20 @@ class AuthApiContractTest {
 
     /** Classpath location of the contract this module publishes. */
     private static final String CONTRACT_RESOURCE = "/openapi/auth-api.yaml";
+
+    /**
+     * The mapping annotations a handler may carry, each paired with the verb it means.
+     *
+     * <p>Assumptions: the four verbs the contract uses are enumerated, and a fifth annotation would be
+     * absent from this map and so invisible to the mounted walk. That is the safe direction: an operation
+     * mounted through an annotation this map omits reads as unmounted and fails the assertion, rather
+     * than passing unnoticed.
+     */
+    private static final Map<Class<? extends Annotation>, String> MAPPING_VERBS = Map.of(
+            GetMapping.class, "get",
+            PostMapping.class, "post",
+            PutMapping.class, "put",
+            DeleteMapping.class, "delete");
 
     /** The extension field naming the authority an operation requires. */
     private static final String AUTHORITY_FIELD = "x-required-authority";
@@ -367,6 +392,89 @@ class AuthApiContractTest {
                         open.stream().map(name -> name.substring(name.indexOf(' ') + 1)).toList());
     }
 
+    /**
+     * Asserts that every operation the contract publishes is actually mounted by an adapter.
+     *
+     * <p>Assumptions: this closes the one dimension the sibling assertions above do not reach. They check
+     * that the contract and the filter chain agree about which paths exist and what authority each needs,
+     * and both agreed while three of the published operations answered 404 -- the contract declared them,
+     * the chain opened or gated them, and no handler was mapped. Alignment between two descriptions of a
+     * surface says nothing about whether the surface is there.
+     *
+     * <p>Assumptions: the mounted set is read from the mapping annotations rather than from a running
+     * context, so the assertion needs no Spring container and cannot be satisfied by a stub. The two
+     * adapter classes are named explicitly because the contract is this service's alone; a new adapter
+     * would have to be enrolled here, which is the intended friction.
+     *
+     * <p>This test takes no parameter and returns no value.
+     */
+    @Test
+    @DisplayName("every published operation is mounted by a handler, so none of them answers 404")
+    void everyPublishedOperationIsMounted() {
+
+        List<String> mounted = new ArrayList<>();
+        for (Class<?> adapter : List.of(AuthController.class, UserController.class)) {
+            String base = adapter.getAnnotation(RequestMapping.class).path()[0];
+            for (Method handler : adapter.getDeclaredMethods()) {
+                mountedOperation(base, handler).ifPresent(mounted::add);
+            }
+        }
+
+        assertThat(mounted)
+                .as("the mounted set and the published set must agree in both directions: a published"
+                        + " operation with no handler answers 404 while three artifacts describe it as"
+                        + " present, and a mounted operation the contract omits is an unpublished surface")
+                .containsExactlyInAnyOrderElementsOf(operationsByPathAndMethod().keySet());
+    }
+
+    /**
+     * Reports the operation key one handler method mounts, if it mounts one.
+     *
+     * <p>Assumptions: the key is composed in the same lower-case {@code "<verb> <path>"} form the contract
+     * walk produces, so the two sets are directly comparable without normalising either at the comparison
+     * site.
+     *
+     * @param base the adapter's class-level path prefix
+     * @param handler the candidate handler method
+     * @return the operation key, or empty when the method mounts no request mapping
+     */
+    private static Optional<String> mountedOperation(String base, Method handler) {
+
+        for (Map.Entry<Class<? extends Annotation>, String> candidate : MAPPING_VERBS.entrySet()) {
+            Annotation mapping = handler.getAnnotation(candidate.getKey());
+            if (mapping == null) {
+                continue;
+            }
+            String[] declared = pathOf(mapping);
+            String suffix = declared.length == 0 ? "" : declared[0];
+            return Optional.of(candidate.getValue() + " " + base + suffix);
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Reads the {@code path} member of a mapping annotation without knowing its concrete type.
+     *
+     * <p>Alternatives Considered: a branch per annotation type reading {@code path()} directly, which is
+     * type-safe. Rejected because the five annotations declare that member independently rather than
+     * through a shared supertype, so a branch per type would be five near-identical blocks that a sixth
+     * annotation would silently escape. Reflection over the member name treats all five uniformly.
+     *
+     * @param mapping the mapping annotation to read
+     * @return the declared paths, empty when the annotation declares none
+     * @throws IllegalStateException if the annotation publishes no readable {@code path} member, which
+     *     would mean this walk had been pointed at an annotation that is not a request mapping
+     */
+    private static String[] pathOf(Annotation mapping) {
+
+        try {
+            return (String[]) mapping.annotationType().getMethod("path").invoke(mapping);
+        } catch (ReflectiveOperationException unreadable) {
+            throw new IllegalStateException(
+                    "a mapping annotation did not publish a path member: " + mapping, unreadable);
+        }
+    }
+
     // WHY : Assumptions: the assertion is a FLOOR rather than an equality, because the contract
     //       deliberately does not restate the provider's policy - it bounds the value only so that an
     //       oversized body is not relayed onward. What must hold is that the bound cannot refuse a
@@ -464,6 +572,22 @@ class AuthApiContractTest {
      * on both sides -- so the mapping is read from the name rather than declared in a table that could
      * drift from it.</p>
      *
+     * <p>Refactoring Rationale: the loop covers ALL FIVE request records of the package, where it covered
+     * two. Three were missing for two different reasons and neither survives: the update body's record
+     * did not exist when this case was written, and the challenge and renewal bodies' records were added
+     * later with the operations they serve. A closed loop over two records is exactly the hand-maintained
+     * list this case was introduced to replace, so leaving three out reproduced the defect it exists to
+     * catch.</p>
+     *
+     * <p>Refactoring Rationale: each component is now asserted TWICE, once against the committed document
+     * and once against the record's own schema annotation, because the review found the two disagreeing
+     * in a way the document-side assertion alone cannot see. The document served from
+     * {@code /v3/api-docs} is generated from the annotations, and a non-blank constraint contributes a
+     * minimum length and no pattern, so a committed facet with no annotation behind it means the two
+     * documents describe different shapes. The second assertion is what makes the annotation's removal a
+     * failure rather than a silent regression -- it has to be, because a schema-documentation annotation
+     * affects nothing a compiler or a runtime check would notice.</p>
+     *
      * @throws ReflectiveOperationException never in practice; declared because the component types are
      *     resolved reflectively and a renamed record would surface here rather than as a silent skip
      */
@@ -473,7 +597,7 @@ class AuthApiContractTest {
         Map<String, Object> schemas = mapping(mapping(contract, "components"), "schemas");
         int asserted = 0;
 
-        for (String recordName : List.of("SignOnRequest", "CreateUserRequest")) {
+        for (String recordName : NOT_BLANK_REQUEST_RECORDS) {
             Class<?> record = Class.forName("com.carddemo.auth.dto." + recordName);
             Map<String, Object> properties = mapping(mapping(schemas, recordName), "properties");
 
@@ -488,26 +612,93 @@ class AuthApiContractTest {
                                 + " whitespace-only value by pattern or by enum rather than by prose"
                                 + " alone", recordName, component.getName(), recordName)
                         .isTrue();
+
+                // WHY : Assumptions: a component whose domain is an enum needs no annotation, because the
+                //       generated document carries the enum from the constraint that declares it and the
+                //       committed schema states the domain rather than a pattern. Requiring one would
+                //       demand that a record publish a facet its own schema does not declare.
+                if (declared.get("pattern") == null) {
+                    continue;
+                }
+                assertThat(publishedPattern(record, component))
+                        .as("%s.%s declares pattern in the committed schema, so the record must publish"
+                                + " the identical string into the GENERATED document -- @NotBlank renders"
+                                + " as minLength alone, so without the annotation the two documents"
+                                + " describe different shapes", recordName, component.getName())
+                        .isEqualTo(String.valueOf(declared.get("pattern")));
             }
         }
 
         // WHY : Assumptions: the count is asserted because a reflective loop that matched nothing would
-        //       otherwise pass. Six is the two sign-on components plus the four of the create body, and
-        //       a change to either record moves this number rather than silently emptying the loop.
+        //       otherwise pass. Fourteen is the two sign-on components, the four of the create body, the
+        //       three of the update body, the three of the challenge answer and the two of the renewal,
+        //       and a change to any of the five records moves this number rather than silently emptying
+        //       the loop.
         assertThat(asserted)
                 .as("the reflective loop must actually have found the annotated components")
-                .isEqualTo(6);
+                .isEqualTo(14);
     }
+
+    /**
+     * Reads the pattern a record component publishes into the generated document, if it publishes one.
+     *
+     * <p>Assumptions: the annotation is looked for on the accessor and then on the backing field, in that
+     * order, because a record's component annotations are propagated to whichever targets the annotation
+     * declares and the schema annotation permits both. Checking one alone would report a component as
+     * unannotated depending on which target the annotation happened to reach.</p>
+     *
+     * <p>Assumptions: an absent annotation and an annotation with the default empty pattern are both
+     * reported as {@code null}, because the generated document carries no pattern in either case, and
+     * that is the fact this assertion is about.</p>
+     *
+     * @param record the record class declaring the component; must not be {@code null}
+     * @param component the component to read; must not be {@code null}
+     * @return the pattern the component publishes, or {@code null} when it publishes none
+     * @throws ReflectiveOperationException if the backing field cannot be resolved, which a renamed
+     *     component would cause
+     */
+    private static String publishedPattern(Class<?> record, RecordComponent component)
+            throws ReflectiveOperationException {
+
+        Schema onAccessor = component.getAccessor().getAnnotation(Schema.class);
+        Schema declared = onAccessor != null
+                ? onAccessor
+                : record.getDeclaredField(component.getName()).getAnnotation(Schema.class);
+
+        if (declared == null || declared.pattern().isEmpty()) {
+            return null;
+        }
+        return declared.pattern();
+    }
+
+    /**
+     * The request records whose non-blank components this case holds to the committed document.
+     *
+     * <p>Assumptions: this is every record in {@code com.carddemo.auth.dto} that carries a request body,
+     * which is five of the package's nine records -- the four remaining ones are responses, and a
+     * response body's constraints are not evaluated on the way out. The list is named rather than
+     * discovered by scanning the package because a scan would silently cover nothing if the package name
+     * changed, whereas a named class that disappears fails to load.</p>
+     */
+    private static final List<String> NOT_BLANK_REQUEST_RECORDS = List.of(
+            "SignOnRequest",
+            "SignOnChallengeRequest",
+            "TokenRefreshRequest",
+            "CreateUserRequest",
+            "UpdateUserRequest");
 
     /**
      * Asserts that no request property claims non-blankness in prose without also enforcing it.
      *
      * <p>Refactoring Rationale: this is the same defect stated from the document's own side, and it
-     * catches the case the reflective test above cannot. The update body publishes two name properties
-     * whose descriptions assert the value must not be blank, and the record implementing that body is not
-     * yet authored -- so no annotation exists to derive an expectation from, and the contradiction sits
-     * entirely inside the document. Asserting the prose against the constraints closes it now rather than
-     * at whatever later moment the record lands.</p>
+     * catches the case the reflective test above cannot -- a property whose description asserts the value
+     * must not be blank while no record component claims it, so there is no annotation to derive an
+     * expectation from and the contradiction sits entirely inside the document. That is not hypothetical:
+     * it was the state of the update body's two name properties, whose implementing record did not yet
+     * exist when this case was written. The record exists now and the reflective case above covers it, but
+     * this one is retained because the situation recurs by construction -- every new schema in this
+     * document is authored before the record that serves it, so between those two moments this case is the
+     * only thing holding the description to the constraints beside it.</p>
      *
      * <p>Assumptions: the phrase searched for is the one this document actually uses, and it is searched
      * for case-insensitively because the sentence opens some descriptions and continues others. A

@@ -375,7 +375,9 @@ public record CardSummary(
      * request-time half; the annotations are evaluated by the framework on a body it VALIDATES and are
      * NOT evaluated on a response it SERIALISES, so on their own they would leave an unmasked number able
      * to leave through this shape. A check in the constructor cannot be bypassed, because every instance
-     * this service serialises was constructed.</p>
+     * this service serialises was constructed. The narrowing is registered as
+     * {@code D-CARD-MASKED-FORM-ENFORCED} in
+     * {@code docs/architecture/cobol-to-service-traceability.md} §7.4.</p>
      *
      * <p>Assumptions: both checks delegate rather than restate their rule --
      * {@link SealedSelector#hasSealedShape(String)} owns the sealed form and

@@ -11,6 +11,8 @@ import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminAddUse
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminCreateUserRequest;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminCreateUserResponse;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminDeleteUserRequest;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminRemoveUserFromGroupRequest;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminUpdateUserAttributesRequest;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AttributeType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.MessageActionType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.UserNotFoundException;
@@ -272,13 +274,167 @@ public class CognitoUserProvisioningService {
     }
 
     /**
+     * Moves an identity's group membership from the group one reference type selects to the group
+     * another selects, restoring the original membership if the second half of the move fails.
+     *
+     * <p>Purpose: this is the operation that gives a user-type change its effect. The local
+     * {@code auth.users.user_type} column names an authority but confers none: every authority a
+     * request is matched against is derived by {@code com.carddemo.common.security.JwtRoleConverter}
+     * from the signed {@code cognito:groups} claim, so until the membership behind that claim moves,
+     * a promoted user is still refused every administrative route and a demoted one still reaches
+     * every one of them. The baseline had no equivalent, because {@code app/cbl/COUSR02C.cbl} moved
+     * {@code SEC-USR-TYPE} in the record it had read at L322 and rewrote it at L360, and that single
+     * byte WAS the authority -- {@code app/cbl/COADM01C.cbl} read it back from the same file. Splitting
+     * the name of an authority from the grant of it is a consequence of moving identity to a managed
+     * provider, and this method is where the two are put back together.</p>
+     *
+     * <p>Assumptions: the source membership is removed BEFORE the target membership is added, and the
+     * order is a security decision rather than an arbitrary one. Either order has a window in which
+     * the provider's view is neither the old state nor the new one, and the two windows are not
+     * equivalent. Removing first leaves the identity holding NO group for the width of one provider
+     * call, so a token minted inside that window carries no authority and is refused everywhere --
+     * the fail-closed outcome. Adding first would leave it holding BOTH groups, so a token minted in
+     * that window carries administrative authority in every case, including the demotion of an
+     * administrator that is precisely the operation intended to take that authority away. A momentary
+     * denial is recoverable by retrying a request; a momentary escalation is not recoverable at
+     * all.</p>
+     *
+     * <p>Assumptions: the compensating call reverses only the removal, because the removal is the only
+     * half that can have succeeded when this method fails. If the removal itself fails nothing has
+     * changed and there is nothing to put back; if the removal succeeded and the addition failed the
+     * identity is groupless, and re-adding the source group returns it exactly to the state it held
+     * before the call. There is no third case, because the two calls are the whole of the mutation.</p>
+     *
+     * <p>Trade-offs: a compensation that itself fails is logged at error level and the original failure
+     * is what propagates, with the compensation's failure attached as a suppressed exception. What is
+     * given up is that the caller is told what it asked about -- why the reassignment did not happen --
+     * rather than what is arguably more urgent, that an identity is now groupless. The alternative,
+     * propagating the compensation failure instead, was rejected because it would report a symptom in
+     * place of a cause and would make the common case, a transient provider failure with a clean
+     * compensation, indistinguishable from the rare one. The suppressed exception carries the second
+     * failure to any handler that logs the throwable rather than only its message, and the error line
+     * names the identifier so an operator can repair the membership directly.</p>
+     *
+     * <p>Alternatives Considered: reading the current membership with {@code AdminListGroupsForUser}
+     * first and skipping calls that are already satisfied. Rejected because it converts one mutation
+     * into a read plus a mutation whose decision is based on a state that may have changed between
+     * them, and because both provider calls are already idempotent -- adding a member that is present
+     * and removing one that is absent both succeed -- so the read would buy nothing that retrying does
+     * not already give. The membership the provider holds, not a snapshot of it, is what the calls act
+     * on.</p>
+     *
+     * @param userId the provider username, being the row identifier the membership belongs to; must not
+     *     be {@code null}
+     * @param fromUserType the reference type the identity currently holds, {@code "A"} or {@code "U"}
+     *     per {@code app/cpy/COCOM01Y.cpy} L27 and L28; must not be {@code null}
+     * @param toUserType the reference type it is to hold, from the same two-value domain and different
+     *     from {@code fromUserType}; must not be {@code null}
+     * @return evidence that the provider now holds the target membership, which is what
+     *     {@link UserAuthorityService} requires before the local column may be assigned; never
+     *     {@code null}
+     * @throws IllegalArgumentException if either type is outside the two-value domain, or if the two
+     *     are equal -- an equal pair is not a reassignment and is refused here rather than treated as a
+     *     silent success, because a caller asking to move an authority to where it already stands has
+     *     confused a no-op with a move and {@link AuthorityReassignment#unchanged} states the no-op
+     *     without calling the provider at all
+     * @throws software.amazon.awssdk.core.exception.SdkException if the provider refused or could not be
+     *     reached, after the membership has been restored to what it was
+     */
+    public AuthorityReassignment reassignGroup(String userId, String fromUserType, String toUserType) {
+        String fromGroup = groupFor(fromUserType);
+        String toGroup = groupFor(toUserType);
+        if (fromGroup.equals(toGroup)) {
+            throw new IllegalArgumentException(
+                    "fromUserType and toUserType must differ to reassign a group membership");
+        }
+
+        this.provider.adminRemoveUserFromGroup(AdminRemoveUserFromGroupRequest.builder()
+                .userPoolId(this.userPoolId)
+                .username(userId)
+                .groupName(fromGroup)
+                .build());
+
+        try {
+            this.provider.adminAddUserToGroup(AdminAddUserToGroupRequest.builder()
+                    .userPoolId(this.userPoolId)
+                    .username(userId)
+                    .groupName(toGroup)
+                    .build());
+        } catch (RuntimeException failure) {
+            restoreGroup(userId, fromGroup, failure);
+            throw failure;
+        }
+
+        // WHY : Assumptions: both group names are recorded and the subject is not, which is the same
+        //       division the provisioning line above draws. An authority change is the single most
+        //       consequential thing this service does to an identity, so the line has to say which
+        //       authority was taken and which was given; the subject would add the linkage between a
+        //       person and their token claims to a log store, and no diagnostic here needs it.
+        LOG.warn("event=auth.identity.authority-reassigned userId={} fromGroup={} toGroup={}",
+                userId, fromGroup, toGroup);
+
+        return new AuthorityReassignment(userId, fromUserType, toUserType, true);
+    }
+
+    /**
+     * Puts a removed group membership back after the addition that was to replace it failed.
+     *
+     * <p>Assumptions: this is a compensation and not a retry, so it is attempted exactly once. A loop
+     * here would hold the caller's thread across an outage for a state an operator can repair, and
+     * would leave the identity groupless for longer than a single call's timeout either way. The error
+     * line below is the durable record that the repair is outstanding.</p>
+     *
+     * @param userId the provider username whose membership is being restored
+     * @param fromGroup the group name to restore, being the one this method's caller removed
+     * @param failure the failure that made the restoration necessary, which the caller propagates and
+     *     which carries any compensation failure as a suppressed exception
+     */
+    private void restoreGroup(String userId, String fromGroup, RuntimeException failure) {
+        try {
+            this.provider.adminAddUserToGroup(AdminAddUserToGroupRequest.builder()
+                    .userPoolId(this.userPoolId)
+                    .username(userId)
+                    .groupName(fromGroup)
+                    .build());
+            LOG.warn("event=auth.identity.authority-reassign-compensated userId={} restoredGroup={}",
+                    userId, fromGroup);
+        } catch (RuntimeException compensationFailure) {
+            // WHY : Trade-offs: attaching the second failure to the first rather than replacing it, and
+            //       the reason is stated on the public method above. What this line adds is the one
+            //       piece of information the propagated exception cannot carry to an operator who sees
+            //       only a log: that the identity currently holds no group at all and which group it
+            //       should hold. Every guarded route refuses a caller in that state, so the visible
+            //       symptom is a user who signs on and can do nothing, which is why the message names
+            //       the repair rather than only the fault.
+            LOG.error("event=auth.identity.authority-reassign-orphaned userId={} missingGroup={} "
+                    + "action=restore-membership", userId, fromGroup, compensationFailure);
+            failure.addSuppressed(compensationFailure);
+        }
+    }
+
+    /**
      * Deletes the pool account provisioned for an identifier, so a failed row write leaves none behind.
      *
-     * <p>Assumptions: this is a compensating action and not a published delete. It exists because the
-     * pool account has to be created before the row can carry its subject, so the window between the
-     * two is real and a caller whose write fails is the only party that knows it. Absence is treated
-     * as success, which is what makes it safe to call unconditionally on a failure path: a caller that
-     * failed BEFORE provisioning and a caller that failed after both reach the same clean state.</p>
+     * <p>Assumptions: this began as a compensating action alone. It exists because the pool account has
+     * to be created before the row can carry its subject, so the window between the two is real and a
+     * caller whose write fails is the only party that knows it. Absence is treated as success, which is
+     * what makes it safe to call unconditionally on a failure path: a caller that failed BEFORE
+     * provisioning and a caller that failed after both reach the same clean state.</p>
+     *
+     * <p>Refactoring Rationale: it now serves TWO callers -- the compensating path above and the
+     * published delete operation -- and it is one method rather than two because the two need identical
+     * behaviour in the one respect that is not obvious. Both must treat an absent pool account as
+     * success. On the compensating path that is because the failure may have preceded provisioning; on
+     * the delete path it is because the ROW is this context's authority on whether the user exists, so a
+     * row found with no pool account behind it must still be deletable rather than leaving an
+     * undeletable row behind. A second method for the delete path would have had to make the same
+     * decision for a different reason and could then drift from this one. The two callers are told apart
+     * in the log by the event names, not by the method.</p>
+     *
+     * <p>Assumptions: every provider failure other than an absent account propagates, on both paths. An
+     * account that could not be deleted is an orphan an operator has to know about: on the delete path
+     * it means a row was removed while an account that can still authenticate remains, which is a
+     * pool identity with no row -- refused at every guarded route, but present.</p>
      *
      * @param userId the provider username to remove, being the row identifier provisioning used; must
      *     not be {@code null}
@@ -325,6 +481,100 @@ public class CognitoUserProvisioningService {
         }
         throw new IllegalArgumentException(
                 "userType must be \"" + USER_TYPE_ADMIN + "\" or \"" + USER_TYPE_USER + "\"");
+    }
+
+    /**
+     * Brings the pool account in line with a row that has just been updated.
+     *
+     * <p>Purpose: the pool holds its own copy of the two names and the type -- as {@code given_name},
+     * {@code family_name} and {@code custom:user_type} -- and the type additionally decides group
+     * membership, which is what every authorization decision is actually made on. A row updated without
+     * this call would leave the pool describing the user as it was before, and in the case of a type
+     * change would leave the signed group claim contradicting the stored type. The claim wins, so the
+     * row's own type would become decoration.
+     *
+     * <p>Assumptions: the attribute update is issued unconditionally and the membership change only when
+     * the type actually differs, and the asymmetry follows from what each call costs when it is
+     * redundant. Rewriting three attributes with the values they already hold is one idempotent call
+     * with no observable effect; removing a user from a group and adding it back is two calls that pass
+     * through a state in which the account holds no group at all, and an account with no group is
+     * refused at every guarded route. Doing that on an update that changed only a surname would open a
+     * window in which the user could sign on and do nothing.
+     *
+     * <p>Assumptions: the removal precedes the addition, and the order is not interchangeable. An
+     * account may hold both groups at once, so adding first and removing second would leave the account
+     * holding the administrator group for the width of one call even when the type is being lowered from
+     * administrator to ordinary user -- which is the one ordering that could grant authority it should
+     * be taking away. Removing first fails closed: the window it opens withholds authority rather than
+     * granting it.
+     *
+     * <p>Trade-offs: neither call is compensated on failure, and a failure of either propagates. What
+     * that means concretely is worth stating rather than leaving to be discovered: the row has already
+     * been written when this runs, so a failed attribute update leaves the pool's copy of the names
+     * stale, and a failed membership change leaves the account with no group. Both are visible -- the
+     * first as a name that differs between the row and a token's claims, the second as a user who can
+     * sign on and reach nothing -- and both are repaired by reissuing the same update, because this
+     * method is idempotent. The alternative, rolling the row back to match the pool, was rejected
+     * because it would report success to the caller for a change it then undid, and because the row is
+     * this context's authority on what the user IS while the pool is a projection of it.
+     *
+     * @param userId the row identifier, which is also the provider username; must not be {@code null}
+     * @param firstName the given name as it now stands on the row; must not be {@code null}
+     * @param lastName the family name as it now stands on the row; must not be {@code null}
+     * @param previousUserType the type the row held before the update, {@code "A"} or {@code "U"}, used
+     *     only to decide whether membership has to move; must not be {@code null}
+     * @param userType the type the row holds after the update, {@code "A"} or {@code "U"}; must not be
+     *     {@code null}
+     * @throws IllegalArgumentException if either type is outside the two-value domain, raised before any
+     *     provider call so an out-of-domain value changes nothing
+     * @throws software.amazon.awssdk.services.cognitoidentityprovider.model.UserNotFoundException if the
+     *     pool holds no account for the identifier, which means a row exists whose account was never
+     *     provisioned or was removed outside this service; the remedy is operational and the condition
+     *     is deliberately not translated into a client-facing status, because the authority on whether
+     *     the USER exists is the row and the row was found
+     */
+    public void synchronise(String userId, String firstName, String lastName,
+            String previousUserType, String userType) {
+
+        // WHY : Assumptions: both types are resolved to group names BEFORE any provider call, so an
+        //       out-of-domain value on either side raises without having half-applied the change. The
+        //       resolution of the previous type is what makes that true of the value the caller read
+        //       from storage as well as the one it accepted from a request.
+        String targetGroup = groupFor(userType);
+        String previousGroup = groupFor(previousUserType);
+
+        this.provider.adminUpdateUserAttributes(AdminUpdateUserAttributesRequest.builder()
+                .userPoolId(this.userPoolId)
+                .username(userId)
+                .userAttributes(
+                        attribute(ATTRIBUTE_GIVEN_NAME, firstName),
+                        attribute(ATTRIBUTE_FAMILY_NAME, lastName),
+                        attribute(ATTRIBUTE_USER_TYPE, userType))
+                .build());
+
+        if (!previousGroup.equals(targetGroup)) {
+            this.provider.adminRemoveUserFromGroup(AdminRemoveUserFromGroupRequest.builder()
+                    .userPoolId(this.userPoolId)
+                    .username(userId)
+                    .groupName(previousGroup)
+                    .build());
+
+            this.provider.adminAddUserToGroup(AdminAddUserToGroupRequest.builder()
+                    .userPoolId(this.userPoolId)
+                    .username(userId)
+                    .groupName(targetGroup)
+                    .build());
+
+            // WHY : Assumptions: the authority change is logged at its own event name rather than folded
+            //       into the attribute update, because a change of group is a change of what the user can
+            //       do and is the line an audit reads. It records both group names and not the subject,
+            //       for the reason the provisioning line records: the subject is the value a presented
+            //       token is matched on.
+            LOG.warn("event=auth.identity.regrouped userId={} from={} to={}", userId, previousGroup,
+                    targetGroup);
+        }
+
+        LOG.info("event=auth.identity.synchronised userId={} group={}", userId, targetGroup);
     }
 
     /**

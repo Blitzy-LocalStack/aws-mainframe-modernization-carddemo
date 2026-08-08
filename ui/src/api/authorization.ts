@@ -39,9 +39,17 @@ import { getApiClient } from './client';
 import { requestPath } from './types';
 import type { ContractOperation, PageDirection, PageResponse } from './types';
 
+/*
+ * Refactoring Rationale: this was `GET /api/v1/authorizations` with the account scope, cursor and
+ * direction sent as QUERY PARAMETERS. It is `POST /api/v1/authorizations/search` sending them in a
+ * body, because the scope is an account identifier and a query string is part of the request line —
+ * which the load balancer writes into its mandatory access log itself, before any application code
+ * runs. The scope is REQUIRED here, so every listing request previously wrote one account identifier
+ * into a durable log object rather than only those that chose to narrow.
+ */
 const LIST_PENDING_AUTHORIZATIONS: ContractOperation = {
-  method: 'GET',
-  path: '/api/v1/authorizations',
+  method: 'POST',
+  path: '/api/v1/authorizations/search',
   operationId: 'listPendingAuthorizations',
 };
 
@@ -248,15 +256,19 @@ export interface PendingAuthListQuery {
 export async function listPendingAuthorizations(
   query: PendingAuthListQuery,
 ): Promise<PendingAuthListResponse> {
-  const params: Record<string, string> = { accountId: query.accountId };
+  // Refactoring Rationale: these criteria were assembled into a query-parameter record and are now
+  //   assembled into a request body. The membership rules are unchanged — the scope is always sent
+  //   and the direction accompanies a cursor or is omitted with it — so the service sees exactly the
+  //   criteria it saw before, in a place the access log does not record.
+  const body: Record<string, string> = { accountId: query.accountId };
   if (query.cursor !== undefined) {
-    params.cursor = query.cursor;
-    params.direction = query.direction ?? 'next';
+    body.cursor = query.cursor;
+    body.direction = query.direction ?? 'next';
   }
 
-  const response = await getApiClient().get<PendingAuthListResponse>(
+  const response = await getApiClient().post<PendingAuthListResponse>(
     requestPath(LIST_PENDING_AUTHORIZATIONS),
-    { params },
+    body,
   );
 
   for (const row of response.data.page.items) {

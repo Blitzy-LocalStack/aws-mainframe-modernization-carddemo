@@ -45,17 +45,48 @@ public class RestAccountContextClient implements AccountContextClient {
     /** The account context's cross-reference lookup, which takes its key in a request body. */
     public static final String PATH_CARD_XREF_LOOKUP = "/api/v1/card-xrefs/lookup";
 
-    /** The account context's account-keyed cross-reference read. */
-    public static final String PATH_CARD_XREF_BY_ACCOUNT = "/api/v1/card-xrefs/by-account/{accountId}";
+    /**
+     * The account context's account-keyed cross-reference read, which takes its key in a request body.
+     *
+     * <p>Refactoring Rationale: this was the path template
+     * {@code /api/v1/card-xrefs/by-account/{accountId}} and the read was a {@code GET}, so the account
+     * identifier travelled in the request line. The load balancer between this client and the account
+     * context composes its access record from that request line before any application code runs, and the
+     * migration's sensitive-data logging contract names account identifiers among the values a durable
+     * diagnostic may not hold -- so the value had to leave the target rather than be masked after it.</p>
+     */
+    public static final String PATH_CARD_XREF_BY_ACCOUNT = "/api/v1/card-xrefs/lookup-by-account";
 
-    /** The account context's account master read. */
-    public static final String PATH_ACCOUNT = "/api/v1/accounts/{accountId}";
+    /**
+     * The account context's account master read, which takes its key in a request body.
+     *
+     * <p>Refactoring Rationale: was {@code /api/v1/accounts/{accountId}} as a {@code GET}; it is now the
+     * published {@code POST} lookup, for the reason recorded above. The account context's contract moved
+     * with it, so this is a change of shape on both sides rather than a client working around a server.</p>
+     */
+    public static final String PATH_ACCOUNT = "/api/v1/accounts/lookup";
 
-    /** The account context's balance-reducing payment operation. */
-    public static final String PATH_ACCOUNT_PAYMENT = "/api/v1/accounts/{accountId}/payments";
+    /**
+     * The account context's balance-reducing payment operation, which takes its key in its request body.
+     *
+     * <p>Refactoring Rationale: was {@code /api/v1/accounts/{accountId}/payments}. This one was ALREADY a
+     * {@code POST} carrying a body, so the identifier was in the target for no reason at all -- the body it
+     * needed was already there and the amount was already in it. Moving the identifier alongside the
+     * amount removes the disclosure at no cost whatsoever.</p>
+     */
+    public static final String PATH_ACCOUNT_PAYMENT = "/api/v1/accounts/payments";
 
     /** The request member the lookup keys on, spelled as the account context publishes it. */
     private static final String FIELD_CARD_NUMBER = "cardNumber";
+
+    /**
+     * The request member every account-keyed call carries the account identifier in.
+     *
+     * <p>Assumptions: the spelling matches the {@code accountId} property of the account context's
+     * published {@code AccountLookupRequest} schema, and one constant serves all three account-keyed
+     * calls so they cannot disagree about it.</p>
+     */
+    private static final String FIELD_ACCOUNT_ID = "accountId";
 
     /** The request member the payment operation keys its amount on. */
     private static final String FIELD_AMOUNT = "amount";
@@ -164,8 +195,9 @@ public class RestAccountContextClient implements AccountContextClient {
     @Override
     public Optional<CardXref> findCardXrefByAccountId(String accountId) {
         try {
-            CardXrefView view = this.client.get()
-                    .uri(PATH_CARD_XREF_BY_ACCOUNT, accountId)
+            CardXrefView view = this.client.post()
+                    .uri(PATH_CARD_XREF_BY_ACCOUNT)
+                    .body(Map.of(FIELD_ACCOUNT_ID, accountId))
                     .retrieve()
                     .body(CardXrefView.class);
             return Optional.ofNullable(view).map(CardXrefView::toCardXref);
@@ -186,8 +218,9 @@ public class RestAccountContextClient implements AccountContextClient {
     @Override
     public Optional<AccountBalance> findAccountBalance(String accountId) {
         try {
-            AccountView view = this.client.get()
-                    .uri(PATH_ACCOUNT, accountId)
+            AccountView view = this.client.post()
+                    .uri(PATH_ACCOUNT)
+                    .body(Map.of(FIELD_ACCOUNT_ID, accountId))
                     .retrieve()
                     .body(AccountView.class);
             return Optional.ofNullable(view)
@@ -214,8 +247,10 @@ public class RestAccountContextClient implements AccountContextClient {
             //       forbids the money path leaving exact fixed point at any hop, and a request body is a
             //       hop.
             this.client.post()
-                    .uri(PATH_ACCOUNT_PAYMENT, accountId)
-                    .body(Map.of(FIELD_AMOUNT, paymentAmount.amount().toPlainString()))
+                    .uri(PATH_ACCOUNT_PAYMENT)
+                    .body(Map.of(
+                            FIELD_ACCOUNT_ID, accountId,
+                            FIELD_AMOUNT, paymentAmount.amount().toPlainString()))
                     .retrieve()
                     .toBodilessEntity();
         } catch (RestClientException failure) {

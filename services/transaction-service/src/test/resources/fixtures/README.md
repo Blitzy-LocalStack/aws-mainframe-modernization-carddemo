@@ -553,32 +553,40 @@ This section uses the `[present]` and `[planned]` convention of master section
 9.3. Its purpose is to keep a document from describing a future artifact as
 though it already exists, which is the failure this annotation prevents.
 
-- `services/transaction-service/src/test/java/**` -- **[present]**, but **no
-  consumer of these fixtures is present yet**. Measured on this branch the tree
-  holds four test classes --
-  [`TransactionApiContractTest`](../../java/com/carddemo/transaction/dto/TransactionApiContractTest.java),
-  [`TransactionAddRequestTest`](../../java/com/carddemo/transaction/dto/TransactionAddRequestTest.java),
-  [`FixedWidthMappingTest`](../../java/com/carddemo/transaction/domain/FixedWidthMappingTest.java)
-  and
-  [`TransactionRepositoryIT`](../../java/com/carddemo/transaction/repository/TransactionRepositoryIT.java)
-  -- beside five documentation-only `package-info.java` declarations, and **not one
-  of them reads a byte from this folder**. The contract test binds the published
-  OpenAPI document to the request and response records; the mapping test asserts
-  the fixed-width offsets against the entity; and the repository integration test
-  builds every row it needs in code, through `save(...)` calls on literal values,
-  rather than loading a record image. So every record file here is still loaded by
-  nothing.
+- `services/transaction-service/src/test/java/**` -- **[present]**, and **two
+  consumers of these fixtures are now present**. Measured on this branch, exactly
+  two test classes open a file in this folder:
+  [`TransactionFixtureContractTest`](../../java/com/carddemo/transaction/fixtures/TransactionFixtureContractTest.java),
+  which resolves every scenario's record files from the classpath and holds each
+  record image to the byte values that scenario's own README states; and
+  [`TransactionRejectRepositoryIT`](../../java/com/carddemo/transaction/repository/TransactionRejectRepositoryIT.java),
+  which reads `fixtures/<scenario>/dailytran.txt` for each reject scenario, asserts
+  the image is exactly the declared width, and persists it as the raw record of a
+  reject row. Both resolve through `getResourceAsStream` rather than a filesystem
+  path, because the working directory differs between a reactor build and a
+  single-module build while the classpath resolves identically in both.
 
-  Refactoring Rationale: this bullet has been re-derived twice, and the second
-  re-derivation is the reason it is now phrased around the consumer rather than
-  around the class count. It first read `[planned]` with no test class at all; it
-  then named the single contract test; the tree now holds four classes including
-  the `*RepositoryIT` this section used to describe as the thing that would read
-  these bytes once authored. The fact a fixture author actually needs -- whether
-  anything reads them -- survived all three states unchanged, so it is stated
-  first and the inventory is stated as a measurement behind it. Adding another test
-  class no longer falsifies the sentence; making one of them load a record file is
-  the single change that must update it.
+  Every other test class in the tree still builds the rows it needs in code and
+  reads nothing from here -- among them
+  [`TransactionApiContractTest`](../../java/com/carddemo/transaction/dto/TransactionApiContractTest.java),
+  which binds the published OpenAPI document to the request and response records,
+  [`FixedWidthMappingTest`](../../java/com/carddemo/transaction/domain/FixedWidthMappingTest.java),
+  which asserts the fixed-width offsets against the entity, and
+  [`TransactionRepositoryIT`](../../java/com/carddemo/transaction/repository/TransactionRepositoryIT.java),
+  which saves literal values. Several of those files **cite** this README for a
+  decision it owns; a citation is not a consumer, and the distinction is what this
+  bullet turns on.
+
+  Refactoring Rationale: this bullet has been re-derived three times, and the
+  current wording keeps the earlier phrasing-around-the-consumer while inverting
+  its verdict. It first read `[planned]` with no test class at all; it then named
+  the single contract test; it then recorded four classes and stated that not one
+  read a byte from this folder. That last statement was true when written and is
+  now false, and it was the most costly of the three to leave standing: a fixture
+  author who believed nothing consumed these bytes would treat a boundary value as
+  free to adjust, when moving one cent in `boundary_exact_limit` now fails two
+  suites. The consumer question is still stated first, because it is the fact a
+  fixture author actually needs; what changed is the answer.
 - [`../application-test.yml`](../application-test.yml) -- **[present]** sibling.
   Three of the things it supplies are what make an assertion on these bytes
   reproducible at all: it pins schema resolution to `ledger` for both the
@@ -608,7 +616,14 @@ though it already exists, which is the failure this annotation prevents.
 - Integration testing against a real PostgreSQL instance through Testcontainers
   -- **[present]**: `TransactionRepositoryIT` runs against `postgres:17-alpine`
   and applies this module's own migration. A **fixture-loading** integration test
-  is the part that remains **[planned]**. Assumptions: the non-unique index on the
+  is **[present]** too: `TransactionRejectRepositoryIT` reads
+  `fixtures/<scenario>/dailytran.txt` from the classpath and persists the image it
+  read as the raw record of a reject row, so a record file in this folder is now
+  exercised against the real engine and not only against the byte contract.
+  Refactoring Rationale: this bullet marked that test `[planned]` and is corrected
+  rather than deleted, because the reasoning it carries for **why** the engine has
+  to be real still holds and is the part a reader comes here for. Assumptions: the
+  non-unique index on the
   processing timestamp and the key-ordered read paths these records feed are
   properties of the real engine; an in-memory substitute cannot exercise either,
   so a test that passed against one would prove nothing about the behaviour being

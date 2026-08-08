@@ -18,7 +18,7 @@
 #   to `ecs-service` (instantiated once per service); the VPC, subnet tiers and
 #   security groups to `network`; dashboards, alarms and the notification topic
 #   to `observability`; the internal load balancer and its listener rules to
-#   `alb`; the four customer-managed keys to `kms`; the image repositories to
+#   `alb`; the five customer-managed keys to `kms`; the image repositories to
 #   `ecr`; the nightly state machine to `step-functions-batch`. The ECS Exec log
 #   group and the KMS key are INPUTS rather than resources, so both must already
 #   exist when this module runs.

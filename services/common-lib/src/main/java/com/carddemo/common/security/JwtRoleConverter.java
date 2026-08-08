@@ -22,8 +22,11 @@ import org.springframework.security.oauth2.jwt.Jwt;
  * is left to settle. This class settles it from one input and one only: the token's
  * {@code cognito:groups} claim. It reads no request body, no header, no path segment and no value
  * the caller supplied for the purpose; it performs no input or output of any kind; and it keeps
- * nothing between calls. The eight service modules gate their administrative routes on the
- * authorities it returns, and none of them repeats this reading.</p>
+ * nothing between calls. Seven of the eight service modules gate their routes on the authorities
+ * it returns, and none of them repeats this reading. The eighth, {@code batch-service}, declares no
+ * filter chain at all: its own configuration charter records that it exposes no endpoint and is
+ * driven by a command argument rather than by a request, so it has no route to authorize and does
+ * not construct this class.</p>
  *
  * <p>The mapping is two group names wide, and it is closed at two:</p>
  *
@@ -132,7 +135,8 @@ import org.springframework.security.oauth2.jwt.Jwt;
  * converter, and reusing it was evaluated. It reads a scope claim by default, applies a scope
  * prefix by default, and splits a textual claim on a delimiter, so adopting it would mean setting
  * its claim name, clearing its prefix and accepting its delimiter semantics at every point it is
- * wired -- eight service modules, each free to get one of those three settings wrong -- and it
+ * wired -- the seven service modules that declare a filter chain, each free to get one of those
+ * three settings wrong -- and it
  * would still admit every group name it found, which is the behaviour rejected under the
  * unrecognised-group heading below. A named class carries the mapping once, and is then the single
  * thing a reader opens to learn what the authority vocabulary is.</p>
@@ -165,13 +169,18 @@ import org.springframework.security.oauth2.jwt.Jwt;
  * order with duplicates collapsed, which holds a rendered authority list stable from run to run and
  * so keeps a test that asserts one from depending on an order the platform does not promise.</p>
  *
- * <p>Alternatives Considered: no configuration class accompanies this one, and the shared kernel
- * admits no configuration package at all. A shared {@code SecurityConfig} was evaluated and
- * rejected: each of the eight service modules owns its own filter chain and decides for itself
- * which of its routes demand the administrative authority, so a shared one would have to anticipate
- * eight route tables it cannot see. The cost is that eight modules each carry a few lines of wiring
- * that one class could have carried once; the gain is that a route table stays beside the routes it
- * governs, and that this class needs to know nothing about how any service is routed. A consuming
+ * <p>Alternatives Considered: no SECURITY configuration class accompanies this one, and the shared
+ * kernel admits no configuration package at all. Assumptions: the kernel does hold two configuration
+ * classes -- {@code com.carddemo.common.CardDemoCommonAutoConfiguration}, which registers the
+ * cross-cutting beans every service needs, and the {@code @Configuration} class in
+ * {@code com.carddemo.common.observability} that contributes the common meter tags -- so the claim
+ * here is about SECURITY configuration specifically and not about the absence of every such class.
+ * A shared {@code SecurityConfig} was evaluated and rejected: each service module that serves
+ * requests owns its own filter chain and decides for itself which of its routes demand the
+ * administrative authority, so a shared one would have to anticipate seven route tables it cannot
+ * see. The cost is that seven modules each carry a few lines of wiring that one class could have
+ * carried once; the gain is that a route table stays beside the routes it governs, and that this
+ * class needs to know nothing about how any service is routed. A consuming
  * module opts in by constructing this converter with the two group names read from configuration
  * and handing it to the framework's authentication converter. Requiring those names in the
  * constructor makes authorization drift fail while the service starts instead of turning every

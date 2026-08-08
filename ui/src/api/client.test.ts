@@ -7,6 +7,7 @@ import type { AxiosRequestConfig, AxiosResponse } from 'axios';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { getApiClient } from './client';
+import { resetServerClock, serverInstant } from './serverClock';
 
 // Refactoring Rationale: the bound asserted below is restated here as a literal
 // rather than imported, because the value it must agree with lives in Java --
@@ -120,3 +121,108 @@ function requestCorrelationContract(): void {
 }
 
 describe('request correlation contract', requestCorrelationContract);
+
+/**
+ * A fixed server instant, in the IMF-fixdate form an HTTP `Date` response header carries.
+ *
+ * Assumptions: deliberately far from any plausible test-run clock, so a case that passed by reading
+ * the LOCAL clock instead of this header would be visible rather than coincidentally correct.
+ */
+const SERVER_DATE_HEADER = 'Tue, 15 Jul 2025 14:23:45 GMT';
+
+/**
+ * Answers a request with a success carrying a `Date` header and no body.
+ * @param {AxiosRequestConfig} config - Request configuration after the client's interceptors ran.
+ * @returns {Promise<AxiosResponse>} A 200 response whose headers include the fixed server instant.
+ */
+async function datedSuccessAdapter(config: AxiosRequestConfig): Promise<AxiosResponse> {
+  return Promise.resolve({
+    data: {},
+    status: 200,
+    statusText: 'OK',
+    headers: { date: SERVER_DATE_HEADER },
+    config,
+  } as AxiosResponse);
+}
+
+/**
+ * Answers a request with a server error that still carries a `Date` header.
+ * @param {AxiosRequestConfig} config - Request configuration after the client's interceptors ran.
+ * @returns {Promise<AxiosResponse>} A 500 response, which Axios converts into a rejection.
+ */
+async function datedFailureAdapter(config: AxiosRequestConfig): Promise<AxiosResponse> {
+  // Assumptions: a 500 is returned rather than an AxiosError being constructed by hand, so the
+  //   rejection travels the same path a real failure does -- Axios builds the error from the response
+  //   and hands it to the rejection interceptor, which is the code under test.
+  return Promise.resolve({
+    data: {},
+    status: 500,
+    statusText: 'Internal Server Error',
+    headers: { date: SERVER_DATE_HEADER },
+    config,
+  } as AxiosResponse);
+}
+
+/**
+ * Dispatches one request through the real client using the given adapter.
+ * @param {typeof datedSuccessAdapter} adapter - Adapter answering the request locally.
+ * @returns {Promise<void>} Resolves once the request has settled, however it settled.
+ */
+async function dispatchThrough(adapter: typeof datedSuccessAdapter): Promise<void> {
+  const client = getApiClient();
+  client.defaults.adapter = adapter;
+  try {
+    await client.get('/api/v1/cards');
+  } catch {
+    // Assumptions: the rejection is swallowed here on purpose. These cases assert what the
+    //   interceptor RECORDED, not how the caller was told about the failure, and the failure case
+    //   would otherwise fail the test for the very condition it is exercising.
+  }
+}
+
+/** Asserts a successful response anchors the server clock. */
+async function anchorsTheClockFromASuccess(): Promise<void> {
+  expect(serverInstant()).toBeUndefined();
+  await dispatchThrough(datedSuccessAdapter);
+  expect(serverInstant()?.toUTCString()).toBe(SERVER_DATE_HEADER);
+}
+
+/** Asserts a failed response anchors the server clock too. */
+async function anchorsTheClockFromAFailure(): Promise<void> {
+  // WHY : an error response still came from the server and still carries its `Date`. Skipping it
+  //       would discard a good anchor exactly when a session is having trouble and issuing the most
+  //       requests, so the error path is asserted rather than assumed.
+  expect(serverInstant()).toBeUndefined();
+  await dispatchThrough(datedFailureAdapter);
+  expect(serverInstant()?.toUTCString()).toBe(SERVER_DATE_HEADER);
+}
+
+/** Prepares the build configuration and an unanchored clock for one case. */
+function stubClockFixture(): void {
+  stubBuildConfiguration();
+  resetServerClock();
+}
+
+/** Restores the environment and discards the anchor so no later file inherits either. */
+function restoreClockFixture(): void {
+  restoreBuildConfiguration();
+  resetServerClock();
+}
+
+/**
+ * Groups the assertions that fix the server-clock anchoring contract.
+ *
+ * WHY : these cases close the link between `serverClock` and reality. Its own unit tests prove the
+ *       offset arithmetic, and the header-band contract test proves every screen passes the value on,
+ *       but neither would notice if the response interceptor were removed -- the clock would simply
+ *       never anchor and every screen would silently fall back to the browser clock, which is the
+ *       original defect restored.
+ */
+function serverClockAnchoringContract(): void {
+  beforeEach(stubClockFixture);
+  afterEach(restoreClockFixture);
+  it('anchors the server clock from a successful response', anchorsTheClockFromASuccess);
+  it('anchors the server clock from a failed response', anchorsTheClockFromAFailure);
+}
+
+describe('server clock anchoring contract', serverClockAnchoringContract);

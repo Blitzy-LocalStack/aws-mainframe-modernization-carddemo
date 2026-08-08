@@ -463,10 +463,18 @@ variable "api_connect_src_origins" {
   #       ui/nginx.conf byte for byte. `connect-src` cannot be, because the SPA
   #       calls an API Gateway HTTP API on a DIFFERENT origin whose hostname is
   #       created by another module and differs per environment. The container
-  #       image cannot know it and so states the tightest invariant form it can,
-  #       `'self' https:`; this input is what lets the distribution narrow that to
-  #       the exact origins, which is the whole reason the two policies are allowed
-  #       to differ in this one directive.
+  #       image cannot know it AT BUILD TIME; this input is what lets the
+  #       distribution state the exact origins.
+  #       Refactoring Rationale: this note previously said the container image
+  #       "states the tightest invariant form it can, `'self' https:`", and that the
+  #       two policies were therefore allowed to differ in this one directive. Both
+  #       halves are no longer true, and the first was never accurate: `https:` is a
+  #       scheme-source that admits every HTTPS host on the internet, so it was the
+  #       loosest useful form rather than the tightest. ui/nginx.conf now carries a
+  #       placeholder that ui/docker-entrypoint.sh renders to exact origins when the
+  #       container starts, and an unset list renders `connect-src 'self'` there just
+  #       as an empty list yields `connect-src 'self'` here. The two policies now
+  #       agree in EVERY directive, so no divergence in this one has to be excused.
   #       Assumptions: the value is a list because more than one origin is
   #       legitimately needed as the system grows -- the API today, and a Cognito
   #       token endpoint if the SPA is ever pointed at one directly -- and a single

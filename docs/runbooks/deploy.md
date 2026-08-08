@@ -200,7 +200,75 @@ export TF_VAR_cloudfront_api_connect_src_origins='["https://<api-hostname>"]'
 export TF_VAR_image_tag="<commit-sha>"
 export TF_VAR_github_repository="<owner>/<repo>"
 export TF_VAR_github_oidc_provider_arn="<oidc-provider-arn>"
+# WHY : Assumptions: these last two were absent from this block although both are declared with
+#       no default, so following it exactly still left `plan` refusing to run. Both name an
+#       account-scoped resource this package does not create: the permissions boundary is the
+#       organisation's own IAM guardrail, and the mask key is the HMAC material the card and
+#       reporting services derive their masking from. Neither is a secret VALUE -- both are ARNs
+#       of things that hold one -- which is why they belong here rather than in Secrets Manager
+#       lookups, and why they are absent from terraform.tfvars.
+export TF_VAR_permissions_boundary_arn="<iam-permissions-boundary-arn>"
+export TF_VAR_mask_hmac_secret_arn="<mask-hmac-secret-arn>"
 ```
+
+**The automated path takes the same ten values from protected GitHub environment variables.**
+`.github/workflows/deploy.yml` writes them into an untracked `deployment.auto.tfvars.json` that it
+deletes at the end, and `.github/workflows/infra-ci.yml` passes them as `TF_VAR_` for its review
+plan. Two of the ten are read from the run context instead of being set by an operator, so an
+environment needs the twelve variables below plus the four `CARDDEMO_TF_STATE_*` backend values.
+
+| GitHub environment variable | Terraform variable | Notes |
+|---|---|---|
+| `CARDDEMO_ALB_CERTIFICATE_ARN` | `alb_certificate_arn` | Regional ACM ARN covering `internal_service_domain_name` |
+| `CARDDEMO_INTERNAL_SERVICE_DOMAIN_NAME` | `internal_service_domain_name` | Bare DNS name the ALB certificate covers |
+| `CARDDEMO_CLOUDFRONT_ACM_CERTIFICATE_ARN` | `cloudfront_acm_certificate_arn` | Must be issued in **us-east-1** |
+| `CARDDEMO_CLOUDFRONT_ALIASES_JSON` | `cloudfront_aliases` | JSON list, e.g. `["app.example.com"]`; must be non-empty |
+| `CARDDEMO_GITHUB_OIDC_PROVIDER_ARN` | `github_oidc_provider_arn` | Output of `infra/bootstrap`, created once per account |
+| `CARDDEMO_PERMISSIONS_BOUNDARY_ARN` | `permissions_boundary_arn` | Organisation IAM guardrail |
+| `CARDDEMO_MASK_HMAC_SECRET_ARN` | `mask_hmac_secret_arn` | ARN of the masking HMAC secret. The secret's **value** is the operator's to create and must be canonical standard base64 of at least 32 random bytes -- see the note below |
+| `CARDDEMO_IMAGE_DIGESTS_JSON` | `image_digests` | Has a default; supplied so a review plan reflects the deployed images |
+| `CARDDEMO_AWS_REGION` | *(not a variable)* | Region for the ECR login and image push |
+| `CARDDEMO_DEPLOY_ROLE_ARN` | *(not a variable)* | Role the workflow assumes by OIDC |
+| *(run context `github.sha`)* | `image_tag` | Not operator-set, so it cannot disagree with the commit being deployed |
+| *(run context `github.repository`)* | `github_repository` | Not operator-set, so the publication role cannot be granted to another repository |
+
+`cloudfront_api_connect_src_origins` is the tenth required variable and is deliberately **not** an
+environment variable. The API endpoint does not exist until the apply creates it, so `deploy.yml`
+supplies an empty list -- which yields `connect-src 'self'` and permits nothing -- and narrows it to
+the real origin after the apply, before the SPA is published.
+
+### The masking secret's value has a format the ETL enforces
+
+`mask_hmac_secret_arn` names a secret this configuration neither creates nor rotates, so its
+**value** is created out of band. That value is the HMAC key the extract-transform-load image
+derives every redaction tag with, and the image now **refuses to run** rather than accept weak
+material: it requires canonical standard base64 decoding to at least 32 bytes -- the HMAC-SHA-256
+output size -- and refuses a passphrase, the URL-safe alphabet, a non-canonical spelling, anything
+shorter, and material that is a single repeated byte. Create the value with:
+
+```bash
+aws secretsmanager create-secret \
+  --name "carddemo/<env>/mask-hmac" \
+  --secret-string "$(python3 -c 'import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())')"
+```
+
+WHY : Assumptions: the refusal is stated here rather than only in the ETL's own README because the
+failure surfaces during a batch run, long after the apply that wired the ARN succeeded -- an apply
+cannot validate a secret's contents, and the operator who creates the secret is the one who needs
+the rule. WHY : Trade-offs: rotating the value re-derives every tag, so a verification pass that
+compares a rendering produced before rotation against one produced after reports differences that
+are not differences in the data; rotate between load campaigns, not during one.
+`data-migration/README.md` §5.7.1 carries the full rule set.
+
+WHY : Refactoring Rationale: this table exists because none of these names was documented anywhere,
+while the workflows required them. Worse, the workflows had been written against an OLDER variable
+vocabulary and were supplying six names -- `route53_zone_id`, `spa_domain_name`,
+`alb_tls_server_name`, `service_tls_domain_name`, `batch_glue_function_arns` and `release_version`
+-- that neither root declares, while supplying nothing for seven that both roots require. Terraform
+discards an undeclared variable silently, so the wiring looked complete and set almost nothing. This
+runbook's manual block above already used the correct vocabulary, which is what the workflows were
+brought into line with; `infra-ci.yml` now carries a closure check that compares the workflows, this
+runbook and `variables.tf` against each other so the three cannot drift apart again.
 
 ```bash
 # WHAT: initialises the selected environment against the bootstrapped remote state.
@@ -237,7 +305,10 @@ terraform -chdir="infra/envs/<env>" apply "<planfile>"
 tiers of role** behind them: eight `NOLOGIN` `carddemo_<context>_owner` roles that own each schema
 and everything a migration creates in it, seven `carddemo_<context>_migrator` logins that are
 members of those owners `WITH INHERIT FALSE`, and eight runtime logins holding `USAGE` plus
-`SELECT`, `INSERT` and `UPDATE` with `CREATE` explicitly revoked. Owning services then apply their
+`SELECT`, `INSERT` and `UPDATE` with `CREATE` explicitly revoked. `DELETE` is **not** among the
+schema-wide grants and is not withheld by oversight: three published operations do delete rows, and
+each is granted one table at a time by `data-migration/sql/V2__runtime_delete_grants.sql`, applied
+after the Flyway step below. Owning services then apply their
 Flyway migrations **under the migration credential**, injected as `SPRING_FLYWAY_USER` and
 `SPRING_FLYWAY_PASSWORD` from that context's `<role>_migrator` secret; each service's
 `spring.flyway.init-sqls` issues `SET ROLE carddemo_<context>_owner` first, which is what makes the
@@ -254,6 +325,33 @@ it reads only the masked security-barrier views granted to its read-only role.
 The batch role's cross-schema grants are deliberately limited to the account and ledger objects
 needed to preserve the posting unit of work as one database transaction. Do not replace those grants
 with schema-wide privileges.
+
+Once every owning service has completed its Flyway migration, apply the table-specific delete
+grants. This file is separate from `V0` for a structural reason rather than a stylistic one: `V0`
+runs before a single table exists, so the only privilege forms available to it are
+`GRANT ... ON ALL TABLES IN SCHEMA` and `ALTER DEFAULT PRIVILEGES`, and neither can name one table.
+Three tables need `DELETE` and the other twenty-plus in the same two schemas must not have it, so the
+grant has to be expressed where the tables are already there to be named.
+
+```bash
+# WHAT: grant DELETE on exactly the three tables whose published operations remove rows --
+#       reference.transaction_types, reference.transaction_categories and
+#       "authorization".auth_reply_outbox -- then prove no other table acquired it.
+# WHY : Trade-offs: withholding these three grants does not make the system safer, it makes two
+#       shipped capabilities fail at runtime -- the reference-service delete routes, and
+#       OutboxPublisher.purgePublished()'s hourly retention sweep over a table whose every row
+#       carries a PAN. The narrower risk of naming three tables is preferred to the broader risk of
+#       an unbounded table of card-bearing rows.
+psql -v ON_ERROR_STOP=1 -f data-migration/sql/V2__runtime_delete_grants.sql
+psql -v ON_ERROR_STOP=1 -f data-migration/sql/verify/runtime_delete_grants.sql
+```
+
+> The `ON DELETE RESTRICT` constraint on `reference.transaction_categories` is unaffected by the
+> grant and is what still refuses a delete of a referenced transaction type — the privilege decides
+> whether the role may *attempt* the delete, the constraint decides whether a *row* may go, and
+> `reference-service` turns the resulting foreign-key violation into its contracted `409`. Verified
+> against PostgreSQL 17.10: with the grant in place the attempt returns SQLSTATE `23503`, not
+> `42501`, so the two outcomes stay distinguishable to the service.
 
 Follow [data-migration.md](data-migration.md) for copybook decoding, staged data, row-count checks,
 checksums, and money-total parity.

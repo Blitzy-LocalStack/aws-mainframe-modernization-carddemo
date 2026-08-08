@@ -68,6 +68,27 @@ class MatchStatusOriginationTest {
     }
 
     /**
+     * Rehydrates one detail row with the match status supplied and every other component fixed.
+     *
+     * <p>Assumptions: the argument list is IDENTICAL to {@link #rowWith(String)}'s, which is what makes
+     * the pair of tests below a comparison of provenance alone. If the two paths took different arguments
+     * a reader could not tell whether a difference in outcome came from the provenance or from the
+     * data.</p>
+     *
+     * @param matchStatus the persisted status to rehydrate; passed through unaltered
+     * @return the rehydrated row
+     */
+    private static PendingAuthDetail persistedRowWith(String matchStatus) {
+        return PendingAuthDetail.rehydrated(
+                new PendingAuthDetailKey(ACCOUNT_ID, AUTH_DATE, AUTH_TIME),
+                "260806", "091644", CARD_NUMBER, "0100", "2712", "0100", "0000",
+                "091644", "00", "0000", "003000",
+                new BigDecimal("250.00"), new BigDecimal("250.00"),
+                "5411", "840", (short) 5, "MERCHANT000001", "ACME HARDWARE",
+                "SPRINGFIELD", "IL", "627040000", "TX0000000000001", matchStatus);
+    }
+
+    /**
      * An approved authorization is recorded as pending a match.
      */
     @Test
@@ -152,5 +173,85 @@ class MatchStatusOriginationTest {
         assertThat(PendingAuthDetail.ORIGINATED_MATCH_STATUSES)
                 .containsExactly(PendingAuthDetail.MATCH_STATUS_PENDING,
                         PendingAuthDetail.MATCH_STATUS_DECLINED);
+    }
+
+    /**
+     * Rehydration admits every one of the four statuses a stored row can hold.
+     *
+     * <p>Assumptions: this is the property whose absence made valid data unloadable. A row that aged out
+     * carries {@code 'E'} and a row that posting matched carries {@code 'M'}; the column's own check
+     * constraint {@code ck_pending_auth_detail_match_status} admits both, the copybook declares condition
+     * names for both at {@code cpy/CIPAUDTY.cpy} L46 to L49, and the committed fixture
+     * {@code pautdtl1-match-status-domain.bin} holds one record per status precisely so a load can be
+     * asserted over all four. Routing the load through the insert-only constructor made two of those four
+     * records unloadable, so an extract of a real database would have failed on the first expired
+     * authorization it reached.</p>
+     *
+     * <p>Assumptions: all four are asserted rather than only the two the insert path refuses, because the
+     * two the insert path admits must keep working through the rehydration route as well -- a fix that
+     * admitted {@code 'E'} and {@code 'M'} while breaking {@code 'P'} and {@code 'D'} would exchange one
+     * unloadable half for the other.</p>
+     */
+    @Test
+    @DisplayName("rehydration admits all four persisted statuses P, D, E and M")
+    void rehydrationAdmitsTheWholePersistedDomain() {
+        for (String persisted : new String[] {
+                PendingAuthDetail.MATCH_STATUS_PENDING,
+                PendingAuthDetail.MATCH_STATUS_DECLINED,
+                PendingAuthDetail.MATCH_STATUS_PENDING_EXPIRED,
+                PendingAuthDetail.MATCH_STATUS_MATCHED_WITH_TRAN}) {
+            assertThat(persistedRowWith(persisted).getMatchStatus())
+                    .as("%s is a state a stored row can hold, so a load must accept it", persisted)
+                    .isEqualTo(persisted);
+        }
+    }
+
+    /**
+     * Rehydration is WIDER than origination and not a bypass of every rule.
+     *
+     * <p>Assumptions: the two paths differ in exactly one respect -- which set of statuses they admit --
+     * and a value outside the copybook's four is refused on BOTH. Admitting an arbitrary character on the
+     * load path would let an extract introduce a value the column's check constraint then refuses at
+     * flush time, reporting a database error with no field named instead of a refusal naming the
+     * status.</p>
+     *
+     * <p>Assumptions: the message asserted is the FIRST stage of the staged refusal, the one that says the
+     * value is not a match status at all. The second stage -- the one that says a value is a match status
+     * an insert may not originate -- is unreachable from this path by construction, since rehydration
+     * admits the whole domain, and asserting that sentence here would pass only if the widening had
+     * failed.</p>
+     */
+    @Test
+    @DisplayName("rehydration still refuses a status outside the copybook's four-value domain")
+    void rehydrationRefusesAnOutOfDomainStatus() {
+        assertThatExceptionOfType(IllegalArgumentException.class)
+                .isThrownBy(() -> persistedRowWith("X"))
+                .withMessageContaining("matchStatus is not a match status value")
+                .withMessageContaining("X");
+        assertThatNullPointerException()
+                .isThrownBy(() -> persistedRowWith(null))
+                .withMessageContaining("matchStatus");
+    }
+
+    /**
+     * The insert path stays narrow after the load path was widened.
+     *
+     * <p>Assumptions: this is the regression guard on the fix itself. The straightforward way to make
+     * {@code 'E'} and {@code 'M'} loadable is to widen the constructor, which would silently permit a
+     * listener defect to record an authorization as already matched or already expired -- an outcome no
+     * decision branch in {@code cbl/COPAUA0C.cbl} can produce. Asserting the same two values through the
+     * two routes in one test is what proves the widening landed on the load path only.</p>
+     */
+    @Test
+    @DisplayName("widening the load path left the insert path refusing E and M")
+    void wideningRehydrationDidNotWidenOrigination() {
+        for (String later : new String[] {
+                PendingAuthDetail.MATCH_STATUS_PENDING_EXPIRED,
+                PendingAuthDetail.MATCH_STATUS_MATCHED_WITH_TRAN}) {
+            assertThat(persistedRowWith(later).getMatchStatus()).isEqualTo(later);
+            assertThatExceptionOfType(IllegalArgumentException.class)
+                    .as("%s must remain unreachable from an insert", later)
+                    .isThrownBy(() -> rowWith(later));
+        }
     }
 }

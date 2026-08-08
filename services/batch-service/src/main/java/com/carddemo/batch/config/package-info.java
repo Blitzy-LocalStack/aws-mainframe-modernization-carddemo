@@ -45,17 +45,30 @@
  *
  * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
  *
- * <p>Assumptions: every class name and count below describes this package's <b>target
- * contract</b> as the migration plan assigns it, not the set of files present beside this one at
- * the checkpoint that authored it. The migration lands its artifacts in plan order, so a class
- * named here that has no file yet is <b>planned</b>, not missing. Measured at this revision this
- * directory still holds only this charter and {@code DataSourceConfig}; {@code BatchConfig} and
- * {@code SqsConfig} remain assigned to other indexes of the same plan and are described below as
- * targets. The distinction is declared
- * because the roster otherwise reads as present tense, and a roster a reader cannot tell apart
- * from an inventory stops being usable the moment one named class turns out to be absent. The
- * parent charter at {@code com.carddemo.batch} makes the same declaration for the subtree as a
- * whole, and the two agree deliberately.</p>
+ * <p>Assumptions: the roster below names three classes, of which two are present and one is not.
+ * Measured at this revision this directory holds this charter, {@code DataSourceConfig} and
+ * {@code BatchConfig}:
+ *
+ * <pre>
+ * this directory: 3 java files = 2 classes + 1 charter (planned: SqsConfig)
+ * </pre>
+ *
+ * <p>{@code SqsConfig} remains assigned to another index of the same plan and is described below as a
+ * target rather than as an inventory entry. The distinction is declared because the roster otherwise
+ * reads as present tense, and a roster a reader cannot tell apart from an inventory stops being usable
+ * the moment one named class turns out to be absent. The parent charter at {@code com.carddemo.batch}
+ * makes the same declaration for the subtree as a whole, and the two agree deliberately.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph said the directory "still holds only this charter and
+ * {@code DataSourceConfig}" and listed {@code BatchConfig} among the absent. That was overtaken when
+ * the seven job beans landed: they need a time source and a shared ledger-guarded step builder, so
+ * {@code BatchConfig} was authored with them and the sentence became a false report of the directory
+ * rather than an honest declaration about a plan. The marker line above is measured against this
+ * directory on every build by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
+ * so the same drift cannot recur silently. Assumptions: the marker counts what is PRESENT, and the
+ * roster below still names the one planned class, which is why the two figures differ by one and the
+ * difference is stated rather than reconciled away.</p>
  *
  * <h2>Purpose</h2>
  *
@@ -70,34 +83,44 @@
  * the table mappings to {@code domain}. A reader asking why a transaction was rejected, or how a
  * monthly interest figure was reached, will not find the answer in this directory.</p>
  *
- * <h2>The membership canon: three configuration classes at the target, one delivered</h2>
+ * <h2>The membership canon: three configuration classes at the target, two delivered</h2>
  *
  * <p>The set is closed at three {@code @Configuration} classes, so the question "which
  * configuration class does this bean belong on" keeps a definite answer as the module grows. Three
  * production classes plus this charter is four {@code .java} files at the target, and there is no fifth
- * type.</p>
+ * type. The directory currently holds three of those four.</p>
  *
- * <p>Refactoring Rationale: exactly ONE of the three is delivered. {@code DataSourceConfig} is present;
- * {@code BatchConfig} and {@code SqsConfig} are not, and every capability the two entries below describe
- * -- the chunk-oriented step infrastructure, the durable job repository, the job-parameter interlock, the
- * publish-only error sink and its message attributes -- is consequently a TARGET description and not a
- * delivered one. That distinction is restated here because the entries themselves read in the present
- * tense, and a reader who took them at face value would look for a chunk-step bean, a job repository or a
- * message publisher and find none. The prose is left in place rather than deleted because it is the
- * agreed contract for those two classes and is what the authoring of each must satisfy; what is corrected
- * is the impression that satisfying it has already happened.</p>
+ * <p>Refactoring Rationale: TWO of the three are delivered. {@code DataSourceConfig} and
+ * {@code BatchConfig} are present; {@code SqsConfig} is not, so the capability its entry below describes
+ * -- the publish-only terminal error sink and the message attributes a published event carries -- is a
+ * TARGET description and not a delivered one, and nothing in this module publishes
+ * {@code BatchErrorEvent} today. That distinction is restated here because the entry reads in the
+ * present tense, and a reader who took it at face value would look for a message publisher and find
+ * none. Its prose is left in place rather than deleted because it is the agreed contract for that class
+ * and is what its authoring must satisfy; what is corrected is the impression that satisfying it has
+ * already happened. Assumptions: no job depends on that publisher, so its absence blocks no unit of
+ * work -- it costs the terminal-sink notification a failed run would otherwise emit, which the state
+ * machine's own catch-and-notify path covers independently.</p>
  *
- * <p>Assumptions: the two absent classes are NOT authored as empty configurations to make the roster
+ * <p>Assumptions: the one absent class is NOT authored as an empty configuration to make the roster
  * true. A configuration class contributing no bean would be a placeholder occupying the name of a
- * reviewed contract, and the step infrastructure in particular cannot be authored honestly ahead of the
- * jobs whose steps it wires. What HAS landed in their place is narrower and real: the durable step ledger
- * is exercised through {@code BatchStepLedger} in the sibling service package rather than through a job
- * repository bean, so the redrive no-op behaviour exists and is asserted even though the framework's own
- * batch infrastructure is not yet wired.</p>
+ * reviewed contract. The step infrastructure, by contrast, could not be authored honestly ahead of the
+ * jobs whose steps it wires, and it was authored WITH them: {@code BatchConfig} now supplies the time
+ * source the ledger stamps its rows with and one nested builder that wraps a job's work in a
+ * ledger-guarded step, so a redrive of an already-completed step is a no-op. The durable ledger itself
+ * remains {@code BatchStepLedger} in the sibling service package, which is where its transaction
+ * posture belongs.</p>
  *
  * <ul>
- *   <li>{@code BatchConfig} owns the chunk-oriented step infrastructure, the durable job
- *       repository, and the job-parameter contract those steps read. It is the interlock with the
+ *   <li>{@code BatchConfig} owns the module's step infrastructure -- the time source the durable
+ *       ledger stamps its rows with, and the nested builder that wraps one unit of work in a
+ *       ledger-guarded step -- and the job-parameter contract those steps read. Trade-offs: the step
+ *       it builds is a single transactional tasklet rather than a chunk-oriented read-process-write
+ *       step. A chunk-oriented step commits per chunk, which would make a partially posted run
+ *       observable and a redrive non-idempotent; the reference commits its three writes as one unit
+ *       of work, so the tasklet is what preserves that and the ledger row is what makes the redrive
+ *       a no-op. The accepted cost is that a very large run holds one transaction open for its
+ *       duration. It is the interlock with the
  *       command contract declared on {@code BatchApplication}, whose {@code --job=} option selects
  *       one of seven job tokens and whose {@code --business-date=} option reaches a job under the
  *       parameter key {@code businessDate}. Assumptions: a step that read the business date from
@@ -252,9 +275,22 @@
  *
  * <p>{@code BatchConfig}'s job repository together with the {@code batch.batch_run} table is this
  * module's analogue of a mainframe restart directive. {@code BatchRun} declares a uniqueness
- * constraint over {@code (run_id, step_name)} above a surrogate identity key, which is what makes a
- * redriven orchestrator state a no-op for a step that already completed rather than a second
- * application of the same work.</p>
+ * constraint over {@code (run_id, step_name)} above a surrogate identity key, which is the mechanism
+ * <i>intended</i> to make a redriven orchestrator state a no-op for a step that already completed
+ * rather than a second application of the same work.</p>
+ *
+ * <p>Trade-offs: the two halves of that sentence are at different stages, and collapsing them would
+ * overstate what this package delivers. The framework's own job repository IS wired here and IS
+ * operative: because the business date is added as an identifying job parameter, a repeat of a
+ * business date that already completed is recognised and reported clean, which is the guarantee
+ * {@code BatchApplication} implements at its {@code JobInstanceAlreadyCompleteException} branch. The
+ * {@code batch.batch_run} half is <b>not</b> operative: the table and its repository exist, but the
+ * only class that touches them lives in the sibling service package and has no production caller
+ * while the job beans remain unauthored. So the granularity available today is the whole business
+ * date, not the individual step, and a mid-chain redrive of one state within a night cannot yet be
+ * told apart from a first attempt at it. Assumptions: recording that gap here is worth more than a
+ * tidier paragraph, because this is the package a reader consults to learn what the restart story
+ * is, and the step-level half of it is the half that is easy to assume is already running.</p>
  *
  * <p>Refactoring Rationale: there was no checkpoint contract to carry across, and the absence is
  * stated as an absence. The only {@code RESTART=} anywhere in the thirty-eight jobs of

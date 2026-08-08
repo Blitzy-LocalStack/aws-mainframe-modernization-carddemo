@@ -608,4 +608,90 @@ class PostingValidationResultTest {
                 .as("one day past expiration rejects with 103, as reject_103_expired expects")
                 .contains(RejectReason.RECEIVED_AFTER_ACCOUNT_EXPIRATION);
     }
+
+    /**
+     * Confirms the rendering names the reason code and never the projected balance.
+     *
+     * <p>Assumptions: the projection is asserted absent in BOTH its plain and its thousands-grouped
+     * spelling, matching the sibling entity cases in
+     * {@code com.carddemo.batch.domain.DiagnosticRenderingTest}. A future rendering that formatted the
+     * figure for readability would still disclose it, and an assertion against one spelling alone would
+     * pass against the other.</p>
+     *
+     * <p>Assumptions: the assertion names what must be ABSENT rather than pinning the exact rendered
+     * text. A rendering can only regress by GAINING a member, so a negative assertion fails exactly
+     * when a withheld value returns, which is the single failure mode this override exists to
+     * prevent.</p>
+     *
+     * <p>Refactoring Rationale: this type declared no {@code toString}, so the compiler-generated
+     * record rendering applied and emitted the projection in full. A record inherits a rendering it
+     * never wrote, which is why nothing in the build reported it -- there was no override to review.
+     * Both arms are covered because the projection is present on one and null on the other, and a case
+     * covering only the refusing arm would pass against a rendering that published the accepted
+     * projection.</p>
+     */
+    @Test
+    @DisplayName("render the reason code without the projected balance, on both arms")
+    void theRenderingCarriesTheReasonCodeAndNeverTheProjection() {
+        String rejected = PostingValidationResult
+                .rejected(RejectReason.OVER_CREDIT_LIMIT, new BigDecimal("25314.88"))
+                .toString();
+
+        assertThat(rejected)
+                .as("the four-character reason-code field is a bounded token the rendering rule admits")
+                .contains("reasonCode=0102");
+        assertThat(rejected)
+                .as("that a projection was formed distinguishes the outcomes without disclosing it")
+                .contains("projectionFormed=true");
+        assertThat(rejected).doesNotContain("25314.88");
+        assertThat(rejected).doesNotContain("25,314.88");
+
+        String accepted = PostingValidationResult.accepted(new BigDecimal("1504.77")).toString();
+
+        assertThat(accepted)
+                .as("acceptance reports the same four zeroes the reference writes for a clean record")
+                .contains("reasonCode=0000");
+        assertThat(accepted).doesNotContain("1504.77");
+        assertThat(accepted).doesNotContain("1,504.77");
+    }
+
+    /**
+     * Confirms the rendering does not vary with the magnitude of the projection it withheld.
+     *
+     * <p>Assumptions: magnitude invariance is asserted as well as containment because a rendering that
+     * disclosed only the WIDTH of the projection would defeat a containment check while still leaking
+     * the order of magnitude of a balance. Two projections differing by six digits must render
+     * identically.</p>
+     *
+     * @param projection a projected balance, supplied at two very different magnitudes
+     */
+    @ParameterizedTest
+    @CsvSource({"0.01", "999999999.99"})
+    @DisplayName("render identically whatever the magnitude of the withheld projection")
+    void theRenderingDoesNotVaryWithTheMagnitudeOfTheProjection(String projection) {
+        assertThat(PostingValidationResult
+                .rejected(RejectReason.OVER_CREDIT_LIMIT, new BigDecimal(projection))
+                .toString())
+                .as("a rendering that varied with the value would leak its order of magnitude")
+                .isEqualTo("PostingValidationResult[reasonCode=0102, projectionFormed=true]");
+    }
+
+    /**
+     * Confirms an outcome refused before the account was read reports no projection.
+     *
+     * <p>Assumptions: this arm is covered separately because it is the only one whose projection is
+     * genuinely {@code null}, and the boolean is what distinguishes it from an outcome refused after
+     * the account was read. Rendering the reason code alone would collapse the two.</p>
+     *
+     * @param reason a reason whose assignment ends validation before any account read
+     */
+    @ParameterizedTest
+    @EnumSource(value = RejectReason.class,
+            names = {"CARD_NUMBER_NOT_IN_CROSS_REFERENCE", "ACCOUNT_NOT_FOUND_ON_READ"})
+    @DisplayName("report no projection for an outcome refused before the account was read")
+    void theRenderingReportsNoProjectionWhenValidationEndedEarly(RejectReason reason) {
+        assertThat(PostingValidationResult.rejected(reason, null).toString())
+                .as("an outcome that never formed a projection must say so rather than imply one")
+                .endsWith("projectionFormed=false]");
+    }
 }

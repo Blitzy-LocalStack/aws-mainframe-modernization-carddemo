@@ -222,4 +222,37 @@ public record CustomerResponse(
     String eftAccountId,
     String primaryCardHolderIndicator,
     String ficoCreditScore) {
+
+  /**
+   * Renders this projection for a log line, disclosing no part of the customer it describes.
+   *
+   * <p>Refactoring Rationale: a record's generated rendering prints every component, and on this type
+   * that is a name, a whole postal address, two telephone numbers, a date of birth, a credit score, an
+   * electronic-funds account identifier and the customer identifier -- the whole customer master row in
+   * plain text, reachable from any diagnostic that renders an instance. The two protected identifiers
+   * were already masked before reaching this record, so they were never the exposure; everything beside
+   * them was.</p>
+   *
+   * <p>Trade-offs: the rendering keeps ONE component, the primary-cardholder indicator, and nothing
+   * else. The sensitive-data logging contract in {@code docs/architecture/observability.md} admits a
+   * status code as non-disclosing identity, and that indicator is exactly a status code -- a single
+   * character saying whether this customer is the primary cardholder. Every other component is either
+   * named among the prohibited values, is free text about a person, or is a date of birth. The cost is
+   * that this rendering identifies no row at all; the correlation identifier the shared kernel puts on
+   * every request-scoped line is what locates the event instead.</p>
+   *
+   * <p>Alternatives Considered: keeping the two masked identifier components, on the ground that they
+   * are already masked and therefore already safe. Rejected because they are masked to a FIXED marker
+   * rather than to a suffix, so emitting them adds two constants to every line and says nothing at all
+   * -- unlike the entity's own rendering, where naming a withheld field is what distinguishes a
+   * deliberate withholding from a forgotten one. An entity is edited by hand and benefits from that
+   * signal; a generated record rendering is compared against its component list, where a missing
+   * component is already visible.</p>
+   *
+   * @return a rendering naming the type and the primary-cardholder indicator only, never {@code null}
+   */
+  @Override
+  public String toString() {
+    return "CustomerResponse[primaryCardHolderIndicator=" + this.primaryCardHolderIndicator + ']';
+  }
 }

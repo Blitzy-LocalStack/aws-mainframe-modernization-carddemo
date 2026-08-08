@@ -64,14 +64,18 @@ What this module deliberately does not do
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import os
 import re
-from collections.abc import Mapping
+import stat
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Final, Protocol
+from typing import IO, Any, Final, Protocol
 
 from carddemo_migration import config
 from carddemo_migration.config import DatasetStagingSettings
@@ -89,7 +93,6 @@ __all__ = [
     "GenerationPrefix",
     "GenerationRetentionError",
     "S3StagingClient",
-    "StagedGeneration",
     "StagedObject",
     "delete_generation_prefix",
     "family",
@@ -100,10 +103,10 @@ __all__ = [
     "next_generation",
     "parse_business_date",
     "prune_generations",
+    "reserve_generation",
     "s3_client",
     "stage_dataset_file",
     "stage_family_file",
-    "stage_generation",
 ]
 
 #: Maximum number of keys one ``DeleteObjects`` request accepts. The batching in
@@ -152,7 +155,7 @@ _SHA256_METADATA_KEY: Final[str] = "carddemo-sha256"
 _BYTE_SIZE_METADATA_KEY: Final[str] = "carddemo-byte-size"
 
 
-# WHY (Assumptions): every check in this module RAISES one of the three typed errors below, and
+# WHY : Assumptions: every check in this module RAISES one of the three typed errors below, and
 #   there is no ``assert`` anywhere in it. That is a correctness requirement rather than a style
 #   preference: the interpreter strips ``assert`` statements entirely under ``-O``, and the
 #   container image that runs the staging step is free to set ``PYTHONOPTIMIZE``, so an assertion
@@ -170,7 +173,7 @@ class GenerationRetentionError(ValueError):
     object name or retention count, and a cleanup the service refused to complete.
     """
 
-    # WHY (Refactoring Rationale): this derived from ``RuntimeError`` and now derives from
+    # WHY : Refactoring Rationale: this derived from ``RuntimeError`` and now derives from
     #   ``ValueError``. The old base was not merely unidiomatic, it broke a live caller:
     #   ``carddemo_migration.cli`` guards its staging call with ``except ValueError`` and its
     #   own comment states that this module raises ``ValueError`` for a generation outside
@@ -296,8 +299,9 @@ class S3StagingClient(Protocol):
         ----------
         **kwargs : Any
             Request arguments. This module supplies ``Bucket``, ``Key``, ``Body`` and
-            ``ContentType`` always, and ``ContentLength`` and ``Metadata`` when staging from a
-            file.
+            ``ContentType`` always; ``ContentLength``, ``ChecksumSHA256`` and ``Metadata`` when
+            staging from a file; and ``IfNoneMatch`` when claiming a generation, where the
+            conditional create is the whole point of the call.
 
         Returns
         -------
@@ -308,7 +312,34 @@ class S3StagingClient(Protocol):
         Raises
         ------
         botocore.exceptions.ClientError
-            Raised by a real client if the service refuses the write.
+            Raised by a real client if the service refuses the write. A refused conditional
+            create carries a code in :data:`_CLAIM_CONFLICT_CODES` and is an expected outcome
+            of generation allocation rather than a failure.
+        """
+
+    def get_object(self, **kwargs: Any) -> Any:
+        """Read one object's body, used only to read a generation claim record.
+
+        Purpose
+        -------
+        Retrieve the execution token stored in a claim, so a retried staging step can recognise
+        the claim its own first attempt created.
+
+        Parameters
+        ----------
+        **kwargs : Any
+            Request arguments. This module supplies ``Bucket`` and ``Key`` only.
+
+        Returns
+        -------
+        Any
+            The service response mapping. This module reads ``Body`` and nothing else, and the
+            bodies it reads are claim tokens of a few tens of bytes, never dataset content.
+
+        Raises
+        ------
+        botocore.exceptions.ClientError
+            Raised by a real client if the object cannot be read.
         """
 
     def delete_objects(self, **kwargs: Any) -> Any:
@@ -377,7 +408,7 @@ class GenerationPrefix:
         As the parameter of the same name.
     """
 
-    # WHY (Assumptions): field ORDER is load-bearing, because ``order=True`` derives the
+    # WHY : Assumptions: field ORDER is load-bearing, because ``order=True`` derives the
     #   comparison from it. Business date must precede generation so that a family sorts the
     #   way the baseline catalogue did -- every generation of an earlier date before any
     #   generation of a later one -- and ``prefix`` sits last so it never influences the
@@ -387,44 +418,6 @@ class GenerationPrefix:
     business_date: date
     generation: int
     prefix: str
-
-
-@dataclass(frozen=True, slots=True)
-class StagedGeneration:
-    """Describe the object written and any old generation prefixes scratched.
-
-    Purpose
-    -------
-    Report the outcome of a staging call as one value, so a caller can log the key it wrote
-    and the prefixes it removed without re-deriving either.
-
-    Parameters
-    ----------
-    key : str
-        Complete object key written to S3.
-    deleted_generation_prefixes : tuple[str, ...]
-        Old logical generation prefixes permanently deleted after the write.
-
-    Returns
-    -------
-    StagedGeneration
-        A frozen instance.
-
-    Raises
-    ------
-    None
-        Both fields are supplied by the staging function that already validated them.
-
-    Attributes
-    ----------
-    key : str
-        As the parameter of the same name.
-    deleted_generation_prefixes : tuple[str, ...]
-        As the parameter of the same name.
-    """
-
-    key: str
-    deleted_generation_prefixes: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -597,7 +590,7 @@ class GenerationFamily:
             Propagated from the builder if the business date is a datetime rather than a date,
             or the generation is not an integer within 0 to :data:`MAX_GENERATION`.
         """
-        # WHY (Assumptions): this DELEGATES and never formats. The builder on
+        # WHY : Assumptions: this DELEGATES and never formats. The builder on
         #   ``DatasetStagingSettings`` is documented as the only place the prefix layout is
         #   written, and its docstring states that enumerating the families is this module's
         #   job rather than its own. Composing the string here instead would put the layout in
@@ -606,7 +599,7 @@ class GenerationFamily:
         return settings.generation_prefix(self.domain, self.dataset, business_date, generation)
 
 
-# WHY (Assumptions): there are TEN families, not six, and the arithmetic is written out so it
+# WHY : Assumptions: there are TEN families, not six, and the arithmetic is written out so it
 #   can be added up rather than trusted. They come from three ``DEFINE GENERATIONDATAGROUP``
 #   blocks, which an exhaustive search of the baseline shows are the authoritative ones:
 #   SIX in ``app/jcl/DEFGDGB.jcl`` (names at L25, L31, L37, L43, L49 and L55), THREE in
@@ -620,13 +613,13 @@ class GenerationFamily:
 #   carrying no retention contract, and their generations would accumulate without limit. One
 #   of the four is the reject stream, which is the audit trail of every transaction the posting
 #   run declined to post.
-# WHY (Assumptions): the ``dataset`` keys and ``domain`` values are transcribed from
+# WHY : Assumptions: the ``dataset`` keys and ``domain`` values are transcribed from
 #   ``infra/modules/s3-datasets``, whose ``dataset_families`` variable carries a Terraform
 #   ``validation`` asserting both a length of ten and this exact key set, and they match the
 #   catalogue ``data-migration/README.md`` section 9.1 publishes. Three artifacts therefore
 #   state the same inventory independently, and a name invented here would put the ETL out of
 #   step with the prefixes that actually exist in the bucket.
-# WHY (Assumptions): ``record_length`` is read from the defining or consuming job, never
+# WHY : Assumptions: ``record_length`` is read from the defining or consuming job, never
 #   guessed, and each value was cross-checked against the registered copybook layout it names
 #   -- ``reclen_of`` returns 350 for TRAN and INTTRAN, 50 for TCATBAL and DISGROUP, 60 for
 #   TRANTYPE and TRANCAT, and 430 for REJECT, matching the LRECL each job declares. ``tranrept``
@@ -717,7 +710,7 @@ _GENERATION_FAMILIES: dict[str, GenerationFamily] = {
         record_length=50,
         layout_name="DISGROUP",
     ),
-    # WHY (Assumptions): the tenth family is the one most easily missed, because it is defined
+    # WHY : Assumptions: the tenth family is the one most easily missed, because it is defined
     #   in a job named for the reject dataset itself rather than in either ``DEFGDG*`` job. Its
     #   430-byte record is the posting reject contract -- the 350-byte daily-transaction record
     #   extended by a reason code and description -- and the registered REJECT layout reports
@@ -733,7 +726,7 @@ _GENERATION_FAMILIES: dict[str, GenerationFamily] = {
     ),
 }
 
-# WHY (Trade-offs): the registry is exposed through a read-only view rather than as the
+# WHY : Trade-offs: the registry is exposed through a read-only view rather than as the
 #   dictionary itself. The cost is one indirection on every lookup; what it buys is that the
 #   inventory cannot be mutated by a caller that happens to hold it, which matters because this
 #   IS the prefix topology and the topology must be identical in every environment. It is the
@@ -764,7 +757,7 @@ def family_names() -> tuple[str, ...]:
     None
         Reading a constant cannot fail.
     """
-    # WHY (Assumptions): declaration order is preserved rather than sorted, because the order
+    # WHY : Assumptions: declaration order is preserved rather than sorted, because the order
     #   groups the families by defining job -- six, then three, then one -- which is what lets a
     #   reader of the output check the count against the three sources instead of trusting it.
     return tuple(_GENERATION_FAMILIES)
@@ -801,7 +794,7 @@ def family(name: str) -> GenerationFamily:
         raise GenerationRetentionError("generation family name is empty")
     resolved = _GENERATION_FAMILIES.get(stripped)
     if resolved is None:
-        # WHY (Trade-offs): the message lists every accepted name. It is long, and that is the
+        # WHY : Trade-offs: the message lists every accepted name. It is long, and that is the
         #   point: the failure this guards is a typo or a family a caller invented, and both are
         #   fixed by seeing the closed set. Reporting only the rejected name would leave an
         #   operator to find the inventory in a Terraform variable file.
@@ -836,7 +829,7 @@ def parse_business_date(value: str) -> date:
         If ``value`` is not text, is blank, is not exactly ten characters, or does not name a
         real calendar date.
     """
-    # WHY (Assumptions): the business date is a REQUIRED PARAMETER and this module reads no
+    # WHY : Assumptions: the business date is a REQUIRED PARAMETER and this module reads no
     #   clock -- there is no ``date.today``, ``datetime.now``, ``datetime.utcnow`` or
     #   ``time.time`` anywhere on the staging path. The baseline is explicit about this:
     #   ``app/jcl/INTCALC.jcl:22`` is
@@ -855,7 +848,7 @@ def parse_business_date(value: str) -> date:
             "business date is empty; it must be supplied as YYYY-MM-DD and is never defaulted"
         )
 
-    # WHY (Assumptions): the SHAPE is matched before parsing, because
+    # WHY : Assumptions: the SHAPE is matched before parsing, because
     #   ``date.fromisoformat`` became permissive in Python 3.11 and this package targets 3.13.
     #   Measured against the pinned interpreter rather than assumed: it accepts the compact
     #   ``20220718`` and, more awkwardly, the ISO week form ``2022-W29-1``, which is also
@@ -876,7 +869,7 @@ def parse_business_date(value: str) -> date:
             f"business date {text!r} is not a valid calendar date"
         ) from exc
 
-    # WHY (Alternatives Considered): no datetime guard is written here, and its absence is
+    # WHY : Alternatives Considered: no datetime guard is written here, and its absence is
     #   deliberate rather than an omission. ``date.fromisoformat`` returns a ``date`` and the
     #   pattern above admits only the calendar form, so a branch testing for a ``datetime``
     #   could never execute -- an unreachable check that a reader would nonetheless have to
@@ -912,7 +905,7 @@ def s3_client() -> S3StagingClient:
         If the AWS SDK is not installed, or the environment names no usable region or
         credentials.
     """
-    # WHY (Alternatives Considered): no ``endpoint_url``, no ``region_name``, no credential and
+    # WHY : Alternatives Considered: no ``endpoint_url``, no ``region_name``, no credential and
     #   no bucket name is passed literally, anywhere. botocore at the pinned 1.43.50 honours the
     #   ``AWS_ENDPOINT_URL`` environment variable natively, and that is the same variable the
     #   reference emulator helper under ``tests/helpers/`` declares as its canonical override
@@ -921,7 +914,7 @@ def s3_client() -> S3StagingClient:
     #   Passing a literal endpoint -- or branching on a "running locally" boolean to decide
     #   whether to pass one -- would create a second code path that only one of the two
     #   environments ever exercises, so a defect in either would be invisible from the other.
-    # WHY (Alternatives Considered): the client is obtained from
+    # WHY : Alternatives Considered: the client is obtained from
     #   ``carddemo_migration.config`` rather than by calling ``boto3.client("s3")`` here.
     #   Building it locally was written first and rejected for a concrete reason: config's
     #   factory is memoised, and ``config.reset_resolution_cache`` discards every memoised
@@ -958,7 +951,7 @@ def _require_retention_count(retention_count: int) -> int:
     GenerationRetentionError
         If the value is a boolean, non-integer or less than one.
     """
-    # WHY (Assumptions): ``bool`` is excluded before the integer check because it subclasses
+    # WHY : Assumptions: ``bool`` is excluded before the integer check because it subclasses
     #   ``int``, so ``True`` would otherwise pass as a count of one and scratch every generation
     #   but the newest -- a destructive outcome from what is almost certainly a mistyped
     #   argument. Zero is refused for the same reason: it would leave no generation at all.
@@ -992,7 +985,7 @@ def _require_object_name(object_name: str) -> str:
     GenerationRetentionError
         If the name is blank, not text, contains a slash or is a dot segment.
     """
-    # WHY (Assumptions): a slash and the two dot segments are refused because the name is
+    # WHY : Assumptions: a slash and the two dot segments are refused because the name is
     #   concatenated onto a prefix that has already been validated. Allowing ``../`` or an
     #   embedded slash would let the leaf deepen or escape the hierarchy, so an object would be
     #   written where neither the retention walk nor a reader looking by convention would find
@@ -1031,7 +1024,7 @@ def _require_staged_generation(generation: int) -> int:
         If the value is a boolean, a non-integer, or outside :data:`MIN_GENERATION` to
         :data:`MAX_GENERATION` inclusive.
     """
-    # WHY (Trade-offs): this is a NARROWER check than the prefix builder's, which accepts zero
+    # WHY : Trade-offs: this is a NARROWER check than the prefix builder's, which accepts zero
     #   because it also serves the family-prefix derivation below. Writing is held to 1-9999
     #   while derivation may use 0, and the asymmetry is deliberate: a written ``gen=0000`` has
     #   no baseline counterpart, since the first relative reference is ``(+1)`` and the first
@@ -1077,7 +1070,7 @@ def family_prefix(
     ConfigurationError
         Propagated from the builder if either segment is blank or contains a forward slash.
     """
-    # WHY (Alternatives Considered): the family prefix is derived by asking the canonical
+    # WHY : Alternatives Considered: the family prefix is derived by asking the canonical
     #   builder for a sample and truncating at ``dt=``, rather than by concatenating
     #   ``f"{domain}/{dataset}/"`` here. Concatenating is shorter and was rejected: it is a
     #   second, independent statement of the layout, so a change to the builder's shape would
@@ -1085,7 +1078,7 @@ def family_prefix(
     #   listing looks exactly like a family with no generations yet. Truncating a generated
     #   sample means the two cannot diverge -- and it keeps the builder's validation of both
     #   segments, which a local f-string would skip.
-    # WHY (Assumptions): ``date.min`` and generation ``0`` are placeholders that never reach a
+    # WHY : Assumptions: ``date.min`` and generation ``0`` are placeholders that never reach a
     #   key. They are chosen because the builder accepts them -- its range starts at zero -- and
     #   because everything after ``dt=`` is discarded, so their values cannot influence the
     #   result. This is why ``_require_staged_generation`` guards writes separately instead of
@@ -1123,7 +1116,7 @@ def _parse_generation_prefix(
     GenerationRetentionError
         If a matching date segment contains an impossible calendar date.
     """
-    # WHY (Trade-offs): a non-matching child path is IGNORED rather than reported, while a
+    # WHY : Trade-offs: a non-matching child path is IGNORED rather than reported, while a
     #   path that matches the shape but carries an impossible date is raised. The asymmetry is
     #   deliberate. A bucket legitimately holds paths this module did not write, so treating
     #   every one as an error would make retention unusable; but ``dt=2022-02-30/gen=0001/``
@@ -1179,7 +1172,7 @@ def list_generation_prefixes(
     GenerationRetentionError
         If a matching prefix contains an invalid date.
     """
-    # WHY (Trade-offs): the walk is two levels of delimited listing -- date prefixes, then
+    # WHY : Trade-offs: the walk is two levels of delimited listing -- date prefixes, then
     #   generation prefixes under each -- rather than one flat listing of every key in the
     #   family. A flat listing was the obvious alternative and was rejected on cost: it returns
     #   one entry per OBJECT, so a family holding five generations of the 500-record export
@@ -1205,7 +1198,7 @@ def list_generation_prefixes(
                 parsed = _parse_generation_prefix(candidate, prefix)
                 if parsed is not None:
                     generations.add(parsed)
-    # WHY (Assumptions): results are collected in a set and then sorted, because a paginator
+    # WHY : Assumptions: results are collected in a set and then sorted, because a paginator
     #   may legitimately return the same common prefix on two pages and a duplicate would make
     #   the newest-N slice below drop one generation too many.
     return tuple(sorted(generations))
@@ -1247,7 +1240,7 @@ def latest_generation(
     ConfigurationError
         If either path segment is unacceptable to the prefix builder.
     """
-    # WHY (Assumptions): ``(0)`` is resolved across the WHOLE family rather than within one
+    # WHY : Assumptions: ``(0)`` is resolved across the WHOLE family rather than within one
     #   business date, which is what the published convention states: a ``(+1)`` reference
     #   becomes a new prefix and a ``(0)`` reference resolves to the newest valid prefix in the
     #   family. It matters at a date boundary -- ``app/jcl/COMBTRAN.jcl`` reads
@@ -1303,7 +1296,7 @@ def next_generation(
     ConfigurationError
         If either path segment is unacceptable to the prefix builder.
     """
-    # WHY (Alternatives Considered): the next number is DISCOVERED from the prefixes in the
+    # WHY : Alternatives Considered: the next number is DISCOVERED from the prefixes in the
     #   bucket rather than tracked in a counter this process holds. A counter was rejected on
     #   two concrete failures. First, the batch chain stages through a Step Functions ``Map``
     #   state that runs one containerised branch per dataset, and each branch is a fresh
@@ -1314,7 +1307,7 @@ def next_generation(
     #   attempt already used and overwrite a generation that had completed. The bucket's own
     #   prefix listing is the one durable, shared state that every branch and every attempt
     #   agrees on, so it is the only correct source for the answer.
-    # WHY (Assumptions): ``(+1)`` is scoped to the TARGET BUSINESS DATE, unlike the family-wide
+    # WHY : Assumptions: ``(+1)`` is scoped to the TARGET BUSINESS DATE, unlike the family-wide
     #   ``(0)`` above. The prefix partitions by day, so a second staging run for the same
     #   injected date must become that date's ``gen=0002`` rather than a number derived from
     #   some later date's generations -- otherwise re-running one day after a subsequent day had
@@ -1334,6 +1327,411 @@ def next_generation(
             f"for that business date"
         )
     return highest + 1
+
+
+_CLAIM_SEGMENT: Final[str] = "_claims/"
+#: Service error codes a conditional create returns when another writer already claimed the key.
+#: ``PreconditionFailed`` is S3's 412 answer to an unsatisfied ``If-None-Match``;
+#: ``ConditionalRequestConflict`` is the 409 answer when two conditional writes race each other.
+#: Both mean "somebody else got there first", which is a normal outcome of the allocation loop
+#: below rather than an error, so both are treated as a refused claim and not re-raised.
+_CLAIM_CONFLICT_CODES: Final[frozenset[str]] = frozenset(
+    {"PreconditionFailed", "ConditionalRequestConflict"}
+)
+
+
+def _claim_prefix(
+    settings: DatasetStagingSettings, domain: str, dataset: str, business_date: date
+) -> str:
+    """Build the prefix holding one business date's generation claims for one family.
+
+    Purpose
+    -------
+    Place claim records in a sibling of the ``gen=`` prefixes under the same business date, so a
+    claim is discoverable from the family and date alone without colliding with a generation.
+
+    Parameters
+    ----------
+    settings : DatasetStagingSettings
+        Validated bucket settings carrying the canonical prefix builder.
+    domain : str
+        Bounded-context segment.
+    dataset : str
+        Dataset-family segment.
+    business_date : date
+        The business date whose claims are wanted.
+
+    Returns
+    -------
+    str
+        The claim prefix, ending in a forward slash.
+
+    Raises
+    ------
+    ConfigurationError
+        If a path segment or the business date is unacceptable to the prefix builder.
+    """
+    # WHY : Alternatives Considered: the claim prefix is derived by TRUNCATING a real generation
+    #   prefix at its ``gen=`` component rather than being composed from the segments here. The
+    #   composed form was rejected because it would restate the layout -- domain, dataset, the
+    #   ``dt=`` spelling and the ISO date format -- in a second place, and the two spellings would
+    #   then be free to drift. Deriving keeps one builder authoritative for the whole layout, the
+    #   same technique :func:`family_prefix` already uses to obtain the family root.
+    # WHY : Assumptions: claims sit in a ``_claims/`` SIBLING of the ``gen=NNNN/`` prefixes rather
+    #   than inside one, and two consequences follow that a reader should not have to discover.
+    #   First, they are invisible to generation discovery: :func:`_parse_generation_prefix` refuses
+    #   the segment, so a claim can never be mistaken for a staged generation. Second, and stated
+    #   plainly because it is a real operational cost, :func:`prune_generations` does NOT remove
+    #   them -- it deletes generation prefixes, and a claim is not one -- so claims accumulate at
+    #   roughly one small object per staging step per family. Pruning them alongside generations
+    #   was considered and rejected: a claim outliving its generation is harmless, whereas deleting
+    #   a claim whose execution may still retry would hand that retry a fresh generation and
+    #   reintroduce the duplicate this mechanism exists to prevent. The bucket's lifecycle
+    #   configuration is the right place to expire them, since it can do so on age rather than on
+    #   a guess about whether an execution has finished.
+    generation_prefix = settings.generation_prefix(domain, dataset, business_date, MIN_GENERATION)
+    return f"{generation_prefix.split('gen=', 1)[0]}{_CLAIM_SEGMENT}"
+
+
+def _claim_key(
+    settings: DatasetStagingSettings,
+    domain: str,
+    dataset: str,
+    business_date: date,
+    generation: int,
+) -> str:
+    """Build the key of the claim record for one generation of one family and business date.
+
+    Purpose
+    -------
+    Name the single object whose existence means "this generation number is taken", so claiming
+    a generation is one conditional create rather than a read followed by a write.
+
+    Parameters
+    ----------
+    settings : DatasetStagingSettings
+        Validated bucket settings carrying the canonical prefix builder.
+    domain : str
+        Bounded-context segment.
+    dataset : str
+        Dataset-family segment.
+    business_date : date
+        The business date the generation belongs to.
+    generation : int
+        The generation number being claimed.
+
+    Returns
+    -------
+    str
+        The claim record's key. It is an object key, not a prefix, so it has no trailing slash.
+
+    Raises
+    ------
+    ConfigurationError
+        If a path segment or the business date is unacceptable to the prefix builder.
+    """
+    prefix = _claim_prefix(settings, domain, dataset, business_date)
+    return f"{prefix}gen={generation:0{GENERATION_DIGITS}d}"
+
+
+def _claimed_generation(key: str, claim_prefix: str) -> int | None:
+    """Read the generation number out of a claim key, or report that it is not one.
+
+    Purpose
+    -------
+    Keep claim-key parsing in one place, so a stray object under the claim prefix is ignored
+    rather than being mistaken for a claim and skewing allocation.
+
+    Parameters
+    ----------
+    key : str
+        A key discovered under the claim prefix.
+    claim_prefix : str
+        The claim prefix the key was listed under.
+
+    Returns
+    -------
+    int or None
+        The generation the claim names, or ``None`` when the key is not a well-formed claim.
+
+    Raises
+    ------
+    None
+        An unparseable key yields ``None``, because refusing the whole allocation over one
+        unrecognised object would let anything written under the prefix block staging outright.
+    """
+    if not key.startswith(claim_prefix):
+        return None
+    remainder = key[len(claim_prefix) :]
+    matched = re.fullmatch(rf"gen=(\d{{{GENERATION_DIGITS}}})", remainder)
+    if matched is None:
+        return None
+    number = int(matched.group(1))
+    if number < MIN_GENERATION or number > MAX_GENERATION:
+        return None
+    return number
+
+
+def _existing_claim(
+    client: S3StagingClient, bucket: str, claim_prefix: str, execution_token: str
+) -> int | None:
+    """Find the generation this execution already claimed for a family and business date.
+
+    Purpose
+    -------
+    Make a retried staging step reuse the generation its first attempt allocated, so a retry
+    re-writes one key rather than consuming a second generation with identical bytes.
+
+    Parameters
+    ----------
+    client : S3StagingClient
+        S3 client used for the listing and the claim reads.
+    bucket : str
+        Dataset bucket holding the claims.
+    claim_prefix : str
+        Prefix under which this family and business date keep their claims.
+    execution_token : str
+        Token identifying the orchestrator execution whose claim is wanted.
+
+    Returns
+    -------
+    int or None
+        The generation already claimed by this execution, or ``None`` if it holds none.
+
+    Raises
+    ------
+    GenerationDiscoveryError
+        If a claim record exists but cannot be read.
+    """
+    # WHY : Alternatives Considered: the replay lookup LISTS the claims and reads each one, rather
+    #   than deriving a key from the execution token and fetching it directly. A token-keyed
+    #   record would be one request instead of N, and it was rejected because it cannot make the
+    #   generation itself exclusive: two executions would each create their own token-keyed record
+    #   and both could name the same generation, which is precisely the collision this function
+    #   exists to prevent. Keying the record BY GENERATION is what makes the conditional create
+    #   below a mutual exclusion, and the cost of that choice is this bounded scan. It is bounded
+    #   by the number of generations one business date holds, which the family retention limit
+    #   keeps small -- five for every one of the ten provisioned families.
+    paginator = client.get_paginator("list_objects_v2")
+    candidates: dict[int, str] = {}
+    for page in paginator.paginate(Bucket=bucket, Prefix=claim_prefix):
+        for item in page.get("Contents", []):
+            key = item.get("Key")
+            if not isinstance(key, str):
+                continue
+            number = _claimed_generation(key, claim_prefix)
+            if number is not None:
+                candidates[number] = key
+    for number in sorted(candidates):
+        try:
+            response = client.get_object(Bucket=bucket, Key=candidates[number])
+            holder = response["Body"].read()
+        except Exception as exc:  # noqa: BLE001 - re-raised below as a named staging failure
+            raise GenerationDiscoveryError(
+                f"the generation claim {candidates[number]} could not be read: {exc}"
+            ) from exc
+        # WHY : Assumptions: the stored token is compared as BYTES decoded strictly rather than
+        #   being trusted as text. A claim body this process did not write -- anything else that
+        #   put an object under the prefix -- may not be valid UTF-8 at all, and a lenient decode
+        #   would turn those bytes into replacement characters that could never match any token
+        #   and would silently be treated as another execution's claim. Refusing to match on an
+        #   undecodable body reaches the same conclusion honestly.
+        try:
+            recorded = holder.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        if recorded == execution_token:
+            return number
+    return None
+
+
+def _claim_generation(client: S3StagingClient, bucket: str, key: str, execution_token: str) -> bool:
+    """Attempt to claim one generation with a single conditional create.
+
+    Purpose
+    -------
+    Turn "is this generation free, and may I have it?" into one atomic service operation, so two
+    concurrent allocators cannot both conclude the same number is available.
+
+    Parameters
+    ----------
+    client : S3StagingClient
+        S3 client used for the conditional write.
+    bucket : str
+        Dataset bucket holding the claims.
+    key : str
+        The claim record's key, naming the generation being claimed.
+    execution_token : str
+        Token recorded as the claim's body, identifying the holder.
+
+    Returns
+    -------
+    bool
+        True when this call created the claim, False when it already existed.
+
+    Raises
+    ------
+    Exception
+        Any service failure other than a conditional-write conflict is re-raised unchanged,
+        because only a conflict is an expected outcome of the allocation loop.
+    """
+    # WHY : Refactoring Rationale: allocation is a CONDITIONAL CREATE, replacing a
+    #   list-then-take-the-maximum-then-add-one sequence. That sequence had no atomicity at any
+    #   point: two allocators listing the same prefix both read the same highest generation, both
+    #   computed the same successor, and the second write landed on the first one's key -- a lost
+    #   update with no error anywhere. ``If-None-Match: *`` makes the service itself arbitrate, so
+    #   exactly one caller can create a given claim and the loser is told so.
+    try:
+        client.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=execution_token.encode("utf-8"),
+            ContentType="text/plain; charset=utf-8",
+            IfNoneMatch="*",
+        )
+    except Exception as exc:  # noqa: BLE001 - only a conflict is swallowed; see below
+        # WHY : Trade-offs: the conflict is recognised by the service's own ERROR CODE rather than
+        #   by exception type, reusing the defensive reader the configuration module already
+        #   applies for the same purpose. Catching ``ClientError`` by type was the alternative and
+        #   was rejected on two counts: it would import botocore into a module that deliberately
+        #   stays importable without the SDK, and it would make the conflict path unreachable from
+        #   a test using this module's own client protocol, which is satisfied by any object with
+        #   the right methods. Anything that is not a recognised conflict is re-raised unchanged.
+        if config._error_code(exc) in _CLAIM_CONFLICT_CODES:
+            return False
+        raise
+    return True
+
+
+def reserve_generation(
+    client: S3StagingClient,
+    settings: DatasetStagingSettings,
+    domain: str,
+    dataset: str,
+    business_date: date,
+    execution_token: str,
+) -> int:
+    """Reserve the generation number this execution will write, durably and exactly once.
+
+    Purpose
+    -------
+    Allocate the baseline ``(+1)`` generation so that concurrent allocators cannot collide and a
+    retried execution reuses the number its first attempt took, rather than consuming a fresh
+    generation for a second copy of the same bytes.
+
+    Parameters
+    ----------
+    client : S3StagingClient
+        S3 client used for claim discovery and the conditional claim writes.
+    settings : DatasetStagingSettings
+        Validated bucket settings and the canonical prefix builder.
+    domain : str
+        Bounded-context segment.
+    dataset : str
+        Dataset-family segment.
+    business_date : date
+        The injected business date the new generation belongs to. Never derived from a clock.
+    execution_token : str
+        Non-blank token identifying the orchestrator execution. The same token must be presented
+        by every retry of the same logical step, and a different one by every distinct step.
+
+    Returns
+    -------
+    int
+        The reserved generation number, between :data:`MIN_GENERATION` and
+        :data:`MAX_GENERATION`. Calling again with the same token returns the same number.
+
+    Raises
+    ------
+    GenerationRetentionError
+        If the execution token is blank, or a discovered prefix carries an invalid business date.
+    GenerationDiscoveryError
+        If the generation space for that business date is exhausted, or a claim cannot be read.
+    ConfigurationError
+        If a path segment or the business date is unacceptable to the prefix builder.
+    """
+    # WHY : Assumptions: a blank token is REFUSED rather than defaulted. The token is the only
+    #   thing that distinguishes "this is my retry, give me my generation back" from "this is a
+    #   new step, give me a fresh one". Defaulting it -- to the empty string, a hostname or a
+    #   process identifier -- would make every caller that omitted it share one identity, so two
+    #   unrelated steps would silently reuse each other's generation. Failing here forces the
+    #   caller to state which of the two cases it is in.
+    if not isinstance(execution_token, str) or not execution_token.strip():
+        raise GenerationRetentionError("generation reservation requires a non-blank token")
+
+    claim_prefix = _claim_prefix(settings, domain, dataset, business_date)
+    replayed = _existing_claim(client, settings.bucket, claim_prefix, execution_token)
+    if replayed is not None:
+        return replayed
+
+    # WHY : Assumptions: the search starts from the highest number that is either already STAGED
+    #   or already CLAIMED, so the two sources are considered together. Starting from the staged
+    #   generations alone would re-offer a number another execution has claimed but not yet
+    #   written, and starting from the claims alone would re-offer a number staged before claims
+    #   existed. Taking the maximum of both is what makes the allocator correct across a bucket
+    #   that predates this mechanism.
+    staged = next_generation(client, settings, domain, dataset, business_date)
+    claimed = _claimed_generations(client, settings.bucket, claim_prefix)
+    candidate = max(staged, max(claimed) + 1 if claimed else MIN_GENERATION)
+
+    while candidate <= MAX_GENERATION:
+        claim_key = _claim_key(settings, domain, dataset, business_date, candidate)
+        if _claim_generation(client, settings.bucket, claim_key, execution_token):
+            return candidate
+        # WHY : Trade-offs: a refused claim advances to the NEXT number rather than re-listing the
+        #   prefix. Re-listing would cost a request per collision and could still be stale by the
+        #   time the next claim is attempted, so the loop would be no more correct and slower.
+        #   Advancing converges: each iteration either wins a number or proves that one is taken,
+        #   and the four-digit ceiling bounds the work.
+        candidate += 1
+
+    raise GenerationDiscoveryError(
+        f"the generation space for {claim_prefix} on {business_date.isoformat()} is exhausted at "
+        f"gen={MAX_GENERATION:0{GENERATION_DIGITS}d}; no further generation can be reserved "
+        f"for that business date"
+    )
+
+
+def _claimed_generations(
+    client: S3StagingClient, bucket: str, claim_prefix: str
+) -> tuple[int, ...]:
+    """List the generation numbers already claimed under one claim prefix.
+
+    Purpose
+    -------
+    Report which numbers are spoken for but possibly not yet staged, so the allocator does not
+    offer a number another execution is in the middle of writing.
+
+    Parameters
+    ----------
+    client : S3StagingClient
+        S3 client used for the listing.
+    bucket : str
+        Dataset bucket holding the claims.
+    claim_prefix : str
+        Prefix under which this family and business date keep their claims.
+
+    Returns
+    -------
+    tuple[int, ...]
+        The claimed generation numbers in ascending order, empty when none are claimed.
+
+    Raises
+    ------
+    None
+        An unparseable key under the prefix is ignored rather than failing the listing.
+    """
+    paginator = client.get_paginator("list_objects_v2")
+    numbers: set[int] = set()
+    for page in paginator.paginate(Bucket=bucket, Prefix=claim_prefix):
+        for item in page.get("Contents", []):
+            key = item.get("Key")
+            if not isinstance(key, str):
+                continue
+            number = _claimed_generation(key, claim_prefix)
+            if number is not None:
+                numbers.add(number)
+    return tuple(sorted(numbers))
 
 
 def _delete_batch(
@@ -1367,7 +1765,7 @@ def _delete_batch(
     GenerationRetentionError
         If S3 reports any per-object deletion error.
     """
-    # WHY (Trade-offs): ``Quiet`` is requested, which suppresses the per-object SUCCESS entries
+    # WHY : Trade-offs: ``Quiet`` is requested, which suppresses the per-object SUCCESS entries
     #   while still returning the errors. The cost is that a successful call reports nothing to
     #   log; what it buys is that the response size stays bounded when a prefix holds many
     #   versions, and the deleted prefixes are reported by the caller anyway.
@@ -1377,7 +1775,7 @@ def _delete_batch(
     )
     errors = response.get("Errors", [])
     if errors:
-        # WHY (Trade-offs): the message carries the distinct error CODES and not the keys they
+        # WHY : Trade-offs: the message carries the distinct error CODES and not the keys they
         #   came from. A key under a generation prefix ends in the extract's own file name,
         #   which is operationally useful but unbounded in count, so a failure over a thousand
         #   versions would emit a thousand paths into a log. The codes are what distinguish the
@@ -1423,7 +1821,7 @@ def delete_generation_prefix(
     GenerationRetentionError
         If any delete batch reports a partial failure.
     """
-    # WHY (Assumptions): every VERSION and every DELETE MARKER is named explicitly, because the
+    # WHY : Assumptions: every VERSION and every DELETE MARKER is named explicitly, because the
     #   bucket is versioned. A plain delete on a versioned bucket does not remove anything -- it
     #   adds a delete marker and keeps the data as a noncurrent version -- so a retention run
     #   built that way would report the generation scratched while every byte of it remained
@@ -1439,7 +1837,7 @@ def delete_generation_prefix(
                 if not isinstance(key, str) or not isinstance(version_id, str):
                     continue
                 pending.append({"Key": key, "VersionId": version_id})
-                # WHY (Assumptions): the batch is flushed at the service's own limit of 1000
+                # WHY : Assumptions: the batch is flushed at the service's own limit of 1000
                 #   keys per ``DeleteObjects`` request. Accumulating everything and sending one
                 #   request would fail with a malformed-request error on any prefix holding more
                 #   than that, which is reachable for the transaction families.
@@ -1496,7 +1894,7 @@ def prune_generations(
     generations = list_generation_prefixes(
         client, settings.bucket, family_prefix(settings, domain, dataset)
     )
-    # WHY (Assumptions): the slice keeps the LAST ``count`` entries because
+    # WHY : Assumptions: the slice keeps the LAST ``count`` entries because
     #   :func:`list_generation_prefixes` returns them oldest first. Note that ``[:-count]`` is
     #   correct for the empty case as well -- with fewer generations than the count it yields
     #   nothing -- whereas an index arithmetic form such as ``[0:len - count]`` would produce a
@@ -1507,171 +1905,164 @@ def prune_generations(
     return tuple(generation.prefix for generation in stale)
 
 
-def stage_generation(
-    client: S3StagingClient,
-    settings: DatasetStagingSettings,
-    domain: str,
-    dataset: str,
-    business_date: date,
-    generation: int,
-    object_name: str,
-    payload: bytes,
-    retention_count: int,
-) -> StagedGeneration:
-    """Write one generation object from bytes already in memory, then enforce retention.
+@dataclass(frozen=True)
+class _HeldSource:
+    """Carry one open extract descriptor together with the identity recorded at open time.
 
     Purpose
     -------
-    Stage a payload a caller has already read, for the case where the bytes did not come from a
-    file on disk. :func:`stage_dataset_file` is the entry point for staging an extract, because
-    it streams and reports the audit anchors this one cannot.
+    Keep the handle and the ``fstat`` result that describes it in a single value, so every stage
+    of a staging step -- the digest, the geometry check, the transfer and the final
+    re-examination -- refers to the same descriptor rather than re-resolving the path.
+
+    Attributes
+    ----------
+    path : Path
+        The path the descriptor was opened from. Carried for diagnostics only; it is never
+        re-opened, because re-opening is the defect this type exists to prevent.
+    handle : IO[bytes]
+        The single open binary handle, read twice: once to digest, once to transfer.
+    identity : os.stat_result
+        The ``fstat`` result taken immediately after the open, compared again after the transfer.
+    """
+
+    path: Path
+    handle: IO[bytes]
+    identity: os.stat_result
+
+
+def _nofollow_opener(path: str, flags: int) -> int:
+    """Open a path for :func:`open`, refusing a symbolic link at the final component.
+
+    Purpose
+    -------
+    Supply :func:`open` with an opener that adds ``O_NOFOLLOW``, so a staging step cannot be
+    redirected through a symbolic link planted where the extract is expected.
 
     Parameters
     ----------
-    client : S3StagingClient
-        S3 client used for the write and cleanup.
-    settings : DatasetStagingSettings
-        Validated bucket and prefix settings.
-    domain : str
-        Dataset bounded-context segment.
-    dataset : str
-        Dataset-family segment.
-    business_date : date
-        Business date encoded into the staged prefix.
-    generation : int
-        Four-digit generation number.
-    object_name : str
-        Single leaf name beneath the generation prefix.
-    payload : bytes
-        Exact bytes written as the staged dataset object.
-    retention_count : int
-        Number of newest logical generations to keep.
+    path : str
+        Filesystem path :func:`open` was asked for.
+    flags : int
+        Flags :func:`open` computed from its mode string.
 
     Returns
     -------
-    StagedGeneration
-        Written key plus any old prefixes scratched after the successful write.
+    int
+        A file descriptor for ``path``, opened with ``O_NOFOLLOW`` added.
 
     Raises
     ------
-    GenerationRetentionError
-        If the object name, payload or retention count is invalid, or cleanup reports a partial
-        failure.
-    ConfigurationError
-        If a path segment, the business date or the generation is unacceptable to the prefix
-        builder.
+    OSError
+        If the path cannot be opened. ``ELOOP`` is raised when the final component is a
+        symbolic link, which is the refusal this opener exists to produce.
     """
-    # WHY (Assumptions): this function takes ``domain`` and ``dataset`` as SEPARATE arguments and
-    #   does not resolve them through :data:`GENERATION_FAMILIES`, unlike
-    #   :func:`stage_family_file`. That is deliberate and it is worth knowing why, because the
-    #   two entry points name the ``<dataset>`` segment from different vocabularies.
-    #   ``carddemo_migration.cli``'s staging subcommand validates its ``--dataset`` against the
-    #   copybook layout registry and passes that name straight through, so it stages under a
-    #   layout identifier such as ``TRAN`` rather than under one of the ten provisioned family
-    #   segments such as ``transact-bkup``. Constraining this function to registered families
-    #   would break that command outright. The registry is offered through the family-aware entry
-    #   point instead, where a caller opting into it also gets the domain, the retention limit
-    #   and the record length from one place and cannot mispair them.
-    leaf = _require_object_name(object_name)
-    count = _require_retention_count(retention_count)
-    # WHY (Assumptions): the payload must be ``bytes`` and a ``str`` is refused rather than
-    #   encoded. Encoding it would be a transcode, and these extracts include EBCDIC datasets
-    #   whose bytes are not text in any encoding this process could pick -- the export extract
-    #   uses all 256 byte values. Refusing here makes a caller that holds a ``str`` confront
-    #   that its content has already been through a decode.
-    if not isinstance(payload, bytes):
-        raise GenerationRetentionError("generation payload must be bytes")
-
-    prefix = settings.generation_prefix(domain, dataset, business_date, generation)
-    key = f"{prefix}{leaf}"
-    # WHY (Trade-offs): the write happens BEFORE retention, and the argument list is kept to
-    #   the four members a caller can predict. Scratching first would free space earlier but
-    #   would drop a good generation on a run whose write then failed, leaving the family with
-    #   one fewer generation and nothing new -- so the newest data is committed before anything
-    #   old is given up.
-    client.put_object(
-        Bucket=settings.bucket,
-        Key=key,
-        Body=payload,
-        ContentType=_STAGED_CONTENT_TYPE,
-    )
-    deleted = prune_generations(client, settings, domain, dataset, count)
-    return StagedGeneration(key=key, deleted_generation_prefixes=deleted)
+    # WHY : Assumptions: ``O_CLOEXEC`` is NOT added, and its absence is deliberate rather than an
+    #   omission. PEP 446 already makes every descriptor Python opens non-inheritable, which was
+    #   confirmed by measurement on the pinned interpreter: ``os.get_inheritable`` on a
+    #   descriptor from a bare ``os.open`` returns ``False``. Adding the flag would restate a
+    #   guarantee the runtime already gives and would read as though it were load-bearing.
+    # WHY : Assumptions: ``O_NOFOLLOW`` guards the FINAL component only -- an intermediate
+    #   directory that is itself a symbolic link is still traversed. Closing that remaining gap
+    #   would require walking the path with ``openat`` one component at a time, which was
+    #   rejected as disproportionate: the staging root is an operator-supplied directory on the
+    #   task's own filesystem, so the exposure this does close -- a link planted at the extract's
+    #   own name, which is the component an untrusted producer can influence -- is the one that
+    #   matters. The narrower scope is recorded so a reader does not over-trust the flag.
+    return os.open(path, flags | os.O_NOFOLLOW)
 
 
-def _require_source_file(source: Path) -> Path:
-    """Return a readable local extract path, refusing anything that is not one.
+@contextmanager
+def _held_source(source: Path) -> Iterator[_HeldSource]:
+    """Open a local extract once and hold that one descriptor for the whole staging step.
 
     Purpose
     -------
-    Turn an absent, non-regular or unreadable source into an immediate, named failure, so a
-    staging step can never write an empty object in place of a dataset.
+    Collapse what were three separate pathname opens -- one to prove readability, one to digest,
+    one to transfer -- into a single descriptor whose identity is captured and re-checked, so
+    the bytes digested and the bytes uploaded are provably the same file.
 
     Parameters
     ----------
     source : Path
         Local path of the extract to stage.
 
-    Returns
-    -------
-    Path
-        The same path, confirmed to be an existing regular file.
+    Yields
+    ------
+    _HeldSource
+        The open handle together with the ``fstat`` identity recorded at open time.
 
     Raises
     ------
     DatasetSourceError
-        If the path is not a :class:`~pathlib.Path`, does not exist, is not a regular file, or
-        cannot be opened for reading.
+        If the path is not a :class:`~pathlib.Path`, is a symbolic link, does not exist, is not
+        a regular file, or cannot be opened for reading.
     """
-    # WHY (Assumptions): a MISSING SOURCE IS A HARD, RECORDED ERROR and never a silent empty
+    # WHY : Refactoring Rationale: this replaces a check-then-use sequence that opened the
+    #   pathname three separate times -- a readability probe, a digest pass and the transfer --
+    #   and so could act on three different files. That is CWE-367 (time-of-check to time-of-use)
+    #   and it was reachable here, because the extract sits in a staging directory a batch step
+    #   does not own exclusively. Anything a caller learns from the first open only remains true
+    #   of the bytes finally uploaded if the SAME descriptor carries all three, which is why the
+    #   handle is opened once here and passed on rather than re-derived from the path.
+    if not isinstance(source, Path):
+        raise DatasetSourceError("dataset source path is not a path")
+    # WHY : Assumptions: a MISSING SOURCE IS A HARD, RECORDED ERROR and never a silent empty
     #   upload. This is the discipline the reference emulator seeder states for the same job,
     #   and the failure it prevents is quiet: an empty object satisfies a later existence check
     #   and a row-count verification against it reports zero rows loaded, which reads as "the
     #   extract was empty" rather than "the extract was never there". Naming the path at the
     #   point of failure is what separates those two.
-    if not isinstance(source, Path):
-        raise DatasetSourceError("dataset source path is not a path")
-    if not source.exists():
-        raise DatasetSourceError(f"the dataset source {source} does not exist")
-    if not source.is_file():
-        raise DatasetSourceError(f"the dataset source {source} is not a regular file")
     try:
-        # WHY (Trade-offs): readability is proved by OPENING the file rather than by consulting
-        #   its mode bits. The cost is one extra open; what it buys is that the check matches
-        #   what the transfer will actually do, because a mode test can pass while the open
-        #   fails -- on a broken symlink target, a revoked mandatory-access-control label, or a
-        #   file whose permissions changed between the two calls.
-        with source.open("rb") as handle:
-            handle.read(0)
+        handle = open(source, "rb", opener=_nofollow_opener)  # noqa: SIM115
     except OSError as exc:
+        # WHY : Trade-offs: every open failure is reported through ONE message shape naming the
+        #   path and the operating system's own reason, rather than being pre-classified into
+        #   "absent", "is a link" and "unreadable" by separate probes. The cost is that the
+        #   caller reads the errno text to tell them apart; what it buys is that the diagnosis
+        #   describes the open that actually failed. A pre-classifying probe can disagree with
+        #   the real open -- it passes, then the transfer's open fails -- which is the very
+        #   split-brain this single-open design exists to remove.
         raise DatasetSourceError(f"the dataset source {source} cannot be read: {exc}") from exc
-    return source
+    try:
+        identity = os.fstat(handle.fileno())
+        # WHY : Assumptions: the regular-file test runs on the HELD DESCRIPTOR through ``fstat``
+        #   rather than on the path through ``stat``. A path-based test answers for whatever the
+        #   name resolves to at that instant, which is not necessarily what the open descriptor
+        #   refers to; ``fstat`` answers for the object being read. The refusal matters because a
+        #   directory, FIFO or character device can be opened for reading and would then stage
+        #   either nothing or an unbounded stream in place of a dataset.
+        if not stat.S_ISREG(identity.st_mode):
+            raise DatasetSourceError(f"the dataset source {source} is not a regular file")
+        yield _HeldSource(path=source, handle=handle, identity=identity)
+    finally:
+        handle.close()
 
 
-def _digest_source(source: Path) -> tuple[int, str]:
-    """Measure a local extract's exact length and SHA-256 without altering a byte.
+def _digest_held_source(held: _HeldSource) -> tuple[int, bytes]:
+    """Measure a held extract's exact length and SHA-256 without altering a byte.
 
     Purpose
     -------
-    Produce the two audit anchors a later readback is checked against, reading the file in
-    binary and in bounded chunks so memory does not scale with the dataset.
+    Produce the two audit anchors a later readback is checked against, reading the already-open
+    descriptor in binary and in bounded chunks so memory does not scale with the dataset.
 
     Parameters
     ----------
-    source : Path
-        Local path of an extract already confirmed readable.
+    held : _HeldSource
+        The open extract handle to measure. Read from its start and left positioned at its end.
 
     Returns
     -------
-    tuple[int, str]
-        The exact byte length, and the lower-case hex SHA-256 of those same bytes.
+    tuple[int, bytes]
+        The exact byte length, and the raw 32-byte SHA-256 of those same bytes.
 
     Raises
     ------
     DatasetSourceError
-        If the file cannot be read to the end.
+        If the descriptor cannot be read to the end.
     """
-    # WHY (Assumptions): the file is opened in BINARY mode -- ``"rb"``, never ``"r"`` -- and no
+    # WHY : Assumptions: the file is opened in BINARY mode -- ``"rb"``, never ``"r"`` -- and no
     #   encoding, newline or error-handling argument is supplied anywhere on this path. These
     #   extracts are not text. The export extract at
     #   ``app/data/EBCDIC/AWS.M2.CARDDEMO.EXPORT.DATA.PS`` is 250 000 bytes, exactly 500 records
@@ -1683,19 +2074,86 @@ def _digest_source(source: Path) -> tuple[int, str]:
     #   4 153 NUL bytes break anything treating the payload as a C string. Any one of them makes
     #   the SHA-256 recorded here disagree with the bytes on disk, which is exactly the check
     #   that would then be meaningless.
+    # WHY : Refactoring Rationale: the raw digest is returned rather than a hex string, because
+    #   two encodings of the same digest are now needed -- lower-case hex for the object metadata
+    #   and the caller's report, and base64 for the service's own ``ChecksumSHA256`` parameter.
+    #   Returning the bytes lets both be derived from one measurement, so the value the service
+    #   verifies and the value recorded for audit cannot drift apart.
     digest = hashlib.sha256()
     byte_size = 0
     try:
-        with source.open("rb") as handle:
-            while True:
-                chunk = handle.read(_DIGEST_CHUNK_BYTES)
-                if not chunk:
-                    break
-                byte_size += len(chunk)
-                digest.update(chunk)
+        held.handle.seek(0)
+        while True:
+            chunk = held.handle.read(_DIGEST_CHUNK_BYTES)
+            if not chunk:
+                break
+            byte_size += len(chunk)
+            digest.update(chunk)
     except OSError as exc:
-        raise DatasetSourceError(f"the dataset source {source} could not be read: {exc}") from exc
-    return byte_size, digest.hexdigest()
+        raise DatasetSourceError(
+            f"the dataset source {held.path} could not be read: {exc}"
+        ) from exc
+    return byte_size, digest.digest()
+
+
+def _require_stable_source(held: _HeldSource, byte_size: int) -> None:
+    """Confirm the held extract was not replaced or resized while it was being staged.
+
+    Purpose
+    -------
+    Re-examine the descriptor after the transfer and refuse if the file it refers to has changed
+    identity or length, so a substitution mid-flight is reported rather than staged silently.
+
+    Parameters
+    ----------
+    held : _HeldSource
+        The open extract handle, carrying the identity recorded when it was opened.
+    byte_size : int
+        The length measured during the digest pass.
+
+    Returns
+    -------
+    None
+        Returns nothing when the descriptor still describes the same unchanged file.
+
+    Raises
+    ------
+    DatasetSourceError
+        If the descriptor cannot be examined, or its identity, length or modification time no
+        longer matches what was recorded.
+    """
+    # WHY : Assumptions: holding one descriptor removes the substitution that swaps the NAME, but
+    #   not the one that rewrites the FILE the descriptor already refers to -- a writer with the
+    #   same inode open can truncate or append while this step streams. So the identity is
+    #   re-read at the end and compared. Inode and device catch a name rebound to a different
+    #   file, size catches a truncate or append, and the nanosecond modification time catches an
+    #   in-place rewrite that happens to preserve the length.
+    try:
+        current = os.fstat(held.handle.fileno())
+    except OSError as exc:
+        raise DatasetSourceError(
+            f"the dataset source {held.path} could not be re-examined after transfer: {exc}"
+        ) from exc
+    recorded = held.identity
+    if (current.st_ino, current.st_dev) != (recorded.st_ino, recorded.st_dev):
+        raise DatasetSourceError(
+            f"the dataset source {held.path} changed identity while it was being staged; "
+            f"the staged object cannot be trusted to hold the digested bytes"
+        )
+    # WHY : Trade-offs: the size compared is the DIGESTED length rather than the length recorded
+    #   at open time. The digest pass is what fixes the anchor the staged object is verified
+    #   against, so that is the length the upload must agree with; comparing against the open-time
+    #   size would pass a file that grew between the open and the digest and then stopped.
+    if current.st_size != byte_size:
+        raise DatasetSourceError(
+            f"the dataset source {held.path} was {byte_size} bytes when digested and is "
+            f"{current.st_size} bytes now; it was modified while it was being staged"
+        )
+    if current.st_mtime_ns != recorded.st_mtime_ns:
+        raise DatasetSourceError(
+            f"the dataset source {held.path} was modified in place while it was being staged; "
+            f"the staged object cannot be trusted to hold the digested bytes"
+        )
 
 
 def _describe_record_geometry(layout_name: str) -> str:
@@ -1722,7 +2180,7 @@ def _describe_record_geometry(layout_name: str) -> str:
     LayoutError
         If ``layout_name`` is not a registered layout.
     """
-    # WHY (Trade-offs): the report names FIELD, OFFSET, LENGTH and KIND only -- never content.
+    # WHY : Trade-offs: the report names FIELD, OFFSET, LENGTH and KIND only -- never content.
     #   That is what ``FieldSpec.describe`` is for, and it is used rather than the dataclass
     #   ``repr`` because ``describe`` names four attributes explicitly and therefore cannot begin
     #   printing content if a component is added later. The compromise accepted is that a reader
@@ -1730,7 +2188,7 @@ def _describe_record_geometry(layout_name: str) -> str:
     #   records: the account, card and customer extracts carry primary account numbers,
     #   card verification values and national identifiers, and a length fault is not a reason to
     #   emit one into a log line.
-    # WHY (Alternatives Considered): ``layouts.mask_field`` is deliberately NOT used here, even
+    # WHY : Alternatives Considered: ``layouts.mask_field`` is deliberately NOT used here, even
     #   though it is the package's redactor. It takes the field's content chunk and returns a
     #   redacted rendering of it, so calling it would require this module to read record content
     #   -- the one thing a byte-verbatim staging path must never do. The sensitivity FLAG that
@@ -1771,7 +2229,7 @@ def _require_record_length(source: Path, byte_size: int, record_length: int, dat
     DatasetSourceError
         If ``byte_size`` is zero or is not a whole multiple of ``record_length``.
     """
-    # WHY (Assumptions): this is ARITHMETIC ON A BYTE COUNT and not a decode. Nothing is read
+    # WHY : Assumptions: this is ARITHMETIC ON A BYTE COUNT and not a decode. Nothing is read
     #   back, no field is interpreted and no code page is applied -- the check is
     #   ``byte_size % record_length``, which is why it is safe on a path that must not decode.
     if byte_size == 0:
@@ -1850,53 +2308,74 @@ def stage_dataset_file(
     ConfigurationError
         If a path segment or the business date is unacceptable to the prefix builder.
     """
-    resolved = _require_source_file(Path(source))
-    leaf = _require_object_name(object_name if object_name is not None else resolved.name)
+    leaf = _require_object_name(object_name if object_name is not None else Path(source).name)
     number = _require_staged_generation(generation)
     count = _require_retention_count(retention_count)
-
-    # WHY (Trade-offs): the extract is read TWICE -- once to digest it, once to transfer it --
-    #   and the extra pass is accepted deliberately. Digesting the stream as it uploaded would
-    #   read once, but the digest would then describe whatever the SDK happened to send rather
-    #   than what is on disk, which is self-reported and cannot detect the very corruption it
-    #   exists to detect. Buffering the whole extract to hash and send one copy was the other
-    #   alternative and was rejected because memory would then scale with the dataset. Two
-    #   bounded passes give an anchor that a readback can be checked against independently.
-    byte_size, sha256 = _digest_source(resolved)
-    if record_length is not None:
-        try:
-            _require_record_length(resolved, byte_size, record_length, dataset)
-        except DatasetSourceError as exc:
-            registered = _GENERATION_FAMILIES.get(dataset)
-            layout_name = registered.layout_name if registered is not None else None
-            if layout_name is None:
-                raise
-            raise DatasetSourceError(
-                f"{exc}; the {layout_name} record is laid out as "
-                f"{_describe_record_geometry(layout_name)}"
-            ) from exc
 
     prefix = settings.generation_prefix(domain, dataset, business_date, number)
     key = f"{prefix}{leaf}"
 
-    # WHY (Assumptions): the payload is streamed DIRECTLY FROM ITS ON-DISK PATH, with no
-    #   temporary copy anywhere. Round-tripping a binary EBCDIC extract through an intermediate
-    #   write is precisely how its NUL bytes and sign-overpunch bytes get mangled, and the
-    #   reference emulator seeder avoids a temp copy for that exact reason. The handle is opened
-    #   in binary so the bytes the service receives are the bytes the digest above measured.
-    # WHY (Trade-offs): ``ContentLength`` is stated from the measured size, which the in-memory
-    #   sibling above does not do. It costs one more argument and it buys a service-side
-    #   rejection if the stream ends early, so a truncated transfer fails the write instead of
-    #   producing a short object that a later readback would have to catch.
-    try:
-        with resolved.open("rb") as handle:
+    # WHY : Refactoring Rationale: the extract is opened ONCE and every subsequent stage works
+    #   from that one descriptor. The earlier shape called a readability probe, then a digest
+    #   helper, then the transfer, each re-opening the pathname -- three opens that could resolve
+    #   to three different files. Holding the descriptor is what makes the digest an anchor for
+    #   the bytes actually uploaded rather than for whatever the name meant at digest time.
+    with _held_source(Path(source)) as held:
+        # WHY : Trade-offs: the extract is read TWICE from the held descriptor -- once to digest
+        #   it, once to transfer it -- and the extra pass is accepted deliberately. Digesting the
+        #   stream as it uploaded would read once, but the digest would then describe whatever the
+        #   SDK happened to send rather than what is on disk, which is self-reported and cannot
+        #   detect the very corruption it exists to detect. Buffering the whole extract to hash
+        #   and send one copy was the other alternative and was rejected because memory would then
+        #   scale with the dataset. Two bounded passes over ONE descriptor give an anchor a
+        #   readback can be checked against independently, at no re-open risk.
+        byte_size, raw_digest = _digest_held_source(held)
+        sha256 = raw_digest.hex()
+        if record_length is not None:
+            try:
+                _require_record_length(held.path, byte_size, record_length, dataset)
+            except DatasetSourceError as exc:
+                registered = _GENERATION_FAMILIES.get(dataset)
+                layout_name = registered.layout_name if registered is not None else None
+                if layout_name is None:
+                    raise
+                raise DatasetSourceError(
+                    f"{exc}; the {layout_name} record is laid out as "
+                    f"{_describe_record_geometry(layout_name)}"
+                ) from exc
+
+        # WHY : Assumptions: the payload is streamed DIRECTLY FROM THE HELD DESCRIPTOR, with no
+        #   temporary copy anywhere. Round-tripping a binary EBCDIC extract through an
+        #   intermediate write is precisely how its NUL bytes and sign-overpunch bytes get
+        #   mangled, and the reference emulator seeder avoids a temp copy for that exact reason.
+        #   The handle is binary, so the bytes the service receives are the bytes the digest
+        #   above measured -- and it is rewound explicitly, because the digest pass left it at
+        #   end of file and a stream starting there would upload nothing.
+        try:
+            held.handle.seek(0)
             client.put_object(
                 Bucket=settings.bucket,
                 Key=key,
-                Body=handle,
+                Body=held.handle,
                 ContentType=_STAGED_CONTENT_TYPE,
+                # WHY : Trade-offs: ``ContentLength`` is stated from the measured size. It costs
+                #   one more argument and it buys a service-side rejection if the stream ends
+                #   early, so a truncated transfer fails the write instead of producing a short
+                #   object that a later readback would have to catch.
                 ContentLength=byte_size,
-                # WHY (Trade-offs): the anchors are also written as object metadata, not only
+                # WHY : Alternatives Considered: the digest is ALSO supplied as the service's own
+                #   ``ChecksumSHA256`` parameter, base64 as that parameter requires, and not only
+                #   written as metadata below. The two are not interchangeable. Metadata is an
+                #   opaque string the service stores without ever reading, so on its own it
+                #   records a claim that the upload was intact; the checksum parameter makes S3
+                #   recompute SHA-256 over the bytes it received and REJECT the write when they
+                #   disagree. Relying on metadata alone was the earlier shape and it could not
+                #   detect an in-flight corruption at all -- the object would land, carrying a
+                #   digest describing bytes it did not contain, and the mismatch would surface
+                #   only when something later chose to verify. The pinned botocore 1.43.50
+                #   accepts this parameter on ``PutObject``.
+                ChecksumSHA256=base64.b64encode(raw_digest).decode("ascii"),
+                # WHY : Trade-offs: the anchors are also written as object metadata, not only
                 #   returned to this caller. The cost is two small headers per object; what it
                 #   buys is that the verification pass can read the expected digest from the
                 #   object itself rather than from whatever the staging step happened to log, so
@@ -1907,12 +2386,18 @@ def stage_dataset_file(
                     _BYTE_SIZE_METADATA_KEY: str(byte_size),
                 },
             )
-    except OSError as exc:
-        raise DatasetSourceError(
-            f"the dataset source {resolved} could not be transferred: {exc}"
-        ) from exc
+        except OSError as exc:
+            raise DatasetSourceError(
+                f"the dataset source {held.path} could not be transferred: {exc}"
+            ) from exc
 
-    # WHY (Trade-offs): re-staging is TOLERATED rather than refused. Step Functions may retry a
+        # WHY : Assumptions: the descriptor is re-examined AFTER the transfer rather than before
+        #   it. A check beforehand can only report the state at that moment, which the transfer
+        #   then invalidates; checking afterwards is what establishes that nothing moved across
+        #   the whole window the digest is meant to cover.
+        _require_stable_source(held, byte_size)
+
+    # WHY : Trade-offs: re-staging is TOLERATED rather than refused. Step Functions may retry a
     #   ``Map`` branch, and a retry that re-writes the same key with the same bytes is harmless
     #   on a versioned bucket -- the previous copy becomes a noncurrent version that the
     #   Terraform-provisioned lifecycle rule ages out. Refusing on an existing key was the
@@ -1944,6 +2429,7 @@ def stage_family_file(
     object_name: str | None = None,
     retention_count: int | None = None,
     check_record_length: bool = False,
+    execution_token: str | None = None,
 ) -> StagedObject:
     """Stage a local extract into one registered generation family.
 
@@ -1966,8 +2452,8 @@ def stage_family_file(
     source : Path
         Local path of the extract to stage.
     generation : int or None
-        Explicit generation number, or ``None`` to resolve the next one from the prefixes that
-        already exist -- the baseline ``(+1)`` form.
+        Explicit generation number, or ``None`` to reserve the next one -- the baseline ``(+1)``
+        form. Reserving requires ``execution_token``.
     object_name : str or None
         Leaf name beneath the generation prefix. Defaults to the source file's own name.
     retention_count : int or None
@@ -1976,6 +2462,10 @@ def stage_family_file(
     check_record_length : bool
         When true, require the extract's length to be a whole multiple of the family's declared
         record length.
+    execution_token : str or None
+        Token identifying the orchestrator execution, required when ``generation`` is ``None``.
+        Presenting the same token again returns the same generation, so a retried step re-writes
+        one key instead of consuming a second generation for identical bytes.
 
     Returns
     -------
@@ -1985,7 +2475,8 @@ def stage_family_file(
     Raises
     ------
     GenerationRetentionError
-        If the family name is unknown, or the generation or retention count is unacceptable.
+        If the family name is unknown, the generation or retention count is unacceptable, or no
+        execution token was supplied for a reservation.
     GenerationDiscoveryError
         If the family's generation space for that business date is exhausted.
     DatasetSourceError
@@ -1993,14 +2484,14 @@ def stage_family_file(
     ConfigurationError
         If the business date is unacceptable to the prefix builder.
     """
-    # WHY (Assumptions): the family name is resolved against the registry FIRST, before a byte
+    # WHY : Assumptions: the family name is resolved against the registry FIRST, before a byte
     #   is read or a listing is issued. Staging copies bytes verbatim, so this function cannot
     #   detect a wrong family from the payload -- the name is the only thing deciding which
     #   prefix the object lands under, and a typo would otherwise put a real extract somewhere
     #   nothing reads and nothing ages out.
     registered = family(family_name)
 
-    # WHY (Alternatives Considered): the record-length check is OPT-IN rather than always on.
+    # WHY : Alternatives Considered: the record-length check is OPT-IN rather than always on.
     #   Applying it unconditionally was rejected on measured evidence: the thirteen EBCDIC
     #   datasets are fixed-block with no terminators, so their lengths do divide exactly -- the
     #   account extract is 15 000 bytes of 300-byte records -- but the nine ASCII datasets are
@@ -2011,11 +2502,32 @@ def stage_family_file(
     #   readers rather than here.
     declared_length = registered.record_length if check_record_length else None
 
-    number = (
-        next_generation(client, settings, registered.domain, registered.dataset, business_date)
-        if generation is None
-        else generation
-    )
+    # WHY : Refactoring Rationale: when no generation is given the number is RESERVED rather than
+    #   merely discovered. :func:`next_generation` answers "what would a ``(+1)`` reference
+    #   resolve to?" and is still the right answer to that question, but it is a read: two
+    #   branches asking it concurrently receive the same number, and a retry asking it after its
+    #   first attempt already wrote receives the number AFTER that write and stages a duplicate
+    #   generation of identical bytes. :func:`reserve_generation` makes the answer exclusive and
+    #   replayable, which is why allocation goes through it and the plain query does not.
+    if generation is None:
+        # WHY : Assumptions: allocation REQUIRES an execution token and refuses to invent one.
+        #   Without it there is no way to tell a retry from a new step, so the reservation could
+        #   not be idempotent and the duplicate-generation defect would survive the change.
+        if execution_token is None:
+            raise GenerationRetentionError(
+                "staging without an explicit generation requires an execution token, so a retry "
+                "can reuse the generation its first attempt reserved"
+            )
+        number = reserve_generation(
+            client,
+            settings,
+            registered.domain,
+            registered.dataset,
+            business_date,
+            execution_token,
+        )
+    else:
+        number = generation
     return stage_dataset_file(
         client=client,
         settings=settings,

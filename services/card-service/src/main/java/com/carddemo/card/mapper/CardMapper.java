@@ -7,6 +7,7 @@ import com.carddemo.card.dto.CardUpdateRequest;
 import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.common.security.SealedSelector;
+import org.springframework.stereotype.Component;
 import com.carddemo.common.web.PageResponse;
 import java.time.LocalDate;
 import java.time.YearMonth;
@@ -65,6 +66,16 @@ import java.util.Objects;
  * left implicit, because the cheapest way to breach that rule is for a class believed to handle no
  * amount to acquire one later.</p>
  */
+// WHY : Refactoring Rationale: this mapper had no construction site at all. It declares a
+//       constructor taking the deployment's selector sealer, and nothing contributed either the
+//       mapper or the sealer, so no route in this context could mint a selector or open one -- the
+//       type compiled and was unreachable. It is a component now, and
+//       com.carddemo.card.config.CardSelectorConfig contributes the sealer it needs.
+// WHY : Alternatives Considered: a @Bean method beside that sealer, which would keep both
+//       contributions in one file. Declined because this class holds no configuration of its own
+//       beyond the collaborator it is handed, so a factory method would add a second place to look
+//       for it; component scanning states the dependency once, in the constructor that needs it.
+@Component
 public class CardMapper {
 
     /**

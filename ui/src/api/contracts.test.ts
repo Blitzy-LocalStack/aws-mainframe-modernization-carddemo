@@ -95,13 +95,18 @@ const SERVICES_WITHOUT_A_CONTRACT = ['batch'] as const;
 /**
  * Each browser-facing contract paired with the client module that implements it.
  *
- * Assumptions: `account` is deliberately ABSENT, and the exclusion is the decision rather than an
- * oversight. `account-api.yaml` titles itself an internal read API and its three operations are
- * governed by `InternalApiSecurityConfig` in account-service, an ordered filter chain that requires a
- * machine token minted by the calling service and refuses the identity-provider token every browser
- * holds. A typed browser client for it would describe operations no browser can reach, and one of the
- * three carries an unmasked account number in its request body. {@link theInternalContractHasNoClient}
- * asserts the exclusion holds rather than leaving it to this comment.
+ * Assumptions: `account` is ABSENT because no client module for it has been written yet, and NOT
+ * because none may be. That is a change of reason rather than of the list: the account contract used to
+ * publish an internal read surface alone -- three operations governed by `InternalApiSecurityConfig`,
+ * an ordered filter chain requiring a machine token that no browser holds -- and it now publishes three
+ * end-user operations beside them, which a browser client legitimately may address.
+ *
+ * Trade-offs: the three end-user account operations therefore have no client-side gate at present, so a
+ * drift between them and a future `accounts.ts` would not be caught here until that module is added to
+ * this list. What IS still enforced is the boundary that matters for correctness:
+ * {@link theInternalContractHasNoClient} asserts that no client addresses an operation the contract
+ * marks internal, keyed by method and path, so a client cannot acquire the machine read by sharing an
+ * address with the end-user edit.
  */
 const BROWSER_CLIENTS: ReadonlyArray<
   readonly [keyof typeof CONTRACTS, readonly ContractOperation[]]
@@ -137,6 +142,36 @@ const METHOD_KEY = /^ {4}([a-z]+):\s*$/u;
 const OPERATION_ID = /^ {6}operationId:\s*(\S+)\s*$/u;
 
 /**
+ * Matches an operation's tag list written as a flow sequence: `tags: [internal, account]`.
+ *
+ * Assumptions: only the flow form is matched, and that is sufficient rather than a gap. The one gate
+ * that reads tags reads the ACCOUNT contract, which writes every tag list this way, and that gate
+ * additionally asserts the tagged set it finds is non-empty -- so a document that moved to the block
+ * form would fail the gate loudly rather than silently reporting that nothing is internal.
+ */
+const TAG_LIST = /^ {6}tags:\s*\[([^\]]*)\]\s*$/u;
+
+/**
+ * The tag the account contract marks its machine-facing surface with.
+ *
+ * Assumptions: the surface is read from the document's own tag rather than inferred from a path
+ * prefix, because the two surfaces of that contract legitimately SHARE an address -- the machine read
+ * is a GET and the end-user edit is a PUT on the same path -- so a prefix rule cannot separate them
+ * and would exclude the end-user operation along with the internal one.
+ */
+const INTERNAL_SURFACE_TAG = 'internal';
+
+/**
+ * One operation as this scanner reads it, paired with the tags declared on it.
+ *
+ * Assumptions: this is a named alias rather than an inline object type at each signature, and the
+ * reason is mechanical as well as readable: `jsdoc/require-param` walks a documented object TYPE and
+ * demands a `@param` line per member, so an inline literal would oblige every projection below to
+ * restate both members of a shape that is declared once here.
+ */
+type DeclaredEntry = { readonly operation: ContractOperation; readonly tags: readonly string[] };
+
+/**
  * Reads one service-held contract as text.
  * @param {keyof typeof CONTRACTS} service - The service module's directory name without its suffix.
  * @returns {string} The whole document, decoded as UTF-8.
@@ -166,8 +201,24 @@ function contractText(service: keyof typeof CONTRACTS): string {
  * @throws {Error} If an operation carries no identifier, which every contract is required to declare.
  */
 function declaredOperations(text: string): ContractOperation[] {
+  return declaredEntries(text).map(justTheOperation);
+}
+
+/**
+ * Extracts every operation one contract declares, paired with the tags it carries.
+ *
+ * Assumptions: this is the single walk and {@link declaredOperations} projects its result, rather than
+ * the two scanning the document separately. A second walk keyed by method and path would have to
+ * reproduce the indentation rules of the first, and the two copies would then disagree the moment
+ * either was corrected.
+ * @param {string} text - The whole contract document.
+ * @returns {readonly DeclaredEntry[]} One entry per declared operation, in document order, each with
+ *   the tags declared on it.
+ * @throws {Error} If an operation carries no identifier, which every contract is required to declare.
+ */
+function declaredEntries(text: string): readonly DeclaredEntry[] {
   const lines = text.split('\n');
-  const operations: ContractOperation[] = [];
+  const operations: DeclaredEntry[] = [];
   let inPaths = false;
   let currentPath: string | null = null;
 
@@ -203,12 +254,40 @@ function declaredOperations(text: string): ContractOperation[] {
     }
 
     operations.push({
-      method: method.toUpperCase() as ContractOperation['method'],
-      path: currentPath,
-      operationId: operationIdentifierAfter(lines, index, currentPath, method),
+      operation: {
+        method: method.toUpperCase() as ContractOperation['method'],
+        path: currentPath,
+        operationId: operationIdentifierAfter(lines, index, currentPath, method),
+      },
+      tags: operationTagsAfter(lines, index),
     });
   }
   return operations;
+}
+
+/**
+ * Reads the tags of the operation whose method key sits at one line.
+ *
+ * Assumptions: the search is bounded exactly as the identifier search below is, so it cannot run into
+ * the following operation and report its tags. An operation with no tag list yields an empty array
+ * rather than raising, because five of the seven contracts in this repository are not read for tags at
+ * all and requiring one everywhere would fail them for a property no gate examines.
+ * @param {string[]} lines - Every line of the document.
+ * @param {number} methodLine - The index of the method key line.
+ * @returns {readonly string[]} The declared tags, trimmed, or an empty array.
+ */
+function operationTagsAfter(lines: string[], methodLine: number): readonly string[] {
+  for (let index = methodLine + 1; index < lines.length; index += 1) {
+    const line = lines[index] ?? '';
+    if (line.trim().length > 0 && !/^ {5}/u.test(line)) {
+      break;
+    }
+    const match = TAG_LIST.exec(line);
+    if (match?.[1] !== undefined) {
+      return match[1].split(',').map(trimmed).filter(nonEmpty);
+    }
+  }
+  return [];
 }
 
 /**
@@ -334,18 +413,35 @@ function theClientMatchesItsContract(
 }
 
 /**
- * Asserts that no browser client addresses the internal-only account contract.
- * @throws {Error} If any client manifest names a path the internal contract declares.
+ * Asserts that no browser client addresses an operation the account contract marks internal.
+ *
+ * Refactoring Rationale: this gate compared client paths against EVERY operation the account contract
+ * declares, on the premise that the whole document was internal. That premise no longer holds: the
+ * document now publishes three end-user operations beside its three internal reads, and it distinguishes
+ * them with a tag. Comparing against the whole document would therefore reject a legitimate account
+ * client, and comparing by path alone could not have separated the surfaces in any case -- the machine
+ * read and the end-user edit share one address and differ only in method.
+ *
+ * Assumptions: the comparison is by METHOD and path together for that reason. A client declaring
+ * `PUT /api/v1/accounts/{accountId}` addresses the end-user edit and is admissible; one declaring
+ * `GET` on the same address addresses the machine read, which no browser token can satisfy, and is
+ * not.
+ * @throws {Error} If any client manifest names an operation the account contract marks internal.
  */
 function theInternalContractHasNoClient(): void {
-  const internal = new Set(declaredOperations(contractText('account')).map(operationPath));
-  expect(internal.size, 'account-api.yaml must declare its internal operations').toBeGreaterThan(0);
+  const internal = new Set(
+    declaredEntries(contractText('account')).filter(isInternalSurface).map(methodAndPath),
+  );
+  expect(
+    internal.size,
+    'account-api.yaml must mark its machine-facing operations with the internal tag',
+  ).toBeGreaterThan(0);
 
   for (const [service, manifest] of BROWSER_CLIENTS) {
     for (const operation of manifest) {
       expect(
-        internal.has(operation.path),
-        `${service} client must not address the internal contract path ${operation.path}`,
+        internal.has(`${operation.method} ${operation.path}`),
+        `${service} client must not address the internal operation ${operation.method} ${operation.path}`,
       ).toBe(false);
     }
   }
@@ -365,13 +461,57 @@ function isContractFile(name: string): boolean {
   return name.endsWith('.yaml');
 }
 
-/**
- * Projects one declared operation onto its contract path.
- * @param {ContractOperation} operation - One operation read out of a contract document.
- * @returns {string} That operation's path, as the contract spells it.
+/*
+ * WHY : Assumptions: the five projections below are hoisted and named rather than written inline at
+ *       their call sites, for the reason already recorded on `isContractFile`: `jsdoc/require-jsdoc` is
+ *       configured with `publicOnly: false` and so selects a function expression in every position,
+ *       and a block comment attached to an inline argument is moved by Prettier onto the preceding
+ *       expression, which detaches it from what it documents.
  */
-function operationPath(operation: ContractOperation): string {
-  return operation.path;
+
+/**
+ * Projects one declared entry onto the operation it carries, discarding its tags.
+ * @param {DeclaredEntry} entry - One declared entry.
+ * @returns {ContractOperation} The operation alone.
+ */
+function justTheOperation(entry: DeclaredEntry): ContractOperation {
+  return entry.operation;
+}
+
+/**
+ * Reports whether one declared entry belongs to the machine-facing surface.
+ * @param {DeclaredEntry} entry - One declared entry.
+ * @returns {boolean} True when the entry carries the internal surface tag.
+ */
+function isInternalSurface(entry: DeclaredEntry): boolean {
+  return entry.tags.includes(INTERNAL_SURFACE_TAG);
+}
+
+/**
+ * Renders one declared entry as the method-and-path key the client comparison uses.
+ * @param {DeclaredEntry} entry - One declared entry.
+ * @returns {string} The method and path, separated by one space.
+ */
+function methodAndPath(entry: DeclaredEntry): string {
+  return `${entry.operation.method} ${entry.operation.path}`;
+}
+
+/**
+ * Trims one tag read out of a flow sequence.
+ * @param {string} tag - One comma-separated element, with whatever spacing the document used.
+ * @returns {string} The element without surrounding whitespace.
+ */
+function trimmed(tag: string): string {
+  return tag.trim();
+}
+
+/**
+ * Reports whether a trimmed tag carries any characters.
+ * @param {string} tag - One trimmed element.
+ * @returns {boolean} True when the element is not empty.
+ */
+function nonEmpty(tag: string): boolean {
+  return tag.length > 0;
 }
 
 /**

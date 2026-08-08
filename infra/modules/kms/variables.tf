@@ -478,9 +478,25 @@ variable "application_key_user_role_arns" {
 }
 
 variable "application_encryption_context_purposes" {
-  description = "The kms:EncryptionContext:carddemo:purpose values the application-data key grant admits. This is the narrowing condition a directly-called key has in place of kms:ViaService, so a role holding the grant can work only with ciphertext produced for one of these purposes. The default names the one purpose the migration enciphers today, the card verification value produced by com.carddemo.card.service.CardVerificationValueCipher."
+  description = "The kms:EncryptionContext:carddemo:purpose values the application-data key grant admits. This is the narrowing condition a directly-called key has in place of kms:ViaService, so a role holding the grant can work only with ciphertext produced for one of these purposes. The default names the two purposes the migration enciphers today: card-cvv, the card verification value produced by com.carddemo.card.service.CardVerificationValueCipher, and customer-identifier, the national and government-issued identifiers produced by com.carddemo.account.service.CustomerIdentifierCipher."
   type        = list(string)
-  default     = ["card-cvv"]
+
+  # WHY : Refactoring Rationale: this list named card-cvv alone while a SECOND
+  #       purpose was being enciphered under the same key. account-service's
+  #       CustomerIdentifierCipher protects CUST-SSN (app/cpy/CVCUS01Y.cpy L17) and
+  #       CUST-GOVT-ISSUED-ID (L18) under the purpose customer-identifier, so a
+  #       grant admitting only card-cvv would deny every account write the moment
+  #       application_key_user_role_arns was wired. Naming both keeps the condition
+  #       an accurate inventory of what this key actually protects.
+  # WHY : Trade-offs: two purposes under ONE key rather than a sixth key. The two
+  #       workloads are granted separately from the identity side -- the card task
+  #       role's condition names card-cvv and the account task role's names
+  #       customer-identifier -- so neither role can reach the other's ciphertext
+  #       even though both keys resolve to the same key material. A sixth key would
+  #       buy separation of the key material as well, at the cost of another key,
+  #       another alias, another rotation schedule and another monthly charge, for
+  #       two values written by two roles that are already condition-separated.
+  default = ["card-cvv", "customer-identifier"]
 
   validation {
     condition = length(var.application_encryption_context_purposes) > 0 && length(distinct(var.application_encryption_context_purposes)) == length(var.application_encryption_context_purposes) && alltrue([

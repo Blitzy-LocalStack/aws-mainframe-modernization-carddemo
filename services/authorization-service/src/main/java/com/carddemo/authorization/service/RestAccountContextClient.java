@@ -123,20 +123,47 @@ public class RestAccountContextClient implements AccountContextClient {
     public static final String PATH_CARD_XREF_LOOKUP = "/api/v1/card-xrefs/lookup";
 
     /**
-     * The path template of the account read, whose single variable is the account identifier.
+     * The path of the account read, which carries the account identifier in its body.
+     *
+     * <p>Refactoring Rationale: this was the path TEMPLATE {@code /api/v1/accounts/{accountId}} and the
+     * read was a {@code GET}. It is a fixed path and a {@code POST} because the load balancer between
+     * this client and the account context writes the request line of every hop into its access log,
+     * composing that record itself before any application code runs -- and the migration's
+     * sensitive-data logging contract names account identifiers among the values a durable diagnostic
+     * may not hold. The cross-reference lookup above already had this shape for a card number; the
+     * account read now has it for the same reason.</p>
      */
-    public static final String PATH_ACCOUNT = "/api/v1/accounts/{accountId}";
+    public static final String PATH_ACCOUNT = "/api/v1/accounts/lookup";
 
     /**
-     * The path template of the customer existence check, whose single variable is the customer
-     * identifier.
+     * The path of the customer existence check, which carries the customer identifier in its body.
+     *
+     * <p>Refactoring Rationale: this was the path template {@code /api/v1/customers/{customerId}} and the
+     * check was issued with {@code HEAD}. It is a fixed path and a {@code POST} for the same reason as
+     * the account read above. The answer is still carried entirely by the status code and the response
+     * still has no body, so the property that made {@code HEAD} attractive is retained -- what changes is
+     * only that the identifier no longer travels where it would be logged.</p>
      */
-    public static final String PATH_CUSTOMER = "/api/v1/customers/{customerId}";
+    public static final String PATH_CUSTOMER = "/api/v1/customers/lookup";
 
     /**
      * The body member the lookup call carries the card number in.
      */
     private static final String LOOKUP_FIELD_CARD_NUM = "cardNumber";
+
+    /**
+     * The body member the account read carries the account identifier in.
+     *
+     * <p>Assumptions: the spelling matches the {@code accountId} property of the published
+     * {@code AccountLookupRequest} schema. It is a constant so that this client and the test asserting
+     * the outgoing body agree on one spelling rather than two that have to match.</p>
+     */
+    private static final String LOOKUP_FIELD_ACCOUNT_ID = "accountId";
+
+    /**
+     * The body member the customer existence check carries the customer identifier in.
+     */
+    private static final String LOOKUP_FIELD_CUSTOMER_ID = "customerId";
 
     /**
      * The only scheme the base address may use.
@@ -490,8 +517,9 @@ public class RestAccountContextClient implements AccountContextClient {
     @Override
     public Optional<Account> findAccount(long accountId) {
         try {
-            AccountView view = this.client.get()
-                    .uri(PATH_ACCOUNT, accountId)
+            AccountView view = this.client.post()
+                    .uri(PATH_ACCOUNT)
+                    .body(Map.of(LOOKUP_FIELD_ACCOUNT_ID, accountId))
                     .retrieve()
                     .body(AccountView.class);
             if (view == null || view.creditLimit() == null || view.cashCreditLimit() == null
@@ -535,8 +563,9 @@ public class RestAccountContextClient implements AccountContextClient {
     @Override
     public boolean customerExists(long customerId) {
         try {
-            this.client.head()
-                    .uri(PATH_CUSTOMER, customerId)
+            this.client.post()
+                    .uri(PATH_CUSTOMER)
+                    .body(Map.of(LOOKUP_FIELD_CUSTOMER_ID, customerId))
                     .retrieve()
                     .toBodilessEntity();
             return true;

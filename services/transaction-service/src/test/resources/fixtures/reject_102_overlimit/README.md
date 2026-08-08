@@ -462,15 +462,31 @@ byte rather than to the field's tail digits.
 
 Alternatives Considered: representing this money as a binary floating-point value
 somewhere along the path, which is the single most likely way this scenario is
-defeated without anything appearing to go wrong. A one-cent difference at a
-magnitude above two thousand is not exactly representable in IEEE-754 binary64: the
-two values become the nearest representable neighbours of 2065.00 and 2065.01
-rather than those numbers, and a comparison, a sum or a round trip through such a
-type can make them compare equal, or can yield a value on the other side of the
-limit than the byte says. The failure is silent -- no exception, no truncation
-warning, just a gate that answers TRUE where the bytes require FALSE. That is
-precisely the defect this pair is built to catch, and a floating-point pipeline
-would report the pair as passing while the boundary went unverified.
+defeated without anything appearing to go wrong. Refactoring Rationale: this
+paragraph used to argue the point by claiming that a one-cent difference above two
+thousand is not representable in IEEE-754 binary64, that both values become nearby
+neighbours rather than themselves, and that a comparison of the two "can make them
+compare equal". That is wrong on all three counts and the correction matters, because
+an overstated hazard is the fastest way to get a real one dismissed. Measured: `2065.00`
+IS exactly representable -- it is an integer, and every integer of this magnitude is
+-- and `2065.01` is not, because one hundredth is not a dyadic fraction; its nearest
+binary64 value is `2065.010000000000218...`. The two are about **twenty-two billion**
+representable steps apart, one step at that magnitude being about `4.5e-13`, so no
+comparison of these two literals could ever call them equal.
+
+The hazard is real and it lives somewhere else: not in comparing two written
+constants, but in any arithmetic that PRODUCES the projection the limit is compared
+against. `CBTRN02C` forms it as a cycle-credit total minus a cycle-debit total plus the
+transaction amount, so the value reaching the gate is a sum and not a literal. Measured:
+summing `20.6501` one hundred times in binary64 yields `2065.010000000002`, where exact
+decimal arithmetic yields `2065.0100`. Those two answers fall on OPPOSITE sides of an
+inclusive limit of `2065.01` -- the binary sum is strictly greater, so the guard at line
+407 rejects a transaction the bytes require it to post, and this fixture's pass
+counterpart would fail while this one still passed. The same class of error shows up on
+the way out: `2065.01 * 3` is `6195.030000000001` in binary64 against `6195.03` exactly,
+which is a statement line that does not add up. Both failures are silent -- no
+exception, no truncation warning, just a gate or a total that answers on the accumulated
+error instead of on the data.
 
 The discipline chosen instead is exact fixed point at every hop, and this folder is
 the sharpest argument for it in the module: `NUMERIC(11,2)` in the `ledger` schema,

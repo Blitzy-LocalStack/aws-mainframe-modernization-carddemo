@@ -517,6 +517,250 @@ public class Customer {
      * @param value the array to copy, which may be {@code null}
      * @return an independent copy, or {@code null} when the input was {@code null}
      */
+    /**
+     * Applies an edited customer state onto this MANAGED row, leaving the provider to own the version.
+     *
+     * <p>Purpose: this is the migrated form of the write-back at {@code app/cbl/COACTUPC.cbl} L4009
+     * through L4046, which moves each {@code ACUP-NEW-*} field into the corresponding
+     * {@code CUST-UPDATE-*} field of the record it read and then rewrites that record. It mutates the
+     * loaded row for exactly the reason the reference rewrites the read record rather than building a
+     * fresh one: the row's identity and its concurrency state belong to the row, not to the submission.
+     * </p>
+     *
+     * <p>Refactoring Rationale: the update path previously CONSTRUCTED a new {@code Customer} from the
+     * request. That reset {@code version} to zero, which defeats the optimistic check entirely -- the
+     * provider would either insert a duplicate or overwrite whatever version it found, so the
+     * concurrent-change detection the reference performs with its before-image had no target form at
+     * all. Mutating the managed row is what makes {@code @Version} do the work, because the version the
+     * provider compares is then the one it loaded.</p>
+     *
+     * <p>Assumptions: the two PROTECTED identifiers are supplied as explicit intents rather than as
+     * values, which is why they are the only two parameters that are not plain fields. A blank or
+     * omitted protected value cannot be distinguished from "leave it alone" by looking at the value,
+     * because the submitter is shown a mask and never the ciphertext -- so a value-shaped parameter has
+     * no representation for the difference and the previous code resolved it the destructive way: an
+     * omitted government-issued identifier became {@code null} and DELETED the stored ciphertext, and
+     * the national identifier was re-enciphered on every update whether or not it had been edited. The
+     * intent types make preserve, replace and clear three separate things a caller must choose
+     * between.</p>
+     *
+     * <p>Assumptions: the national identifier admits only PRESERVE and REPLACE and never CLEAR, because
+     * its column is declared {@code NOT NULL}; the government-issued identifier admits all three,
+     * because its column is nullable and {@code app/cbl/COACTUPC.cbl} L1403 moves low values into the
+     * field when the screen field is empty, which is the baseline's own encoding of an absent value.</p>
+     *
+     * @param editedFirstName the first name to store; must not be {@code null}
+     * @param editedMiddleName the middle name to store, or {@code null} for the optional absent state
+     * @param editedLastName the last name to store; must not be {@code null}
+     * @param editedAddressLine1 the first address line to store; must not be {@code null}
+     * @param editedAddressLine2 the second address line to store, or {@code null} when absent
+     * @param editedAddressLine3 the third address line to store; must not be {@code null}
+     * @param editedStateCode the state code to store; must not be {@code null}
+     * @param editedCountryCode the country code to store; must not be {@code null}
+     * @param editedAddressZip the postal code to store at its full stored width; must not be
+     *     {@code null}
+     * @param editedPhoneNumber1 the first telephone number to store, or {@code null} when absent
+     * @param editedPhoneNumber2 the second telephone number to store, or {@code null} when absent
+     * @param nationalIdentifier what to do with the national identifier; must not be {@code null}, and
+     *     must not be a clearing intent because the column is declared not null
+     * @param governmentIdentifier what to do with the government-issued identifier; must not be
+     *     {@code null}
+     * @param editedDateOfBirth the date of birth to store; must not be {@code null}
+     * @param editedEftAccountId the transfer account identifier to store; must not be {@code null}
+     * @param editedPrimaryCardHolderIndicator the primary-holder indicator to store; must not be
+     *     {@code null}
+     * @param editedFicoCreditScore the credit score to store
+     * @throws NullPointerException if a parameter documented as required is {@code null}
+     * @throws IllegalArgumentException if {@code nationalIdentifier} is a clearing intent
+     */
+    public void applyUpdate(String editedFirstName, String editedMiddleName, String editedLastName,
+            String editedAddressLine1, String editedAddressLine2, String editedAddressLine3,
+            String editedStateCode, String editedCountryCode, String editedAddressZip,
+            String editedPhoneNumber1, String editedPhoneNumber2,
+            ProtectedValueUpdate nationalIdentifier, ProtectedValueUpdate governmentIdentifier,
+            LocalDate editedDateOfBirth, String editedEftAccountId,
+            String editedPrimaryCardHolderIndicator, short editedFicoCreditScore) {
+        Objects.requireNonNull(nationalIdentifier, "nationalIdentifier must not be null");
+        Objects.requireNonNull(governmentIdentifier, "governmentIdentifier must not be null");
+        if (nationalIdentifier.clears()) {
+            throw new IllegalArgumentException("the national identifier cannot be cleared, because"
+                    + " ssn_encrypted is declared NOT NULL");
+        }
+
+        this.firstName = Objects.requireNonNull(editedFirstName, "editedFirstName must not be null");
+        this.middleName = editedMiddleName;
+        this.lastName = Objects.requireNonNull(editedLastName, "editedLastName must not be null");
+        this.addressLine1 =
+                Objects.requireNonNull(editedAddressLine1, "editedAddressLine1 must not be null");
+        this.addressLine2 = editedAddressLine2;
+        this.addressLine3 =
+                Objects.requireNonNull(editedAddressLine3, "editedAddressLine3 must not be null");
+        this.addressStateCode =
+                Objects.requireNonNull(editedStateCode, "editedStateCode must not be null");
+        this.addressCountryCode =
+                Objects.requireNonNull(editedCountryCode, "editedCountryCode must not be null");
+        this.addressZip =
+                Objects.requireNonNull(editedAddressZip, "editedAddressZip must not be null");
+        this.phoneNumber1 = editedPhoneNumber1;
+        this.phoneNumber2 = editedPhoneNumber2;
+
+        // WHY : Assumptions: a PRESERVE intent leaves the field untouched rather than reassigning it to
+        //       its own current value. The two are equivalent in the stored result, but only the
+        //       untouched form is equivalent in the DIRTY-CHECKING result: reassigning a byte array
+        //       makes the provider see a changed field and issue an update for a column nothing edited,
+        //       which advances the version and would make a concurrent reader's precondition fail for a
+        //       change that never happened.
+        if (nationalIdentifier.replaces()) {
+            this.ssnEncrypted = defensiveCopy(nationalIdentifier.ciphertext());
+        }
+        if (governmentIdentifier.replaces()) {
+            this.governmentIssuedIdEncrypted = defensiveCopy(governmentIdentifier.ciphertext());
+        } else if (governmentIdentifier.clears()) {
+            this.governmentIssuedIdEncrypted = null;
+        }
+
+        this.dateOfBirth =
+                Objects.requireNonNull(editedDateOfBirth, "editedDateOfBirth must not be null");
+        this.eftAccountId =
+                Objects.requireNonNull(editedEftAccountId, "editedEftAccountId must not be null");
+        this.primaryCardHolderIndicator = Objects.requireNonNull(editedPrimaryCardHolderIndicator,
+                "editedPrimaryCardHolderIndicator must not be null");
+        this.ficoCreditScore = editedFicoCreditScore;
+    }
+
+    /**
+     * What an update intends for one protected identifier: preserve it, replace it, or clear it.
+     *
+     * <p>Purpose: the three intents exist because a protected column cannot express them as values. The
+     * submitter is shown a mask, never the ciphertext, so an absent submitted value means "I did not
+     * edit this" and NOT "store nothing" -- and a value-shaped parameter cannot hold that difference.
+     * Resolving it by value is what deleted stored ciphertext: an omitted government-issued identifier
+     * arrived as {@code null} and was written as {@code null}, destroying a value the submitter had
+     * never been shown and could not have re-supplied.</p>
+     *
+     * <p>Assumptions: the three intents are a sealed set with a private constructor and three named
+     * factories, so a caller states which one it means and no fourth state can be constructed. A boolean
+     * pair would admit a fourth combination that means nothing.</p>
+     *
+     * <p>Trade-offs: {@code clear} is offered even though only one of the two columns admits it, and
+     * {@link #applyUpdate} refuses it for the other rather than the type doing so. One type for both
+     * columns keeps the caller's shape uniform; the refusal names the column, which a type-level split
+     * could not do as clearly.</p>
+     */
+    public static final class ProtectedValueUpdate {
+
+        /** The preserve intent, which carries no ciphertext and is stateless, so one instance serves. */
+        private static final ProtectedValueUpdate PRESERVE = new ProtectedValueUpdate(null, false);
+
+        /** The clear intent, likewise stateless. */
+        private static final ProtectedValueUpdate CLEAR = new ProtectedValueUpdate(null, true);
+
+        /** The replacement ciphertext, or {@code null} for the preserve and clear intents. */
+        private final byte[] replacement;
+
+        /** Whether this intent clears the column. */
+        private final boolean clearing;
+
+        /**
+         * Creates one intent.
+         *
+         * @param ciphertext the replacement ciphertext, or {@code null} when this intent replaces nothing
+         * @param clears whether this intent clears the column
+         */
+        private ProtectedValueUpdate(byte[] ciphertext, boolean clears) {
+            this.replacement = ciphertext;
+            this.clearing = clears;
+        }
+
+        /**
+         * The intent that leaves the stored ciphertext exactly as it is.
+         *
+         * @return the preserve intent, never {@code null}
+         */
+        public static ProtectedValueUpdate preserve() {
+            return PRESERVE;
+        }
+
+        /**
+         * The intent that writes new ciphertext over whatever is stored.
+         *
+         * @param ciphertext the ciphertext to store; must not be {@code null} or empty
+         * @return the replace intent, never {@code null}
+         * @throws NullPointerException if {@code ciphertext} is {@code null}
+         * @throws IllegalArgumentException if {@code ciphertext} is empty, which would store a value
+         *     indistinguishable from a protected one while protecting nothing
+         */
+        public static ProtectedValueUpdate replaceWith(byte[] ciphertext) {
+            Objects.requireNonNull(ciphertext, "ciphertext must not be null");
+            if (ciphertext.length == 0) {
+                throw new IllegalArgumentException("ciphertext must not be empty; use clear() to remove"
+                        + " a stored value, so that removing and protecting nothing stay distinct");
+            }
+            return new ProtectedValueUpdate(ciphertext, false);
+        }
+
+        /**
+         * The intent that removes the stored ciphertext, for a nullable protected column only.
+         *
+         * @return the clear intent, never {@code null}
+         */
+        public static ProtectedValueUpdate clear() {
+            return CLEAR;
+        }
+
+        /**
+         * Whether this intent writes new ciphertext.
+         *
+         * @return {@code true} when this intent replaces the stored value
+         */
+        boolean replaces() {
+            return this.replacement != null;
+        }
+
+        /**
+         * Whether this intent removes the stored ciphertext.
+         *
+         * @return {@code true} when this intent clears the column
+         */
+        boolean clears() {
+            return this.clearing;
+        }
+
+        /**
+         * The replacement ciphertext.
+         *
+         * @return the ciphertext this intent stores, or {@code null} when it replaces nothing
+         */
+        byte[] ciphertext() {
+            return this.replacement;
+        }
+
+        /**
+         * Renders the intent without its ciphertext.
+         *
+         * <p>Assumptions: the ciphertext is withheld even though it is not plaintext, because its
+         * LENGTH is derived from the identifier's length and this type is the kind of small value a
+         * diagnostic prints whole.</p>
+         *
+         * @return the intent name, never {@code null}
+         */
+        @Override
+        public String toString() {
+            if (this.clearing) {
+                return "ProtectedValueUpdate[clear]";
+            }
+            return this.replacement == null
+                    ? "ProtectedValueUpdate[preserve]"
+                    : "ProtectedValueUpdate[replace]";
+        }
+    }
+
+    /**
+     * Copies an array so a caller's reference cannot reach the stored value.
+     *
+     * @param value the array to copy, which may be {@code null}
+     * @return an independent copy, or {@code null} when the input was {@code null}
+     */
     private static byte[] defensiveCopy(byte[] value) {
         return value == null ? null : value.clone();
     }
@@ -681,24 +925,32 @@ public class Customer {
      * entity that would emit a name, a full postal address, two phone numbers, a date of birth, a credit
      * score and the raw bytes of two encrypted identifiers -- the single most disclosing default rendering
      * anywhere in this migration, and one that would reach a log on every persistence failure the provider
-     * reports. Only the identifier and the version are carried: the identifier says which row and the
-     * version says which revision, and neither is cardholder data.</p>
+     * reports. All of that was already withheld.</p>
      *
-     * <p>Trade-offs: the two protected identifiers are named with a fixed marker rather than left out of
-     * the rendering altogether. Omitting them entirely would disclose no less, but it would also leave a
-     * reader unable to tell a deliberate withholding from a field somebody forgot, and it would let a later
-     * edit that reinstated a real value pass as an addition rather than as a regression. Naming them and
-     * withholding the value states the decision in the output itself, and the marker is a constant, so
-     * nothing derived from the ciphertext -- not its bytes, not its length, not whether it is present --
-     * can reach a log through this method.</p>
+     * <p>Refactoring Rationale: what was NOT withheld was the CUSTOMER IDENTIFIER, carried on the
+     * reasoning that it says which row and is not cardholder data. The sensitive-data logging contract in
+     * {@code docs/architecture/observability.md} names customer identifiers explicitly among the
+     * prohibited values, so that reasoning does not hold, and the first part of the rule it states is that
+     * a prohibited value is OMITTED rather than abbreviated. The identifier is therefore gone, and the
+     * version counter -- which that same rule admits by name -- is what remains to say which revision was
+     * in hand.</p>
      *
-     * @return a rendering carrying the identifier, the version and two redaction markers, never
-     *     {@code null}
+     * <p>Trade-offs: the two protected identifiers are still NAMED with a fixed marker rather than left
+     * out of the rendering altogether, and that is a deliberate exception to the omit-rather-than-mask
+     * rule with a specific justification. The rule exists to stop a protected VALUE being disclosed in
+     * part; these two markers are constants that carry nothing derived from the ciphertext -- not its
+     * bytes, not its length, not whether the optional government-issued identifier is present at all --
+     * so they disclose strictly nothing. What naming them buys is that a reader can tell a deliberate
+     * withholding from a field somebody forgot, and that a later edit reinstating a real value reads as a
+     * regression rather than as an addition. That is the whole of the difference from the customer
+     * identifier above, which is omitted outright because any rendering of it would be the value.</p>
+     *
+     * @return a rendering carrying the version and two constant redaction markers, and neither the
+     *     customer identifier nor any cardholder detail, never {@code null}
      */
     @Override
     public String toString() {
-        return "Customer[customerId=" + this.customerId
-                + ", ssn=" + REDACTED
+        return "Customer[ssn=" + REDACTED
                 + ", governmentIssuedId=" + REDACTED
                 + ", version=" + this.version + ']';
     }

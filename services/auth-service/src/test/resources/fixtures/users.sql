@@ -3,11 +3,14 @@
 -- -----------------------------------------------------------------------------
 -- WHAT: Supplies the canonical base rows for keyed reads, mutations, and
 --       constraint checks against the Flyway-created auth.users table.
---       Consumers, none of which is authored yet -- the module's test tree holds
---       AuthApiContractTest and SecurityConfigTest only, and neither reads this
---       file: UserRepositoryIT will load it as a forward contract, while
---       AuthControllerTest, UserControllerTest, and UserServiceTest are to mirror
---       its literals in Java builders without loading SQL.
+--       Current consumer: UserRepositoryIT, which loads this file to establish the
+--       rows its keyed-read, keyset-browse and constraint assertions run against.
+--       Not consumers, and deliberately so: AuthControllerTest and
+--       CognitoIdentityServiceTest substitute the repository entirely, so they
+--       mirror the shape of these rows in Java builders rather than loading SQL --
+--       a sliced test that loaded a schema to assert a status code would be paying
+--       for a database it does not read. Still absent: UserControllerTest and
+--       UserServiceTest, which arrive with the user-administration handlers.
 --       Load result: five deterministic rows spanning both A and U user types.
 --       Failure modes: a repeated cognito_sub is rejected by UNIQUE, a user_type
 --       outside A/U is rejected by CHECK, and an over-width user_id is rejected

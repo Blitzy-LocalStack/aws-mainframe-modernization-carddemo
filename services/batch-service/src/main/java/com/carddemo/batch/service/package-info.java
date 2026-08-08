@@ -153,7 +153,20 @@
  *       {@code app/jcl/DALYREJS.jcl} finds the verb and a reader checking line 25 finds the
  *       name. Note what this class does NOT own: the coordinate itself, the two relative
  *       generation forms and the prefix rendering belong to a sibling type named in the
- *       boundary section below.</dd>
+ *       boundary section below.
+ *       <p>Assumptions: this class is the one member of this package with a WRITING surface, and the
+ *       exception is deliberate. Every other rule here is a function of its arguments and touches
+ *       nothing; this one holds the dataset bucket, so it writes the two reservation markers that make
+ *       a generation allocation durable across containers and retries, it stages a generation's dataset
+ *       file, and it deletes the objects of a generation the retention rule has aged out. Placing those
+ *       three in a job instead was the alternative and was declined: three jobs stage generations, so
+ *       the bucket and the key convention would then be known in three places rather than one.</p>
+ *       <p>Assumptions: every one of its operations is reached from a job in
+ *       {@code com.carddemo.batch.job}. {@code BackupTransactionsJob} allocates, stages, applies the
+ *       retention rule, scratches what rolls off and renders a location;
+ *       {@code CombineTransactionsJob} additionally resolves the current generation of its two input
+ *       families, which is the only reader of that form -- {@code app/jcl/COMBTRAN.jcl:24} and
+ *       {@code :26} are the only two {@code (0)} references in the whole baseline.</p></dd>
  * </dl>
  *
  * <h2>Invariants every class in this package inherits</h2>

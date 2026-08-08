@@ -155,9 +155,21 @@ import java.util.stream.Stream;
  * -- it is a computed intermediate, formed during validation and discarded once the outcome is
  * known -- so this component widens the record by a value that has no counterpart in the schema. It
  * is carried because it is the value the credit-limit decision turned on, which makes a 102 auditable
- * after the fact and gives the surrounding job something meaningful to log; the alternative,
- * recomputing it from the account and the transaction wherever it is wanted, would duplicate the very
- * formula the paragraph above exists to protect.</p>
+ * against the account and the transaction it was formed from; the alternative, recomputing it from
+ * those two wherever it is wanted, would duplicate the very formula the paragraph above exists to
+ * protect.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph also offered the projection as something "meaningful to
+ * log", and that clause is withdrawn rather than softened. The projection is a monetary amount, and
+ * the disclosure rule this migration works to -- the rendering section of
+ * {@code docs/architecture/observability.md} -- puts a monetary amount in the OMITTED class rather
+ * than the abbreviated one: there is no width, no rounding and no digest of a balance that is safe to
+ * emit, because a projection is a balance plus a transaction and either one is recoverable from it
+ * given the other. Recommending it as log material invited exactly the disclosure {@link #toString()}
+ * below exists to prevent, and a rationale that argues for the opposite of the code beneath it is
+ * worse than no rationale, because a later reader trusts it. Auditability is served instead by the
+ * reject stream, which records the reason and the 350-character transaction image under the same
+ * access controls as the ledger itself.</p>
  *
  * <h2>Fixed point, at scale 2, and nothing else</h2>
  *
@@ -188,6 +200,11 @@ import java.util.stream.Stream;
  * {@code com.carddemo.batch.domain.TransactionReject} is what persists it, so no part of it is
  * modelled here -- which is also why no card number and no account identifier appears on this
  * record, and therefore why no masking question arises for it.</p>
+ *
+ * <p>Assumptions: the absence of an identifier does NOT make this record safe to render. It carries a
+ * monetary amount, which the disclosure rule treats exactly as it treats an identifier, so the
+ * rendering question this type has to answer is about the projection rather than about a card number.
+ * {@link #toString()} answers it.</p>
  *
  * <h2>109 is a write failure, so this type can never report it</h2>
  *
@@ -572,5 +589,51 @@ public record PostingValidationResult(RejectReason reason, BigDecimal projectedC
         //       fields again here would be a second implementation of one layout, free to disagree
         //       with the first about a width that positions every following byte of the record.
         return this.reason.trailerField();
+    }
+
+    /**
+     * Renders this outcome for a log line, carrying the reason and never the projection.
+     *
+     * <p>Assumptions: the reason-code field is rendered and the projected balance is OMITTED. The code
+     * is a bounded four-character token drawn from a five-member closed domain, which the rendering
+     * rule of {@code docs/architecture/observability.md} admits on the same footing as a status code;
+     * the projection is a monetary amount, which that rule places in the omitted class without an
+     * abbreviated form. Whether a projection EXISTS is rendered as a boolean, because that fact
+     * distinguishes an outcome refused before the account was read from one refused after it and
+     * discloses nothing about the value.</p>
+     *
+     * <p>Refactoring Rationale: this override was absent, so the compiler-generated record rendering
+     * applied and emitted {@code projectedCycleBalance} in full. That is the whole of a cycle-credit
+     * total minus a cycle-debit total plus a transaction amount, and it appeared in any log line, any
+     * exception message and any collection rendering that reached an instance of this type -- a
+     * monetary disclosure requiring no error to trigger it. A record inherits a rendering it never
+     * declared, which is why the absence was invisible to review.</p>
+     *
+     * <p>Alternatives Considered: rendering the projection's SCALE, or a fixed-width digest of it,
+     * which is the geometry-not-content form used where a width is itself the contract. Rejected on
+     * both counts: the scale is invariant at {@link #PROJECTED_BALANCE_SCALE} and so carries no
+     * information at all, and a digest of a monetary amount is enumerable -- the value space a cycle
+     * projection occupies is small enough that a digest is a lookup rather than a one-way function.</p>
+     *
+     * @return a rendering naming the reason code and whether a projection was formed, never
+     *     {@code null} and never containing the projected balance
+     */
+    @Override
+    public String toString() {
+        return "PostingValidationResult[reasonCode=" + reasonCodeField()
+                + ", projectionFormed=" + (this.projectedCycleBalance != null) + "]";
+    }
+
+    /**
+     * Names the reason-code field this outcome contributes, without disclosing anything further.
+     *
+     * <p>Assumptions: the accepted outcome reports the same four zero characters the reference writes
+     * for a transaction that failed no condition, so one rendering covers both arms and no caller has
+     * to test for absence before reading it.</p>
+     *
+     * @return the four-character reason-code field, never {@code null}
+     */
+    private String reasonCodeField() {
+        return this.reason == null ? ACCEPTED_CODE_FIELD : this.reason.codeField();
     }
 }

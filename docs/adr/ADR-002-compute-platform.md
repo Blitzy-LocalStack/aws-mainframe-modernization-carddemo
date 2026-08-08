@@ -115,9 +115,9 @@ connection pool and process no records: two of them write a single parameter and
 the third issues a single statement, so their work does not scale with the record
 volume the chain is moving. No duration is claimed for them here — see
 [Accepted limitation](#accepted-limitation--this-record-chooses-a-platform-not-a-running-system)
-— and one of them genuinely is not instantaneous in principle: `ANALYZE` takes as
-long as the database takes, which is why that function carries a 300-second
-timeout rather than a token one. What matters for the shape is that the work is a
+— and one of them genuinely is not instantaneous in principle: `VACUUM ANALYZE`
+takes as long as the database takes, which is why that function carries a
+300-second timeout rather than a token one. What matters for the shape is that the work is a
 single call and not a volume of records.
 
 Recognising this third shape as distinct is what keeps the decision from
@@ -229,13 +229,29 @@ count of chain states is not a count of functions:
 |---|---|---|
 | `quiesce` | each environment root | Chain state 1 — sets the read-only flag |
 | `resume` | each environment root | Chain state 11 — clears the flag; **also** the target of the bracket-finalizer rule (`aws_cloudwatch_event_rule.daily_finalizer`), which releases the flag when an execution ends FAILED, TIMED\_OUT or ABORTED without reaching state 11 |
-| `database_admin` | each environment root | Chain state 10 — runs `ANALYZE`; **also** invoked once at apply time to run the schema-and-role bootstrap transactionally |
+| `database_admin` | each environment root | Chain state 10 — runs `VACUUM ANALYZE`; **also** invoked once at apply time to run the schema-and-role bootstrap transactionally |
 | `dataset_retention` | each environment root | Not a chain state — triggered by object creation in the dataset bucket to enforce generation retention |
 
-Two clarifications the inventory earns. The maintenance statement is plain
-`ANALYZE`, not `VACUUM ANALYZE`: the Data API wraps a statement in a transaction
-context and PostgreSQL refuses `VACUUM` there, so the handler runs `ANALYZE`
-alone and records why at its point of use. And `seed_user_bootstrap.py` under the
+Two clarifications the inventory earns. The maintenance statement is
+`VACUUM ANALYZE`, which is what AAP §0.4.1.7 specifies for this state, and the
+handler falls back to `ANALYZE` alone only if Aurora refuses the statement for
+being inside a transaction block — logging a warning when it does, so a night that
+refreshed statistics without reclaiming is distinguishable from one that did both.
+
+Refactoring Rationale: this passage previously asserted the opposite — that the
+statement is plain `ANALYZE` because "the Data API wraps a statement in a
+transaction context and PostgreSQL refuses `VACUUM` there" — and the handler was
+narrowed to match. The premise does not hold: `ExecuteStatement` documents that a
+call omitting `transactionId` is not part of a transaction and commits
+automatically, and the maintenance call passes no `transactionId`; only the
+bootstrap path opens one. The claim was wrong in the same words in three places at
+once — here, in [ADR-005](ADR-005-batch-orchestration.md) and in the cluster
+module's README — which is what a shared false premise looks like when it is
+copied rather than re-derived. The retained fallback is a hedge against the
+protocol detail rather than a restatement of the premise, and it is narrow enough
+that any other failure still fails the state.
+
+And `seed_user_bootstrap.py` under the
 Cognito module is **not** a Lambda despite the shape of its name — it runs as a
 local provisioner at apply time — so it is absent from the table on purpose.
 

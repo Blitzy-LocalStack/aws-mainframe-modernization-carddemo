@@ -38,6 +38,65 @@ public class PendingAuthDetailKey implements Serializable {
     private static final long serialVersionUID = 1L;
 
     /**
+     * The lowest authorization date this key admits, the first day of the earliest representable year.
+     *
+     * <p>Assumptions: the bound is the schema's own, {@code auth_date BETWEEN 1 AND 99366} in
+     * {@code ck_pending_auth_detail_auth_date_domain} at L595 of the migration, which follows from the
+     * value being a five-digit ordinal date -- a two-digit year followed by a three-digit day of year.
+     * Zero is excluded because there is no day zero.</p>
+     */
+    public static final int AUTH_DATE_MIN = 1;
+
+    /**
+     * The highest authorization date this key admits, the last day of a leap year in year 99.
+     */
+    public static final int AUTH_DATE_MAX = 99_366;
+
+    /**
+     * The divisor that isolates the day-of-year part of an ordinal date.
+     *
+     * <p>Assumptions: the value is five digits with the day of year in the low three, so the day is the
+     * remainder modulo one thousand and the year is the quotient. The schema states the same arithmetic
+     * as {@code auth_date % 1000 BETWEEN 1 AND 366}.</p>
+     */
+    private static final int DAY_OF_YEAR_MODULUS = 1_000;
+
+    /** The lowest day-of-year part an ordinal date may carry. */
+    private static final int DAY_OF_YEAR_MIN = 1;
+
+    /** The highest day-of-year part an ordinal date may carry, a leap year's last day. */
+    private static final int DAY_OF_YEAR_MAX = 366;
+
+    /**
+     * The lowest authorization time this key admits, midnight exactly.
+     *
+     * <p>Assumptions: zero is admissible where day zero is not, because midnight is a real instant. The
+     * schema states {@code auth_time BETWEEN 0 AND 235959999} at L598 of the migration.</p>
+     */
+    public static final int AUTH_TIME_MIN = 0;
+
+    /**
+     * The highest authorization time this key admits, one millisecond before midnight.
+     *
+     * <p>Assumptions: the value is nine digits, {@code HHMMSSmmm} -- two for the hour, two for the
+     * minute, two for the second and three for the millisecond -- which the reference program assembles
+     * at {@code cbl/COPAUA0C.cbl} L858 to L875 before complementing it into the key.</p>
+     */
+    public static final int AUTH_TIME_MAX = 235_959_999;
+
+    /** The divisor that isolates the minute part of a nine-digit time. */
+    private static final int MINUTE_DIVISOR = 100_000;
+
+    /** The divisor that isolates the second part of a nine-digit time. */
+    private static final int SECOND_DIVISOR = 1_000;
+
+    /** The modulus that reduces an isolated time part to its own two digits. */
+    private static final int TIME_PART_MODULUS = 100;
+
+    /** The highest value a minute or a second part may carry. */
+    private static final int SEXAGESIMAL_MAX = 59;
+
+    /**
      * The account the authorization belongs to, inherited from the root segment's key.
      */
     @Column(name = "account_id", nullable = false, updatable = false)
@@ -68,14 +127,112 @@ public class PendingAuthDetailKey implements Serializable {
     /**
      * Creates a fully-specified key.
      *
-     * @param accountId the account the authorization belongs to; must not be {@code null}
-     * @param authDate the packed authorization date as an integer; must not be {@code null}
-     * @param authTime the packed authorization time as an integer; must not be {@code null}
+     * <p>Refactoring Rationale: the three parts are VALIDATED here, and they were assigned unchecked. The
+     * same invariants were written once, as a helper on the detail mapper, and that helper had no caller
+     * -- so every path that built a key, including the decoding of a stored complement and the reopening
+     * of a sealed screen selector, could produce a key the schema refuses. Validating in the type means
+     * every caller receives one rule rather than each restating it, which matters most for the two callers
+     * that build a key from data they did not author: a segment image and a client-echoed selector.</p>
+     *
+     * <p>Assumptions: the rules are the schema's own, restated rather than invented --
+     * {@code ck_pending_auth_detail_auth_date_domain} and {@code ck_pending_auth_detail_auth_time_domain}
+     * at L594 to L600 of {@code V1__authorization.sql}. Enforcing them here does not make the constraints
+     * redundant: two writers reach these columns, this type and the extract load, and a check in one of
+     * them cannot bind the other. What it buys is that the fault is reported where the value was composed
+     * instead of as an opaque constraint violation at flush, inside the transaction that had already
+     * decided an authorization.
+     *
+     * <p>Assumptions: the ACCOUNT identifier is required to be positive rather than merely present. The
+     * column is {@code BIGINT NOT NULL} with a foreign key to the summary row, and an account identifier
+     * is an unsigned eleven-digit value at {@code cpy/CIPAUSMY.cpy} L19, so zero and negative values name
+     * no account. This is the one rule the schema does not also state, and it is stated here because the
+     * foreign key would report it as a missing parent rather than as a malformed identifier.
+     *
+     * <p>Assumptions: the two clock values are the DECODED date and time and never the nines complement
+     * the segment stores. A complement is bounded by the same two widths but by a different domain -- the
+     * complement of the first day of a year is 99998, which is outside the date range above -- so a caller
+     * that passed a complement here would be refused, which is the intended outcome and the reason the
+     * decode belongs to the mapper.
+     *
+     * @param accountId the account the authorization belongs to; must not be {@code null} and must be
+     *     positive
+     * @param authDate the DECODED five-digit ordinal authorization date; must not be {@code null}, must
+     *     lie between {@value #AUTH_DATE_MIN} and {@value #AUTH_DATE_MAX}, and its day-of-year part must
+     *     lie between one and three hundred and sixty-six
+     * @param authTime the DECODED nine-digit authorization time to the millisecond; must not be
+     *     {@code null}, must lie between {@value #AUTH_TIME_MIN} and {@value #AUTH_TIME_MAX}, and its
+     *     minute and second parts must each be at most fifty-nine
+     * @throws NullPointerException if any of the three parts is {@code null}
+     * @throws IllegalArgumentException if the account identifier is not positive, or if either clock value
+     *     lies outside the domain its column declares; the message names the part and its value, neither
+     *     of which is protected data -- a date and a time are rendered by this type's own diagnostic
+     *     form, and an account identifier is reported as out of domain without being quoted
      */
     public PendingAuthDetailKey(Long accountId, Integer authDate, Integer authTime) {
+        Objects.requireNonNull(accountId, "accountId must not be null");
+        Objects.requireNonNull(authDate, "authDate must not be null");
+        Objects.requireNonNull(authTime, "authTime must not be null");
+        if (accountId <= 0L) {
+            // WHY : Assumptions: the identifier itself is NOT quoted, unlike the two clock values. The
+            //       sensitive-data logging contract in docs/architecture/observability.md names account
+            //       identifiers in a clause of their own, and this type's own diagnostic form omits it for
+            //       that reason; a refusal that quoted it would reintroduce exactly what toString withholds.
+            throw new IllegalArgumentException(
+                    "accountId must be a positive account identifier, and the value supplied was not");
+        }
         this.accountId = accountId;
-        this.authDate = authDate;
-        this.authTime = authTime;
+        this.authDate = requireAuthDateInDomain(authDate);
+        this.authTime = requireAuthTimeInDomain(authTime);
+    }
+
+    /**
+     * Returns the supplied authorization date once it is known to be a five-digit ordinal date.
+     *
+     * @param candidate the decoded date a caller supplied; must not be {@code null}
+     * @return {@code candidate} unchanged, once it is known to be in domain
+     * @throws IllegalArgumentException if the value is outside {@value #AUTH_DATE_MIN} to
+     *     {@value #AUTH_DATE_MAX}, or its day-of-year part is outside one to three hundred and sixty-six
+     */
+    private static Integer requireAuthDateInDomain(Integer candidate) {
+        int value = candidate;
+        if (value < AUTH_DATE_MIN || value > AUTH_DATE_MAX) {
+            throw new IllegalArgumentException("authDate must be a five-digit ordinal date between "
+                    + AUTH_DATE_MIN + " and " + AUTH_DATE_MAX + " but was: " + value);
+        }
+        int dayOfYear = value % DAY_OF_YEAR_MODULUS;
+        if (dayOfYear < DAY_OF_YEAR_MIN || dayOfYear > DAY_OF_YEAR_MAX) {
+            throw new IllegalArgumentException("authDate's day-of-year part must be between "
+                    + DAY_OF_YEAR_MIN + " and " + DAY_OF_YEAR_MAX + " but was: " + dayOfYear
+                    + " in " + value);
+        }
+        return candidate;
+    }
+
+    /**
+     * Returns the supplied authorization time once it is known to be a nine-digit time of day.
+     *
+     * @param candidate the decoded time a caller supplied; must not be {@code null}
+     * @return {@code candidate} unchanged, once it is known to be in domain
+     * @throws IllegalArgumentException if the value is outside {@value #AUTH_TIME_MIN} to
+     *     {@value #AUTH_TIME_MAX}, or its minute or second part exceeds fifty-nine
+     */
+    private static Integer requireAuthTimeInDomain(Integer candidate) {
+        int value = candidate;
+        if (value < AUTH_TIME_MIN || value > AUTH_TIME_MAX) {
+            throw new IllegalArgumentException("authTime must be a nine-digit time of day between "
+                    + AUTH_TIME_MIN + " and " + AUTH_TIME_MAX + " but was: " + value);
+        }
+        int minute = (value / MINUTE_DIVISOR) % TIME_PART_MODULUS;
+        if (minute > SEXAGESIMAL_MAX) {
+            throw new IllegalArgumentException("authTime's minute part must be at most "
+                    + SEXAGESIMAL_MAX + " but was: " + minute + " in " + value);
+        }
+        int second = (value / SECOND_DIVISOR) % TIME_PART_MODULUS;
+        if (second > SEXAGESIMAL_MAX) {
+            throw new IllegalArgumentException("authTime's second part must be at most "
+                    + SEXAGESIMAL_MAX + " but was: " + second + " in " + value);
+        }
+        return candidate;
     }
 
     /**

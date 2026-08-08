@@ -2,7 +2,6 @@ package com.carddemo.common.error;
 
 import com.carddemo.common.observability.LogSafeText;
 import com.carddemo.common.observability.ThrowableDigest;
-import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.common.validation.FieldValidationFlag;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.Clock;
@@ -24,9 +23,15 @@ import org.springframework.validation.FieldError;
 import org.springframework.validation.ObjectError;
 import org.springframework.validation.method.ParameterErrors;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingMatrixVariableException;
+import org.springframework.web.bind.MissingRequestCookieException;
+import org.springframework.web.bind.MissingRequestHeaderException;
+import org.springframework.web.bind.MissingRequestValueException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.HandlerMethodValidationException;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 /**
  * The single advice that renders every failed request of every migrated service as an
@@ -1502,6 +1507,128 @@ public class GlobalExceptionHandler {
         return ResponseEntity.badRequest().body(ApiError.ofFieldErrors(aggregate,
                 HttpStatus.BAD_REQUEST.value(), correlationId(), pathOf(request), fieldErrors,
                 this.clock));
+    }
+
+    /**
+     * Renders an absent required header, cookie, query parameter or matrix variable as HTTP 400,
+     * naming the value that was not supplied.
+     *
+     * <p>Refactoring Rationale: these four failures reached
+     * {@link #onUnexpectedFailure(Exception, HttpServletRequest)} before this handler existed and were
+     * answered as HTTP 500 with severity critical and an abend block, because
+     * {@code ServletRequestBindingException} is a CHECKED {@code ServletException} rather than a runtime
+     * one, so neither {@link #onRejectedCallerInput(ClientInputException, HttpServletRequest)} nor
+     * {@link #onRuntimeFailure(RuntimeException, HttpServletRequest)} could claim it and the
+     * catch-all did. That was measured on the account update, whose {@code If-Match} precondition is
+     * required: omitting the header produced a 500 carrying the abend shape. The objection is the one
+     * already recorded on {@link #onRejectedCallerInput(ClientInputException, HttpServletRequest)} --
+     * it told a caller the service had failed when the caller had in fact omitted something the
+     * service correctly requires, and it raised the severity reserved for an abend on a caller's
+     * omission, which is how an alert channel stops being read.
+     *
+     * <p>Assumptions: {@code MissingPathVariableException} is deliberately NOT claimed here even
+     * though it is the fifth member of the same {@code MissingRequestValueException} family. It is
+     * raised when a handler declares a path variable the URI template does not contain, which is a
+     * mapping defect in THIS repository rather than anything a caller did, and Spring's own
+     * {@code getStatusCode()} on that type returns 500 for exactly that reason. Folding it in would
+     * report a server defect to a caller as their mistake and would remove it from the channel that
+     * exists to surface server defects.
+     *
+     * <p>Assumptions: the entry is keyed by the value's own name -- the header name, the cookie name,
+     * the parameter name or the variable name -- and carries {@link FieldValidationFlag#BLANK}, which
+     * is the state the reference programs set through their {@code FLG-*-BLANK} conditions when a
+     * control was left empty. A caller can act on that pair without parsing prose: it names what to
+     * supply and says that nothing was supplied.
+     *
+     * <p>Alternatives Considered: rendering the framework's own {@code getMessage()}, which already
+     * names the missing value. Rejected for the reason recorded on
+     * {@link #onUnexpectedFailure(Exception, HttpServletRequest)}: a framework sentence is composed
+     * outside this repository, so its content is not bounded by anything here. The name is read from
+     * the typed accessor instead and the sentence is this repository's own constant.
+     *
+     * @param failure the binding failure naming the absent value; never {@code null} on any path the
+     *     framework reaches this method by
+     * @param request the request that failed, read only for its path
+     * @return HTTP 400 carrying {@link ApiError#CODE_VALIDATION}, the aggregate sentence and one
+     *     per-field entry keyed by the absent value's name, never {@code null}
+     */
+    @ExceptionHandler({MissingRequestHeaderException.class, MissingRequestCookieException.class,
+            MissingServletRequestParameterException.class, MissingMatrixVariableException.class})
+    public ResponseEntity<ApiError> onMissingRequestValue(MissingRequestValueException failure,
+            HttpServletRequest request) {
+
+        // WHY : Assumptions: the name is read through a pattern switch over the four claimed types
+        //   rather than through one accessor, because the family's common supertype publishes no name
+        //   at all -- each subtype names its own accessor after the kind of value it carries. The
+        //   switch is exhaustive over what the annotation claims, and the default is unreachable for
+        //   that reason; it is present because the compiler cannot see the annotation, and it degrades
+        //   to the whole-request key rather than to an empty array so that a fifth type admitted here
+        //   later still produces a displayable refusal.
+        String name = switch (failure) {
+            case MissingRequestHeaderException header -> header.getHeaderName();
+            case MissingRequestCookieException cookie -> cookie.getCookieName();
+            case MissingServletRequestParameterException parameter -> parameter.getParameterName();
+            case MissingMatrixVariableException variable -> variable.getVariableName();
+            default -> FIELD_REQUEST;
+        };
+
+        // WHY : Assumptions: the delegation constructs the refusal this repository already renders
+        //   rather than assembling a second problem document here. One rendering means the shape a
+        //   client parses for an omitted header is byte-identical to the shape it parses for a rejected
+        //   value, which is what lets a client keep one handler for HTTP 400.
+        // WHY : Assumptions: the name is sanitised before it is keyed. A header or parameter name is
+        //   chosen by the CALLER, not by this repository -- an unknown name never reaches here, but the
+        //   name of a DECLARED value is echoed back and a request may present it with control
+        //   characters in the raw bytes -- so it is a value of external provenance entering a
+        //   structured field, which is what that helper exists for.
+        return onRejectedCallerInput(new ClientInputException(ApiError.CODE_VALIDATION,
+                LogSafeText.sanitize(name), FieldValidationFlag.BLANK, MESSAGE_VALIDATION_FAILED),
+                request);
+    }
+
+    /**
+     * Renders a path or query value that cannot be converted to the type its handler declares as
+     * HTTP 400, naming the parameter and never echoing the value.
+     *
+     * <p>Refactoring Rationale: this failure reached
+     * {@link #onRuntimeFailure(RuntimeException, HttpServletRequest)} before this handler existed --
+     * it is a {@code TypeMismatchException} and therefore a runtime one -- matched none of that
+     * method's three contention branches, and fell through to the same HTTP 500 abend shape. It was
+     * measured on the account routes, whose identifier path variables are declared as {@code long}: a
+     * non-numeric segment produced a 500. Six published contracts declare HTTP 400 on operations whose
+     * only reachable 400 was this one, so the status a client was told to expect was one no response
+     * could produce.
+     *
+     * <p>Assumptions: the offending VALUE is never rendered and never logged, so neither the response
+     * nor the log line can echo it back. The reason is not squeamishness about diagnostics: the values
+     * that arrive in these positions include account identifiers, and the framework's own
+     * {@code getMessage()} quotes the value it could not convert verbatim. Reporting which parameter
+     * was wrong is actionable without it -- a caller holds the value it sent.
+     *
+     * <p>Assumptions: the state is {@link FieldValidationFlag#NOT_OK} rather than the blank one,
+     * because a value WAS supplied and was refused. That distinction is the reference's own: its
+     * templated highlight at {@code app/cpy/CSSETATY.cpy} lines 17 to 27 draws an asterisk for a blank
+     * control and only the colour change for a rejected value.
+     *
+     * @param failure the conversion failure naming the parameter it could not bind; never {@code null}
+     *     on any path the framework reaches this method by
+     * @param request the request that failed, read only for its path
+     * @return HTTP 400 carrying {@link ApiError#CODE_VALIDATION}, the aggregate sentence and one
+     *     per-field entry keyed by the parameter's name, never {@code null}
+     */
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ApiError> onUnconvertibleValue(MethodArgumentTypeMismatchException failure,
+            HttpServletRequest request) {
+
+        // WHY : Assumptions: getName() is the handler parameter's own name, which is authored in this
+        //   repository, so the sanitisation applied here guards against nothing a caller controls. It
+        //   is applied anyway for the reason the unexpected-failure handler records about generated
+        //   names: a value this code did not author entering a structured line is what the helper is
+        //   for, and applying it unconditionally removes the need for a reader to verify the
+        //   provenance of every key.
+        return onRejectedCallerInput(new ClientInputException(ApiError.CODE_VALIDATION,
+                LogSafeText.sanitize(failure.getName()), FieldValidationFlag.NOT_OK,
+                MESSAGE_VALIDATION_FAILED), request);
     }
 
     /**

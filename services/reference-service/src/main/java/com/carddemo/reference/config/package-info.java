@@ -27,7 +27,7 @@
  * repository ruleset audits at-clause bodies for emptiness, so an invented empty at-clause would be
  * reported rather than credited.</p>
  *
- * <h2>The four configuration types, and what each one owns</h2>
+ * <h2>The three configuration types, and what each one owns</h2>
  *
  * <p>Assumptions: the inventory below is the package contract the migration plan assigns, and each
  * entry carries its own marker for whether that contract is discharged on disk. Naming a type here is
@@ -74,25 +74,30 @@
  *       auto-configured one, and the two could disagree about which account and region they
  *       address.</dd>
  *
- *   <dt>{@code DataSourceConfig} -- PLANNED</dt>
- *   <dd>Connection-pool behaviour, and the verification that an unqualified table name really resolves
- *       inside the {@code reference} schema at the connection boundary. Assumptions: {@code reference}
- *       is the only schema this context owns, so pinning the search path at the connection boundary
- *       rather than in each statement is what stops a query omitting the qualifier from reaching
- *       another context's tables. Assumptions: the pin ITSELF is already declared once, in this
- *       module's {@code application.yml} under
- *       {@code spring.datasource.hikari.connection-init-sql}, which records at its own head why it is
- *       expressed there, and the pool sizing sits beside it under the same key; a type here would
- *       restate neither. What the contracted type adds is the check that the setting took EFFECT,
- *       because the declared setting reports only what was asked for. A pin declared in both places
- *       would be two authorities over one connection property.</dd>
+ * </dl>
  *
- *   <dt>{@code OpenApiConfig} -- PLANNED</dt>
+ * <p>Refactoring Rationale: this charter listed a fourth type, {@code DataSourceConfig}, as PLANNED,
+ * and no such type exists here. The entry is WITHDRAWN rather than fulfilled, because the reasoning the
+ * entry itself carried is the reasoning against it: the schema pin and the pool sizing are declared once
+ * in this module's {@code application.yml}, under
+ * {@code spring.datasource.hikari.connection-init-sql} and the pool keys beside it, and a type here
+ * would restate neither. A charter that names a type as planned states an obligation, and an obligation
+ * no one intends to meet reads to the next author as unfinished work rather than as a decision. The set
+ * above is therefore closed at three, and the closed set is four compilation units: this descriptor and
+ * the three types.
+ *
+ * <p>Assumptions: the one thing the withdrawn entry offered beyond the declaration -- a check that the
+ * search-path pin took EFFECT rather than merely being asked for -- is not lost with it. That check
+ * belongs to a test against a real engine rather than to a configuration type, because a configuration
+ * type can only assert what it itself set.
+ *
+ * <dl>
+ *   <dt>{@code OpenApiConfig} -- LANDED</dt>
  *   <dd>The metadata of the interface document this service serves, aligned to the contract committed
  *       under this module's {@code src/main/resources/openapi} directory. Assumptions: the
  *       specification level of the served document is already pinned declaratively in this module's
  *       {@code application.yml}, where the api-docs key selects the 3.1 form and the contract
- *       directory is added to the served static locations; the contracted type adds the document's own
+ *       directory is added to the served static locations; this type adds the document's own
  *       title, revision and security scheme and not the specification level. Trade-offs: that
  *       contract is authored by hand and is already compared against this module's handlers in both
  *       directions by its routing contract test, so metadata supplied here is expected to agree with a

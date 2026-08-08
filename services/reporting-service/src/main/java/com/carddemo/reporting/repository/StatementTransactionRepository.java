@@ -215,74 +215,28 @@ public interface StatementTransactionRepository
     String STATEMENT_FETCH_SIZE = "512";
 
     /**
-     * Opens a forward-only cursor over every row of the projection in the reference's own key order.
+     * The whole-table ordered pass this interface deliberately no longer declares.
      *
-     * <p>This is the target of the open at L734 of {@code app/cbl/CBSTM03A.CBL}, the priming read at
-     * L746 and the streaming read at L835, collapsed into one declaration: a caller consumes rows
-     * until the cursor is exhausted rather than testing a return code for {@code '10'} after each
-     * read. </p>
+     * <p>Refactoring Rationale: an ordered cursor over EVERY row of the projection was declared here,
+     * named for the card-then-transaction order {@code app/jcl/CREASTMT.JCL:53} sorts the statement
+     * input by, and it was reached by nothing. Its removal is recorded rather than silent because the
+     * citation it carried is worth keeping: the reference really does make one sequential pass over a
+     * card-ordered file and break by card in working storage, so a reader who expects that shape here
+     * is not mistaken about the baseline -- only about this module.</p>
      *
-     * <p>Alternatives Considered: returning a materialised collection of the whole projection. The
-     * reason for a cursor is arity and not throughput. {@code app/cbl/CBSTM03A.CBL} declares two
-     * independent tables that no statement bounds-checks -- an outer card table
-     * {@code 05  WS-CARD-TBL OCCURS 51 TIMES.} at L226 holding a nested
-     * {@code 10  WS-TRAN-TBL OCCURS 10 TIMES.} at L228, and a separate counter table
-     * {@code 05  WS-TRN-TBL-CTR OCCURS 51 TIMES.} at L232 -- and it indexes them at L822 and L827
-     * through L829 with no test on either subscript. Three figures travel with those tables and none
-     * is the same figure as another: the declared inner arity of 10, the measured same-card overrun
-     * threshold of 512, and the declared and measured distinct-card limit of 51. Streaming at this
-     * boundary is what lets the migrated statement path carry no declared arity at all. The baseline
-     * behaves as its own declarations say; this cursor has no arity to overrun; the divergence is
-     * registered as D-2 in {@code docs/architecture/cobol-to-service-traceability.md}. </p>
+     * <p>Assumptions: the migrated statement flow composes ONE statement per request. Its entry point
+     * is {@code StatementService#compose(StatementRequest)}, which names a single card and reaches
+     * {@link #streamByCardNumber(String)}; nothing drives an all-cards run, because the state of the
+     * nightly chain that would drive one is a batch task rather than a request to this service. A
+     * whole-table cursor was therefore a second access path over the same projection with no driver,
+     * and the ordering it guaranteed is already guaranteed within each card by the per-card query.</p>
      *
-     * <p>Assumptions: an enclosing transaction is required, and the mandatory propagation mode
-     * declared below is what enforces it rather than documenting it. The default mode would begin a
-     * transaction that completes when this method returns, releasing the cursor's resources before
-     * the caller had read a row from it, so the mandatory mode is a correctness requirement and not a
-     * preference: it joins the caller's transaction, which keeps the cursor open for the caller's own
-     * scope, and it refuses outright when none is in progress instead of handing back a cursor that
-     * fails on first use. The consumer in this module satisfies it -- the composing method of
-     * {@code com.carddemo.reporting.service.StatementService} declares
-     * {@code @Transactional(readOnly = true)} at its L242. </p>
-     *
-     * <p>Assumptions: the {@code org.hibernate.fetchSize} hint set below only takes effect while the
-     * connection is not in autocommit mode, which inside a transaction it is not. Issued outside one,
-     * the driver retrieves the whole result set regardless of the hint, so the
-     * {@value #STATEMENT_FETCH_SIZE}-row batch would silently not apply. That is the second and
-     * independent reason the enclosing transaction is mandatory here rather than merely advised. </p>
-     *
-     * <p>Trade-offs: the {@code org.hibernate.readOnly} hint set below suppresses the dirty-checking
-     * snapshot the persistence context would otherwise retain for each row. What is given up is that
-     * a row handed back under this hint is not a candidate for a write through the persistence context
-     * at all. That costs nothing here for two independent reasons, each verifiable: the projection is
-     * annotated {@code @Immutable} at L301 of {@link StatementTransactionView}, so the mapping layer
-     * emits no update for it; and {@code data-migration/sql/V1__reporting_views.sql} conveys
-     * {@code SELECT} at its L546 and withdraws every writing privilege at its L568 through L576, so
-     * no such write could reach the relation either. </p>
-     *
-     * @return an open, forward-only cursor over every row of the projection, ordered by card number
-     *     ascending and then transaction identifier ascending, exactly as
-     *     {@code app/jcl/CREASTMT.JCL} L53 declares; empty when the projection holds no row; never
-     *     {@code null}. The caller owns the cursor and must close it, for which try-with-resources is
-     *     the intended form, and must consume it inside the read-only transaction it requires
-     * @throws org.springframework.transaction.IllegalTransactionStateException if no transaction is
-     *     in progress when this method is called, since the cursor cannot outlive one that this
-     *     method began itself
-     * @throws org.springframework.dao.DataAccessException if the projection cannot be read, which
-     *     includes the relation being absent -- a defect to report against the data-migration
-     *     package, as register entry <b>R11</b> records, and never one to work around from here
+     * <p>Alternatives Considered: keeping the method and giving it a caller by adding an all-cards
+     * composition to the statement service. Declined because the orphan would only move one layer up:
+     * nothing would drive THAT method either, so the module would gain an untested public surface and
+     * the same finding would recur against it. The honest resolution is that this access path arrives
+     * with the driver that needs it, and the driver is not in this module.</p>
      */
-    @Query("""
-            select t
-            from StatementTransactionView t
-            order by t.key.cardNumber asc, t.key.transactionId asc
-            """)
-    @QueryHints({
-        @QueryHint(name = AvailableHints.HINT_FETCH_SIZE, value = STATEMENT_FETCH_SIZE),
-        @QueryHint(name = AvailableHints.HINT_READ_ONLY, value = "true")
-    })
-    @Transactional(readOnly = true, propagation = Propagation.MANDATORY)
-    Stream<StatementTransactionView> streamAllOrderedByCardThenTransaction();
 
     /**
      * Opens a forward-only cursor over one card number's rows in transaction-identifier order.

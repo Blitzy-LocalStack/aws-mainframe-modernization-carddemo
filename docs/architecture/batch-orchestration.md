@@ -614,12 +614,26 @@ claiming they are the same mechanism.
 Trade-offs: retention is enforced when a writer stages a generation rather than
 as an autonomous catalog service. That keeps the operation adjacent to the write
 that can exceed the limit and lets `delete_objects` report partial failures
-immediately. The cost is that every generation writer must use `stage_generation`;
+immediately. The cost is that every generation writer must use
+`stage_dataset_file` (or the family-aware `stage_family_file` that wraps it);
 a direct `put_object` can bypass cleanup. The environment/task wiring that passes
 the Terraform output to every writer is therefore still required and is not yet
 authored. Deriving order from object modification times was rejected because a
 retry would then alter catalog order; the explicit date and generation labels make
 ordering deterministic.
+
+Refactoring Rationale: this previously named a byte-oriented `stage_generation`
+entry point, which has been withdrawn. It accepted a payload the caller had
+already read into memory, so peak usage scaled with the dataset; it opened the
+extract separately from the transfer, so the digest it recorded was not provably
+of the bytes uploaded; and it wrote the object with no checksum the service could
+verify. `stage_dataset_file` holds one descriptor across the digest and the
+transfer, streams it in bounded chunks, and supplies `ChecksumSHA256` so S3
+itself rejects a mismatched write. Generation numbers are allocated by
+`reserve_generation`, a conditional create keyed by execution token, family and
+business date, so two concurrent writers cannot take the same number and a
+retried step reuses the one its first attempt reserved instead of staging a
+duplicate generation of identical bytes.
 
 
 ## The restart story: there is no baseline checkpoint contract to preserve
@@ -985,9 +999,11 @@ L22–L28 and then emits **three distinct unload formats** from one program run 
 dataset output at all.
 
 **Target mapping.** The SDSF operator quiesce **mechanism** retires — there will
-be no CICS region and no `CEMT` — while its **behaviour** is specified as states
-1 and 11, which will set and clear a read-only flag in Parameter Store bracketing
-the batch window. Those states are not authored. Alternatives Considered:
+be no CICS region and no `CEMT` — while its **behaviour** is carried by states
+1 and 11, which set and clear a read-only flag in Parameter Store bracketing
+the batch window. Both states are authored, in
+[`infra/modules/step-functions-batch/main.tf`](../../infra/modules/step-functions-batch/main.tf),
+together with the conditional lease described immediately below. Alternatives Considered:
 revoking the online services' database write grants for the duration would enforce
 the quiesce in the database rather than in application code, and was rejected
 because a revoked grant surfaces to a user as a database error rather than as the
@@ -995,6 +1011,44 @@ read-only condition the flag lets a service report deliberately. The retirement
 of the mechanism is registered in
 `docs/architecture/cobol-to-service-traceability.md` once that register is
 authored.
+
+### The bracket is a conditional lease, not the flag
+
+The read-only flag is what every online service reads, and it is **not** what holds
+the bracket. Ownership lives in a DynamoDB item the environment root provisions, and
+the two edges operate on it with condition expressions the service arbitrates:
+`QuiesceOnlineWrites` acquires with a conditional `PutItem` that succeeds only when
+no lease is stored or the stored one has expired, and every release path issues a
+conditional `DeleteItem` that succeeds only for the recorded owner or an expired
+lease. The flag is then written as a **consequence** of the lease decision.
+
+Refactoring Rationale: the flag used to be the lease, and that could not work. There
+is no compare-and-set for a plain String parameter in Parameter Store, so acquisition
+was a read followed by a write — two executions reading in the same instant both
+concluded they had acquired — and release had no stored owner against which to check a
+claimed one, so an out-of-graph watchdog release was necessarily unconditional. Three
+concrete failures followed, and all three are closed together because they share that
+one cause. Two executions could each believe they owned the window. A watchdog firing
+for one terminating execution could clear a bracket a healthy execution still held,
+re-enabling online writes mid-window. And the acquisition result was ignored on the
+success edge entirely — the graph continued to staging whether or not it had acquired
+— so a chain starting while a previous night still held the window went on to post
+transactions and accrue interest with online writes enabled.
+
+Trade-offs: moving the **bracket** into a store with a conditional primitive was
+chosen over moving the **flag** there, so that every online service still reads one
+boolean at one parameter path and none of them gains a second client. The cost is one
+additional resource per environment — a single-item, on-demand table — and one
+additional grant on the quiesce/resume role.
+
+Assumptions: expiry is compared inside the conditional writes rather than delegated to
+a DynamoDB time-to-live. TTL deletion is asynchronous and documented as taking up to a
+few days, so a TTL-expired lease could still be present and still block acquisition
+long after it should have lapsed; comparing the stored `expiresAt` makes takeover exact
+and immediate. The expiry recorded is the state machine's own timeout, which is the
+longest a running execution can hold the bracket, so a lease can only be expired once
+its owner can no longer be running. That is what makes the mechanism self-healing
+without letting a lease lapse underneath a live chain.
 
 
 ## The procedure and control-card tier

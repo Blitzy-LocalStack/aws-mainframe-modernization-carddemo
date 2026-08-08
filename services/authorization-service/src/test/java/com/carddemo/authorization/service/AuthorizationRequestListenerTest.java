@@ -14,6 +14,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.carddemo.authorization.domain.AuthReplyOutbox;
+import com.carddemo.authorization.domain.OutboxMessage;
 import com.carddemo.authorization.domain.PendingAuthDetail;
 import com.carddemo.authorization.domain.PendingAuthSummary;
 import com.carddemo.authorization.mapper.AuthorizationMessageMapper;
@@ -713,6 +714,79 @@ class AuthorizationRequestListenerTest {
         verify(this.summaries).save(summary.capture());
         assertEquals(1, summary.getValue().getDeclinedAuthCount().intValue());
         assertEquals(0, summary.getValue().getApprovedAuthCount().intValue());
+    }
+
+    /**
+     * The detail row and the outbox row are both produced by the mapper's own projections.
+     *
+     * <p>Assumptions: the assertion is made on the MAPPER and not only on the saved rows, because the
+     * defect it closes was not a wrong value -- the assembly this class performed and the projection the
+     * mapper published produced identical rows -- but two implementations of one crossing, only one of
+     * which ran. A value assertion passes under either, so the property under test is that the documented
+     * projection is the one the live path goes through, and an observing substitute is what makes that
+     * observable.</p>
+     *
+     * <p>Assumptions: the saved outbox row's deadline is asserted beside it, as five seconds past the
+     * fixed clock, because that deadline now comes from the mapper's conversion of the reference
+     * descriptor's fifty tenths of a second rather than from a local constant. A projection that was
+     * called but handed the wrong instant would still satisfy the interaction assertion alone.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the detail and outbox rows are both produced by the mapper's projections")
+    void theRowsAreProducedByTheMapperProjections() {
+        AuthorizationMessageMapper observed =
+                org.mockito.Mockito.spy(new AuthorizationMessageMapper(VALIDATOR));
+        AuthorizationRequestListener throughTheMapper = new AuthorizationRequestListener(
+                this.summaries, this.details, this.outbox, new AuthorizationDecisionService(),
+                observed, this.accounts, TOKENISER, List.of(ALLOWED_REPLY_QUEUE),
+                Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC), WINDOW_LIMIT,
+                handled -> this.closedWindows.add(handled));
+        givenResolvableCard();
+        when(this.summaries.findWithLockByAccountId(ACCOUNT_ID))
+                .thenReturn(Optional.of(summaryWithRoom()));
+
+        throughTheMapper.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
+
+        verify(observed).toPendingAuthDetail(any(), any(), any(), any());
+        verify(observed).toOutboxMessage(any(), any(), any());
+        ArgumentCaptor<AuthReplyOutbox> published = ArgumentCaptor.forClass(AuthReplyOutbox.class);
+        verify(this.outbox).save(published.capture());
+        assertEquals(java.time.LocalDateTime.ofInstant(FIXED_INSTANT, ZoneOffset.UTC)
+                .plusSeconds(5), published.getValue().getExpiresAt());
+        assertEquals(AuthReplyOutbox.CONTENT_TYPE_CSV, published.getValue().getContentType());
+    }
+
+    /**
+     * A reply destination that the routing carrier cannot hold is refused rather than made durable.
+     *
+     * <p>Assumptions: the destination is checked against the allowlist BEFORE the routing is built, so a
+     * value too wide for the column can only arrive from an allowlist entry that is itself too wide --
+     * which is a deployment fault rather than a requester's. It is asserted because the refusal is what
+     * keeps such an entry from reaching the flush of the deciding transaction, where it would abort a
+     * decision that had already been made.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a reply destination wider than its column refuses the message rather than the decision")
+    void anOversizedReplyDestinationIsRefused() {
+        String tooWide = "https://sqs.us-east-1.amazonaws.com/000000000000/"
+                + "q".repeat(OutboxMessage.REPLY_QUEUE_URL_MAX_LENGTH);
+        AuthorizationRequestListener wideAllowlist = new AuthorizationRequestListener(
+                this.summaries, this.details, this.outbox, new AuthorizationDecisionService(),
+                new AuthorizationMessageMapper(VALIDATOR), this.accounts, TOKENISER,
+                List.of(tooWide), Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC), WINDOW_LIMIT,
+                handled -> this.closedWindows.add(handled));
+        givenResolvableCard();
+        when(this.summaries.findWithLockByAccountId(ACCOUNT_ID))
+                .thenReturn(Optional.of(summaryWithRoom()));
+
+        assertThrows(IllegalArgumentException.class, () -> wideAllowlist.onRequest(
+                messageFor(requestFor(Money.of("100.99")), tooWide)));
+
+        verify(this.outbox, never()).save(any());
     }
 
     /**

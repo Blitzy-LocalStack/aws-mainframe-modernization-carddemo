@@ -225,16 +225,18 @@ public class UsState {
     /**
      * Creates an empty instance for the persistence provider to populate.
      *
-     * <p>Assumptions: a persistence entity must declare a constructor taking no arguments, and the
-     * provider invokes it before writing the one mapped column, {@code state_cd}, into the member
-     * above. Visibility is public rather than the narrower protected the specification would also
-     * accept, because this type guards no invariant -- there is a single two-character member and no
-     * relationship between members to keep consistent -- and its instances are assembled by hand in
-     * tests as well as by the provider; a narrower constructor would push those callers onto the
-     * argument-taking form without making anything safer, since an instance built either way holds
-     * whatever code it was given. </p>
+     * <p>Assumptions: the specification requires a persistence entity to declare a constructor taking
+     * no arguments, which the provider invokes before writing the mapped columns into the members
+     * above. It is {@code protected} rather than public, which is the policy every other entity in this
+     * codebase already follows: 30 of the 33 entity declarations across the eight services declare it
+     * protected, and the five public ones were all in this package. The provider reaches a protected
+     * constructor, and application code outside this package cannot allocate an unpopulated row and
+     * pass it on as though it had been loaded.
+     *
+     * <p>Refactoring Rationale: this was public, and each of the five gave its own reason -- that a
+     * mapper or a test needs to assemble a row member by member. Narrowing costs those callers nothing here: the argument-taking form is public, and the claim that a narrower constructor would make nothing safer was answered by measurement rather than argument -- no call site anywhere constructs this type without arguments, so the public form guarded nothing and offered nothing.
      */
-    public UsState() {
+    protected UsState() {
         // Assumptions: the body is empty by design rather than unfinished. The provider assigns the
         // member declared from app/cpy/CSLKPCDY.cpy L1012 directly after construction, so a value
         // written here would be overwritten on every load.

@@ -13,7 +13,6 @@ import java.time.Clock;
 import java.time.LocalDateTime;
 import java.util.NoSuchElementException;
 import java.util.Objects;
-import java.util.Optional;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -222,20 +221,34 @@ public class BillPaymentService {
     }
 
     /**
-     * Derives the next transaction identifier the way the reference derives it at lines 212 to 217.
+     * Obtains the next transaction identifier from the database's own allocator.
+     *
+     * <p>Assumptions: the reference derives the same value by positioning a browse at high values,
+     * reading backwards once and adding one, at lines 212 to 217. The value is the same; the route
+     * differs, and the route is what was wrong.</p>
+     *
+     * <p>Refactoring Rationale: this previously read the maximum stored identifier and added one in
+     * Java. That was unsafe for two independent reasons -- concurrent callers derived the same key, and
+     * the maximum spans a second identifier format that a numeric parse can reject -- both of which are
+     * set out in full on {@code TransactionAddService.nextTransactionId()} and are not repeated here so
+     * that the argument has one home. The concurrency hazard is if anything sharper on this path: bill
+     * payment's unit of work also writes the account balance through another context, so the window
+     * between reading a maximum and inserting under it was the widest of the two.</p>
      *
      * @return the next identifier as sixteen digit characters, never {@code null}
-     * @throws IllegalStateException if the highest existing identifier could not be read
+     * @throws IllegalStateException if the allocator could not be reached
      */
     private String nextTransactionId() {
-        Optional<String> highest;
+        long next;
         try {
-            highest = this.transactions.findMaxTranId();
-        } catch (RuntimeException readFailure) {
+            next = this.transactions.allocateTransactionId();
+        } catch (RuntimeException allocationFailure) {
+            // WHY : Assumptions: the same sentence the previous read failure used, because from the
+            //       caller's side the condition is identical -- an identifier could not be obtained --
+            //       and the reference has one message for it.
             throw new IllegalStateException(BillPaymentMapper.MESSAGE_TRANSACTION_LOOKUP_FAILED,
-                    readFailure);
+                    allocationFailure);
         }
-        long next = highest.map(Long::parseLong).orElse(0L) + 1L;
         return String.format("%0" + TransactionAddService.TRANSACTION_ID_WIDTH + "d", next);
     }
 }

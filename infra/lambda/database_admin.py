@@ -558,30 +558,86 @@ def _bootstrap() -> tuple[int, int]:
 
 
 def _analyze() -> int:
-    """Run PostgreSQL ANALYZE outside a Data API transaction.
+    """Reclaim dead tuples and refresh planner statistics after the batch chain.
+
+    Issues ``VACUUM ANALYZE`` as a single autocommitted Data API statement, which is
+    the maintenance operation state 10 of the nightly chain is responsible for. If
+    Aurora refuses the ``VACUUM`` half because a transaction block is in force, falls
+    back to ``ANALYZE`` so the planner statistics are refreshed regardless.
 
     Returns
     -------
     int
-        One, the number of statements executed.
+        One, the number of maintenance statements that completed. The fallback
+        REPLACES the statement rather than adding one, so the count is one on either
+        path and the caller's reported ``statementCount`` stays comparable between
+        runs that did and did not reclaim.
 
     Raises
     ------
     botocore.exceptions.BotoCoreError
-        If Aurora rejects the maintenance statement.
+        If Aurora rejects the maintenance statement for any reason other than
+        refusing ``VACUUM`` inside a transaction block.
     """
 
-    # Alternatives Considered: VACUUM ANALYZE, which is the usual
-    #       maintenance pairing. The Data API wraps a statement in a transaction
-    #       context and PostgreSQL refuses VACUUM there; ANALYZE alone refreshes
-    #       the planner statistics this batch state is responsible for.
-    RDS_DATA.execute_statement(
-        resourceArn=CLUSTER_ARN,
-        secretArn=MASTER_SECRET_ARN,
-        database=DATABASE_NAME,
-        sql="ANALYZE",
-        continueAfterTimeout=True,
-    )
+    # Refactoring Rationale: this previously issued a bare ANALYZE and justified the
+    #       narrowing with "the Data API wraps a statement in a transaction context
+    #       and PostgreSQL refuses VACUUM there". That premise is false. The
+    #       ExecuteStatement contract is explicit that a call which does NOT include
+    #       transactionId is not part of a transaction and is committed
+    #       automatically, and the only caller here that passes transactionId is the
+    #       bootstrap path above. So the reclaim half of the operation was being
+    #       skipped for a reason that did not hold, and the frozen plan specifies
+    #       VACUUM ANALYZE for this state rather than ANALYZE alone.
+    # Alternatives Considered: connecting with psycopg in autocommit mode, which
+    #       would put VACUUM outside a transaction under our own control rather than
+    #       relying on the Data API's. Rejected because this module's stated contract
+    #       is to provide these operations WITHOUT packaging a PostgreSQL driver:
+    #       both environment roots zip this single file with archive_file, so a
+    #       driver would mean a layer or a build step plus VPC attachment, for one
+    #       maintenance statement a year of nightly runs apart.
+    # Assumptions: continueAfterTimeout lets the statement outlive the Data API
+    #       response window. That matters far more for VACUUM than for ANALYZE,
+    #       because reclaim work scales with the dead tuples the posting and interest
+    #       states just produced, whereas a statistics refresh does not.
+    try:
+        RDS_DATA.execute_statement(
+            resourceArn=CLUSTER_ARN,
+            secretArn=MASTER_SECRET_ARN,
+            database=DATABASE_NAME,
+            sql="VACUUM ANALYZE",
+            continueAfterTimeout=True,
+        )
+    except Exception as refusal:
+        # Trade-offs: PostgreSQL reports this refusal as SQLSTATE 25001, but the Data
+        #       API relays it as message text on a generic fault, so the message is
+        #       the only discriminator available without importing botocore for a
+        #       single exception type -- which the broad except at the end of the
+        #       bootstrap path avoids for the same reason. The guard is deliberately
+        #       narrow and re-raises everything else, so a permissions, connectivity
+        #       or capacity failure still fails the state rather than being quietly
+        #       downgraded to a warning.
+        if "cannot run inside a transaction block" not in str(refusal):
+            raise
+        # Trade-offs: degrading to ANALYZE instead of failing the state. State 10 runs
+        #       after every financial write in the chain has already committed, and
+        #       the responsibility it carries is the planner statistics that the
+        #       retired IDCAMS BLDINDEX step used to refresh. Refreshing those
+        #       without reclaiming is strictly better than failing an otherwise
+        #       complete nightly run, and autovacuum reclaims the space on its own
+        #       schedule. The warning is what makes the degradation visible rather
+        #       than silent, so an operator can see that reclaim did not happen.
+        LOGGER.warning(
+            "event=database_admin_vacuum_refused fallback=analyze detail=%s",
+            str(refusal),
+        )
+        RDS_DATA.execute_statement(
+            resourceArn=CLUSTER_ARN,
+            secretArn=MASTER_SECRET_ARN,
+            database=DATABASE_NAME,
+            sql="ANALYZE",
+            continueAfterTimeout=True,
+        )
     return 1
 
 

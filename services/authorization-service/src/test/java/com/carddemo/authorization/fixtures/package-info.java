@@ -20,8 +20,18 @@
  * would then have no consumer at all, which is precisely the gap this package closes.
  *
  * <p>Assumptions: the inventory of fixtures is asserted as a CLOSED set inside the consumer, not just
- * iterated. A test that read only the files it named would stay green after a fixture was added with
- * no consumer, so the count and the names are both asserted.
+ * iterated, and the closure is established by DISCOVERING the fixture directory rather than by naming
+ * its contents. {@code AuthorizationFixtureContractTest.everyFixtureIsPresentAndEnrolled} enumerates the
+ * directory from the test class path and requires it to name exactly the resources the test enrols, and
+ * requires both to number the count the fixture {@code README.md} publishes.
+ *
+ * <p>Refactoring Rationale: that closure used to be asserted by comparing the enrolled list against a
+ * literal count, and a list compared against itself agrees however many files are on disk. The gap was
+ * real rather than theoretical -- six fixtures had accumulated in the directory with no enrolment and no
+ * consumer of any kind, so their bytes could have changed, or the files disappeared, with the whole
+ * module staying green, which is the exact condition the paragraph above claimed to exclude. A fixture
+ * added now fails that case until it is enrolled, given a consumer and recorded in the README with the
+ * published count moved to match.
  *
  *
  * <p>Assumptions: this directory is the only place in the module where PACKED and BINARY bytes are
@@ -30,12 +40,15 @@
  * negative zero re-encoded with a positive sign each produce a file of exactly the right length holding
  * the wrong values. Length is what a build checks; these tests check meaning.
  *
- * <p>Refactoring Rationale: a review found several committed fixtures that no test read at all.
- * Several of them exist specifically to pin a hazard -- line-terminator bytes inside a binary field, a
+ * <p>Refactoring Rationale: two successive reviews each found committed fixtures that no test read at
+ * all. Several exist specifically to pin a hazard -- line-terminator bytes inside a binary field, a
  * negative zero that must decode but must not re-encode, a non-blank filler that must not be dropped,
- * and two unload variants that differ only in order -- and a hazard nothing exercises is a hazard
- * nobody is warned about. Every fixture now has an assertion that fails if its bytes change, and the
- * closed-set inventory above is what keeps that true as fixtures are added.
+ * two unload variants that differ only in order, a reply frame carrying one byte more than its declared
+ * width, a five-hundred-byte receive buffer, a match status outside its closed domain, and a key whose
+ * stored bytes are impossible unless they are complemented -- and a hazard nothing exercises is a hazard
+ * nobody is warned about. Every fixture now has at least one consumer that fails if its bytes change,
+ * and the directory-discovering closure above is what keeps that true as fixtures are added, in place of
+ * the self-comparing count that let the second batch through.
  *
  * <p>Trade-offs: one consumer here decodes the hundred-byte summary segment through a descriptor it
  * builds itself rather than through {@code CopybookLayout.layout("PAUTSUM0")}, and the reason is

@@ -10,6 +10,7 @@ import com.carddemo.common.codec.CsvAuthCodec.AuthMessageFormatException;
 import com.carddemo.common.codec.CsvAuthCodec.AuthReply;
 import com.carddemo.common.codec.CsvAuthCodec.AuthRequest;
 import com.carddemo.common.observability.LogSafeText;
+import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.common.security.OpaqueIdentifier;
 import com.carddemo.common.web.CorrelationIdFilter;
 import jakarta.validation.ConstraintViolation;
@@ -166,6 +167,47 @@ public class AuthorizationMessageMapper {
     public static final String ERROR_LEVEL_CRITICAL = "C";
 
     /**
+     * The diagnostic severity the reference program records a business condition under.
+     *
+     * <p>Assumptions: {@code 88 ERR-WARNING VALUE 'W'} at {@code cpy/CCPAUERY.cpy} L28. The reference
+     * uses exactly this severity for the three record-not-found conditions -- {@code 5100-READ-XREF-RECORD}
+     * at {@code cbl/COPAUA0C.cbl} L495, the account read at L542 and the customer read at L590 -- each
+     * paired with {@link #ERROR_SUBSYSTEM_APPLICATION}. It is NOT terminal: the program records the
+     * condition, declines the authorization and carries on with the next message, which is why
+     * {@link ErrorLogEntry#isTerminal()} answers false for it.</p>
+     */
+    public static final String ERROR_LEVEL_WARNING = "W";
+
+    /**
+     * The diagnostic subsystem the reference program attributes a business condition to.
+     *
+     * <p>Assumptions: {@code 88 ERR-APP VALUE 'A'} at {@code cpy/CCPAUERY.cpy} L31, as opposed to the
+     * five infrastructure subsystems declared beside it at L32 to L36. A record that is simply absent is
+     * the application's own condition rather than a fault of the datastore that answered, which is the
+     * distinction the reference draws by pairing this subsystem with the warning severity while pairing
+     * a datastore fault with {@link #ERROR_LEVEL_CRITICAL} and that datastore's own subsystem.</p>
+     */
+    public static final String ERROR_SUBSYSTEM_APPLICATION = "A";
+
+    /**
+     * The purpose the diagnostic event key is tokenised under.
+     *
+     * <p>Assumptions: the value follows the same three-part shape as the purposes
+     * {@code CsvAuthCodec} declares for the queue identities -- {@code carddemo/pauth/correlation},
+     * {@code carddemo/pauth/order-group} and {@code carddemo/pauth/deduplication} -- so the whole set is
+     * readable as one namespace and a reader can see at a glance that four purposes exist and what each
+     * is for.</p>
+     *
+     * <p>Assumptions: it is DISTINCT from all three of those, and the distinctness is the control rather
+     * than a naming nicety. {@code OpaqueIdentifier} authenticates the purpose along with the value, so
+     * two purposes yield unrelated tokens for one input; sharing the correlation purpose would let a
+     * reader of the log stream match a diagnostic line to a queue message carrying the same token and
+     * recover, by correlation, which card the failure concerned -- reconstructing from two tokenised
+     * values the identifier neither of them discloses.</p>
+     */
+    public static final String EVENT_KEY_TOKEN_PURPOSE = "carddemo/pauth/diagnostic-event-key";
+
+    /**
      * The pattern the diagnostic record's date field is rendered in, year first.
      *
      * <p>Assumptions: {@code cbl/COPAUA0C.cbl} L990 to L994 format the current instant with
@@ -186,6 +228,37 @@ public class AuthorizationMessageMapper {
      */
     private static final DateTimeFormatter ERROR_TIME_PATTERN = DateTimeFormatter.ofPattern("HHmmss");
 
+
+    /**
+     * The wire position of {@code PA-RQ-PROCESSING-CODE} among the eighteen request fields.
+     *
+     * <p>Assumptions: the position is recorded as an index into
+     * {@link CsvAuthCodec#REQUEST_FIELD_WIDTHS} rather than as the width itself, so the declared width
+     * this class fills to has exactly one source -- the codec that also encodes and decodes it. Writing
+     * the six here would create a second statement of the same copybook fact, and a copybook change
+     * would then leave the two disagreeing with nothing failing. The field is the eighth declared at
+     * {@code cpy/CCPAURQY.cpy} L26, hence the zero-based seven.</p>
+     */
+    private static final int PROCESSING_CODE_POSITION = 7;
+
+    /**
+     * The wire position of {@code PA-RQ-POS-ENTRY-MODE} among the eighteen request fields.
+     *
+     * <p>Assumptions: the twelfth field declared at {@code cpy/CCPAURQY.cpy} L30, hence the zero-based
+     * eleven, indexed into {@link CsvAuthCodec#REQUEST_FIELD_WIDTHS} for the reason recorded on
+     * {@link #PROCESSING_CODE_POSITION}.</p>
+     */
+    private static final int POS_ENTRY_MODE_POSITION = 11;
+
+    /**
+     * The character a numeric-display field is filled with on the left.
+     *
+     * <p>Assumptions: a {@code PIC 9(n)} field moved a shorter value into is filled with zeros and not
+     * with blanks, which is the whole difference between this constant and the pad character the codec
+     * applies on the right to a {@code PIC X(n)} field.</p>
+     */
+    private static final char NUMERIC_DISPLAY_FILL = '0';
+
     /**
      * The validation engine the payload constraints are applied through.
      */
@@ -201,9 +274,17 @@ public class AuthorizationMessageMapper {
      * instance to be shared by every consumer.</p>
      *
      * @param validator the validation engine; must not be {@code null}
+     * @throws NullPointerException if {@code validator} is {@code null}
      */
     public AuthorizationMessageMapper(Validator validator) {
-        this.validator = validator;
+        // WHY : Refactoring Rationale: the engine is null-checked HERE, and it was not -- the parameter
+        //       was documented as required and then assigned unchecked. An absent engine has no
+        //       observable consequence at construction; it surfaces on the first crossing, as a null
+        //       dereference inside a validation call, in a component that has already accepted a message
+        //       off a queue and is midway through deciding an authorization. Refusing it at construction
+        //       turns a mis-wired context into a startup failure naming the missing collaborator, which
+        //       is the difference between a deployment that never serves and one that fails per message.
+        this.validator = Objects.requireNonNull(validator, "validator must not be null");
     }
 
     /**
@@ -269,9 +350,9 @@ public class AuthorizationMessageMapper {
         requireValid(payload, "authorization request payload");
         return new AuthRequest(payload.authDate(), payload.authTime(), payload.cardNumber(),
                 payload.authType(), payload.cardExpiryDate(), payload.messageType(),
-                payload.messageSource(), payload.processingCode(), payload.transactionAmount(),
+                payload.messageSource(), numericDisplay(payload.processingCode(), PROCESSING_CODE_POSITION), payload.transactionAmount(),
                 payload.merchantCategoryCode(), payload.acquirerCountryCode(),
-                payload.posEntryMode(), payload.merchantId(), payload.merchantName(),
+                numericDisplay(payload.posEntryMode(), POS_ENTRY_MODE_POSITION), payload.merchantId(), payload.merchantName(),
                 payload.merchantCity(), payload.merchantState(), payload.merchantZip(),
                 payload.transactionId());
     }
@@ -403,6 +484,7 @@ public class AuthorizationMessageMapper {
         Objects.requireNonNull(request, "request wire record must not be null");
         Objects.requireNonNull(decision, "decision reply must not be null");
         Objects.requireNonNull(matchStatus, "match status must not be null");
+        requireAnswers(request, decision);
 
         // WHY : Assumptions: the request's own date and time become the ORIGINATING date and time,
         //       not the key's. The reference insert draws them from the request while keying the row
@@ -681,6 +763,79 @@ public class AuthorizationMessageMapper {
     }
 
     /**
+     * Refuses a reply that does not answer the request it is being combined with.
+     *
+     * <p>Refactoring Rationale: this check did not exist, and its absence was reachable by an ordinary
+     * mistake rather than by misuse. The projection above takes the acquirer's fields from one object
+     * and the decided fields from another, and the two identifiers that say the pair belong together --
+     * the card number at {@code cpy/CCPAURQY.cpy} L21 and {@code cpy/CCPAURLY.cpy} L19, the transaction
+     * identifier at L36 and L20 -- appear on both. With no check, a caller that paired one
+     * authorization's request with another's reply produced a detail row carrying one card's merchant
+     * data and another card's decision, and the same pair then addressed the reply: the wrong requester
+     * would be told the wrong outcome, and the persisted history of two accounts would both be wrong,
+     * with nothing failing at any point.</p>
+     *
+     * <p>Alternatives Considered: passing the four decided fields as parameters instead of a reply
+     * object, which would make the mismatch unrepresentable. Rejected on the reasoning already recorded
+     * on the projection: separate parameters let a caller persist one response code and transmit
+     * another, which is a worse failure than the one this check closes because it has no single place it
+     * could be detected. Alternatives Considered: comparing the values after trimming. Rejected because
+     * both records hold declared-width character fields with their trailing pad already removed by the
+     * codec, so two renderings of one identity are equal as they stand; admitting a difference in
+     * trailing blanks would accept a pair assembled from two different decodings and lose the property
+     * being checked.</p>
+     *
+     * @param request the decoded request supplying the acquirer's fields; must not be {@code null}
+     * @param decision the reply supplying the decided fields; must not be {@code null}
+     * @throws IllegalArgumentException if the two disagree on the card number or on the transaction
+     *     identifier; the message names WHICH identifier disagrees and neither value, because one of
+     *     them is a primary account number
+     */
+    private static void requireAnswers(AuthRequest request, AuthReply decision) {
+        if (!Objects.equals(request.cardNum(), decision.cardNum())) {
+            throw new IllegalArgumentException("the reply's PA-RL-CARD-NUM does not match the"
+                    + " request's PA-RQ-CARD-NUM, so the reply does not answer this request");
+        }
+        if (!Objects.equals(request.transactionId(), decision.transactionId())) {
+            throw new IllegalArgumentException("the reply's PA-RL-TRANSACTION-ID does not match the"
+                    + " request's PA-RQ-TRANSACTION-ID, so the reply does not answer this request");
+        }
+    }
+
+    /**
+     * Fills a numeric-display field on the left with zeros to the width its copybook line declares.
+     *
+     * <p>Assumptions: only a SHORT value is altered. A value already at the declared width crosses
+     * unchanged, and an over-wide one crosses unchanged as well so that the wire record's own
+     * constructor refuses it by name -- refusing it here would report the fault without the copybook
+     * field it belongs to, and truncating it would send a different number than the caller supplied.</p>
+     *
+     * <p>Assumptions: an absent value stays absent. A blank or {@code null} numeric-display field means
+     * the acquirer supplied nothing, and filling it would emit six or two zeros -- a specific claim
+     * ({@code 000000} is a processing code, {@code 00} an entry mode) where none was made.</p>
+     *
+     * @param value the field value as the payload carries it, which may be {@code null} or blank
+     * @param position the field's zero-based position among the eighteen request fields, used to read
+     *     its declared width from {@link CsvAuthCodec#REQUEST_FIELD_WIDTHS}
+     * @return the value filled on the left to the declared width, or the value unaltered when it is
+     *     absent, blank, already at that width or wider than it
+     */
+    private static String numericDisplay(String value, int position) {
+        if (value == null || value.isBlank()) {
+            return value;
+        }
+        int declaredWidth = CsvAuthCodec.REQUEST_FIELD_WIDTHS.get(position);
+        if (value.length() >= declaredWidth) {
+            return value;
+        }
+        StringBuilder filled = new StringBuilder(declaredWidth);
+        while (filled.length() < declaredWidth - value.length()) {
+            filled.append(NUMERIC_DISPLAY_FILL);
+        }
+        return filled.append(value).toString();
+    }
+
+    /**
      * The transport metadata of an inbound request that its reply has to be addressed and dated by.
      *
      * <p>Assumptions: the reference message descriptor's concerns map onto three transport attributes
@@ -716,6 +871,91 @@ public class AuthorizationMessageMapper {
      */
     public record ReplyRouting(String replyQueueUrl, String correlationId,
             LocalDateTime expiresAt) {
+
+        /**
+         * Refuses a routing that cannot be made durable or cannot be addressed.
+         *
+         * <p>Refactoring Rationale: these components were accepted unchecked. A routing is the address a
+         * committed decision's reply is sent to and the identity that reply is correlated by, and it is
+         * built from message attributes the REQUESTER supplies. An absent or blank destination produced
+         * an outbox row that no dispatcher could deliver, and an over-wide component produced one the
+         * storing column truncated or refused at flush time -- both failures surfacing after the
+         * authorization was committed, when the reply is the only thing left to go wrong. Refusing at
+         * construction moves the failure to the point that has the faulty value.</p>
+         *
+         * @param replyQueueUrl the destination the reply is sent to, taken from the request message's
+         *     reply-to attribute; required and never blank, because an outbox row naming no destination
+         *     can never be delivered
+         * @param correlationId the identity the reply is correlated by, taken from the request message's
+         *     correlation attribute; optional, since a requester that supplied none is answered on the
+         *     destination alone
+         * @param expiresAt the instant after which the reply is stale and is dropped rather than sent,
+         *     which is the target equivalent of the reference producer's message expiry; required
+         * @throws NullPointerException if {@code replyQueueUrl} or {@code expiresAt} is {@code null}
+         * @throws IllegalArgumentException if {@code replyQueueUrl} is blank, or if either component is
+         *     wider than the column that stores it
+         */
+        public ReplyRouting {
+            Objects.requireNonNull(replyQueueUrl, "replyQueueUrl must not be null");
+            if (replyQueueUrl.isBlank()) {
+                throw new IllegalArgumentException("replyQueueUrl must not be blank");
+            }
+            requireWithin(replyQueueUrl, "replyQueueUrl", OutboxMessage.REPLY_QUEUE_URL_MAX_LENGTH);
+            requireWithin(correlationId, "correlationId", OutboxMessage.CORRELATION_ID_MAX_LENGTH);
+            Objects.requireNonNull(expiresAt, "expiresAt must not be null");
+        }
+
+        /**
+         * Refuses a component wider than the column that stores it.
+         *
+         * <p>Assumptions: the failure names the component and its two lengths and never its value. A
+         * reply destination is a deployment address and a correlation identity arrives from a message
+         * attribute, so one of the two is attacker-influenced text, and this refusal is reported through
+         * the same log stream every other diagnostic on this path uses.</p>
+         *
+         * @param value the component to check, which may be {@code null} for an absent optional one
+         * @param component the component's name, reproduced in the refusal
+         * @param maxLength the width the storing column declares
+         * @throws IllegalArgumentException if {@code value} is present and wider than {@code maxLength}
+         */
+        private static void requireWithin(String value, String component, int maxLength) {
+            if (value != null && value.length() > maxLength) {
+                throw new IllegalArgumentException(component + " is " + value.length()
+                        + " characters but at most " + maxLength + " can be made durable");
+            }
+        }
+
+        /**
+         * Renders the routing for a diagnostic line, omitting the destination it names.
+         *
+         * <p>Assumptions: the destination is OMITTED and its presence is reported instead. A queue
+         * destination is deployment topology -- it carries the account the queue belongs to, the region
+         * it lives in and the queue's own name -- and it arrives on an attribute the REQUESTER controls,
+         * so a rendering that reproduced it would put a requester-supplied string describing our own
+         * infrastructure into a log store. The rendering rule in
+         * {@code docs/architecture/observability.md} requires omission rather than abbreviation for a
+         * withheld value, and a truncated queue address would still name the account.</p>
+         *
+         * <p>Assumptions: the correlation identity IS rendered, and it is the one member of this record
+         * that a diagnostic needs. Part three of that rule admits it by name, and the same value reaches
+         * the log stream through {@link CorrelationIdFilter#CORRELATION_ID_MDC_KEY} on the request path
+         * -- so rendering it here is what lets a reply's diagnostic line be joined to the request that
+         * produced it, which is the join the rule offers in place of naming a row.</p>
+         *
+         * <p>Trade-offs: reporting the destination as a boolean rather than dropping the member entirely
+         * costs one word and answers the question a reader of this line actually has, which is whether a
+         * reply could be addressed at all. A missing destination and an unreachable one present the same
+         * way in a queue client's failure, and only this distinguishes them.</p>
+         *
+         * @return a single-line rendering naming the correlation identity and whether a destination and
+         *     a deadline are present, and no queue address; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "ReplyRouting[correlationId=" + this.correlationId
+                    + ", destinationPresent=" + (this.replyQueueUrl != null)
+                    + ", expiresAt=" + this.expiresAt + "]";
+        }
     }
 
     /**
@@ -787,7 +1027,8 @@ public class AuthorizationMessageMapper {
         }
 
         /**
-         * Projects the eleven fields onto the key and value pairs a structured logger emits.
+         * Projects the fields onto the key and value pairs a structured logger emits, omitting the
+         * event key.
          *
          * <p>Assumptions: every value is passed through
          * {@link LogSafeText#sanitize(String)} first. Several of these fields originate in a message
@@ -797,13 +1038,26 @@ public class AuthorizationMessageMapper {
          * fixed-width character data; that was rejected because the declared width bounds the LENGTH of
          * a value and says nothing about which characters it contains.</p>
          *
-         * <p>Assumptions: the keys are the target field names rather than the copybook names, and the
-         * ordering is the declaration order of {@code cpy/CCPAUERY.cpy} L20 to L40. Insertion order is
-         * preserved deliberately, so a diagnostic read as a whole appears in the same sequence as the
-         * one-hundred-and-twenty-two character record it stands for.</p>
+         * <p>Refactoring Rationale: this projection used to emit {@code eventKey} verbatim, and
+         * sanitizing it was not enough, because sanitizing prevents log FORGING and not
+         * DISCLOSURE. The reference program puts the key of the item being processed into that field,
+         * and for this consumer the item is an authorization -- so the twenty characters carry a primary
+         * account number, an account identifier or a customer identifier depending on which step failed.
+         * Emitting it sent a protected identifier to centralized logging on every failure, which is the
+         * one path guaranteed to be exercised when something is already going wrong. The field is now
+         * omitted from this projection, and the overload below is the only way to record it, in
+         * tokenised form.</p>
          *
-         * @return the sanitized fields in declaration order, never {@code null} and never containing a
-         *     {@code null} value, absent components appearing as an empty value
+         * <p>Alternatives Considered: masking the key in place with {@link CardNumberMasker}, so the
+         * field kept its name and its position. Rejected because the masker abbreviates a card number
+         * and this field is not always one: an eleven-digit account identifier and a nine-digit customer
+         * identifier both fall below the width a card masker recognises, so they would pass through
+         * unchanged while the field's name asserted it had been masked. A control that works for one of
+         * three cases and announces itself for all three is worse than none.</p>
+         *
+         * @return the sanitized fields in declaration order with {@code eventKey} absent, never
+         *     {@code null} and never containing a {@code null} value, absent components appearing as an
+         *     empty value
          */
         public Map<String, String> structuredFields() {
             Map<String, String> fields = new LinkedHashMap<>();
@@ -817,8 +1071,84 @@ public class AuthorizationMessageMapper {
             fields.put("codeOne", safe(this.codeOne));
             fields.put("codeTwo", safe(this.codeTwo));
             fields.put("message", safe(this.message));
-            fields.put("eventKey", safe(this.eventKey));
             return fields;
+        }
+
+        /**
+         * Projects the fields for a structured logger and records the event key as a keyed token.
+         *
+         * <p>Assumptions: the caller supplies the tokeniser rather than this record reaching for one,
+         * and that is the shape {@code docs/architecture/observability.md} sanctions for exactly this
+         * problem: a keyed opaque token is "the right control ... where the caller holds the tokeniser
+         * and passes it in". A method that takes an argument can be handed a collaborator where a
+         * {@code toString()} cannot, which is why the tokenised form lives here and not on the rendering
+         * below.</p>
+         *
+         * <p>Assumptions: the token is derived under a purpose of its own, so the same identifier
+         * tokenised for a queue group and tokenised for a diagnostic do not produce the same value. That
+         * separation is what stops a reader of the log stream from joining a diagnostic line to a queue
+         * message and recovering which card a group belongs to by correlation, which would reconstruct
+         * from two tokenised values the identifier neither of them discloses.</p>
+         *
+         * <p>Assumptions: the key is sanitized BEFORE it is tokenised. The tokeniser accepts any
+         * character, so sanitizing afterwards would be sanitizing a value that is already
+         * base-thirty-two text and cannot carry a line break; doing it first means the token identifies
+         * the value the producer actually sent rather than a value with control characters still in
+         * it, so two failures carrying the same key agree.</p>
+         *
+         * <p>Trade-offs: an absent or blank key yields an absent entry rather than a token of the empty
+         * string. A token of nothing is a fixed value that every keyless failure would share, and a
+         * reader would reasonably read repeated identical tokens as repeated failures on one item.</p>
+         *
+         * @param tokeniser the keyed tokeniser the event key is derived through, which the caller holds;
+         *     must not be {@code null}
+         * @return the sanitized fields in declaration order followed by {@code eventKeyToken}, which is
+         *     absent when this record carries no key; never {@code null}
+         * @throws NullPointerException if {@code tokeniser} is {@code null}, because a projection that
+         *     silently omitted the token would be indistinguishable from one whose key was absent
+         */
+        public Map<String, String> structuredFields(OpaqueIdentifier tokeniser) {
+            Objects.requireNonNull(tokeniser, "tokeniser must not be null");
+            Map<String, String> fields = structuredFields();
+            String sanitizedKey = safe(this.eventKey);
+            if (!sanitizedKey.isBlank()) {
+                fields.put("eventKeyToken",
+                        tokeniser.token(EVENT_KEY_TOKEN_PURPOSE, sanitizedKey.trim()));
+            }
+            return fields;
+        }
+
+        /**
+         * Renders the diagnostic for a log line, omitting the event key.
+         *
+         * <p>Assumptions: the nine bounded members are rendered and the event key is not, for the reason
+         * the projection above records -- the twenty characters carry a primary account number, an
+         * account identifier or a customer identifier, and part one of the rendering rule in
+         * {@code docs/architecture/observability.md} omits all three as a class. The tokenised form is
+         * unavailable here because a {@code toString()} takes no argument and so cannot be handed a
+         * tokeniser, which that document states as the reason tokens do not reach a rendering.</p>
+         *
+         * <p>Assumptions: the description IS rendered, sanitized. It is a fifty-character account of
+         * what failed rather than data about a cardholder, so it is the one member of this record a
+         * reader is looking for; sanitizing it in the rendering as well as in the projection matters
+         * because a rendering reaches a log line by exactly the same route.</p>
+         *
+         * @return a single-line rendering naming the observation date and time, the component
+         *     coordinates, the severity, both status codes and the sanitized description, and no event
+         *     key in any form; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "ErrorLogEntry[errDate=" + safe(this.errDate)
+                    + ", errTime=" + safe(this.errTime)
+                    + ", application=" + safe(this.application)
+                    + ", program=" + safe(this.program)
+                    + ", location=" + safe(this.location)
+                    + ", level=" + safe(this.level)
+                    + ", subsystem=" + safe(this.subsystem)
+                    + ", codeOne=" + safe(this.codeOne)
+                    + ", codeTwo=" + safe(this.codeTwo)
+                    + ", message=" + safe(this.message) + "]";
         }
 
         /**

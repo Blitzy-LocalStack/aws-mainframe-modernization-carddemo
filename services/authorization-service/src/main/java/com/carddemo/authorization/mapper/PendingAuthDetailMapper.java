@@ -881,8 +881,17 @@ public final class PendingAuthDetailMapper {
      * has already chosen seventy elsewhere, and agreeing with it is the whole point: two pivots in one
      * module would resolve one stored authorization to two different years depending on which code path
      * widened it, and the disagreement would surface as two views of the same row showing different
-     * centuries rather than as any failure. Every two-digit year in the committed fixtures is 23 or 24
-     * and therefore takes the twenty-first-century branch.</p>
+     * centuries rather than as any failure.</p>
+     *
+     * <p>Refactoring Rationale: BOTH branches are reachable from committed data and both are exercised,
+     * which is a correction rather than an elaboration. This paragraph previously read "Every two-digit
+     * year in the committed fixtures is 23 or 24 and therefore takes the twenty-first-century branch",
+     * and {@code pautdtl1-date-formats.bin} falsified it: its second record stores {@code 991231}, whose
+     * year of 99 is at or above the pivot and resolves to 1999. The statement mattered more than its
+     * size, because a reader who believed the twentieth-century branch unreachable in practice could
+     * have removed it as dead. {@code PendingAuthDetailDatePivotFixtureTest} now drives that record and
+     * asserts 1999 rather than 2099, so the branch has an oracle and this paragraph cannot go stale in
+     * the same direction again -- a fixture year crossing the pivot fails there.</p>
      *
      * @param twoDigitYear the two digits as stored; must be between zero and ninety-nine inclusive
      * @return the four-digit calendar year the pivot assigns
@@ -1491,11 +1500,20 @@ public final class PendingAuthDetailMapper {
      * space or as a null. The reference insert path writes blanks into both on every insert, so blank is
      * the ordinary case and not an edge one.</p>
      *
-     * <p>Trade-offs: an occurrence whose match status is the expired or matched value is REFUSED, because
-     * the entity's constructor admits only the two an insert originates. The compromise accepted is that
-     * this operation covers three of the four states a stored segment can be in; what it buys is that no
-     * path here can fabricate an entity asserting an outcome no insert produced. Callers reading those
-     * occurrences use {@link #toSegmentFields(byte[])}, which reaches every state.</p>
+     * <p>Refactoring Rationale: this operation now reaches ALL FOUR stored states, through
+     * {@link PendingAuthDetail#rehydrated}, and it previously reached three. It routed every occurrence
+     * through the entity's originating constructor, which admits only the two values an insert selects
+     * between, so a segment carrying the expired or the matched value was refused with a message stating
+     * that the value "is reached by a later transition and never by an insert" -- true of the constructor
+     * and false of the segment. Those two states are not edge cases: the purge job writes the first and
+     * the posting match writes the second, the migration's own check constraint admits both, and the
+     * committed fixture {@code pautdtl1-match-status-domain.bin} carries one occurrence of each, so an
+     * extract load of real data failed on them. The entity now separates originating a decision from
+     * reconstituting a row and this operation is a reconstitution, which is why it uses the second.
+     *
+     * <p>Assumptions: the narrow rule still applies where it belongs. Nothing here can fabricate a NEW
+     * decision claiming to have been matched, because the decision path uses the constructor and the
+     * constructor is unchanged; what changed is that a LOAD is no longer held to the rule of an insert.
      *
      * @param segment one detail segment image; must not be null and must be exactly the declared segment
      *     length
@@ -1509,10 +1527,10 @@ public final class PendingAuthDetailMapper {
      *     storage regime
      * @throws ArithmeticException if a decoded key component or amount exceeds the range its target
      *     holds
-     * @throws IllegalArgumentException if a stored complement is out of range, if the match status is
-     *     outside the closed domain or is one an insert path cannot originate, if the entry mode is
-     *     outside the range its picture admits, or if a fraud position is present with a report date of
-     *     the wrong width
+     * @throws IllegalArgumentException if a stored complement is out of range, if the decoded key falls
+     *     outside the domain its columns declare, if the match status is outside the closed four-value
+     *     domain, if the entry mode is outside the range its picture admits, or if a fraud position is
+     *     present with a report date of the wrong width
      */
     public static PendingAuthDetail toEntity(byte[] segment, Long accountId) {
         Objects.requireNonNull(accountId, "accountId must not be null");
@@ -1525,7 +1543,10 @@ public final class PendingAuthDetailMapper {
         Map<String, Object> fields = toSegmentFields(segment);
         PendingAuthDetailKey key = keyOf(fields, accountId);
 
-        PendingAuthDetail detail = new PendingAuthDetail(key,
+        // WHY : Refactoring Rationale: the rehydration factory rather than the constructor, for the reason
+        //       recorded on this method: a stored occurrence may hold any of the four match statuses its
+        //       column admits, and the constructor admits only the two an insert originates.
+        PendingAuthDetail detail = PendingAuthDetail.rehydrated(key,
                 text(fields, FIELD_AUTH_ORIG_DATE),
                 text(fields, FIELD_AUTH_ORIG_TIME),
                 text(fields, FIELD_CARD_NUM),
@@ -1593,6 +1614,49 @@ public final class PendingAuthDetailMapper {
      */
     public static byte[] toSegment(PendingAuthDetail detail) {
         return FixedWidthCodec.encodeRecord(segmentFieldsOf(detail), SEGMENT);
+    }
+
+    /**
+     * Encodes an entity into one prefixed unload record, for the unload path.
+     *
+     * <p>Purpose: this is the exact inverse of {@link #fromUnloadRecord(byte[])} and the encode half of
+     * what {@code cbl/PAUDBUNL.CBL} performs per child segment -- L44 to L48 declare the record as a
+     * packed eleven-digit parent key ahead of the two-hundred-byte segment, and the write at its
+     * {@code 3000-FIND-NEXT-AUTH-DTL} paragraph emits exactly that pair after moving
+     * {@code PA-ACCT-ID} into the prefix.</p>
+     *
+     * <p>Assumptions: the prefix is taken from the entity's OWN key rather than from a parameter, because
+     * the reference program writes the account identifier of the parent it is currently positioned on and
+     * the child it just read belongs to that parent by construction. Accepting an identifier here would
+     * make it possible to emit a record whose prefix names one account and whose segment belongs to
+     * another, and nothing downstream could detect it: both halves would be well-formed.</p>
+     *
+     * <p>Assumptions: the prefix is written as packed decimal and never as text, matching the
+     * {@code PIC S9(11) COMP-3} the record declares, and its width is computed from that picture rather
+     * than written as six so that the two cannot disagree.</p>
+     *
+     * @param detail the stored authorization to encode; must not be {@code null}, and its key must carry
+     *     an account identifier because the prefix column cannot be omitted
+     * @return a newly allocated record of exactly {@link #unloadRecordLength()} bytes
+     * @throws NullPointerException if {@code detail} is {@code null}, or if it carries no key, or if its
+     *     key carries no account identifier
+     * @throws FixedWidthCodec.FieldCodecException if a stored value does not fit its declared interval
+     * @throws PackedDecimalCodec.PackedDecimalException if the account identifier needs more than the
+     *     eleven digits the prefix declares, or if a stored amount exceeds its picture
+     */
+    public static byte[] toUnloadRecord(PendingAuthDetail detail) {
+        Objects.requireNonNull(detail, "detail must not be null");
+        PendingAuthDetailKey key = Objects.requireNonNull(detail.getId(),
+                "detail must carry a key, because the unload prefix is taken from it");
+        Long accountId = Objects.requireNonNull(key.getAccountId(),
+                "the key must carry an account identifier, because the prefix column cannot be omitted");
+
+        byte[] record = new byte[unloadRecordLength()];
+        byte[] prefix = PackedDecimalCodec.encodePacked(
+                BigDecimal.valueOf(accountId), UNLOAD_ROOT_KEY_DIGITS, 0, true);
+        System.arraycopy(prefix, 0, record, 0, UNLOAD_ROOT_KEY_WIDTH);
+        System.arraycopy(toSegment(detail), 0, record, UNLOAD_ROOT_KEY_WIDTH, SEGMENT.reclen());
+        return record;
     }
 
     /**

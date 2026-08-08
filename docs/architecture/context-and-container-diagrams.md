@@ -433,9 +433,9 @@ Service names and schema names are taken verbatim from
 ```mermaid
 graph TB
     BROWSER["Browser<br/>single-page application<br/>React and TypeScript"]
-    CI["Target deployment workflow<br/>OIDC role assumption<br/>not authored"]
-    REGISTRY[("Private container registry<br/>scan on push<br/>image reference placeholder only")]
-    OPS["Operator<br/>target runbook commands<br/>not authored"]
+    CI["Deployment workflow<br/>.github/workflows/deploy.yml<br/>OIDC role assumption · authored"]
+    REGISTRY[("Private container registry<br/>scan on push<br/>image reference supplied by the deploy workflow")]
+    OPS["Operator<br/>docs/runbooks/ · four runbooks authored<br/>deploy · teardown · data-migration · batch-operations"]
 
     subgraph EDGE["Public edge"]
         CDN["Content delivery network<br/>origin access control<br/>single-page routing"]
@@ -453,7 +453,7 @@ graph TB
             ALB["Internal load balancer<br/>reached from the edge<br/>through a private link"]
             SVC["Eight target services on serverless containers<br/>auth-service · account-service · card-service<br/>transaction-service · reference-service<br/>batch-service · authorization-service · reporting-service"]
             BATCHTASK["Target batch tasks<br/>one task per orchestration state"]
-            ENDPOINTS["Target interface endpoints<br/>network resource graph absent"]
+            ENDPOINTS["Interface endpoints<br/>declared by infra/modules/network"]
             S3GW["Target gateway endpoint<br/>object store"]
         end
 
@@ -480,7 +480,7 @@ graph TB
     subgraph XCUT["Cross-cutting"]
         KMS["Customer-managed keys<br/>with rotation"]
         SECRETS["Secret store<br/>values generated at provisioning time"]
-        OBS["Target logs · metrics · traces<br/>observability resource graph absent"]
+        OBS["Logs · metrics · traces · alarms<br/>declared by infra/modules/observability"]
     end
 
     BROWSER --> CDN
@@ -528,8 +528,10 @@ graph TB
 %% counterpart here, for the reason given in the legend below.
 %% Reporting reads reach AURORA through SELECT-only cross-schema views on the
 %% WRITER. No read replica exists in this design.
-%% This is a target-contract diagram. The network, orchestration, observability and
-%% environment composition needed to make several drawn paths real are not authored.
+%% This is a target-contract diagram. Every node above is declared by an authored
+%% Terraform module or workflow -- network, orchestration and observability included --
+%% and both environment roots compose them. What is NOT claimed is a live apply: no
+%% drawn path has been exercised against a provisioned AWS account.
 ```
 
 ### Target-state legend
@@ -670,13 +672,18 @@ present ones.
   responsibilities, owned data and inter-service dependency edges are the subject of
   [`service-catalog.md`](service-catalog.md), which draws exactly that graph. The
   names are listed inside the node so the correspondence is not lost.
-- Assumptions: **the container registry appears as a placeholder, deliberately.**
-  No registry hostname, account identifier or resource identifier appears anywhere
-  in this document. Image references are shown as a placeholder because a concrete
-  registry address is an account-specific value that has no place in version
-  control. The target deployment contract uses short-lived federated role assumption
-  rather than a stored credential, but the workflow is not authored; the placeholder
-  therefore describes a target boundary rather than a current CI path.
+- Assumptions: **the container registry appears without an address, deliberately.**
+  No registry hostname, account identifier or resource identifier appears anywhere in
+  this document, because a concrete registry address is an account-specific value that
+  has no place in version control. The image reference reaching a task is produced at
+  deploy time and consumed through the `image_uri` input of
+  [`../../infra/modules/ecs-service`](../../infra/modules/ecs-service).
+  Refactoring Rationale: this bullet previously said the deployment workflow was not
+  authored, so the registry described a target boundary rather than a CI path.
+  [`.github/workflows/deploy.yml`](../../.github/workflows/deploy.yml) is authored and
+  does assume a role by OIDC with no stored credential, so the edge is a real CI path;
+  what remains unproven is that it has ever run against a live account, and that is the
+  narrower claim this bullet now makes.
 
 
 
@@ -706,9 +713,9 @@ migration. One line per row, with the owning sibling document named for the deta
 | System authorization | RACF, the external security manager | Least-privilege task roles plus directory groups — **a mapping, not a port** | Effective privilege boundaries | [`security-and-identity.md`](security-and-identity.md) |
 | Operations | Operator quiesce and resume around the batch window | Orchestration states that set and clear a read-only flag in a parameter store | The quiesce-and-resume bracket around the batch window | `docs/architecture/batch-orchestration.md` |
 | Ad-hoc job submission | An online program writes 80-byte JCL cards to `TDQUEUE(JOBS)` via `DDNAME(INREADER)` | A service starts an orchestration execution | The ability to request a report on demand from the online path | `docs/architecture/batch-orchestration.md` |
-| Deployment | A load library, refreshed by a resource-definition utility | Target container images in a private registry, to be deployed by continuous integration using short-lived federated role assumption; workflow not authored | Deployable-unit versioning and rollback capability | `docs/adr/` |
-| Infrastructure | Not expressed as code anywhere in the baseline | 16 module directories, bootstrap resources and two incomplete environment roots; network/observability/orchestration graphs remain absent | Nothing to preserve — this is net-new, and the row exists to record that | [`../../infra/README.md`](../../infra/README.md) |
-| Observability | Job logs, `SYSOUT` and `SYSPRINT` output, the operator console | Target centralised logs, metrics and traces, with alarms and a notification topic; only selected log resources/configuration are authored | Auditability of every batch step's outcome | [`observability.md`](observability.md) |
+| Deployment | A load library, refreshed by a resource-definition utility | Container images in a private registry, deployed by [`.github/workflows/deploy.yml`](../../.github/workflows/deploy.yml) using short-lived federated role assumption; the workflow is authored, and no run against a live account is claimed | Deployable-unit versioning and rollback capability | `docs/adr/` |
+| Infrastructure | Not expressed as code anywhere in the baseline | 16 module directories, bootstrap resources and two environment roots, each root carrying its backend, variables, tfvars, outputs and README; all 19 directories are authored and statically checked | Nothing to preserve — this is net-new, and the row exists to record that | [`../../infra/README.md`](../../infra/README.md) |
+| Observability | Job logs, `SYSOUT` and `SYSPRINT` output, the operator console | Centralised logs, metrics and traces with alarms and a notification topic, declared by [`../../infra/modules/observability`](../../infra/modules/observability) | Auditability of every batch step's outcome | [`observability.md`](observability.md) |
 
 ### Primitives with no cloud analogue
 
@@ -746,8 +753,8 @@ graph LR
     end
 
     subgraph TARGET["Target contract · AWS · authored incrementally"]
-        T1["9 Maven modules<br/>8 target services<br/>most business implementations absent"]
-        T2["Single-page application target<br/>21 screen routes"]
+        T1["9 Maven modules<br/>8 services · 16 controllers<br/>card-service handlers absent"]
+        T2["Single-page application<br/>21 screen routes contracted<br/>4 authored"]
         T3["Extract-transform-load package<br/>16 infrastructure module directories"]
     end
 

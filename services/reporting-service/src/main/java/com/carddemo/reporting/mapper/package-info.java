@@ -453,7 +453,7 @@
  *
  * <p>The one entry this package defines is the reason its two statement mappers are no longer
  * symmetric. {@code StatementHtmlMapper} routes every value it embeds through
- * {@code StatementHtmlMapper}'s own text-node escaping, because that artifact is opened by a browser
+ * {@code com.carddemo.common.security.HtmlTextEncoder}, because that artifact is opened by a browser
  * where a value carrying a tag opens a tag; {@code StatementTextMapper} routes nothing through it,
  * because that artifact is not markup and is the side a byte comparison against the recorded golden
  * output runs on. A reader who found encoding in one mapper and not the other would reasonably suspect

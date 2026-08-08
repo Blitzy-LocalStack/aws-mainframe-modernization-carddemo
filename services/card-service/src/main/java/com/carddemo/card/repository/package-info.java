@@ -3,22 +3,29 @@
  * card rows into a query, and the sole owner of both access paths by which a card record can be
  * reached at all.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored this charter</h2>
+ * <h2>Contract and current membership, which now agree</h2>
  *
- * <p>Assumptions: the roster below states this package's <b>target contract</b> as the migration plan
- * assigns it, and is not a measurement of the directory. At the checkpoint that authored this charter
- * the directory holds this charter alone, so the interface named throughout is <b>planned</b> rather
- * than missing. The distinction is declared once, here, because every other statement in this file is
- * written in the present tense of the contract; the context root charter at {@code com.carddemo.card}
- * and the charter in {@code com.carddemo.card.domain} draw the same distinction, so a reader moving
- * between the three finds it in the same place in each.</p>
+ * <p>Assumptions: the roster below is both this package's <b>contract</b> as the migration plan assigns
+ * it and a <b>measurement of the directory</b>, because the interface it governs exists:
+ * {@code CardRepository.java} sits beside this charter and declares the keyed read, the two keyset
+ * browse queries and the by-account query described throughout. Every statement in this file is
+ * therefore in the plain present tense, with no planned-versus-delivered marking to interpret.</p>
  *
- * <p>Alternatives Considered: withholding this charter until the interface it governs exists.
+ * <p>Refactoring Rationale: an earlier revision of this section opened with the qualification that "at
+ * the checkpoint that authored this charter the directory holds this charter alone", so the interface
+ * named throughout was marked planned rather than present. That was true when written and is now false,
+ * and it was the costlier of the two possible errors: a reader consulting this charter to learn whether
+ * the card access paths had an interface -- which is exactly the question a charter answers -- was told
+ * they did not, and would have had no reason to open the file that declares them. The qualification is
+ * removed rather than reworded, because what it stood in for is now simply the case. Assumptions: the
+ * argument for having authored the charter first is kept below rather than deleted with the marker, since
+ * it is the record of a decision and does not go stale with the directory.</p>
+ *
+ * <p>Alternatives Considered: withholding this charter until the interface it governs existed.
  * Rejected, because this charter is what the author of that interface works from -- which column the
  * cursor is, which direction each query walks, which envelope carries the result, and what may not be
- * declared here at all -- so writing it last would leave the package with no stated contract across
- * exactly the interval in which one is needed. The cost accepted is that the roster reads as present
- * tense unless the distinction is declared, which is what the paragraph above declares.</p>
+ * declared here at all -- so writing it last would have left the package with no stated contract across
+ * exactly the interval in which one was needed.</p>
  *
  * <h2>Purpose, and the verb mapping that terminates here</h2>
  *

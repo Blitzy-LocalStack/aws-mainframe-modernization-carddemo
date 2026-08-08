@@ -1,6 +1,7 @@
 package com.carddemo.authorization.service;
 
 import com.carddemo.authorization.domain.AuthReplyOutbox;
+import com.carddemo.authorization.domain.OutboxMessage;
 import com.carddemo.authorization.domain.PendingAuthDetail;
 import com.carddemo.authorization.domain.PendingAuthDetailKey;
 import com.carddemo.authorization.domain.PendingAuthSummary;
@@ -532,8 +533,25 @@ public class AuthorizationRequestListener {
                 new AuthorizationDecisionService.DecisionContext(xref.isPresent(), account,
                         customerFound, summary);
         AuthorizationDecisionService.Decision decision = this.decisions.decide(request, context);
+
+        // WHY : Refactoring Rationale: the reply wire record is built HERE, before the write, where it
+        //       used to be built after it. The detail row and the reply carry the same five decision
+        //       values -- the identification code, the response code, the response reason, the approved
+        //       amount and the card and transaction identity -- and building the reply first lets the row
+        //       be PROJECTED from it rather than assembled a second time from the decision. That is what
+        //       keeps the persisted state and the answer sent to the requester two renderings of one
+        //       decision instead of two independent ones that could drift.
+        // WHY : Alternatives Considered: leaving the reply where it was and passing the decision into the
+        //       write. Rejected because the projection the mapper publishes takes the reply, and it is
+        //       that projection which refuses a reply naming a different card or transaction than the
+        //       request; assembling the row from the decision bypasses the refusal entirely, so the one
+        //       check that cannot be satisfied by construction would never run on the path that persists.
+        AuthReply reply = new AuthReply(request.cardNum(), request.transactionId(),
+                this.decisions.identificationCodeFor(request), decision.responseCode(),
+                decision.responseReason(), decision.approvedAmount());
+
         if (xref.isPresent()) {
-            persist(xref.get(), account, summary, request, decision, now);
+            persist(xref.get(), account, summary, request, decision, reply, now);
         } else {
             // WHY : Assumptions: with no cross-reference row there is no account to hang a summary or a
             // detail row from, so the decline is answered without being recorded. That is the baseline's
@@ -542,9 +560,6 @@ public class AuthorizationRequestListener {
             LOG.warn("event=auth.request.declined reason=card-not-cross-referenced respReason={}",
                     decision.responseReason());
         }
-        AuthReply reply = new AuthReply(request.cardNum(), request.transactionId(),
-                this.decisions.identificationCodeFor(request), decision.responseCode(),
-                decision.responseReason(), decision.approvedAmount());
         enqueueReply(message, reply, correlationId, now);
         LOG.info("event=auth.request.decided approved={} respCode={} respReason={}",
                 decision.approved(), decision.responseCode(), decision.responseReason());
@@ -579,11 +594,14 @@ public class AuthorizationRequestListener {
      * @param summary the locked summary, empty when the account has none yet; must not be {@code null}
      * @param request the decoded request; must not be {@code null}
      * @param decision the decision reached; must not be {@code null}
+     * @param reply the reply wire record this decision answers with, which the detail row is
+     *     projected from so the persisted state and the answer sent cannot drift apart
      * @param now the current instant in coordinated universal time; must not be {@code null}
      */
     private void persist(AccountContextClient.CardXref xref,
             Optional<AccountContextClient.Account> account, Optional<PendingAuthSummary> summary,
-            AuthRequest request, AuthorizationDecisionService.Decision decision, LocalDateTime now) {
+            AuthRequest request, AuthorizationDecisionService.Decision decision, AuthReply reply,
+            LocalDateTime now) {
         PendingAuthSummary held = summary.orElseGet(
                 () -> new PendingAuthSummary(xref.accountId(), xref.customerId()));
         account.ifPresent(read -> held.refreshLimits(read.creditLimit(), read.cashCreditLimit()));
@@ -600,7 +618,7 @@ public class AuthorizationRequestListener {
             held.recordDeclined(request.transactionAmount().amount());
         }
         this.summaries.save(held);
-        this.details.save(record(xref.accountId(), request, decision, now));
+        this.details.save(record(xref.accountId(), request, decision, reply, now));
     }
 
     /**
@@ -638,23 +656,25 @@ public class AuthorizationRequestListener {
      * @param accountId the resolved account; must not be {@code null}
      * @param request the decoded request; must not be {@code null}
      * @param decision the decision reached; must not be {@code null}
+     * @param reply the reply wire record this decision answers with, which the detail row is
+     *     projected from so the persisted state and the answer sent cannot drift apart
      * @param now the current instant in coordinated universal time; must not be {@code null}
      * @return the unsaved detail row, never {@code null}
      */
     private PendingAuthDetail record(Long accountId, AuthRequest request,
-            AuthorizationDecisionService.Decision decision, LocalDateTime now) {
+            AuthorizationDecisionService.Decision decision, AuthReply reply, LocalDateTime now) {
         PendingAuthDetailKey key = new PendingAuthDetailKey(accountId, ordinalDateOf(now),
                 timeOfDayOf(now));
-        return new PendingAuthDetail(key, request.authDate(), request.authTime(),
-                request.cardNum(), request.authType(), request.cardExpiryDate(),
-                request.messageType(), request.messageSource(),
-                this.decisions.identificationCodeFor(request), decision.responseCode(),
-                decision.responseReason(), request.processingCode(),
-                request.transactionAmount().amount(), decision.approvedAmount().amount(),
-                request.merchantCategoryCode(), request.acquirerCountryCode(),
-                shortOf(request.posEntryMode()), request.merchantId(), request.merchantName(),
-                request.merchantCity(), request.merchantState(), request.merchantZip(),
-                request.transactionId(), matchStatusFor(decision));
+
+        // WHY : Refactoring Rationale: the row is PROJECTED by the mapper, where this method used to
+        //       assemble it field by field. Both forms produced the same twenty-four components, so the
+        //       duplication was invisible -- and that was the problem: the record-to-entity crossing
+        //       existed twice, and only the mapper's copy carried the refusal of a reply that answers a
+        //       different request. Two copies of a crossing drift on the first change made to one of
+        //       them, and the change most likely to be made is the one this class's own key derivation
+        //       already needed. The key and the match status stay this class's decisions and are passed
+        //       in; every field crossing from the wire is the mapper's.
+        return this.payloads.toPendingAuthDetail(key, request, reply, matchStatusFor(decision));
     }
 
     /**
@@ -812,12 +832,23 @@ public class AuthorizationRequestListener {
         // WHY : Assumptions: both tokens are derived HERE, inside the deciding transaction, rather than at
         //   publication. The publisher then needs no key material, and a row whose payload could not be
         //   parsed is still publishable -- which is precisely the case where publishing matters most.
-        this.outbox.save(new AuthReplyOutbox(replyQueueUrl, correlationId,
-                reply.orderGroup(this.messagingTokeniser),
-                reply.deduplicationKey(this.messagingTokeniser),
-
-                CsvAuthCodec.encodeReply(reply),
-                now.plusSeconds(DEFAULT_REPLY_EXPIRY_SECONDS), now));
+        // WHY : Refactoring Rationale: the row is now assembled through the mapper's publication
+        //   projection and OutboxMessage.toPendingRow rather than by calling the entity's constructor with
+        //   seven positional arguments here. The values written are identical -- the projection derives
+        //   the same two tokens from the same tokeniser, encodes the same payload through the same codec,
+        //   and toPendingRow assigns the same format label, a null publication instant and a zero attempt
+        //   counter that the constructor did. What changes is that ONE type now decides what a reply
+        //   publication consists of. Before this, the projection existed and nothing called it: the
+        //   listener built the row and the publisher read the row's columns one by one, so the type whose
+        //   documented purpose was to be the single description of a publication described nothing, and
+        //   two independent assemblies could drift apart with no test able to notice -- four of the seven
+        //   constructor arguments are character values of similar shape, so a transposition would have
+        //   compiled.
+        OutboxMessage publication = this.payloads.toOutboxMessage(reply,
+                new AuthorizationMessageMapper.ReplyRouting(replyQueueUrl, correlationId,
+                        now.plusSeconds(DEFAULT_REPLY_EXPIRY_SECONDS)),
+                this.messagingTokeniser);
+        this.outbox.save(publication.toPendingRow(now));
     }
 
     /**

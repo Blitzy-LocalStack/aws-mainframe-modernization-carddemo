@@ -168,7 +168,8 @@ public record PhoneAreaCodeResponse(String areaCd, CodeClass codeClass) {
          *     {@code code_class} stores it
          * @return the state that character names, never {@code null}
          * @throws IllegalArgumentException when the value is absent or is neither of the two
-         *     characters the contract publishes
+         *     characters the contract publishes, carrying a message that names the admitted domain
+         *     and does NOT reproduce what was supplied
          */
         @JsonCreator
         public static CodeClass fromWireValue(String wireValue) {
@@ -177,8 +178,23 @@ public record PhoneAreaCodeResponse(String areaCd, CodeClass codeClass) {
                     return candidate;
                 }
             }
-            throw new IllegalArgumentException(
-                    "codeClass must be one of G or E; received " + wireValue);
+            // WHY : Refactoring Rationale: this refusal appended the supplied value to its message.
+            //       The value reaches here from a query parameter and from a request body, so it is
+            //       caller-controlled text of arbitrary length and content, and the exception raised
+            //       inside a @JsonCreator is wrapped by the deserialiser into a message that is
+            //       logged and can reach a response body. Echoing it therefore put unvalidated input
+            //       into a log line and into a refusal a client reads back -- the reflection and
+            //       log-injection shape, for no diagnostic gain.
+            // WHY : Assumptions: naming the admitted domain is strictly more actionable than echoing
+            //       the rejection. The domain here is closed and has two members, so "one of G or E"
+            //       tells a caller everything the echo would have, without the caller's own bytes.
+            // WHY : Alternatives Considered: reporting the supplied LENGTH instead of the value,
+            //       which is the geometry-not-content form used where a width is the contract --
+            //       TransactionCategoryBalance reports a length and a digit position for exactly that
+            //       reason. Rejected here because a length says nothing useful about a two-member
+            //       character domain: every wrong value of length one is as wrong as every other, so
+            //       the number would be noise that still varied with caller input.
+            throw new IllegalArgumentException("codeClass must be one of G or E");
         }
     }
 }

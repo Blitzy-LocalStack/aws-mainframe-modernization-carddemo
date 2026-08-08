@@ -459,16 +459,29 @@ time. What does hold the line is enforced on the service side and in tests:
 
 | Boundary | Enforcement | Mechanism |
 |---|---|---|
-| Contract ↔ handler routes, **where handlers exist** | **Mechanical** | `transaction`, `reference` and `reporting` each assert in **both** directions that every published path is served and every served path is published |
-| Contract ↔ published authority and schema rules | **Mechanical** | Every one of the six contract tests asserts the authority model, the paging envelope and the path-shape rules the contract declares — including for the three services whose handlers are not yet authored |
+| Contract ↔ handler routes, **both directions** | **Mechanical** | `transaction`, `reference` and `reporting` each assert that every published path is served and every served path is published |
+| Contract ↔ handler routes, **one direction** | **Mechanical** | `account` asserts that the published paths are exactly the ones its consumer builds, and that the document names nothing the module withholds — a narrower claim than the row above, and it is stated separately rather than folded into it |
+| Contract ↔ published authority and schema rules | **Mechanical** | Every one of the seven contract tests asserts the authority model, the paging envelope and the path-shape rules the contract declares — this is the only enforcement `auth`, `authorization` and `card` currently have |
 | Contract ↔ DTO wire shape | **Mechanical** | Per-service wire and DTO contract tests assert declared field names, types and money-as-string |
 | Contract ↔ TypeScript client types | **Manual** | No code generation; a contract change and its client change are two edits a reviewer must keep together |
 
-Assumptions: the first two rows are deliberately separate because they cover
-different services. `auth`, `card` and `authorization` publish a contract but have
-no controllers yet, so there is no route set to compare theirs against — their tests
-bind the contract to its own declared rules rather than to handlers, and claiming a
-handler-binding for them would be a verification claim this record cannot support.
+Assumptions: the rows above are deliberately separate because they cover different
+services and make different claims. Of the seven services publishing a contract,
+only `card` has no controllers at all, so for `card` there is genuinely no route set
+to compare against. `auth` and `authorization` **do** have handlers — one
+`AuthController`, and `PendingAuthController` with `FraudController` — but their
+contract tests bind the contract to its own declared rules rather than to the
+handler route set, so a handler-binding claim is still one this record cannot
+support for them. The distinction matters because the two situations are fixed
+differently: `card` needs controllers, while `auth` and `authorization` need the
+route-comparison case their contract tests do not yet carry.
+
+Refactoring Rationale: this paragraph previously grouped `auth`, `card` and
+`authorization` together as services that "publish a contract but have no
+controllers yet". That was accurate when written and is now true of `card` alone.
+Left standing it would have understated what is deployed and, worse, pointed the
+remedy at the wrong work: a reader would have set out to write controllers that
+already exist rather than the route assertions that do not.
 
 Trade-offs: the third row is a real residual risk and it is recorded as one under
 [Risk — the typed client is hand-written, so contract drift is not a compile error](#risk--the-typed-client-is-hand-written-so-contract-drift-is-not-a-compile-error)
@@ -1184,17 +1197,23 @@ plainly, and the first item is the largest:
   report — an ADR records what is chosen, and the delivery boundary belongs here,
   where a reader looking for it will find it rather than discovering it by counting
   files.
-- **`account-service` publishes a contract and controllers, but no contract test.**
-  Refactoring Rationale: this bullet recorded that the service published neither, and
-  both halves are now measurably wrong — `account-api.yaml` declares three operations
-  and `api/` holds `AccountController`, `CustomerController` and `CardXrefController`.
-  What is genuinely still outstanding is narrower and is stated in its place: six of
-  the seven contracts have a contract test holding the committed document to the
-  metadata the service serves, and `account-service` is the one that does not. The
-  boundary is kept rather than removed because the reason it existed — that a
-  published document is only as trustworthy as the test that pins it — applies to
-  exactly one service now instead of to two. Every claim in this record about eight
-  services still describes the decided architecture and not eight running APIs.
+- **Every one of the seven contracts now has a contract test, but only three bind
+  the route set in both directions.** Refactoring Rationale: this bullet has been
+  narrowed twice. It first recorded that `account-service` published neither a
+  contract nor controllers; it then recorded that six of seven contracts had a
+  contract test and that `account-service` was the exception. Both are now wrong —
+  `account-api.yaml` declares three operations, `api/` holds `AccountController`,
+  `CustomerController` and `CardXrefController`, and `AccountContextContractTest`
+  pins the document to what the module serves. What is genuinely still outstanding is
+  narrower again and is stated in the enforcement matrix above rather than repeated
+  here: only `transaction`, `reference` and `reporting` compare the published path set
+  against the served path set in both directions, so for `auth`, `authorization` and
+  `account` a published path that no handler serves would not fail a build, and for
+  `card` there is no handler set to compare at all. The boundary is kept rather than
+  removed because the reason it existed — that a published document is only as
+  trustworthy as the test that pins it — still holds; what has changed is which part
+  of the pinning is missing. Every claim in this record about eight services still
+  describes the decided architecture and not eight running APIs.
 - **No `terraform apply` against a live AWS account.** That is an operator action
   outside this scope, so no distribution, no front door and no user pool exists as
   a running resource.

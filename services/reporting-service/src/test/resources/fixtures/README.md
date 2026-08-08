@@ -108,7 +108,40 @@ composite is what `CVTRA04Y.cpy` declares.
 
 ---
 
-## 5. Regenerating or extending
+## 5. The trailing pad character is a per-record-type fact
+
+Every record here closes with a `FILLER` that carries no value, and **which character that
+`FILLER` is made of differs by record type**. It is taken from the record's own reference extract
+under `app/data/ASCII/`, measured rather than assumed:
+
+| Fixture | Descriptor | `FILLER` span | Pad character | Reference extract |
+|---|---|---|---|---|
+| `acctfile.txt` | `ACCOUNT` | 122–300 (178) | **blank** | `acctdata.txt` pads with blanks |
+| `custfile.txt` | `CUSTOMER` | 332–500 (168) | **blank** | `custdata.txt` pads with blanks |
+| `tcatbal.txt` | `TCATBAL` | 28–50 (22) | **ASCII zero** | `tcatbal.txt` pads with zeroes |
+| `trantype.txt` | `TRANTYPE` | 52–60 (8) | **ASCII zero** | `trantype.txt` pads with zeroes |
+| `trancatg.txt` | `TRANCAT` | 56–60 (4) | **ASCII zero** | `trancatg.txt` pads with zeroes |
+
+The three zero-padded rows are corrections. They previously padded with blanks, which put the same
+record type in two shapes two directories apart: `reference-service`'s `trantype.txt` and
+`trancatg.txt` fixtures and `transaction-service`'s `tcatbal.txt` fixtures all pad with zeroes, as
+their extracts do, and these did not.
+
+Assumptions: nothing a decode does can catch a wrong pad character. `FILLER` is declared as a
+character field, so blanks and zeroes both decode, both re-encode and both round-trip byte for
+byte — which is exactly why the table above is **asserted** by
+`ReportingFixtureContractTest.everyFixturePadsWithItsExtractsCharacter` rather than only written
+down here. That case additionally asserts the two pad characters are different, so the directory
+cannot be quietly standardised on one of them.
+
+Alternatives Considered: padding everything here with zeroes, which is the simpler rule. Rejected
+on the measurement above — it would move `acctfile.txt` and `custfile.txt` away from what their own
+extracts do, trading three divergences for two new ones. The pad belongs to the record type, not to
+the directory.
+
+---
+
+## 6. Regenerating or extending
 
 There is no generator. Each file is hand-authored at its exact record length, and the contract
 test is what proves the hand-authoring is right. To add a row:

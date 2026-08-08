@@ -71,39 +71,34 @@
     that is stated explicitly rather than left implied.
 
   HOW TO READ EVERY TEST COMMENT IN THIS REACTOR:
-    Assumptions: the migration lands its artifacts in plan order, and the build
-      descriptors are authored ahead of the code they build so that the code can
-      be written against them. The test tree is now PARTIAL rather than empty:
-      common-lib holds seventeen test classes and Surefire executes their six
-      hundred and six test methods in that one module. Among them is
-      LayeringRulesTest, so the `architecture-rules` execution below NO LONGER
-      selects nothing: it packages that class into
-      common-lib-<version>-tests.jar and re-runs its three architectural gates
-      and two guards inside every module that consumes the shared kernel, which
-      this reactor confirms by the execution reporting `Tests run: 5` under each
-      of the eight consumers rather than `Tests are skipped.`. That count is five
-      and not six: the class declares three architectural assertions - domain
-      isolation, no cross-root domain dependency, and no binary floating point on
-      the money path - plus two guards that assert the imported class graph is
-      non-vacuous and that the ownership contract is exactly the nine fixed
-      package roots. Selecting nothing is now also a BUILD FAILURE rather than a
-      silent success; see the `architecture-rules-fail-if-absent` profile at the
-      foot of this file. Two `*IT` classes now exist as well -
-      CardDemoCommonAutoConfigurationIT here and TransactionRepositoryIT in
-      transaction-service - so the Failsafe configuration beside it likewise has
-      real work. Comments that describe those suites therefore describe classes
-      that run today; comments that name a suite with no file yet still describe
-      the TARGET test tree and the configuration prepared for it.
-      Refactoring Rationale: the former blanket statement that every named class
-      was PLANNED rather than present became false as the first six landed, and
-      the narrower replacement - that no `*IT` and no LayeringRulesTest class
-      existed anywhere, so both plugin configurations passed trivially - became
-      false in turn once those classes were authored. A build comment that
-      asserts a gate enforces nothing is worse than no comment at all, because a
-      reader who believes it stops looking for the enforcement that is in fact
-      running. The inventory is therefore stated as counts plus the one
-      observable signal that distinguishes an executing gate from a skipped one,
-      and `mvn -f services/pom.xml test` remains the authority that cannot go
+    Assumptions: every test suite this file configures has real work, so no comment
+      below describes a plugin passing trivially. Two wirings carry that claim, and
+      each has an observable signal rather than a count:
+        - The `architecture-rules` Surefire execution packages LayeringRulesTest
+          into common-lib-<version>-tests.jar and re-runs it inside every module
+          that consumes the shared kernel. Its executing signal is the execution
+          reporting `Tests run: <n>` under each consumer rather than
+          `Tests are skipped.`; the rule families it asserts are enumerated in the
+          class itself, which is the only place they cannot drift from what runs.
+          Selecting nothing is a BUILD FAILURE rather than a silent success - see
+          the `architecture-rules-fail-if-absent` profile at the foot of this file.
+        - Failsafe has `*IT` classes in common-lib and in five service modules, so
+          the integration configuration beside it likewise runs rather than
+          no-ops.
+      Refactoring Rationale: this block has been corrected three times, and it is
+      now written so that a fourth correction is not needed. It first said every
+      named class was PLANNED; then that no `*IT` and no LayeringRulesTest class
+      existed anywhere, so both plugin configurations passed trivially; then that
+      common-lib held seventeen test classes running six hundred and six methods,
+      that LayeringRulesTest contributed exactly `Tests run: 5`, and that precisely
+      two `*IT` classes existed. Every one of those figures is now wrong - the
+      class count, the method total, the per-module rule count and the `*IT`
+      inventory have all grown - and a wrong figure in the file that CONFIGURES the
+      gate is worse than a wrong figure in prose, because a reader reconciling it
+      against a build log cannot tell whether the gate or the comment is at fault.
+      The figures are therefore dropped in favour of the two signals above, which
+      distinguish an executing gate from a skipped one without naming a number.
+      `mvn -f services/pom.xml verify` remains the authority, and it cannot go
       stale.
       Alternatives Considered: configuring the test plugins only once the tests
       exist. Rejected because the plugin split, the include patterns and the report

@@ -52,6 +52,15 @@
  *       (1318 lines).</li>
  *   <li>{@code InquiryMessageListener} carries the asynchronous inquiry
  *       path, from {@code app/app-vsam-mq/cbl/COACCT01.cbl} (620 lines).</li>
+ *   <li>{@code RestReferenceAddressLookup} satisfies the lookup contract the
+ *       address validator declares, reaching {@code reference-service} over its
+ *       published address API. It has no reference source of its own: in the
+ *       baseline the lookup lists are a copybook compiled INTO the program, so
+ *       the adapter exists because the target moved that data behind a service
+ *       boundary and something has to cross it. Assumptions: it is listed here
+ *       even though it carries no migrated program, because a reader counting
+ *       this package's classes against this list would otherwise find one more
+ *       class than the list admits to.</li>
  * </ul>
  *
  * <h2>No class here holds session state</h2>

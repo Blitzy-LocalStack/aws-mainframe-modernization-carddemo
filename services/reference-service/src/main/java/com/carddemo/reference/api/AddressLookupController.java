@@ -71,7 +71,27 @@ public class AddressLookupController {
     /** The cursor binding of the prefix browse. */
     public static final String ZIP_PREFIX_BINDING = "reference-state-zip-prefix-list";
 
-    /** The number of rows one lookup page publishes. */
+    /**
+     * The number of rows one lookup page publishes, for all three lookup domains.
+     *
+     * <p>Assumptions: twenty is ADDITIVE and has no baseline antecedent, which is why it differs from
+     * the seven the transaction-type browse inherits. These three domains exist in the baseline only as
+     * condition-name allow-lists inside {@code app/cpy/CSLKPCDY.cpy} -- values a program tested a field
+     * against -- and no BMS map browses any of them, so there is no screen row count to preserve and no
+     * page boundary a caller could compare against the source. A number therefore has to be chosen
+     * rather than derived, and it is recorded here as chosen so that a reader does not go looking for
+     * the baseline authority the sibling browses cite.</p>
+     *
+     * <p>Trade-offs: twenty rather than seven, even though a uniform size across the service would be
+     * simpler to describe. The area-code domain alone holds several hundred entries, so a seven-row
+     * window would make walking it a long sequence of round trips for a list that is a validation
+     * vocabulary rather than an operator-facing screen; and unlike the type browse there is no parity
+     * obligation to spend that cost on. What is given up is one page size for the whole service, and it
+     * is given up knowingly: the {@code api} package charter states the size per endpoint for exactly
+     * this reason. One value is shared by all three lookups rather than tuned per domain, because they
+     * are consumed by the same caller for the same purpose and a difference between them would be
+     * arbitrary.</p>
+     */
     public static final int PAGE_SIZE = 20;
 
     /** The verbatim refusal when no seeded area code matches. */

@@ -1,6 +1,7 @@
 package com.carddemo.auth.dto;
 
 import com.carddemo.common.error.FieldOrdering;
+import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import java.util.List;
@@ -200,10 +201,66 @@ import java.util.List;
  */
 public record SignOnRequest(
         @NotBlank(message = MESSAGE_USER_ID_REQUIRED)
+        @Schema(pattern = NON_WHITESPACE_PATTERN)
         @Size(max = USER_ID_MAX_LENGTH, message = MESSAGE_USER_ID_TOO_LONG) String userId,
         @NotBlank(message = MESSAGE_PASSWORD_REQUIRED)
+        @Schema(pattern = NON_WHITESPACE_PATTERN)
         @Size(max = PASSWORD_MAX_LENGTH, message = MESSAGE_PASSWORD_TOO_LONG) String password)
         implements FieldOrdering {
+
+    /**
+     * The presence expression every request record in this package publishes into the served document.
+     *
+     * <p>Refactoring Rationale: this constant exists because the two documents this service publishes
+     * were describing different shapes. The committed contract declares a {@code pattern} facet on each
+     * of these properties -- the facet that makes a value of twenty spaces schema-invalid, which
+     * {@code minLength: 1} alone does not -- and the document served from {@code /v3/api-docs} is
+     * GENERATED from these annotations, where a non-blank constraint contributes {@code minLength: 1}
+     * and no pattern at all. So the generated description of every request body in this service was
+     * strictly weaker than the committed one it is meant to agree with. This constant is the string both
+     * now carry, declared once.</p>
+     *
+     * <p>Assumptions: the expression is the committed contract's own, character for character, and
+     * carrying the identical string is the whole point -- a semantically equivalent but differently
+     * spelled expression would leave the two documents textually different, which is what a reader or a
+     * diff comparing them would report as drift.</p>
+     *
+     * <p>Assumptions: it is applied through the schema-documentation annotation rather than through a
+     * bean-validation {@code @Pattern}, and it is therefore a statement ABOUT the published schema
+     * rather than a runtime constraint. That distinction is the substance of this decision, not a
+     * technicality, and it rests on the rule being already enforced: {@code @NotBlank} refuses an absent
+     * value, an empty string and a string of whitespace alike, which is exactly the set an unanchored
+     * {@code \S} refuses. There is no value this pattern would reject that the constraint beside it
+     * admits.</p>
+     *
+     * <p>Alternatives Considered: a bean-validation {@code @Pattern} carrying this expression, which the
+     * review's own suggested resolution named. Rejected on two independent grounds, either of which is
+     * sufficient. A bean-validation pattern is matched against the WHOLE value, so this expression as a
+     * constraint would demand a value of exactly one non-whitespace character and refuse every real
+     * identifier and name -- avoiding that would require a differently spelled expression such as
+     * {@code [\s\S]*\S[\s\S]*}, and the committed facet would then have to change to match it,
+     * altering a published contract to accommodate a Java evaluation rule. And it would be redundant
+     * against {@code @NotBlank}: one blank submission would breach both, and because the shared advice
+     * emits one entry per VIOLATION rather than per component, the {@code fieldErrors} array would carry
+     * two entries naming one property -- which the committed contract declares as one entry per
+     * offending field, and which the existing sign-on validation tests assert by counting.</p>
+     *
+     * <p>Alternatives Considered: declaring the expression once per record. Rejected because a value
+     * duplicated across five records can drift in one of them without anything failing -- the copy would
+     * still be a valid pattern and the served document still a valid document, so only the RELATIONSHIP
+     * between one record and one schema would be wrong. Alternatives Considered: moving it to
+     * {@code com.carddemo.common}. Rejected because the shared kernel holds no validation expression at
+     * all, and adding one for a single service's request records would widen the kernel for one caller;
+     * the constant is public here, so a second service that needs the same facet can consume it from
+     * this record and the move into the kernel becomes justified at that point rather than before it.</p>
+     *
+     * <p>Trade-offs: because this is a documentation annotation, nothing in the build fails if it is
+     * removed -- the served document would simply lose the facet again, silently, exactly as it had
+     * before. That is the accepted cost of not adding a redundant constraint, and it is why the contract
+     * test in this module asserts the facet's presence from the DOCUMENT side rather than relying on the
+     * annotation being noticed in review.</p>
+     */
+    public static final String NON_WHITESPACE_PATTERN = "\\S";
 
     /**
      * The sentence the reference displays when the identifier is absent, carried across verbatim.

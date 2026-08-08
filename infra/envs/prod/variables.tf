@@ -715,7 +715,7 @@ variable "permissions_boundary_arn" {
 #       same reason as the permissions boundary: a value this deployment could
 #       rewrite would not be a key it can be held to.
 variable "mask_hmac_secret_arn" {
-  description = "Secrets Manager ARN of the environment-separated HMAC key the data-migration image uses for protected-field fingerprints. Supplied by the operator; never created or rotated by this configuration."
+  description = "Secrets Manager ARN of the environment-separated HMAC key the data-migration image uses for protected-field fingerprints. Supplied by the operator; never created or rotated by this configuration. The secret VALUE must be canonical standard base64 decoding to at least 32 bytes, which the image enforces by refusing to run on weaker material; docs/runbooks/deploy.md gives the creation command."
   type        = string
 
   validation {

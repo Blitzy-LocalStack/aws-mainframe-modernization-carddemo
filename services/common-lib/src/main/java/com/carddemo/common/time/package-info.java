@@ -1,24 +1,19 @@
 /**
  * Owns the exact twenty-six character timestamp contract carried by the migrated CardDemo services.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ * <h2>What this package holds</h2>
  *
- * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
- * beside this one today. The migration lands its artifacts in plan order and this charter is
- * authored first, so at the checkpoint that authored it this directory holds this charter and
- * {@code TimestampFormatter.java}, which is the one production class that exists anywhere in this
- * module. A type or test named below that has no file yet is therefore <b>planned</b>, not missing,
- * and a count below is a target total rather than a measurement of the directory.</p>
+ * <p>Assumptions: this charter describes what this package holds, and the description is a measurement
+ * of the directory rather than a forward statement. The one production class it names,
+ * {@code TimestampFormatter}, is present beside it.</p>
  *
- * <p>Alternatives Considered: withholding this charter until every class it governs
- * exists. Rejected, because the charter is what the authors of those classes work
- * from -- which type belongs here, which may not, what the closed set is -- so
- * writing it last would leave the package with no stated contract during exactly
- * the interval in which one is needed. The cost of authoring it first is that its
- * inventory reads as present tense unless the distinction is declared, which is
- * what this section is for; the sentence above is the single place a reader has to
- * look to tell a target from a measurement.</p>
+ * <p>Refactoring Rationale: this section opened by declaring every inventory here a target contract
+ * rather than a measurement, and recorded that {@code TimestampFormatter} was the only production
+ * class existing anywhere in the shared kernel. The second half is long superseded -- the kernel
+ * now holds production classes in every one of its eight subpackages -- and once it was, the
+ * disclaimer did active harm: it instructed a reader to distrust an inventory that had become
+ * accurate, so a genuine discrepancy in this file would have read as the expected condition rather
+ * than as a defect.</p>
  *
  * <p>A single canonical rendering serves every origination and processing timestamp that crosses a
  * persistence, batch or API boundary in the migrated system:
@@ -216,12 +211,13 @@
  *
  * <p>This package holds exactly one production class, {@code TimestampFormatter}, which owns the
  * pattern named above; with this descriptor beside it, the directory contains exactly two
- * {@code .java} files. Across {@code com.carddemo.common} as a whole the target is
- * twenty-one production classes, distributed as two in {@code money}, five in {@code codec}, three
- * in {@code error}, three in {@code web}, three in {@code security}, one in {@code observability}, one
- * here in {@code time} and two in {@code validation}; adding the nine package descriptors, one for
- * the package root and one for each of its eight subpackages, gives thirty {@code .java} files
- * in total.</p>
+ * {@code .java} files. Assumptions: that is the invariant this section exists to state, and it is
+ * stated without reference to a module-wide total. Refactoring Rationale: a target count for the
+ * whole of {@code com.carddemo.common} stood here -- twenty-one production classes and thirty
+ * files, broken down per subpackage -- and it is removed rather than corrected. It was wrong when
+ * the review measured it and it will be wrong again after the next class lands, because it is a
+ * figure about eight sibling packages restated inside a ninth; nothing in this package's contract
+ * depends on it, and {@code services/common-lib} is the authority for its own inventory.</p>
  *
  * <h2>Why this descriptor exists</h2>
  *

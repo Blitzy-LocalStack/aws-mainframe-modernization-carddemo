@@ -266,11 +266,12 @@
 
     <!--
       Refactoring Rationale: both profile overlays beside this module declare a
-      per-environment Parameter Store overlay. application-dev.yml and
-      application-prod.yml each import
-      optional:aws-parameterstore:/carddemo/[env]/authorization/, while this
-      module declared no artifact supplying the client that import needs, and
-      that combination cannot resolve in any environment. The queue starter
+      per-environment Parameter Store overlay. application-dev.yml imports
+      optional:aws-parameterstore:/carddemo/[env]/authorization/ with the label
+      defaulted to dev, and application-prod.yml imports the same path defaulted
+      to prod, while this module declared no artifact supplying the client those
+      imports need, and that combination cannot resolve in any environment. The
+      queue starter
       above brings spring-cloud-aws-autoconfigure onto the classpath, and that
       artifact registers ParameterStoreConfigDataLocationResolver as a
       ConfigDataLocationResolver in its META-INF/spring.factories, so a resolver
@@ -297,6 +298,16 @@
       (the other two declaring the same import) both declare this same starter.
       Withdrawing it here would leave one context reading its environment
       subtree differently from its peers for no stated reason.
+      Refactoring Rationale: with this dependency present there is exactly ONE
+      delivery path for the per-environment subtree, and both profiles now take
+      it. Before this entry the dev overlay declined the import outright and
+      recorded, as its reason, that no artifact here brings the SSM client. That
+      was true then and is not true now, while the prod overlay and this comment
+      each described a different arrangement again. Three descriptions of one
+      mechanism is worse than any one of them being wrong, because a reader
+      cannot tell which is authoritative; the asymmetry is therefore removed
+      rather than re-explained, and dev and prod differ only in the environment
+      label their path defaults to.
       Assumptions: no version element appears here because the parent aggregator
       at services/pom.xml imports io.awspring.cloud:spring-cloud-aws-dependencies
       as a bill of materials, so this coordinate is managed exactly as the queue

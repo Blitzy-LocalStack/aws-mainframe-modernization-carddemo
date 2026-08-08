@@ -200,7 +200,9 @@ import java.util.Objects;
  * sent anyway. Every instance this service serialises was constructed, so a check in the constructor is
  * the only one that cannot be bypassed -- and it is expressed by calling the shared guard rather than by
  * matching the expression a second time, so the refusal message is the shared one and names the offending
- * position without echoing the value.
+ * position without echoing the value. The narrowing this enforces -- a masked rendering where no baseline
+ * screen masked at all -- is registered as {@code D-CARD-MASKED-FORM-ENFORCED} in
+ * {@code docs/architecture/cobol-to-service-traceability.md} §7.4.
  *
  * <p>Assumptions: the published contract was tightened in the same change, so the two still agree. Its
  * masked members declare the identical pattern and an exact length, which is what keeps this record from

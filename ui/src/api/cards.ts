@@ -28,9 +28,19 @@ export type { PageDirection, PageResponse } from './types';
  *       three lines away addressed something else. Deriving the target removes that gap by
  *       construction and leaves the gate exactly one comparison to make.
  */
+/*
+ * Refactoring Rationale: this was `GET /api/v1/cards` with the account filter, cursor and direction
+ * sent as QUERY PARAMETERS. It is `POST /api/v1/cards/search` sending them in a body, because the
+ * account filter is an account identifier and a query string is part of the request line — which the
+ * load balancer writes into its mandatory access log itself, before any application code runs. The
+ * sibling `lookupCard` already moved a card number out of the request line for exactly that reason;
+ * the migration's sensitive-data logging contract names account identifiers in the same sentence as
+ * the primary account number, so leaving the account filter in the query string applied that finding
+ * to only one of the two values it covers.
+ */
 const LIST_CARDS: ContractOperation = {
-  method: 'GET',
-  path: '/api/v1/cards',
+  method: 'POST',
+  path: '/api/v1/cards/search',
   operationId: 'listCards',
 };
 
@@ -212,22 +222,28 @@ export interface CardListQuery {
  * @throws {Error} If the request fails.
  */
 export async function listCards(query: CardListQuery = {}): Promise<PageResponse<CardSummary>> {
-  const params: Record<string, string> = {};
+  // Refactoring Rationale: these criteria were assembled into a query-parameter record and are now
+  //   assembled into a request body. The membership rules are unchanged — an omitted member is
+  //   absent rather than null, so the service sees exactly the criteria that were supplied — because
+  //   the contract still declares every member optional and still treats an absent body as the
+  //   opening page of the unfiltered set.
+  const body: Record<string, string> = {};
 
   if (query.accountId !== undefined) {
-    params.accountId = query.accountId;
+    body.accountId = query.accountId;
   }
   if (query.cursor !== undefined) {
-    params.cursor = query.cursor;
+    body.cursor = query.cursor;
     // Assumptions: the direction accompanies the cursor and is omitted without one, because the
     //   contract declares it meaningful only alongside a cursor and defaults it to next. Sending a
     //   direction alone would describe a position relative to nothing.
-    params.direction = query.direction ?? 'next';
+    body.direction = query.direction ?? 'next';
   }
 
-  const response = await getApiClient().get<PageResponse<CardSummary>>(requestPath(LIST_CARDS), {
-    params: Object.keys(params).length === 0 ? undefined : params,
-  });
+  const response = await getApiClient().post<PageResponse<CardSummary>>(
+    requestPath(LIST_CARDS),
+    body,
+  );
 
   return {
     ...response.data,

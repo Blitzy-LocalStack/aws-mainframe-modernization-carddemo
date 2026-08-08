@@ -193,6 +193,43 @@ public record AccountViewResponse(
     String returnMessage) {
 
   /**
+   * Renders this response for a log line, disclosing neither the account nor the customer.
+   *
+   * <p>Refactoring Rationale: a record's generated rendering prints every component, and two of the five
+   * here are themselves records whose own generated renderings print everything they hold. This type
+   * therefore emitted the account identifier, five money amounts, three dates, a name, a whole postal
+   * address, two telephone numbers, a date of birth and a credit score in one string -- the most
+   * disclosing single rendering in this bounded context, and one reached from any diagnostic that names
+   * an instance. The sensitive-data logging contract in {@code docs/architecture/observability.md} names
+   * account identifiers, customer identifiers and monetary amounts among its prohibited values and
+   * requires that a prohibited value be OMITTED rather than abbreviated, so no component of either
+   * nested record may appear and the identifier is not shortened.</p>
+   *
+   * <p>Trade-offs: what remains are the two message channels and the PRESENCE of each nested group,
+   * stated as a boolean rather than as its content. Presence is what the caller-visible outcome turns
+   * on -- the reference reaches a state at {@code app/cbl/COACTVWC.cbl} L471 and L472 where only the
+   * customer record was located -- so a diagnostic saying which groups were populated is the one fact
+   * about this response worth writing down, and it discloses nothing. The messages are carried because
+   * both are migrated operator text from a fixed-width field, never a value read from a row.</p>
+   *
+   * <p>Assumptions: the nested records are NOT given renderings of their own that this method then
+   * composes. A rendering on {@code AccountDetail} or {@code CustomerDetail} would have to withhold
+   * every component it holds, leaving a constant string, and a constant string that varies with nothing
+   * is a rendering a reader will eventually mistake for information. Reporting presence from here says
+   * the same thing once, at the level where the two groups can be compared.</p>
+   *
+   * @return a rendering naming the type, both message channels and whether each nested group was
+   *     populated, and no value from either group, never {@code null}
+   */
+  @Override
+  public String toString() {
+    return "AccountViewResponse[accountPresent=" + (this.account != null)
+        + ", customerPresent=" + (this.customer != null)
+        + ", informationMessage=" + this.informationMessage
+        + ", returnMessage=" + this.returnMessage + ']';
+  }
+
+  /**
    * The ten account fields of the view screen, populated or absent as one unit rather than field by
    * field.
    *
@@ -329,6 +366,28 @@ public record AccountViewResponse(
       Money currentCycleCredit,
       String groupId,
       Money currentCycleDebit) {
+    /**
+     * Renders the account detail WITHOUT its money values.
+     *
+     * <p>Assumptions: all five amounts are withheld together rather than individually, because the
+     * balance, the two limits and the two cycle totals are equally an identified account's financial
+     * position and there is no reading on which one of them is safe to print and another is not. The
+     * three dates and the two codes are kept: a date and a status are what an expiry or an activation
+     * question is debugged with, and neither states a sum.</p>
+     *
+     * @return a rendering carrying the dates, the status and the group, with the amounts withheld, never
+     *     {@code null}
+     */
+    @Override
+    public String toString() {
+      return "AccountDetail[activeStatus=" + this.activeStatus
+          + ", openDate=" + this.openDate
+          + ", expirationDate=" + this.expirationDate
+          + ", reissueDate=" + this.reissueDate
+          + ", groupId=" + this.groupId
+          + ", amounts=" + WITHHELD
+          + "]";
+    }
   }
 
   /**
@@ -508,5 +567,49 @@ public record AccountViewResponse(
       String phoneNumber2,
       String eftAccountId,
       String primaryCardHolderIndicator) {
+    /**
+     * Renders the customer detail WITHOUT the personal data it carries.
+     *
+     * <p>Assumptions: only the customer identifier is kept, for the reason recorded on the enclosing
+     * type's rendering. Seventeen of this record's eighteen components are personal data, including the
+     * two already-masked identifiers -- a mask on two components is no help to the other fifteen.</p>
+     *
+     * <p>Trade-offs: presence is reported for the three optional components so an absent middle name,
+     * second address line or second telephone number is still debuggable.</p>
+     *
+     * @return a rendering carrying the identifier, three presence flags and the withheld marker, never
+     *     {@code null}
+     */
+    @Override
+    public String toString() {
+      // WHY : Refactoring Rationale: the customer identifier is OMITTED here and used to be rendered
+      //       verbatim. docs/architecture/observability.md L1075 to L1081 states the rule this now
+      //       obeys -- a prohibited value is omitted rather than abbreviated, and it names the customer
+      //       identifier among the prohibited ones -- and the sibling projection of the same data,
+      //       CustomerResponse, already withheld it. One value rendered two ways makes neither
+      //       authoritative, and the disclosing one was the projection an update response carries, so
+      //       it reached a log on the ordinary success path rather than an exceptional one.
+      // WHY : Alternatives Considered: reporting the identifier's presence, the way the three optional
+      //       components below are reported. Rejected because presence carries no information here: the
+      //       component is required and is therefore always present, so the flag would be a constant
+      //       dressed as an observation. The primary-cardholder indicator is rendered in its place for
+      //       the reason the rule's third clause gives -- what remains is identity that discloses
+      //       nothing, and a one-character status flag is exactly that -- and it is the same component
+      //       CustomerResponse renders, so the two projections now agree.
+      return "CustomerDetail[primaryCardHolderIndicator=" + this.primaryCardHolderIndicator
+          + ", middleNamePresent=" + (this.middleName != null)
+          + ", addressLine2Present=" + (this.addressLine2 != null)
+          + ", phoneNumber2Present=" + (this.phoneNumber2 != null)
+          + ", personalData=" + WITHHELD
+          + "]";
+    }
   }
+  /**
+   * The marker published in place of every withheld component.
+   *
+   * <p>Assumptions: the same literal the {@code Customer} entity, {@code CustomerResponse} and
+   * {@code com.carddemo.account.mapper.CustomerMapper} publish, so a withholding looks identical
+   * wherever a reader meets one.</p>
+   */
+  private static final String WITHHELD = "[REDACTED]";
 }

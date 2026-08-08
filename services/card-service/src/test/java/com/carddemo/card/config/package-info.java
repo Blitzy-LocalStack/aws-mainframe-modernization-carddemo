@@ -17,13 +17,16 @@
  * surfaced first as a refused or over-permissive request in a deployed environment.</p>
  *
  * <p>Alternatives Considered: asserting the same rules by standing up an application context and
- * issuing a request per route, which is the stronger form. Still not adopted, and the reason has
- * changed since this package was authored, so the note is corrected rather than left standing:
- * {@code CardApplication} now exists, but this module publishes no controller, so every request would
- * answer 404 from the handler mapping and the assertion would rest on distinguishing 403 from 404 -- a
- * signal that changes the moment the first controller lands. This package's assertions remain useful
- * afterwards regardless, because they check the PUBLISHED contract, which a request-level test does not
- * read.</p>
+ * issuing a request per route, which is the stronger form. Still not adopted, and the reason has now
+ * changed a second time, so the note is corrected again rather than left standing. It previously said
+ * that this module published no controller, so every request would answer 404 and the assertion would
+ * rest on distinguishing 403 from 404. {@code com.carddemo.card.api.CardController} now exists and maps
+ * all five published operations, so that particular objection has lapsed. What remains is that a
+ * request-level test would assert the OUTCOME of the chain rather than the rule table, and the two fail
+ * differently: a rule deleted from the table and a rule shadowed by an earlier pattern both produce the
+ * same refused request, whereas comparing the table against the contract names which of the two
+ * happened. These assertions also remain the only ones that read the PUBLISHED contract, which a
+ * request-level test never opens.</p>
  *
  * <p>Trade-offs: the contract is parsed as untyped nested maps rather than through an OpenAPI object
  * model. A model would give typed access and would validate the document's structure on the way in;

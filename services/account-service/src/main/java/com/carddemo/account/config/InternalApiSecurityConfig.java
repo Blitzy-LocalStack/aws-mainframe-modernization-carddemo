@@ -13,6 +13,7 @@ import javax.crypto.spec.SecretKeySpec;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.core.annotation.Order;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
@@ -109,10 +110,31 @@ public class InternalApiSecurityConfig {
      */
     static RequestMatcher internalPaths() {
         PathPatternRequestMatcher.Builder matchers = PathPatternRequestMatcher.withDefaults();
+
+        // WHY : Refactoring Rationale: each matcher is bound to the METHOD its operation serves, where
+        //   all three were previously bound to a path alone. A path-only matcher claims every method at
+        //   that address, and the account address is served by TWO surfaces: the machine read is a GET
+        //   and the end-user edit is a PUT on the same address, separated by chain rather than by
+        //   prefix. Claiming the PUT here demanded the internal read scope from a browser token, which a
+        //   browser token never carries, so the end-user update was unreachable -- a 403 with no
+        //   explanation, and the kind of defect a path-only matcher produces silently the moment a
+        //   second method is mounted. Measured before the change and after it.
+        // WHY : Assumptions: the customer probe binds BOTH methods rather than only the HEAD its
+        //   consumer issues. One handler serves both -- it is declared as a GET mapping and the
+        //   framework answers HEAD from it by discarding the body -- so binding HEAD alone would leave
+        //   the GET form of the same operation governed by the human chain, which denies the whole
+        //   customer subtree, and the two forms of one operation would then answer differently.
+        // WHY : Trade-offs: a method a matcher does not claim now falls through to the application
+        //   chain instead of being authorised here and refused by the dispatcher afterwards. For the
+        //   two internal-only subtrees that is strictly narrower -- the application chain denies them
+        //   outright -- so a GET to the lookup address is refused rather than authorised and then
+        //   answered as an unsupported method.
         return new OrRequestMatcher(
-                matchers.matcher(CardXrefController.BASE_PATH + CardXrefController.LOOKUP_PATH),
-                matchers.matcher(AccountController.BASE_PATH + "/{accountId}"),
-                matchers.matcher(CustomerController.BASE_PATH + "/{customerId}"));
+                matchers.matcher(HttpMethod.POST,
+                        CardXrefController.BASE_PATH + CardXrefController.LOOKUP_PATH),
+                matchers.matcher(HttpMethod.GET, AccountController.BASE_PATH + "/{accountId}"),
+                matchers.matcher(HttpMethod.GET, CustomerController.BASE_PATH + "/{customerId}"),
+                matchers.matcher(HttpMethod.HEAD, CustomerController.BASE_PATH + "/{customerId}"));
     }
 
     /**

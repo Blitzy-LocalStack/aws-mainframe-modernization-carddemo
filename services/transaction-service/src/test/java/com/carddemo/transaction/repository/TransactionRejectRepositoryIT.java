@@ -3,7 +3,6 @@ package com.carddemo.transaction.repository;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.carddemo.common.time.TimestampFormatter;
 import com.carddemo.common.money.Money;
 import com.carddemo.transaction.domain.TransactionReject;
 import jakarta.persistence.EntityManager;

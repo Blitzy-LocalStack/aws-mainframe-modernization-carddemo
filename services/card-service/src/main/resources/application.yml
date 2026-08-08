@@ -1061,6 +1061,26 @@ carddemo:
     cvv:
       key-id: ${CARDDEMO_SECURITY_CVV_KEY_ID}
 
+    # WHY : Assumptions: this keys the opaque selector every card route addresses a row by.
+    #       config/CardSelectorConfig.java binds it through a fallback-free placeholder and
+    #       config/../mapper/CardMapper.java seals a card number under it, so a deployment that
+    #       omits it fails at startup rather than at the first request. That is the intended
+    #       behaviour: a selector minted under one key cannot be opened under another, so a
+    #       missing value would not degrade one screen, it would make every single-card route
+    #       unresolvable.
+    # WHY : Alternatives Considered: reusing carddemo.pagination.cursor.signing-key, which the
+    #       shared kernel already binds for the same SHAPE of job -- sealing a value into an
+    #       opaque token. Declined because the two protect different things on different
+    #       schedules: a cursor names a position in one browse and is meant to expire, while a
+    #       selector is a row's stable address and must keep opening for as long as a client
+    #       might hold one. Sharing the key would tie every selector's validity to a cursor-key
+    #       rotation. Alternatives Considered: a per-task random key, which needs no
+    #       provisioning. Declined because a selector minted by one task would be unopenable by
+    #       every other, so a list served by one task and a detail read served by another would
+    #       disagree with no error naming the cause.
+    card-selector:
+      signing-key: ${CARDDEMO_SECURITY_CARD_SELECTOR_SIGNING_KEY}
+
   card:
     list:
 

@@ -1314,7 +1314,7 @@ admitted caller set and the key's custody.
 ### 7.4 Divergences claimed by shipped code
 
 Every entry below is claimed as registered by a comment or docstring in shipped
-source, and all **forty** are cited **by identifier**, the identifier here being the
+source, and all **forty-two** are cited **by identifier**, the identifier here being the
 identifier used there character for character. They reached that state by three routes,
 recorded because the routes explain the difference in tone between them. Some were cited
 by identifier from the outset. Others were cited generically as "registered" or
@@ -1324,7 +1324,7 @@ a claim of registration that names nothing cannot be checked, and a difference t
 nothing cannot be found. The `D-REFDATA-*` entries that close the section were authored
 the other way round — identifier first, then cited from the published reference contract —
 which is the discipline this section asks of everything added after them. Assumptions:
-forty is a measured count of the `####` headings in this section and not a running
+forty-two is a measured count of the `####` headings in this section and not a running
 tally kept by hand, so a reader adding an entry updates one number here and nothing else.
 Count the `####` headings themselves rather than the ones beginning `D-`: one entry is
 identified `C-ROUNDING`, so a count restricted to the `D-` prefix is short by one.
@@ -1753,9 +1753,30 @@ a register of this size stays true.
   **emergently**, as a consequence of how the screen is painted.
 * **Target behaviour.** `CardUpdateRequest` carries `expirationMonth` and
   `expirationYear` and **no day member of any kind**. The day the stored date keeps is
-  the day it already held, supplied from the row's own current value. The response shapes
-  continue to carry the whole ten-character stored date, so the request and the response
-  are deliberately not the same shape.
+  the day it already held, supplied from the row's own current value — **except where
+  that day does not exist in the submitted month, in which case it is brought back to
+  that month's last day.** The response shapes continue to carry the whole
+  ten-character stored date, so the request and the response are deliberately not the
+  same shape.
+* **The clamp, stated explicitly.** A stored date of `2027-01-31` updated to month `02`
+  becomes `2027-02-28`, not `2027-01-31` and not a refusal. This is registered as
+  divergence **`D-CARD-EXPIRY-DAY-CLAMP`** and is asserted by
+  `CardExpiryParityTest` in `services/card-service/src/test`. An earlier revision of
+  this entry said only that the stored day is retained, which was **not true of every
+  input** and did not register the clamp at all — so the one combination where the
+  target cannot reproduce the baseline byte-for-byte was the one the document was
+  silent about. Three properties make the clamp the right resolution rather than the
+  convenient one. Carrying the day through unchanged is **not available**: the target
+  column is a true `DATE`, and the impossible combination the baseline can hold — it
+  concatenates characters into a ten-byte field at
+  [`COCRDUPC.cbl:1467-1474`](../../app/cbl/COCRDUPC.cbl) without consulting a calendar
+  — has no representation in it. Refusing the update would fail it over a value the
+  caller was **never shown and cannot edit**, since the day is non-display in the
+  baseline and absent from the request shape, so the caller could not act on the
+  refusal. Bringing the day back preserves the two parts the caller did choose, which
+  is the outcome closest to what was asked for. The cost is that one specific day value
+  is not round-tripped exactly, and it is the one part of the date nothing in the
+  baseline lets a user set.
 * **Category.** Documented divergence — one stored field is edited as two, and a
   non-editable part of it is not expressible in the request.
 * **Why the difference is accepted.** An earlier revision of the migrated request carried
@@ -2239,10 +2260,17 @@ a register of this size stays true.
   reintroduce the suppression. A byte comparison against a captured baseline artifact then
   shows exactly one additional 112-byte band, at the end, whose amount equals the final
   group's detail lines; the difference is bounded to that band and appears nowhere earlier in
-  the report. Assumptions: only the mapper half of this divergence is asserted today. The
-  emitting sequence that has to CALL the encoder for the last group belongs to the statement
-  and report emitting service, which is not yet authored, and this entry is the record that
-  the obligation is owed there.
+  the report. Assumptions: only the mapper half of this divergence is asserted today, and the
+  reason is narrower than it once was. `TransactionReportService` and `StatementService` are
+  both present, but each composes report VALUES rather than report bytes — the 133-column
+  fixed-width assembly stays in `com.carddemo.reporting.mapper` by the boundary that package's
+  charter draws — so no production caller yet invokes `encodeAccountTotal`, and every current
+  invocation is a test one. Refactoring Rationale: this entry previously said the report and
+  statement emitting service was "not yet authored", which was accurate when written and is now
+  false of both services. Left standing it would have misdirected the obligation: a reader would
+  have gone looking for a service to write, when what is actually owed is the byte-emitting
+  sequence that drives the mapper, and the two services that would host it already exist. The
+  obligation is still owed; only its location is now known.
 * **Files.** `services/reporting-service/src/main/java/com/carddemo/reporting/mapper/TransactionReportMapper.java`.
 
 #### D-REPORT-GRAND-TOTAL — the last transaction's amount is counted once, not twice
@@ -2934,6 +2962,64 @@ a register of this size stays true.
   identifier, and whether a selector expires). A divergence register whose entries overlap
   invites exactly that, so the mechanism is folded in above and the register names this
   change once.
+
+#### D-COMBINE-NO-LOADBACK — the combine flow stages its output and does not copy it back
+
+* **Baseline behaviour.** [`COMBTRAN.jcl`](../../app/jcl/COMBTRAN.jcl) runs two steps. The
+  first sorts the current backup and system-transaction generations together into a new
+  combined generation, ordering on the sixteen-byte transaction identifier at **L30**. The
+  second, at **L41-L48**, is an `IDCAMS REPRO` that copies the combined dataset **back into
+  the transaction master**, because the system-generated transactions the interest job wrote
+  live in a separate dataset and the master does not hold them until that copy runs.
+* **Target behaviour.** `CombineTransactionsJob` performs the first step only: it resolves
+  both current input generations, stages the ledger ordered by transaction identifier as a
+  new generation of `TRANSACT.COMBINED`, and applies the retention rule. There is no
+  load-back step and no migrated counterpart to one.
+* **Why the difference is accepted.** The copy exists to fold rows into the master that were
+  written outside it, and in the migrated model they were never outside it: the interest
+  accrual writes its generated interest transactions to `ledger.transactions` directly,
+  through the same repository the posting job writes to, so the master already holds
+  everything the combined extract is assembled from. Reproducing the step would therefore not
+  be a no-op — it would read every row of the ledger and write each one back over itself,
+  touching every row's `@Version` column and every index entry, which is a large amount of
+  write amplification to reach the state the database is already in. Alternatives Considered:
+  keeping a load-back for symmetry with the job stream, rejected because a step that changes
+  no value while bumping every version is worse than absent — it would make optimistic
+  concurrency conflicts appear in unrelated services for the duration of the batch window.
+* **What is preserved.** The combined generation itself, byte for byte in the record layout
+  and in the same order the reference's sort produced; the two `(0)` input resolutions, which
+  remain and still fail the step by name when an input family holds no generation, so a
+  missing upstream generation is reported exactly as the reference's allocation failure
+  reported it.
+* **Where it is verified.** `GenerationStagingJobsTest` asserts that the job resolves both
+  current inputs before allocating, that it stages under the coordinate it allocated, and
+  that a missing input fails the step by name with nothing allocated or staged;
+  `BatchJobRosterTest` asserts the job is reachable under its advertised token.
+* **Files.** `services/batch-service/src/main/java/com/carddemo/batch/job/CombineTransactionsJob.java`,
+  `services/batch-service/src/test/java/com/carddemo/batch/job/GenerationStagingJobsTest.java`.
+
+#### D-INTEREST-ORPHAN-ROW — a balance row whose account cannot be read is skipped, not abended
+
+* **Baseline behaviour.** [`CBACT04C.cbl`](../../app/cbl/CBACT04C.cbl) reads each category
+  balance row's account through `1100-GET-ACCT-DATA`, and that paragraph abends when the read
+  fails rather than continuing. The run therefore stops at the first balance row whose account
+  is absent from the account master.
+* **Target behaviour.** `CalculateInterestJob` logs the account identifier at warn level and
+  skips the row, continuing with the remaining accounts.
+* **Why the difference is accepted.** The step runs in one transaction, so an abend and a skip
+  discard exactly the same written work — the outcome differs only in whether the remaining
+  accounts are attempted. Attempting them is the more useful of the two behaviours for an
+  operator, because one run then names **every** unresolvable account rather than the first,
+  which is the difference between one corrective pass and one pass per orphaned row. Nothing
+  is accrued for a skipped row, so no interest is invented for an account that does not exist.
+  Assumptions: an orphaned balance row is a referential-integrity failure in the source data,
+  and the migrated schema makes it unreachable going forward — `ledger.transaction_category_balances`
+  is keyed on the account identifier and the load refuses a row whose account did not load — so
+  this path is reachable only for extract data that was already inconsistent.
+* **Where it is verified.** The account-absent branch is exercised by the interest job's own
+  unit coverage of the control-break walk, which asserts that a row with no readable account
+  produces no accrual and no account update while the surrounding rows still accrue.
+* **Files.** `services/batch-service/src/main/java/com/carddemo/batch/job/CalculateInterestJob.java`.
 
 ## 8. Inventory caveats a reader will otherwise contradict
 

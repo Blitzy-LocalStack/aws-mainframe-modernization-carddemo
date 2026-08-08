@@ -128,6 +128,7 @@ stores in clear is a byte range and nothing more.
 
 from __future__ import annotations
 
+import base64
 import enum
 import hashlib
 import hmac
@@ -208,6 +209,7 @@ __all__ = [
     "layout",
     "mask_field",
     "mask_record",
+    "mask_rendered_value",
     "names",
     "normalized_timestamp",
     "opaque",
@@ -218,6 +220,8 @@ __all__ = [
     "sensitive_binary",
     "sensitive_text",
     "sensitive_uint",
+    "sensitive_packed",
+    "sensitive_signed_zoned",
     "signed_zoned",
     "text",
     "uint",
@@ -1327,6 +1331,68 @@ def signed_zoned(name: str, start: int, int_digits: int, dec_digits: int) -> Fie
     )
 
 
+def sensitive_signed_zoned(name: str, start: int, int_digits: int, dec_digits: int) -> FieldSpec:
+    """Declare a signed zoned display field whose raw bytes must stay out of diagnostics.
+
+    Purpose
+    -------
+    Build the descriptor for a ``PIC S9(i)V(d)`` field that carries a money amount held
+    against an identified account, so that :func:`mask_field` and :func:`mask_record` redact
+    it exactly as they redact the identifier it sits beside.
+
+    Refactoring Rationale: this factory exists because the money regime of every base master
+    had no sensitive constructor at all, and the consequence was not theoretical. The account
+    master's balance, its two credit limits and its two cycle totals were declared through
+    :func:`signed_zoned`, so :func:`mask_record` copied all five through verbatim and a
+    whole-record diagnostic of that record emitted a cardholder's exact financial position
+    beside their account number. A diagnostic goes wherever its consumer sends it, and it
+    cannot be un-logged.
+
+    Assumptions: no width is passed. The width comes from :func:`zoned_width` exactly as it
+    does for :func:`signed_zoned`, so marking a field sensitive cannot change its geometry --
+    which is what keeps a sensitive declaration from becoming a second, competing statement of
+    a field's width.
+
+    Trade-offs: the mask this enables is a KEYED tag of the same width rather than a blank
+    span, so a masked comparison still shows which amount differs between two records without
+    disclosing either amount. A blank span would have been simpler and would have destroyed the
+    one property that makes a masked diagnostic worth producing.
+
+    Parameters
+    ----------
+    name : str
+        The field name exactly as the copybook declares it.
+    start : int
+        The ZERO-based byte offset of the field from the start of the record.
+    int_digits : int
+        Number of digit positions before the implied decimal point.
+    dec_digits : int
+        Number of digit positions after the implied decimal point.
+
+    Returns
+    -------
+    FieldSpec
+        A signed zoned display field descriptor whose length is the total digit count, marked
+        sensitive.
+
+    Raises
+    ------
+    LayoutError
+        If the name is blank or malformed, the offset is negative, either digit count is
+        negative, both are zero, or their sum exceeds :data:`MAX_DIGITS`.
+    """
+    return FieldSpec(
+        name,
+        start,
+        zoned_width(int_digits, dec_digits),
+        Kind.ZONED,
+        int_digits,
+        dec_digits,
+        signed=True,
+        sensitive=True,
+    )
+
+
 def packed(name: str, start: int, int_digits: int, dec_digits: int, *, signed: bool) -> FieldSpec:
     """Declare a packed decimal field, deriving its width from its digit counts.
 
@@ -1377,6 +1443,66 @@ def packed(name: str, start: int, int_digits: int, dec_digits: int, *, signed: b
         int_digits,
         dec_digits,
         signed=signed,
+    )
+
+
+def sensitive_packed(
+    name: str, start: int, int_digits: int, dec_digits: int, *, signed: bool
+) -> FieldSpec:
+    """Declare a packed decimal field whose raw bytes must stay out of diagnostics.
+
+    Purpose
+    -------
+    Build the descriptor for a ``USAGE COMP-3`` field carrying a money amount held against an
+    identified account, so that :func:`mask_field` and :func:`mask_record` redact it exactly as
+    they redact the display-form amounts marked by :func:`sensitive_signed_zoned`.
+
+    Refactoring Rationale: the corpus holds an account-borne amount in all three computational
+    and display regimes, and only the character and unsigned-display regimes had sensitive
+    constructors before this one and its two siblings were added. The export record declares the
+    account balance and the cash credit limit as ``S9(10)V99 COMP-3`` at
+    ``app/cpy/CVEXPORT.cpy`` lines 50 and 52 where the account master declares the same two
+    amounts as zoned display, so classifying only the display form would have left the same
+    value disclosable in one encoding and withheld in the other. The storage regime a field
+    happens to use is not a property of the data it carries.
+
+    Assumptions: no width is passed. The width comes from :func:`packed_width` exactly as it
+    does for :func:`packed`, so marking a field sensitive cannot change its geometry.
+
+    Parameters
+    ----------
+    name : str
+        The field name exactly as the copybook declares it.
+    start : int
+        The ZERO-based byte offset of the field from the start of the record.
+    int_digits : int
+        Number of digit positions before the implied decimal point.
+    dec_digits : int
+        Number of digit positions after the implied decimal point.
+    signed : bool
+        Whether the picture clause carries a leading ``S``.
+
+    Returns
+    -------
+    FieldSpec
+        A packed decimal field descriptor whose length is the ceiling of one more than the
+        digit count, halved, marked sensitive.
+
+    Raises
+    ------
+    LayoutError
+        If the name is blank or malformed, the offset is negative, either digit count is
+        negative, both are zero, or their sum exceeds :data:`MAX_DIGITS`.
+    """
+    return FieldSpec(
+        name,
+        start,
+        packed_width(int_digits, dec_digits),
+        Kind.PACKED,
+        int_digits,
+        dec_digits,
+        signed=signed,
+        sensitive=True,
     )
 
 
@@ -2141,6 +2267,107 @@ SECUSER_LAYOUT: Final[RecordSpec] = RecordSpec(
         text("SEC-USR-FILLER", 57, 23),  # CSUSR01Y L23 PIC X(23) named trailing pad
     ),
 ).validate_geometry()
+_ACCOUNT_MASTER_DISCLOSABLE_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        # The one-character active-status flag and the three date fields: the rendering rule of
+        # docs/architecture/observability.md admits a status code and a date by name.
+        "ACCT-ACTIVE-STATUS",
+        "ACCT-OPEN-DATE",
+        "ACCT-EXPIRAION-DATE",
+        "ACCT-REISSUE-DATE",
+        "EXP-ACCT-ACTIVE-STATUS",
+        "EXP-ACCT-OPEN-DATE",
+        "EXP-ACCT-EXPIRAION-DATE",
+        "EXP-ACCT-REISSUE-DATE",
+        # The disclosure-group code, which names a rate table and not a customer. The Java
+        # rendering of the same record keeps it for the same reason: com.carddemo.batch.domain
+        # .Account renders groupId and its negative-disclosure test asserts that it may.
+        "ACCT-GROUP-ID",
+        "EXP-ACCT-GROUP-ID",
+        # The two key components of the category-balance key that are codes rather than
+        # identities -- a transaction type and a transaction category. The rendering rule admits
+        # a type or category code by name, and both are drawn from seeded reference tables.
+        "TRANCAT-TYPE-CD",
+        "TRANCAT-CD",
+        # Every one of these records closes with a trailing pad carrying no value at all.
+        "FILLER",
+    }
+)
+
+
+def _close_master_disclosure(
+    fields: tuple[FieldSpec, ...],
+) -> tuple[FieldSpec, ...]:
+    """Mark every field of an account-bearing master sensitive unless explicitly disclosable.
+
+    Purpose
+    -------
+    Apply a fail-closed disclosure policy to the account master, its packed export branch and
+    the transaction-category balance, so the sensitivity of those records is decided by ONE
+    list rather than by remembering to reach for :func:`sensitive_uint` or
+    :meth:`FieldSpec.with_flags` at each declaration site.
+
+    Refactoring Rationale: these three records previously declared NO sensitive field at all,
+    which made :func:`mask_record` an identity function over them -- so
+    ``render_masked_account_record`` and ``render_masked_category_balance_record`` returned the
+    account identifier and every monetary amount verbatim while being named and documented as
+    privacy-safe renderings. A helper whose NAME promises redaction and whose behaviour is
+    plaintext is worse than no helper, because a caller reads the name and stops. Marking the
+    fields at the layout is the fix those functions' own comments prescribed: they already
+    recorded that "marking a field sensitive in the layout is the ONLY change ever needed to
+    redact it here".
+
+    Assumptions: monetary amounts are sensitive, which is the policy the rest of this module
+    already applies rather than a new position. Both authorization segments mark their limit,
+    balance and amount fields sensitive, and the rendering rule of
+    ``docs/architecture/observability.md`` places a monetary amount in the OMITTED class with
+    no abbreviated form. A balance is also the most re-identifying field in the record after
+    the key, because it is close to unique per account at any instant.
+
+    Assumptions: the policy is fail-closed -- a field is sensitive unless NAMED -- for the same
+    reason :func:`_close_authorization_disclosure` is. A field added to one of these copybook
+    transcriptions later is then protected by default, and disclosing it becomes a decision
+    somebody has to write down rather than an omission nobody notices.
+
+    Assumptions: only the ``sensitive`` flag is ever changed, and geometry is carried through
+    untouched by :meth:`FieldSpec.with_flags`, so applying this function cannot move a field,
+    resize one, or alter a storage regime. That is what lets it run between the field
+    declarations and :meth:`RecordSpec.validate_geometry`, leaving the 300-byte, 460-byte and
+    50-byte sums to be checked exactly as before, and it is why a masked rendering stays
+    byte-aligned and offset-countable.
+
+    Trade-offs: this is a SEPARATE list from the authorization one rather than an extension of
+    it, and the two disagree about the account key -- the authorization policy discloses
+    ``PA-ACCT-ID`` and this one withholds ``ACCT-ID``. Merging them would have to settle that
+    disagreement, and the authorization list is pinned field by field by
+    ``services/common-lib/src/test/java/com/carddemo/common/codec/AuthorizationDisclosurePolicyTest.java``
+    against the segments it was written for. Two named policies that each say what they cover
+    is preferable to one list that quietly changes a contract a test already fixes.
+
+    Parameters
+    ----------
+    fields : tuple[FieldSpec, ...]
+        The record's field descriptors exactly as transcribed from its copybook.
+
+    Returns
+    -------
+    tuple[FieldSpec, ...]
+        The same descriptors in the same order, each either unchanged because its name is
+        disclosable or marked sensitive because it is not.
+
+    Raises
+    ------
+    LayoutError
+        Never in practice; it is documented because :meth:`FieldSpec.with_flags` invokes the
+        validating constructor.
+    """
+    return tuple(
+        field
+        if field.name in _ACCOUNT_MASTER_DISCLOSABLE_FIELDS
+        else field.with_flags(field.normalize_ts, True)
+        for field in fields
+    )
+
 
 # Assumptions: 300 bytes with an eleven-byte key at offset zero, corroborated by
 #   app/jcl/ACCTFILE.jcl lines 40 and 41 declaring KEYS(11 0) and RECORDSIZE(300 300), and
@@ -2161,20 +2388,22 @@ ACCOUNT_LAYOUT: Final[RecordSpec] = RecordSpec(
     300,
     11,
     0,
-    (
-        uint("ACCT-ID", 0, 11),  # CVACT01Y L5 PIC 9(11) unsigned
-        text("ACCT-ACTIVE-STATUS", 11, 1),  # CVACT01Y L6 PIC X(01)
-        signed_zoned("ACCT-CURR-BAL", 12, 10, 2),  # CVACT01Y L7 PIC S9(10)V99
-        signed_zoned("ACCT-CREDIT-LIMIT", 24, 10, 2),  # CVACT01Y L8 PIC S9(10)V99
-        signed_zoned("ACCT-CASH-CREDIT-LIMIT", 36, 10, 2),  # CVACT01Y L9 PIC S9(10)V99
-        text("ACCT-OPEN-DATE", 48, 10),  # CVACT01Y L10 PIC X(10)
-        text("ACCT-EXPIRAION-DATE", 58, 10),  # CVACT01Y L11 PIC X(10) misspelt
-        text("ACCT-REISSUE-DATE", 68, 10),  # CVACT01Y L12 PIC X(10)
-        signed_zoned("ACCT-CURR-CYC-CREDIT", 78, 10, 2),  # CVACT01Y L13 PIC S9(10)V99
-        signed_zoned("ACCT-CURR-CYC-DEBIT", 90, 10, 2),  # CVACT01Y L14 PIC S9(10)V99
-        text("ACCT-ADDR-ZIP", 102, 10),  # CVACT01Y L15 PIC X(10)
-        text("ACCT-GROUP-ID", 112, 10),  # CVACT01Y L16 PIC X(10)
-        text("FILLER", 122, 178),  # CVACT01Y L17 PIC X(178) trailing pad
+    _close_master_disclosure(
+        (
+            uint("ACCT-ID", 0, 11),  # CVACT01Y L5 PIC 9(11) unsigned
+            text("ACCT-ACTIVE-STATUS", 11, 1),  # CVACT01Y L6 PIC X(01)
+            signed_zoned("ACCT-CURR-BAL", 12, 10, 2),  # CVACT01Y L7 PIC S9(10)V99
+            signed_zoned("ACCT-CREDIT-LIMIT", 24, 10, 2),  # CVACT01Y L8 PIC S9(10)V99
+            signed_zoned("ACCT-CASH-CREDIT-LIMIT", 36, 10, 2),  # CVACT01Y L9 PIC S9(10)V99
+            text("ACCT-OPEN-DATE", 48, 10),  # CVACT01Y L10 PIC X(10)
+            text("ACCT-EXPIRAION-DATE", 58, 10),  # CVACT01Y L11 PIC X(10) misspelt
+            text("ACCT-REISSUE-DATE", 68, 10),  # CVACT01Y L12 PIC X(10)
+            signed_zoned("ACCT-CURR-CYC-CREDIT", 78, 10, 2),  # CVACT01Y L13 PIC S9(10)V99
+            signed_zoned("ACCT-CURR-CYC-DEBIT", 90, 10, 2),  # CVACT01Y L14 PIC S9(10)V99
+            text("ACCT-ADDR-ZIP", 102, 10),  # CVACT01Y L15 PIC X(10)
+            text("ACCT-GROUP-ID", 112, 10),  # CVACT01Y L16 PIC X(10)
+            text("FILLER", 122, 178),  # CVACT01Y L17 PIC X(178) trailing pad
+        )
     ),
 ).validate_geometry()
 
@@ -2193,7 +2422,7 @@ CARD_LAYOUT: Final[RecordSpec] = RecordSpec(
     0,
     (
         sensitive_text("CARD-NUM", 0, 16),  # CVACT02Y L5 PIC X(16) primary account number
-        uint("CARD-ACCT-ID", 16, 11),  # CVACT02Y L6 PIC 9(11) alternate key
+        sensitive_uint("CARD-ACCT-ID", 16, 11),  # CVACT02Y L6 PIC 9(11) alternate key
         sensitive_uint("CARD-CVV-CD", 27, 3),  # CVACT02Y L7 PIC 9(03) verification value
         sensitive_text("CARD-EMBOSSED-NAME", 30, 50),  # CVACT02Y L8 PIC X(50)
         text("CARD-EXPIRAION-DATE", 80, 10),  # CVACT02Y L9 PIC X(10) misspelt
@@ -2218,7 +2447,7 @@ CUSTOMER_LAYOUT: Final[RecordSpec] = RecordSpec(
     9,
     0,
     (
-        uint("CUST-ID", 0, 9),  # CVCUS01Y L5 PIC 9(09)
+        sensitive_uint("CUST-ID", 0, 9),  # CVCUS01Y L5 PIC 9(09)
         sensitive_text("CUST-FIRST-NAME", 9, 25),  # CVCUS01Y L6 PIC X(25)
         sensitive_text("CUST-MIDDLE-NAME", 34, 25),  # CVCUS01Y L7 PIC X(25)
         sensitive_text("CUST-LAST-NAME", 59, 25),  # CVCUS01Y L8 PIC X(25)
@@ -2235,7 +2464,7 @@ CUSTOMER_LAYOUT: Final[RecordSpec] = RecordSpec(
         sensitive_text("CUST-DOB-YYYY-MM-DD", 308, 10),  # CVCUS01Y L19 PIC X(10)
         sensitive_text("CUST-EFT-ACCOUNT-ID", 318, 10),  # CVCUS01Y L20 PIC X(10)
         text("CUST-PRI-CARD-HOLDER-IND", 328, 1),  # CVCUS01Y L21 PIC X(01)
-        uint("CUST-FICO-CREDIT-SCORE", 329, 3),  # CVCUS01Y L22 PIC 9(03)
+        sensitive_uint("CUST-FICO-CREDIT-SCORE", 329, 3),  # CVCUS01Y L22 PIC 9(03)
         text("FILLER", 332, 168),  # CVCUS01Y L23 PIC X(168) trailing pad
     ),
 ).validate_geometry()
@@ -2261,8 +2490,8 @@ XREF_LAYOUT: Final[RecordSpec] = RecordSpec(
     0,
     (
         sensitive_text("XREF-CARD-NUM", 0, 16),  # CVACT03Y L5 PIC X(16) primary key
-        uint("XREF-CUST-ID", 16, 9),  # CVACT03Y L6 PIC 9(09)
-        uint("XREF-ACCT-ID", 25, 11),  # CVACT03Y L7 PIC 9(11) alternate key
+        sensitive_uint("XREF-CUST-ID", 16, 9),  # CVACT03Y L6 PIC 9(09)
+        sensitive_uint("XREF-ACCT-ID", 25, 11),  # CVACT03Y L7 PIC 9(11) alternate key
         text("FILLER", 36, 14),  # CVACT03Y L8 PIC X(14) trailing pad
     ),
     (AlternateKeySpec("XREF-ACCT-ID", 25, 11),),
@@ -2290,7 +2519,7 @@ DALYTRAN_LAYOUT: Final[RecordSpec] = RecordSpec(
         uint("DALYTRAN-CAT-CD", 18, 4),  # CVTRA06Y L7 PIC 9(04)
         text("DALYTRAN-SOURCE", 22, 10),  # CVTRA06Y L8 PIC X(10)
         text("DALYTRAN-DESC", 32, 100),  # CVTRA06Y L9 PIC X(100)
-        signed_zoned("DALYTRAN-AMT", 132, 9, 2),  # CVTRA06Y L10 PIC S9(09)V99
+        sensitive_signed_zoned("DALYTRAN-AMT", 132, 9, 2),  # CVTRA06Y L10 PIC S9(09)V99
         uint("DALYTRAN-MERCHANT-ID", 143, 9),  # CVTRA06Y L11 PIC 9(09)
         text("DALYTRAN-MERCHANT-NAME", 152, 50),  # CVTRA06Y L12 PIC X(50)
         text("DALYTRAN-MERCHANT-CITY", 202, 50),  # CVTRA06Y L13 PIC X(50)
@@ -2324,7 +2553,7 @@ TRAN_LAYOUT: Final[RecordSpec] = RecordSpec(
         uint("TRAN-CAT-CD", 18, 4),  # CVTRA05Y L7 PIC 9(04)
         text("TRAN-SOURCE", 22, 10),  # CVTRA05Y L8 PIC X(10)
         text("TRAN-DESC", 32, 100),  # CVTRA05Y L9 PIC X(100)
-        signed_zoned("TRAN-AMT", 132, 9, 2),  # CVTRA05Y L10 PIC S9(09)V99
+        sensitive_signed_zoned("TRAN-AMT", 132, 9, 2),  # CVTRA05Y L10 PIC S9(09)V99
         uint("TRAN-MERCHANT-ID", 143, 9),  # CVTRA05Y L11 PIC 9(09)
         text("TRAN-MERCHANT-NAME", 152, 50),  # CVTRA05Y L12 PIC X(50)
         text("TRAN-MERCHANT-CITY", 202, 50),  # CVTRA05Y L13 PIC X(50)
@@ -2426,12 +2655,14 @@ TCATBAL_LAYOUT: Final[RecordSpec] = RecordSpec(
     50,
     17,
     0,
-    (
-        uint("TRANCAT-ACCT-ID", 0, 11),  # CVTRA01Y L6 PIC 9(11), in the L5 key group
-        text("TRANCAT-TYPE-CD", 11, 2),  # CVTRA01Y L7 PIC X(02), in the L5 key group
-        uint("TRANCAT-CD", 13, 4),  # CVTRA01Y L8 PIC 9(04), in the L5 key group
-        signed_zoned("TRAN-CAT-BAL", 17, 9, 2),  # CVTRA01Y L9 PIC S9(09)V99
-        text("FILLER", 28, 22),  # CVTRA01Y L10 PIC X(22) trailing pad
+    _close_master_disclosure(
+        (
+            uint("TRANCAT-ACCT-ID", 0, 11),  # CVTRA01Y L6 PIC 9(11), in the L5 key group
+            text("TRANCAT-TYPE-CD", 11, 2),  # CVTRA01Y L7 PIC X(02), in the L5 key group
+            uint("TRANCAT-CD", 13, 4),  # CVTRA01Y L8 PIC 9(04), in the L5 key group
+            signed_zoned("TRAN-CAT-BAL", 17, 9, 2),  # CVTRA01Y L9 PIC S9(09)V99
+            text("FILLER", 28, 22),  # CVTRA01Y L10 PIC X(22) trailing pad
+        )
     ),
 ).validate_geometry()
 
@@ -2462,7 +2693,7 @@ TRNX_LAYOUT: Final[RecordSpec] = RecordSpec(
         uint("TRNX-CAT-CD", 34, 4),  # COSTM01 L26 PIC 9(04)
         text("TRNX-SOURCE", 38, 10),  # COSTM01 L27 PIC X(10)
         text("TRNX-DESC", 48, 100),  # COSTM01 L28 PIC X(100)
-        signed_zoned("TRNX-AMT", 148, 9, 2),  # COSTM01 L29 PIC S9(09)V99 at 148, not 132
+        sensitive_signed_zoned("TRNX-AMT", 148, 9, 2),  # COSTM01 L29 PIC S9(09)V99 at 148, not 132
         uint("TRNX-MERCHANT-ID", 159, 9),  # COSTM01 L30 PIC 9(09)
         text("TRNX-MERCHANT-NAME", 168, 50),  # COSTM01 L31 PIC X(50)
         text("TRNX-MERCHANT-CITY", 218, 50),  # COSTM01 L32 PIC X(50)
@@ -3099,7 +3330,7 @@ EXPORT_CUSTOMER_LAYOUT: Final[RecordSpec] = RecordSpec(
     4,
     0,
     (
-        binary("EXP-CUST-ID", 0, 9, 0, signed=False),  # CVEXPORT L25 PIC 9(09) COMP
+        sensitive_binary("EXP-CUST-ID", 0, 9, 0, signed=False),  # CVEXPORT L25 PIC 9(09) COMP
         sensitive_text("EXP-CUST-FIRST-NAME", 4, 25),  # CVEXPORT L26 PIC X(25)
         sensitive_text("EXP-CUST-MIDDLE-NAME", 29, 25),  # CVEXPORT L27 PIC X(25)
         sensitive_text("EXP-CUST-LAST-NAME", 54, 25),  # CVEXPORT L28 PIC X(25)
@@ -3113,7 +3344,7 @@ EXPORT_CUSTOMER_LAYOUT: Final[RecordSpec] = RecordSpec(
         sensitive_text("EXP-CUST-DOB-YYYY-MM-DD", 303, 10),  # CVEXPORT L38 PIC X(10)
         sensitive_text("EXP-CUST-EFT-ACCOUNT-ID", 313, 10),  # CVEXPORT L39 PIC X(10)
         text("EXP-CUST-PRI-CARD-HOLDER-IND", 323, 1),  # CVEXPORT L40 PIC X(01)
-        packed("EXP-CUST-FICO-CREDIT-SCORE", 324, 3, 0, signed=False),  # L41 9(03) COMP-3
+        sensitive_packed("EXP-CUST-FICO-CREDIT-SCORE", 324, 3, 0, signed=False),  # L41 9(03) COMP-3
         text("FILLER", 326, 134),  # CVEXPORT L42 PIC X(134) trailing pad
     ),
 ).validate_geometry()
@@ -3130,20 +3361,22 @@ EXPORT_ACCOUNT_LAYOUT: Final[RecordSpec] = RecordSpec(
     EXPORT_BRANCH_LENGTH,
     11,
     0,
-    (
-        uint("EXP-ACCT-ID", 0, 11),  # CVEXPORT L48 PIC 9(11) display
-        text("EXP-ACCT-ACTIVE-STATUS", 11, 1),  # CVEXPORT L49 PIC X(01)
-        packed("EXP-ACCT-CURR-BAL", 12, 10, 2, signed=True),  # L50 S9(10)V99 COMP-3 = 7
-        signed_zoned("EXP-ACCT-CREDIT-LIMIT", 19, 10, 2),  # L51 S9(10)V99 display = 12
-        packed("EXP-ACCT-CASH-CREDIT-LIMIT", 31, 10, 2, signed=True),  # L52 COMP-3 = 7
-        text("EXP-ACCT-OPEN-DATE", 38, 10),  # CVEXPORT L53 PIC X(10)
-        text("EXP-ACCT-EXPIRAION-DATE", 48, 10),  # CVEXPORT L54 PIC X(10) misspelt
-        text("EXP-ACCT-REISSUE-DATE", 58, 10),  # CVEXPORT L55 PIC X(10)
-        signed_zoned("EXP-ACCT-CURR-CYC-CREDIT", 68, 10, 2),  # L56 S9(10)V99 display = 12
-        binary("EXP-ACCT-CURR-CYC-DEBIT", 80, 10, 2, signed=True),  # L57 COMP = 8
-        text("EXP-ACCT-ADDR-ZIP", 88, 10),  # CVEXPORT L58 PIC X(10)
-        text("EXP-ACCT-GROUP-ID", 98, 10),  # CVEXPORT L59 PIC X(10)
-        text("FILLER", 108, 352),  # CVEXPORT L60 PIC X(352) trailing pad
+    _close_master_disclosure(
+        (
+            uint("EXP-ACCT-ID", 0, 11),  # CVEXPORT L48 PIC 9(11) display
+            text("EXP-ACCT-ACTIVE-STATUS", 11, 1),  # CVEXPORT L49 PIC X(01)
+            packed("EXP-ACCT-CURR-BAL", 12, 10, 2, signed=True),  # L50 S9(10)V99 COMP-3 = 7
+            signed_zoned("EXP-ACCT-CREDIT-LIMIT", 19, 10, 2),  # L51 S9(10)V99 display = 12
+            packed("EXP-ACCT-CASH-CREDIT-LIMIT", 31, 10, 2, signed=True),  # L52 COMP-3 = 7
+            text("EXP-ACCT-OPEN-DATE", 38, 10),  # CVEXPORT L53 PIC X(10)
+            text("EXP-ACCT-EXPIRAION-DATE", 48, 10),  # CVEXPORT L54 PIC X(10) misspelt
+            text("EXP-ACCT-REISSUE-DATE", 58, 10),  # CVEXPORT L55 PIC X(10)
+            signed_zoned("EXP-ACCT-CURR-CYC-CREDIT", 68, 10, 2),  # L56 S9(10)V99 display = 12
+            binary("EXP-ACCT-CURR-CYC-DEBIT", 80, 10, 2, signed=True),  # L57 COMP = 8
+            text("EXP-ACCT-ADDR-ZIP", 88, 10),  # CVEXPORT L58 PIC X(10)
+            text("EXP-ACCT-GROUP-ID", 98, 10),  # CVEXPORT L59 PIC X(10)
+            text("FILLER", 108, 352),  # CVEXPORT L60 PIC X(352) trailing pad
+        )
     ),
 ).validate_geometry()
 
@@ -3164,7 +3397,7 @@ EXPORT_TRANSACTION_LAYOUT: Final[RecordSpec] = RecordSpec(
         uint("EXP-TRAN-CAT-CD", 18, 4),  # CVEXPORT L68 PIC 9(04)
         text("EXP-TRAN-SOURCE", 22, 10),  # CVEXPORT L69 PIC X(10)
         text("EXP-TRAN-DESC", 32, 100),  # CVEXPORT L70 PIC X(100)
-        packed("EXP-TRAN-AMT", 132, 9, 2, signed=True),  # L71 S9(09)V99 COMP-3 = 6
+        sensitive_packed("EXP-TRAN-AMT", 132, 9, 2, signed=True),  # L71 S9(09)V99 COMP-3 = 6
         binary("EXP-TRAN-MERCHANT-ID", 138, 9, 0, signed=False),  # L72 9(09) COMP = 4
         text("EXP-TRAN-MERCHANT-NAME", 142, 50),  # CVEXPORT L73 PIC X(50)
         text("EXP-TRAN-MERCHANT-CITY", 192, 50),  # CVEXPORT L74 PIC X(50)
@@ -3188,8 +3421,8 @@ EXPORT_CARD_XREF_LAYOUT: Final[RecordSpec] = RecordSpec(
     0,
     (
         sensitive_text("EXP-XREF-CARD-NUM", 0, 16),  # CVEXPORT L85 PIC X(16)
-        uint("EXP-XREF-CUST-ID", 16, 9),  # CVEXPORT L86 PIC 9(09) display
-        binary("EXP-XREF-ACCT-ID", 25, 11, 0, signed=False),  # L87 9(11) COMP = 8
+        sensitive_uint("EXP-XREF-CUST-ID", 16, 9),  # CVEXPORT L86 PIC 9(09) display
+        sensitive_binary("EXP-XREF-ACCT-ID", 25, 11, 0, signed=False),  # L87 9(11) COMP = 8
         text("FILLER", 33, 427),  # CVEXPORT L88 PIC X(427) trailing pad
     ),
 ).validate_geometry()
@@ -3215,7 +3448,7 @@ EXPORT_CARD_LAYOUT: Final[RecordSpec] = RecordSpec(
     0,
     (
         sensitive_text("EXP-CARD-NUM", 0, 16),  # CVEXPORT L94 PIC X(16)
-        binary("EXP-CARD-ACCT-ID", 16, 11, 0, signed=False),  # L95 9(11) COMP = 8
+        sensitive_binary("EXP-CARD-ACCT-ID", 16, 11, 0, signed=False),  # L95 9(11) COMP = 8
         sensitive_binary("EXP-CARD-CVV-CD", 24, 3, 0, signed=False),  # L96 9(03) COMP = 2
         sensitive_text("EXP-CARD-EMBOSSED-NAME", 26, 50),  # CVEXPORT L97 PIC X(50)
         text("EXP-CARD-EXPIRAION-DATE", 76, 10),  # CVEXPORT L98 PIC X(10) misspelt
@@ -3659,6 +3892,134 @@ _BRACKETED_TAG_OVERHEAD: Final[int] = len(_REDACTION_BRACKET_PREFIX) + len(_REDA
 _UNTERMINATED_TAG_WIDTH: Final[int] = _BRACKETED_TAG_OVERHEAD
 
 
+_MASK_HMAC_KEY_MIN_BYTES: Final[int] = 32
+
+
+def _mask_hmac_key() -> bytes:
+    """Return the HMAC key the redaction tag is derived with, refusing weak material.
+
+    Purpose
+    -------
+    Resolve :data:`ENV_MASK_HMAC_KEY` into key bytes, or fall back to the process-scoped
+    random key when the variable is unset, and refuse anything supplied that is not
+    canonical base64 of at least :data:`_MASK_HMAC_KEY_MIN_BYTES` distinct-valued bytes.
+
+    Assumptions: the variable stays OPTIONAL and only its CONTENT is constrained. Leaving
+    it unset is a supported mode -- a single command that prints one diagnostic needs only
+    within-run comparability, which the process key gives it -- so this function must
+    distinguish "no key configured", which is safe, from "a weak key configured", which is
+    not. Conflating the two would either force every command to carry a secret or accept
+    every string an operator supplies, and the whole point is that neither is necessary.
+
+    Assumptions: the value is read on every call rather than captured once, matching the
+    behaviour the callers below document. A command-line entry point parses its own
+    arguments before doing any work, so caching at import would make the variable's effect
+    depend on import order; and because the refusal depends only on configuration and never
+    on data, an invalid key fails on the first masked field of the run, before any value has
+    been rendered.
+
+    Trade-offs: whitespace at the two ends of the value is tolerated and interior
+    whitespace is not. A secret store or a shell here-document commonly appends a newline,
+    and refusing that would reject a correct key for a delivery artefact of the transport;
+    interior whitespace is not in the base64 alphabet and is refused by the decoder, which
+    is right, because it means the value was wrapped or concatenated and is not the key the
+    operator generated.
+
+    Assumptions: a value that is EMPTY, or whitespace only, is treated as unset and takes
+    the process key rather than being refused, and that is a decision rather than an
+    oversight. ``FOO=${BAR}`` renders an unset ``BAR`` as an empty string in every shell and
+    in a container task definition alike, so refusing empty would turn a variable that is
+    documented as optional into one that fails whenever a deployment references it
+    conditionally. The choice is safe in the direction that matters: the fallback is 32
+    cryptographically random bytes, so treating empty as unset can never SELECT weak
+    material -- it can only cost cross-run comparability, which is the documented
+    consequence of not supplying a key at all.
+
+    Trade-offs: the canonicality re-encode is a second check on top of the decoder's own
+    validation, and it is not redundant. ``validate=True`` refuses characters outside the
+    alphabet but accepts a trailing character whose unused low bits are non-zero, so two
+    different strings can decode to the same bytes. Without the re-encode a rotation that
+    changed only those bits would leave every tag identical while the configured value
+    looked different -- a change an operator would reasonably believe had taken effect.
+
+    Trade-offs: material whose bytes are all one value is refused, and that is a
+    STRUCTURAL floor rather than an entropy test. No test on a single sample can establish
+    that key material was randomly generated, so the check refuses only the class that is
+    both unmistakably weak and easy to produce by accident -- 32 NUL bytes, or the result of
+    base64-encoding a repeated character. Alternatives Considered: a compression-ratio or
+    byte-frequency heuristic, rejected because it would refuse some correctly generated keys
+    and still accept most badly chosen ones, which is the worst of both outcomes for a check
+    that stands between an operator and a working command.
+
+    Assumptions: no refusal message contains any part of the supplied value. Each names the
+    variable, states the rule and, where a length is the fault, reports the DECODED length
+    only -- so the message stays actionable in a log that may be aggregated anywhere while
+    disclosing nothing that would narrow a guess at the key.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    bytes
+        The decoded supplied key when the variable holds conforming material, otherwise
+        :data:`_PROCESS_MASK_KEY`.
+
+    Raises
+    ------
+    LayoutError
+        If the variable is set but does not hold standard base64, holds a non-canonical
+        encoding, decodes to fewer than :data:`_MASK_HMAC_KEY_MIN_BYTES` bytes, or decodes
+        to a single repeated byte value.
+    """
+    supplied = os.environ.get(ENV_MASK_HMAC_KEY, "").strip()
+    if not supplied:
+        return _PROCESS_MASK_KEY
+
+    generate = (
+        'python3 -c "import base64,secrets;'
+        " print(base64.b64encode(secrets.token_bytes("
+        f'{_MASK_HMAC_KEY_MIN_BYTES})).decode())"'
+    )
+    try:
+        # Assumptions: binascii.Error, which b64decode raises, is a subclass of ValueError,
+        #   so one except clause covers both it and the TypeError-free string path. Catching
+        #   the base class rather than importing binascii keeps the refusal in one branch.
+        material = base64.b64decode(supplied, validate=True)
+    except ValueError as malformed:
+        raise LayoutError(
+            f"{ENV_MASK_HMAC_KEY} must hold standard base64 key material, but the value"
+            " supplied is not valid standard base64; the URL-safe alphabet and a raw passphrase"
+            f" are both refused deliberately. Generate a key with: {generate}"
+        ) from malformed
+
+    if base64.b64encode(material).decode("ascii") != supplied:
+        raise LayoutError(
+            f"{ENV_MASK_HMAC_KEY} must hold the CANONICAL base64 encoding of its key"
+            " material, but the value supplied re-encodes differently, which means two"
+            " different values would denote the same key and a rotation between them would"
+            f" change no tag. Generate a key with: {generate}"
+        )
+
+    if len(material) < _MASK_HMAC_KEY_MIN_BYTES:
+        raise LayoutError(
+            f"{ENV_MASK_HMAC_KEY} must decode to at least {_MASK_HMAC_KEY_MIN_BYTES} bytes of"
+            f" key material, which is the HMAC-SHA-256 output size, but the value supplied"
+            f" decodes to {len(material)}. Generate a key with: {generate}"
+        )
+
+    if len(set(material)) == 1:
+        raise LayoutError(
+            f"{ENV_MASK_HMAC_KEY} must decode to key material that is not a single repeated"
+            f" byte, but the value supplied decodes to {len(material)} copies of one byte,"
+            " which is guessable and returns the redaction tag to the unkeyed digest it"
+            f" replaced. Generate a key with: {generate}"
+        )
+
+    return material
+
+
 def _redaction_tag(field_name: str, chunk: str, width: int) -> str:
     """Return the widest keyed redaction tag that fits one field width.
 
@@ -3727,8 +4088,19 @@ def _redaction_tag(field_name: str, chunk: str, width: int) -> str:
         -- one at a width of two, and none at a width of one, which is the single width at which
         no code character can be carried.
     """
-    supplied = os.environ.get(ENV_MASK_HMAC_KEY, "")
-    key = supplied.encode("utf-8") if supplied else _PROCESS_MASK_KEY
+    # WHY : Refactoring Rationale: the key comes from `_mask_hmac_key`, which VALIDATES it. This
+    #       line read the variable and used `supplied.encode("utf-8")` directly, so any string an
+    #       operator happened to set became the HMAC key -- a four-character passphrase, a hostname,
+    #       an accidentally-exported unrelated value. The tag's whole security property is that an
+    #       attacker holding a masked diagnostic cannot confirm a guessed field value by recomputing
+    #       the digest, and that property rests entirely on the key being unguessable; a weak key
+    #       returns the tag to the unkeyed digest it was introduced to replace, while still looking
+    #       exactly as opaque. Refusing weak material is what makes the difference visible.
+    # WHY : Assumptions: the variable stays OPTIONAL -- unset still takes the process-scoped random
+    #       key, which is the supported mode for a single command that needs only within-run
+    #       comparability. Only its CONTENT is constrained, so "no key configured" and "a weak key
+    #       configured" stay distinguishable rather than being conflated into one outcome.
+    key = _mask_hmac_key()
     environment = os.environ.get(ENV_MASK_ENVIRONMENT, "")
     message = b"".join(
         f"{len(part)}:{part}".encode("utf-8", "replace")
@@ -3807,6 +4179,10 @@ def mask_field(field: FieldSpec, chunk: str) -> str:
     Raises
     ------
     LayoutError
+        If ``CARDDEMO_MASK_HMAC_KEY`` is set to material that is not canonical base64 of
+        at least thirty-two distinct-valued bytes. Raised by :func:`_mask_hmac_key` on the
+        first masked field of a run, before any value has been rendered.
+    LayoutError
         If ``chunk`` is not ``field.length`` characters. The message names the field through
         :meth:`FieldSpec.describe` and reports the observed length, never the content, so it
         stays safe for a sensitive field.
@@ -3824,6 +4200,72 @@ def mask_field(field: FieldSpec, chunk: str) -> str:
     else:
         masked = _redaction_tag(field.name, chunk, field.length)
     return masked[: field.length].ljust(field.length)
+
+
+def mask_rendered_value(field: FieldSpec, rendered: str) -> str:
+    """Return a keyed redaction of a sensitive field's DECODED rendering, at any width.
+
+    Purpose
+    -------
+    Redact a value that has already been decoded and rendered as text, for a diagnostic that
+    prints a decoded field map rather than a raw record. A field not marked sensitive is
+    returned unchanged.
+
+    Refactoring Rationale: this exists because :func:`mask_field` requires a chunk of exactly
+    the field's declared width, and a DECODED money value is not that width -- a
+    ``PIC S9(10)V99`` field occupies twelve stored characters and renders as anything from
+    ``0.00`` to ``-1234567890.12``, so a caller holding the rendering has nothing of the right
+    width to hand over. Before the account-borne money fields were classified sensitive, the
+    only caller worked around that by substituting a constant filler of the declared width,
+    which produced ONE identical tag for every value of that field: two records differing only
+    in balance rendered identically, which is precisely the "a diff reports no difference where
+    one exists" failure the keyed tag exists to prevent. Deriving the tag from the rendering
+    itself restores the property at every width.
+
+    Assumptions: the tag is derived from the rendering rather than from the stored bytes, so it
+    is NOT equal to the tag :func:`mask_field` produces for the same field of the same record.
+    That is stated because the two are otherwise easy to mistake for interchangeable: the
+    stored form and the rendered form of one amount are different strings -- ``00000019400``
+    against ``194.00`` -- and a keyed tag is a function of its input. Comparability therefore
+    holds within one rendering mode and not across the two, which is the correct property for a
+    decoded field map that is only ever compared against another decoded field map.
+
+    Trade-offs: the width passed to the tag builder is the field's DECLARED width and not the
+    rendering's own length, so the tag a narrow field carries is bounded by the field rather
+    than by however many characters this particular value happened to need. Using the
+    rendering's length instead was rejected because the tag's width would then vary between
+    records -- ``0.00`` and ``-1234567890.12`` would produce tags of four and fourteen
+    characters -- and a reader comparing two field maps would see a width difference that
+    reveals the magnitude of a value the tag is there to withhold.
+
+    Parameters
+    ----------
+    field : FieldSpec
+        The descriptor whose ``sensitive`` flag governs disclosure and whose declared width
+        bounds the tag.
+    rendered : str
+        The field's decoded value already rendered as text, of any length. No part of it
+        appears in the result.
+
+    Returns
+    -------
+    str
+        ``rendered`` unchanged for a field that is not sensitive; otherwise a keyed tag of at
+        most the field's declared width, holding no part of the value.
+
+    Raises
+    ------
+    LayoutError
+        If ``CARDDEMO_MASK_HMAC_KEY`` is set to material that is not canonical base64 of
+        at least thirty-two distinct-valued bytes. Raised by :func:`_mask_hmac_key` on the
+        first masked field of a run, before any value has been rendered.
+    None
+        Any text is acceptable at any length, which is the whole reason this entry point exists
+        alongside :func:`mask_field`.
+    """
+    if not field.sensitive:
+        return rendered
+    return _redaction_tag(field.name, rendered, field.length)
 
 
 def mask_record(raw: str, layout: RecordSpec) -> str:
@@ -3855,6 +4297,10 @@ def mask_record(raw: str, layout: RecordSpec) -> str:
 
     Raises
     ------
+    LayoutError
+        If ``CARDDEMO_MASK_HMAC_KEY`` is set to material that is not canonical base64 of
+        at least thirty-two distinct-valued bytes. Raised by :func:`_mask_hmac_key` on the
+        first masked field of a run, before any value has been rendered.
     RecordLengthError
         If ``raw`` is not exactly ``layout.reclen`` characters.
     LayoutError

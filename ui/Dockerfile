@@ -129,8 +129,10 @@ RUN mkdir -p /var/cache/nginx /run/nginx \
        -e 's#^pid  *[^;]*;#pid        /run/nginx/nginx.pid;#' \
        /etc/nginx/nginx.conf \
     && grep -q '^pid        /run/nginx/nginx.pid;$' /etc/nginx/nginx.conf \
+    && mkdir -p /etc/nginx/templates \
     && chown -R 10001:10001 \
-       /var/cache/nginx /run/nginx /usr/share/nginx/html /etc/nginx/conf.d
+       /var/cache/nginx /run/nginx /usr/share/nginx/html /etc/nginx/conf.d \
+       /etc/nginx/templates
 
 # Assumptions: the packaged default site is REPLACED rather than added beside,
 #   because nginx includes every file in conf.d and two servers on port 8080 would
@@ -138,7 +140,22 @@ RUN mkdir -p /var/cache/nginx /run/nginx \
 #   definition: it serves the SPA history fallback that makes all 21 client-side
 #   routes resolve to one document, sets the security headers and the asset cache
 #   policy, and publishes the /healthz endpoint the check below probes.
-COPY --chown=10001:10001 nginx.conf /etc/nginx/conf.d/default.conf
+# Refactoring Rationale: it is installed as a TEMPLATE and no longer as the live
+#   configuration. Its Content-Security-Policy carried `connect-src 'self' https:`,
+#   which admits a fetch to any host on the internet -- the exfiltration path the
+#   directive exists to close. The API origin genuinely is not knowable when this
+#   image is built, but it IS knowable when the container starts, so the file now
+#   carries a placeholder that docker-entrypoint.sh replaces with exact origins at
+#   start. The image therefore stays environment-agnostic, so dev and prod still
+#   share one reviewed artifact, while the header a browser receives names hosts.
+#   The packaged default.conf is still replaced, by the rendered output, so the
+#   include-order reasoning above is unchanged.
+COPY --chown=10001:10001 nginx.conf /etc/nginx/templates/default.conf.template
+
+# Assumptions: the renderer is copied executable rather than invoked through a
+#   shell, so the ENTRYPOINT below stays in exec form and nginx still inherits
+#   PID 1 through `exec`.
+COPY --chown=10001:10001 --chmod=0555 docker-entrypoint.sh /usr/local/bin/carddemo-entrypoint.sh
 
 # Assumptions: the bundle is copied from the build stage's outDir, which
 #   ui/vite.config.ts sets to `dist`. That is the third link of the chain that file
@@ -170,5 +187,12 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
 
 # Assumptions: the exec form with `daemon off` so nginx is PID 1 and receives
 #   SIGTERM directly, letting it drain connections. Daemonising would fork the
-#   master away from PID 1 and the task would be killed on timeout instead.
-ENTRYPOINT ["nginx", "-g", "daemon off;"]
+#   master away from PID 1 and the task would be killed on timeout instead. That
+#   property is PRESERVED through the renderer: it ends in `exec nginx -g 'daemon
+#   off;'`, which replaces the shell rather than spawning a child, so nginx is
+#   still PID 1 and still receives SIGTERM directly.
+# Assumptions: the image's own /docker-entrypoint.sh is deliberately not used. Its
+#   template rendering is guarded by a root check and is SKIPPED for a non-root
+#   user, which this image is, so the placeholder would be served verbatim inside a
+#   live header -- see docker-entrypoint.sh for the full reasoning.
+ENTRYPOINT ["/usr/local/bin/carddemo-entrypoint.sh"]

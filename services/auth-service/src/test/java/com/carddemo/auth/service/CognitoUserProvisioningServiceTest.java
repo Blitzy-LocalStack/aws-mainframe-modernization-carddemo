@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.tuple;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -17,11 +18,13 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import software.amazon.awssdk.services.cognitoidentityprovider.CognitoIdentityProviderClient;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminAddUserToGroupRequest;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminCreateUserRequest;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminCreateUserResponse;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminDeleteUserRequest;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminRemoveUserFromGroupRequest;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AttributeType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.MessageActionType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.NotAuthorizedException;
@@ -465,5 +468,176 @@ class CognitoUserProvisioningServiceTest {
         assertThat(attributes).extracting(AttributeType::name)
                 .doesNotContain("email", "phone_number", "password");
         assertThat(capturedCreate(AdminCreateUserRequest::temporaryPassword)).isNull();
+    }
+    /**
+     * Verifies a promotion removes the ordinary-user membership before adding the administrator one.
+     *
+     * <p>Assumptions: the ORDER is asserted and not merely the pair of calls, because the order is the whole
+     * security content of the method. Adding before removing would leave the identity holding both groups for
+     * the width of one provider call, and a token minted in that window would carry administrative authority
+     * -- including during the demotion whose purpose is to withdraw it. An in-order verification is the only
+     * assertion that fails when someone reorders the two statements.</p>
+     */
+    @Test
+    @DisplayName("a promotion removes the user group before it adds the administrator group")
+    void aPromotionRemovesTheUserGroupBeforeAddingTheAdministratorGroup() {
+        AuthorityReassignment reassignment = this.service.reassignGroup(USER_ID,
+                CognitoUserProvisioningService.USER_TYPE_USER,
+                CognitoUserProvisioningService.USER_TYPE_ADMIN);
+
+        InOrder order = inOrder(this.provider);
+        order.verify(this.provider).adminRemoveUserFromGroup(AdminRemoveUserFromGroupRequest.builder()
+                .userPoolId(POOL_ID).username(USER_ID).groupName(USER_GROUP).build());
+        order.verify(this.provider).adminAddUserToGroup(AdminAddUserToGroupRequest.builder()
+                .userPoolId(POOL_ID).username(USER_ID).groupName(ADMIN_GROUP).build());
+        order.verifyNoMoreInteractions();
+
+        assertThat(reassignment.userId()).isEqualTo(USER_ID);
+        assertThat(reassignment.previousUserType())
+                .isEqualTo(CognitoUserProvisioningService.USER_TYPE_USER);
+        assertThat(reassignment.currentUserType())
+                .isEqualTo(CognitoUserProvisioningService.USER_TYPE_ADMIN);
+        assertThat(reassignment.providerMutated()).isTrue();
+    }
+
+    /**
+     * Verifies a demotion removes the administrator membership before adding the ordinary-user one.
+     *
+     * <p>Assumptions: this direction is asserted separately rather than parameterised with the one above,
+     * because the two groups are held in two different fields and a transposition would leave one direction
+     * correct and the other silently reversed. A single parameterised case reading both group names from the
+     * same accessor could not detect that.</p>
+     */
+    @Test
+    @DisplayName("a demotion removes the administrator group before it adds the user group")
+    void aDemotionRemovesTheAdministratorGroupBeforeAddingTheUserGroup() {
+        this.service.reassignGroup(USER_ID,
+                CognitoUserProvisioningService.USER_TYPE_ADMIN,
+                CognitoUserProvisioningService.USER_TYPE_USER);
+
+        InOrder order = inOrder(this.provider);
+        order.verify(this.provider).adminRemoveUserFromGroup(AdminRemoveUserFromGroupRequest.builder()
+                .userPoolId(POOL_ID).username(USER_ID).groupName(ADMIN_GROUP).build());
+        order.verify(this.provider).adminAddUserToGroup(AdminAddUserToGroupRequest.builder()
+                .userPoolId(POOL_ID).username(USER_ID).groupName(USER_GROUP).build());
+        order.verifyNoMoreInteractions();
+    }
+
+    /**
+     * Verifies a reassignment to the type already held is refused before any provider call.
+     *
+     * <p>Assumptions: refusal rather than a silent success is asserted because the two are
+     * indistinguishable from a return value and completely different in meaning. A caller asking to move an
+     * authority to where it already stands has confused a no-op with a move, and answering it with a
+     * fabricated success would let that confusion reach the column assignment that follows.</p>
+     */
+    @Test
+    @DisplayName("a reassignment whose two types are equal is refused and calls the provider not at all")
+    void aReassignmentWhoseTypesAreEqualIsRefused() {
+        assertThatThrownBy(() -> this.service.reassignGroup(USER_ID,
+                CognitoUserProvisioningService.USER_TYPE_ADMIN,
+                CognitoUserProvisioningService.USER_TYPE_ADMIN))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("must differ");
+
+        verifyNoInteractions(this.provider);
+    }
+
+    /**
+     * Verifies an out-of-domain type is refused before the removal that would otherwise strip a membership.
+     *
+     * <p>Assumptions: BOTH type arguments are validated before the first call, so a well-formed source and a
+     * malformed target still touch nothing. Validating the target only when its turn came would leave an
+     * identity groupless on every mistyped request, which is the one failure mode a refusal is supposed to
+     * prevent.</p>
+     */
+    @Test
+    @DisplayName("an out-of-domain target type strips no membership")
+    void anOutOfDomainTargetTypeStripsNoMembership() {
+        assertThatThrownBy(() -> this.service.reassignGroup(USER_ID,
+                CognitoUserProvisioningService.USER_TYPE_USER, "X"))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        verifyNoInteractions(this.provider);
+    }
+
+    /**
+     * Verifies a failed addition restores the membership that was removed, and reports the original failure.
+     *
+     * <p>Assumptions: the restored group is asserted to be the SOURCE group, which is what returns the
+     * identity to the state it held before the call. Re-adding the target instead would complete the move the
+     * provider had just refused, and asserting only that some add happened would not tell the two apart.</p>
+     */
+    @Test
+    @DisplayName("a failed addition puts the removed membership back and reports the original failure")
+    void aFailedAdditionPutsTheRemovedMembershipBack() {
+        NotAuthorizedException refused =
+                NotAuthorizedException.builder().message("provider refused").build();
+        when(this.provider.adminAddUserToGroup(AdminAddUserToGroupRequest.builder()
+                .userPoolId(POOL_ID).username(USER_ID).groupName(ADMIN_GROUP).build()))
+                .thenThrow(refused);
+
+        assertThatThrownBy(() -> this.service.reassignGroup(USER_ID,
+                CognitoUserProvisioningService.USER_TYPE_USER,
+                CognitoUserProvisioningService.USER_TYPE_ADMIN))
+                .isSameAs(refused);
+
+        verify(this.provider).adminAddUserToGroup(AdminAddUserToGroupRequest.builder()
+                .userPoolId(POOL_ID).username(USER_ID).groupName(USER_GROUP).build());
+        assertThat(refused.getSuppressed()).isEmpty();
+    }
+
+    /**
+     * Verifies a compensation that itself fails is attached to the propagated failure rather than replacing
+     * it.
+     *
+     * <p>Assumptions: the suppressed exception is the assertion, because it is the only channel through which
+     * the second failure reaches a caller at all. A caller is told why the reassignment did not happen, which
+     * is what it asked about; the fact that an identity is now groupless is carried alongside rather than
+     * instead, so neither failure is lost and the common case stays distinguishable from the rare one.</p>
+     */
+    @Test
+    @DisplayName("a failed compensation is suppressed onto the original failure, not substituted for it")
+    void aFailedCompensationIsSuppressedOntoTheOriginalFailure() {
+        NotAuthorizedException refused =
+                NotAuthorizedException.builder().message("provider refused the promotion").build();
+        UserNotFoundException gone =
+                UserNotFoundException.builder().message("account vanished").build();
+        when(this.provider.adminAddUserToGroup(AdminAddUserToGroupRequest.builder()
+                .userPoolId(POOL_ID).username(USER_ID).groupName(ADMIN_GROUP).build()))
+                .thenThrow(refused);
+        when(this.provider.adminAddUserToGroup(AdminAddUserToGroupRequest.builder()
+                .userPoolId(POOL_ID).username(USER_ID).groupName(USER_GROUP).build()))
+                .thenThrow(gone);
+
+        assertThatThrownBy(() -> this.service.reassignGroup(USER_ID,
+                CognitoUserProvisioningService.USER_TYPE_USER,
+                CognitoUserProvisioningService.USER_TYPE_ADMIN))
+                .isSameAs(refused);
+
+        assertThat(refused.getSuppressed()).containsExactly(gone);
+    }
+
+    /**
+     * Verifies a failure of the removal itself leaves nothing to compensate.
+     *
+     * <p>Assumptions: no add of any kind is expected, and that is asserted rather than assumed. A
+     * compensation issued when the removal never succeeded would ADD a membership the identity may not have
+     * held, which on the administrator group is a grant of authority in response to a failure.</p>
+     */
+    @Test
+    @DisplayName("a failed removal adds no membership, because nothing was taken away")
+    void aFailedRemovalAddsNoMembership() {
+        NotAuthorizedException refused =
+                NotAuthorizedException.builder().message("provider refused").build();
+        when(this.provider.adminRemoveUserFromGroup(any(AdminRemoveUserFromGroupRequest.class)))
+                .thenThrow(refused);
+
+        assertThatThrownBy(() -> this.service.reassignGroup(USER_ID,
+                CognitoUserProvisioningService.USER_TYPE_ADMIN,
+                CognitoUserProvisioningService.USER_TYPE_USER))
+                .isSameAs(refused);
+
+        verify(this.provider, never()).adminAddUserToGroup(any(AdminAddUserToGroupRequest.class));
     }
 }

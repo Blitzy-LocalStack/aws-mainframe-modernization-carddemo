@@ -28,6 +28,15 @@ import jakarta.validation.constraints.Size;
  * accepted. That {@code refreshToken} is nullable is precisely what lets one shape serve all three,
  * instead of a second and nearly identical shape existing for the renewal path alone.
  *
+ * <p>Refactoring Rationale: this record implements {@link SignOnOutcome}, and it did not always. The
+ * sealed interface exists so the sign-on handler can declare a return type that admits both branches
+ * of that two-shape success; while this record was the handler's declared return type the other branch
+ * was unrepresentable, so a returned challenge was converted into an unevaluable-credential failure and
+ * answered 500 -- which made the first sign-on of every seeded user report a server fault. What
+ * implementing the interface adds to this record is nothing but the {@code outcome()} accessor it
+ * already generates, so no component, constraint or serialised member changes; what it removes is the
+ * handler's inability to answer with the sibling shape.
+ *
  * <h2>The component set and its order are read from the committed contract</h2>
  *
  * <p>Assumptions: the {@code SignOnResponse} component schema in
@@ -265,6 +274,13 @@ import jakarta.validation.constraints.Size;
  *     reports it, and never below one. The client renews or signs on again before it elapses; this
  *     service refuses an expired token rather than extending one
  */
+// WHY : Refactoring Rationale: this record now implements SignOnOutcome, the sealed union of the two
+//       shapes the sign-on operation's success status can carry, and it implemented nothing before.
+//       The change is what makes the CHALLENGE branch of that status expressible at all: this record
+//       constrains its own discriminator to the single value AUTHENTICATED, so while it was the only
+//       return type available the challenge shape had nowhere to go and was reported as a 500 -- which
+//       made the first sign-on of every seeded identity a server fault. Nothing about this record's
+//       own contract moves: the interface declares only the two accessors it already had.
 public record SignOnResponse(
         @NotNull @Pattern(regexp = OUTCOME_AUTHENTICATED) String outcome,
         @NotNull @Size(max = USER_ID_WIDTH) String userId,
@@ -272,14 +288,15 @@ public record SignOnResponse(
         @NotNull String idToken,
         String refreshToken,
         @NotNull String tokenType,
-        @Min(MINIMUM_LIFETIME_SECONDS) int expiresIn) {
+        @Min(MINIMUM_LIFETIME_SECONDS) int expiresIn) implements SignOnOutcome {
 
     /**
      * The one value the discriminating member carries on this shape.
      *
      * <p>Assumptions: the contract declares {@code outcome} with {@code const: AUTHENTICATED}, so
      * this is the only value a producer may set and the only value a consumer sees on this branch of
-     * the two-shape success. It is public because a producer of this record has to write that exact
+     * the two-shape success. The other branch is {@link SignOnChallenge}, and {@link SignOnOutcome}
+     * is the sealed union of the two that the sign-on operation returns. It is public because a producer of this record has to write that exact
      * string, and a producer that retyped the literal could differ from it in case or in spelling
      * without the build noticing: a response body's constraints are not evaluated on the way out, so
      * a drifted value would ship and the client's discriminator would then match neither shape. One

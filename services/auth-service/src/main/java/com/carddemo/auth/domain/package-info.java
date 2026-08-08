@@ -107,11 +107,17 @@
  * short value, the sign and zone conventions a display-numeric field would use, the dropped
  * padding field and the baseline field-name spellings -- belongs on the far side of an
  * anti-corruption boundary. That boundary is the codecs in
- * {@code com.carddemo.common.codec}, which exist, together with
- * {@code com.carddemo.auth.mapper}, which the plan assigns but which is <b>not yet authored</b> --
- * the qualification is stated here rather than left to the reader because a bare "implemented by"
- * would name a package that cannot be opened. A type in this package sees a decoded value and a
- * column, never a byte range.</p>
+ * {@code com.carddemo.common.codec} together with {@code com.carddemo.auth.mapper}, whose
+ * {@code UserMapper} converts between the entity below and the API shapes in
+ * {@code com.carddemo.auth.dto}. Both packages exist, so a reader following this sentence reaches the
+ * code it names. A type in this package sees a decoded value and a column, never a byte range.</p>
+ *
+ * <p>Refactoring Rationale: an earlier revision of the sentence above qualified
+ * {@code com.carddemo.auth.mapper} as "not yet authored", on the reasoning that a bare "implemented
+ * by" would name a package a reader could not open. The reasoning was sound and the fact it rested on
+ * has changed: {@code mapper/UserMapper.java} is present, so the qualification now sends a reader away
+ * from the one class that discharges the boundary this section is about. It is withdrawn rather than
+ * reworded, because the plain sentence is what the qualification was standing in for.</p>
  *
  * <p>Alternatives Considered: letting the entity hold its own offsets and widths, so that one type
  * describes both the row and the record it came from. Rejected on the precedent the existing test

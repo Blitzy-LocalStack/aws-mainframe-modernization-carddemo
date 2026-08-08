@@ -185,7 +185,7 @@ tags:
 
 paths:
 
-  /api/v1/authorizations:
+  /api/v1/authorizations/search:
 
     description: >-
       The pending authorizations of one account, addressable only as a
@@ -195,7 +195,27 @@ paths:
       never through an HTTP call, and no collection-wide delete, because expiry
       is performed by a sweep this contract does not expose.
 
-    get:
+
+      Refactoring Rationale: the listing was a GET on /api/v1/authorizations and
+      took its account scope, cursor and direction as QUERY PARAMETERS. It is a
+      POST on this literal segment taking them in a body, because the scope is an
+      account identifier and a query string is part of the request line, which
+      the load balancer writes into its access log itself before any application
+      code runs. The migration's sensitive-data logging contract names account
+      and customer identifiers alongside the primary account number, and the
+      scope here is REQUIRED -- so every request to this listing previously wrote
+      one account identifier into a durable log object, rather than only those
+      that chose to narrow.
+
+
+      Alternatives Considered: a POST on /api/v1/authorizations itself, needing no
+      new segment. Rejected because a POST to a collection reads as a create and
+      this context publishes none; the literal segment resolves ahead of
+      /api/v1/authorizations/{key} for the documented reason that a literal
+      pattern is preferred to a templated one, and a sealed selector cannot spell
+      it.
+
+    post:
       operationId: listPendingAuthorizations
       tags:
         - authorizations
@@ -231,9 +251,12 @@ paths:
       x-required-authority: carddemo-user
       parameters:
         - $ref: '#/components/parameters/CorrelationIdHeader'
-        - $ref: '#/components/parameters/AccountIdScope'
-        - $ref: '#/components/parameters/Cursor'
-        - $ref: '#/components/parameters/PagingDirection'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PendingAuthPageQuery'
       responses:
         '200':
           description: >-
@@ -483,65 +506,6 @@ components:
     #   an integer column is a statement about storage and arithmetic, not a
     #   licence to emit a JSON number at the boundary, where leading zeros
     #   are lost.
-    AccountIdScope:
-      name: accountId
-      in: query
-      required: true
-      description: >-
-        The account whose pending authorizations are to be listed, as exactly
-        eleven digits. A blank or non-numeric value is refused with 400 carrying
-        the per-field entry for accountId, which is the migrated form of the two
-        edits at cbl/COPAUS0C.cbl L264 and L273.
-      schema:
-        $ref: '#/components/schemas/AccountId'
-
-    # Assumptions: an ABSENT cursor means the opening page, and an empty
-    #   string is not a cursor. The reference program opens a page by moving
-    #   LOW-VALUES into its forward position at cbl/COPAUS0C.cbl L422, and
-    #   LOW-VALUES and SPACES are two different empty states in that program
-    #   rather than one: L186 clears the message field with SPACES while L422
-    #   uses LOW-VALUES, and the five selection tests at L286, L290, L294,
-    #   L298 and L302 each test against SPACES AND LOW-VALUES because both
-    #   are reachable. Accepting an empty string here, or trimming an absent
-    #   value to one, would collapse a distinction the reference program
-    #   relies on and would make "no position" and "a position that is
-    #   blank" indistinguishable.
-    Cursor:
-      name: cursor
-      in: query
-      required: false
-      description: >-
-        The paging position to continue from: copy the page envelope's lastKey
-        member to advance past it, or its firstKey member to retreat from it,
-        and state the matching direction. Omit it, and the direction, to obtain
-        the opening page. The value is opaque and must be echoed exactly as
-        received; it is not an account identifier, not a card number and not a
-        row ordinal, and a client cannot construct one.
-      schema:
-        $ref: '#/components/schemas/CursorToken'
-
-    # Trade-offs: the direction is an explicit input rather than being
-    #   inferred from which envelope member the caller copied. Inferring it
-    #   is impossible when one parameter carries both positions, and a
-    #   request whose direction and cursor disagreed would otherwise have to
-    #   be resolved silently. The cost is one more input for the caller to
-    #   set; what it buys is that such a request is refused with 400 and
-    #   named rather than answered with a page from the other end of the set.
-    PagingDirection:
-      name: direction
-      in: query
-      required: false
-      description: >-
-        Which way to move from the supplied cursor. It is meaningful only
-        alongside a cursor, and the two are sent together or not at all. Reading
-        next seeks keys strictly after the cursor and is the default, which with
-        no cursor supplied returns the opening page; reading previous seeks keys
-        strictly before it. Supplying a direction with no cursor is a 400 keyed
-        direction, as is a value other than the two published here. A cursor is
-        not sealed per direction, so either direction may be stated with any
-        cursor this service issued; the CursorToken schema records why.
-      schema:
-        $ref: '#/components/schemas/PageDirection'
 
     # Assumptions: the reference selector cannot travel in a path segment at all, which
     #   is why this parameter carries a different value rather than the same one in a
@@ -901,6 +865,71 @@ components:
   #   caller gets; withholding them because no path references them would
   #   leave the messaging contract described nowhere.
   schemas:
+    PendingAuthPageQuery:
+      type: object
+      additionalProperties: false
+      required: [accountId]
+      description: >-
+        The search criteria of the paged pending-authorization listing. The account
+        scope is required; the cursor and direction are optional and are sent
+        together or not at all.
+
+
+        Refactoring Rationale: these three were QUERY PARAMETERS named AccountIdScope,
+        Cursor and PagingDirection on a GET of /api/v1/authorizations. They became
+        members of a request body because the account scope is an account identifier,
+        and a query string is part of the request line the load balancer writes into
+        its access log before any application code runs. The rationale carried down
+        from those definitions is preserved on the members below, because it records
+        decisions about cursor and direction semantics the move did not change.
+      properties:
+        accountId:
+          description: >-
+            The account whose pending authorizations are to be listed, as exactly
+            eleven digits. A blank or non-numeric value is refused with 400 carrying
+            the per-field entry for accountId, which is the migrated form of the two
+            edits at cbl/COPAUS0C.cbl L264 and L273.
+          $ref: '#/components/schemas/AccountId'
+
+        # Assumptions: an ABSENT cursor means the opening page, and an empty
+        #   string is not a cursor. The reference program opens a page by moving
+        #   LOW-VALUES into its forward position at cbl/COPAUS0C.cbl L422, and
+        #   LOW-VALUES and SPACES are two different empty states in that program
+        #   rather than one: L186 clears the message field with SPACES while L422
+        #   uses LOW-VALUES, and the five selection tests at L286, L290, L294,
+        #   L298 and L302 each test against SPACES AND LOW-VALUES because both
+        #   are reachable. Accepting an empty string here, or trimming an absent
+        #   value to one, would collapse a distinction the reference program
+        #   relies on and would make "no position" and "a position that is
+        #   blank" indistinguishable.
+        # Trade-offs: the direction is an explicit input rather than being
+        #   inferred from which envelope member the caller copied. Inferring it
+        #   is impossible when one parameter carries both positions, and a
+        #   request whose direction and cursor disagreed would otherwise have to
+        #   be resolved silently. The cost is one more input for the caller to
+        #   set; what it buys is that such a request is refused with 400 and
+        #   named rather than answered with a page from the other end of the set.
+        cursor:
+          description: >-
+            The paging position to continue from: copy the page envelope's lastKey
+            member to advance past it, or its firstKey member to retreat from it,
+            and state the matching direction. Omit it, and the direction, to obtain
+            the opening page. The value is opaque and must be echoed exactly as
+            received; it is not an account identifier, not a card number and not a
+            row ordinal, and a client cannot construct one.
+          $ref: '#/components/schemas/CursorToken'
+        direction:
+          description: >-
+            Which way to move from the supplied cursor. It is meaningful only
+            alongside a cursor, and the two are sent together or not at all. Reading
+            next seeks keys strictly after the cursor and is the default, which with
+            no cursor supplied returns the opening page; reading previous seeks keys
+            strictly before it. Supplying a direction with no cursor is a 400 keyed
+            direction, as is a value other than the two published here. A cursor is
+            not sealed per direction, so either direction may be stated with any
+            cursor this service issued; the CursorToken schema records why.
+          $ref: '#/components/schemas/PageDirection'
+
 
     # Refactoring Rationale: identifiers travel as digit strings and never
     #   as JSON numbers, and this preserves the reference system's own

@@ -253,16 +253,34 @@ public class StepFunctionsConfig {
     @Bean
     public SfnClient sfnClient() {
         // WHY : Assumptions: no region, no credentials provider and no endpoint override is set on
-        //       the builder, so all three resolve from the environment the task runs in -- which is
-        //       how a container running under an execution role obtains a credential that was
-        //       generated at provisioning time into Secrets Manager and never written to a file. The
-        //       charter beside this file requires exactly this: package-info.java states at L72 to
-        //       L75 that this class declares a call ceiling and nothing else, precisely because
-        //       naming any of the three here would compile one deployment's value into every
-        //       image. The two values this module genuinely needs -- the machine identifier and the
-        //       destination bucket -- arrive as environment variables the task definition resolves
-        //       from Parameter Store, which is what makes the absence of committed credentials
-        //       structural rather than a matter of review discipline.
+        //       the builder, so all three resolve through the SDK's default chains from the
+        //       environment the task runs in. For credentials that chain reaches the CONTAINER
+        //       credentials provider, which reads the address ECS publishes in
+        //       AWS_CONTAINER_CREDENTIALS_RELATIVE_URI and receives short-lived, automatically
+        //       rotated credentials for this service's TASK role -- aws_iam_role.task, wired as
+        //       task_role_arn at infra/modules/ecs-service/main.tf L1271. Nothing is read from a
+        //       file and nothing is read from a secret store, which is why no credential can be
+        //       committed: there is none to commit.
+        //
+        //       Refactoring Rationale: an earlier revision of this comment said the credential
+        //       belonged to the EXECUTION role and was generated at provisioning time into Secrets
+        //       Manager. Both halves named the wrong mechanism, and the correction matters to
+        //       anyone diagnosing an authorization failure here, because it decides which role's
+        //       policy they go and read. The execution role at L1270 is the ECS AGENT's identity,
+        //       not this process's: it pulls the image, writes the log stream, and resolves the
+        //       Parameter Store and Secrets Manager ARNs behind the task definition's container
+        //       secrets entries -- the block at L306 to L312 -- so a grant added there would not
+        //       reach this client at all. Secrets Manager's role in this deployment is to hold
+        //       APPLICATION secrets that the agent injects as environment variables; it issues no
+        //       IAM credential and takes no part in this call. A permission this client needs
+        //       therefore belongs on the task role's policy.
+        //
+        //       The charter beside this file requires the absence of all three settings:
+        //       package-info.java states at L72 to L75 that this class declares a call ceiling and
+        //       nothing else, precisely because naming any of them here would compile one
+        //       deployment's value into every image. The two values this module genuinely needs --
+        //       the machine identifier and the destination bucket -- arrive as environment
+        //       variables the task definition resolves from Parameter Store.
         //
         // WHY : Alternatives Considered: adding a resilience library and wrapping the call in a
         //       circuit breaker. Rejected on two independent grounds. Retry needs no library at all

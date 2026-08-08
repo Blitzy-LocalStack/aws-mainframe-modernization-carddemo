@@ -65,6 +65,7 @@ known baseline one.
 
 from __future__ import annotations
 
+import io
 import re
 import shutil
 from collections.abc import Iterator, Mapping, Sequence
@@ -119,7 +120,7 @@ __all__ = [
     "workspace",
 ]
 
-# WHY (Assumptions): these three directories are the landmarks this suite actually reads --
+# WHY : Assumptions: these three directories are the landmarks this suite actually reads --
 # the COBOL programs the record layouts were transcribed from, the scenario corpus, and the
 # installed package's own source tree. Their joint presence is the cheap identity check that
 # distinguishes the CardDemo repository from any other directory this file could be copied
@@ -130,7 +131,7 @@ _REPO_MARKERS: Final[tuple[str, ...]] = (
     "data-migration/src/carddemo_migration",
 )
 
-# WHY (Assumptions): resolved from this file's own on-disk position, which the repository
+# WHY : Assumptions: resolved from this file's own on-disk position, which the repository
 # layout fixes at ``<repo>/data-migration/tests/conftest.py`` -- so the repository root is
 # its second parent. Alternatives Considered: honouring a ``CARDDEMO_REPO_ROOT`` environment
 # override as the reference conftest does. Rejected because the reference accepts one only in
@@ -144,7 +145,7 @@ _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 #: full file name and reach the same object.
 EBCDIC_DATASET_PREFIX: Final[str] = "AWS.M2.CARDDEMO."
 
-# WHY (Assumptions): a fixture file name is NOT always the seed name for the same record.
+# WHY : Assumptions: a fixture file name is NOT always the seed name for the same record.
 # The measured corpus uses ``trandata.txt`` in the export scenario and ``acctfile.txt``,
 # ``custfile.txt``, ``trnxfile.txt`` and ``xreffile.txt`` in the statement scenarios, where
 # ``app/data/ASCII`` spells the same four records ``acctdata.txt``, ``custdata.txt``,
@@ -172,7 +173,7 @@ _FIXTURE_RECORD_NAMES: Final[Mapping[str, str]] = MappingProxyType(
     }
 )
 
-# WHY (Assumptions): the nine committed ASCII seeds map onto registry records by file name,
+# WHY : Assumptions: the nine committed ASCII seeds map onto registry records by file name,
 # and two of those pairings are load-bearing rather than obvious. ``cardxref.txt`` is
 # thirty-six characters wide on disk while ``XREF`` declares fifty, so it is read through
 # ``iter_ascii_text_records``, which pads a short line to the declared width -- reading it at
@@ -194,7 +195,7 @@ _ASCII_SEED_RECORD_NAMES: Final[Mapping[str, str]] = MappingProxyType(
     }
 )
 
-# WHY (Assumptions): every EBCDIC dataset's byte count divides its record length exactly,
+# WHY : Assumptions: every EBCDIC dataset's byte count divides its record length exactly,
 # which is the property that makes a record count derivable without decoding a byte --
 # 800 = 10 x 80 for the security file, 15000 = 50 x 300 for the account master, 105000 =
 # 300 x 350 for the daily transactions, and so on for all of them. ``CARDXREF.PS`` is the one
@@ -217,7 +218,7 @@ _EBCDIC_SEED_RECORD_NAMES: Final[Mapping[str, str]] = MappingProxyType(
     }
 )
 
-# WHY (Assumptions): the export extract is the one EBCDIC dataset with no entry in the
+# WHY : Assumptions: the export extract is the one EBCDIC dataset with no entry in the
 # record registry, because a 500-byte export record is a fixed header followed by a branch
 # chosen per record type rather than one field list. Its physical width still has a
 # single source -- ``EXPORT_HEADER_LAYOUT.reclen`` -- so it is resolved from the layouts
@@ -225,7 +226,7 @@ _EBCDIC_SEED_RECORD_NAMES: Final[Mapping[str, str]] = MappingProxyType(
 # exactly 500 such records.
 _EXPORT_EBCDIC_DATASET: Final[str] = "AWS.M2.CARDDEMO.EXPORT.DATA.PS"
 
-# WHY (Assumptions): both spellings of the export extract are precomputed, so the accessors
+# WHY : Assumptions: both spellings of the export extract are precomputed, so the accessors
 # recognise it through the same bare-name convenience every other EBCDIC dataset gets rather
 # than being the one name that must be written in full.
 _EXPORT_DATASET_SPELLINGS: Final[frozenset[str]] = frozenset(
@@ -237,21 +238,21 @@ _EXPORT_DATASET_SPELLINGS: Final[frozenset[str]] = frozenset(
 #: anywhere; see that class for why a placeholder is the only admissible content.
 SYNTHETIC_PASSWORD_FILL: Final[str] = "XXXXXXXX"
 
-# WHY (Assumptions): the ceiling the object store places on one multi-object delete request.
+# WHY : Assumptions: the ceiling the object store places on one multi-object delete request.
 # It is stated here as the SERVICE's limit rather than read from the staging loader, whose own
 # copy is private to that module: a double that imported the value under test could not
 # discover a loader that batched against the wrong number, because both sides would be wrong
 # together.
 _MAX_DELETE_BATCH: Final[int] = 1000
 
-# WHY (Assumptions): a data loader connects as a ``carddemo_<context>`` login role, and V0
+# WHY : Assumptions: a data loader connects as a ``carddemo_<context>`` login role, and V0
 # grants that role no DDL and no ownership -- schemas and roles are created by
 # ``data-migration/sql/V0__schemas_and_roles.sql`` and indexes by each service's Flyway
 # migration under a separate ``_migrator`` role. Any statement below would therefore either
 # fail against the real cluster or, worse, succeed in a test that had been handed a
 # privileged connection and so prove nothing about the privilege the loader actually runs
 # with. Recording them is what turns that negative contract into something a test can assert.
-# WHY (Trade-offs): ``DELETE`` is matched only in its ``DELETE FROM`` statement form. The bare
+# WHY : Trade-offs: ``DELETE`` is matched only in its ``DELETE FROM`` statement form. The bare
 # keyword also appears inside ``ON DELETE RESTRICT``, which is legitimate DDL text a
 # diagnostic query could quote, so matching the bare word would report a violation that is
 # not one. The accepted cost is that a contrived spelling could evade the pattern; a false
@@ -286,6 +287,59 @@ class FakeClientContractError(AssertionError):
     """
 
 
+class FakeServiceError(Exception):
+    """Error standing in for a service refusal, shaped like the SDK's own client error.
+
+    Purpose
+    -------
+    Let a double refuse an operation the way the real service does, so production code that
+    distinguishes one refusal from another is exercised through the same path it will take
+    against AWS.
+
+    Assumptions: this deliberately does NOT derive from :class:`FakeClientContractError`, and the
+    distinction is the important part. A contract error means a test used a double wrongly and is
+    the test's own failure; a service error means the service said no, which is an ordinary event
+    the code under test is required to handle. Deriving one from the other would make a swallowed
+    service refusal indistinguishable from a swallowed contract breach.
+
+    Assumptions: the ``response`` mapping carries ``Error.Code`` and
+    ``ResponseMetadata.HTTPStatusCode`` because those are the two members the staging loader reads
+    to classify a refusal, and it reads them by duck-typing rather than by importing
+    ``botocore.exceptions.ClientError`` -- deliberately, so that module can be exercised with no
+    AWS package installed. Reproducing the shape here is what makes that decision testable
+    instead of merely stated.
+    """
+
+    def __init__(self, code: str, status: int, message: str = "") -> None:
+        """Build a refusal carrying one service error code and HTTP status.
+
+        Parameters
+        ----------
+        code : str
+            The service error code, for example ``"PreconditionFailed"`` or ``"NoSuchKey"``.
+        status : int
+            The HTTP status the service would have returned, for example 412 or 404.
+        message : str
+            Optional human-readable detail, carried in ``Error.Message``.
+
+        Returns
+        -------
+        None
+            Initialises the exception and its response mapping.
+
+        Raises
+        ------
+        None
+        """
+        super().__init__(f"{code} ({status}){f': {message}' if message else ''}")
+        self.response: Mapping[str, Any] = MappingProxyType(
+            {
+                "Error": MappingProxyType({"Code": code, "Message": message}),
+                "ResponseMetadata": MappingProxyType({"HTTPStatusCode": status}),
+            }
+        )
+
+
 def _validate_repo_root() -> Path:
     """Resolve the repository root from this file's position and prove its shape.
 
@@ -311,7 +365,7 @@ def _validate_repo_root() -> Path:
     Failed
         Via :func:`pytest.fail`, if any directory in :data:`_REPO_MARKERS` is absent.
     """
-    # WHY (Alternatives Considered): returning the anchor unchecked. Rejected because the
+    # WHY : Alternatives Considered: returning the anchor unchecked. Rejected because the
     # failure it produces is uninformative and arrives late -- every corpus accessor would
     # report its own missing file, and a reader would have to infer from a dozen such
     # messages that the root itself was wrong. Failing here names the missing landmark once.
@@ -354,7 +408,7 @@ def _contained_under(child: Path, parent: Path, *, label: str) -> Path:
     Failed
         Via :func:`pytest.fail`, if the resolved child escapes ``parent``.
     """
-    # WHY (Assumptions): the comparison is made on RESOLVED paths, so ``..`` segments and
+    # WHY : Assumptions: the comparison is made on RESOLVED paths, so ``..`` segments and
     # symlinks are collapsed BEFORE containment is tested. A string-prefix test on the raw
     # value would be satisfied by ``<corpus>/../../etc``, which names a real escape; asking
     # ``is_relative_to`` about the resolved target reasons about the file that would actually
@@ -528,7 +582,7 @@ class FixtureCorpus:
             An absent directory yields an empty tuple rather than an error; the
             repository-root validation has already proven the corpus root exists.
         """
-        # WHY (Assumptions): the corpus is DISCOVERED rather than enumerated from a constant.
+        # WHY : Assumptions: the corpus is DISCOVERED rather than enumerated from a constant.
         # A hard-coded list of twenty would have to be edited in lockstep with a reference
         # tree this migration may not modify, and the failure mode of forgetting is the quiet
         # one -- a new scenario would simply never be parametrised over, and a suite that
@@ -597,7 +651,7 @@ class FixtureCorpus:
         Failed
             Via :func:`pytest.fail`, propagated from :meth:`path`.
         """
-        # WHY (Assumptions): a raw-byte form exists alongside the text form because a text
+        # WHY : Assumptions: a raw-byte form exists alongside the text form because a text
         # decode is not neutral over this corpus. The seed and extract datasets carry bytes
         # that no text codec preserves -- ``AWS.M2.CARDDEMO.EXPORT.DATA.PS`` holds five stray
         # 0x0A and eleven stray 0x0D bytes INSIDE its packed-decimal payload, where they are
@@ -620,7 +674,8 @@ class FixtureCorpus:
         Returns
         -------
         str
-            The whole file as text, empty for the seven zero-byte fixtures.
+            The whole file as text with every terminator exactly as committed, empty for the
+            seven zero-byte fixtures.
 
         Raises
         ------
@@ -630,7 +685,7 @@ class FixtureCorpus:
             If the fixture holds a byte outside ASCII, which would mean the corpus had
             changed shape.
         """
-        # WHY (Alternatives Considered): the codec is named explicitly, and ``ascii`` is chosen
+        # WHY : Alternatives Considered: the codec is named explicitly, and ``ascii`` is chosen
         # over both ``utf-8`` and the platform default. The default was rejected because it
         # varies by host and locale, so the same fixture could decode differently in a container
         # than on a workstation. ``utf-8`` was rejected because it is the more PERMISSIVE of the
@@ -638,7 +693,16 @@ class FixtureCorpus:
         # character count no longer equals its byte count, which is exactly the property every
         # fixed-width offset in this corpus depends on. ``ascii`` raises instead, so a corpus
         # that stopped being seven-bit fails at the read rather than at an offset far downstream.
-        return self.path(scenario, dataset).read_text(encoding="ascii")
+        # WHY : Assumptions: ``newline=""`` disables universal-newline translation here as well,
+        #   and it is set even though it changes nothing today -- measured, the fixture tree holds
+        #   ZERO carriage returns, so no translation currently occurs. It is set because
+        #   :meth:`records` feeds this text to the same iterator :meth:`SeedCorpus.ascii_records`
+        #   uses, so the moment a contributor adds a CRLF fixture -- which is the obvious way to
+        #   pin the mixed-terminator rule with controlled data rather than with a seed -- a default
+        #   read would erase the carriage returns and the new fixture would silently not exercise
+        #   the rule it was written for. Setting the policy in both readers means the corpus a test
+        #   sees is the corpus on disk, in either tree.
+        return self.path(scenario, dataset).read_text(encoding="ascii", newline="")
 
     def records(self, scenario: str, dataset: str) -> tuple[str, ...]:
         """Return one fixture as whole records padded to the declared width.
@@ -672,7 +736,7 @@ class FixtureCorpus:
             Propagated from the layouts iterator if a line is longer than the declared width,
             which means the field offsets have moved and is refused rather than truncated.
         """
-        # WHY (Alternatives Considered): splitting the text and stripping terminators here.
+        # WHY : Alternatives Considered: splitting the text and stripping terminators here.
         # Rejected because ``iter_ascii_text_records`` already owns that rule for the whole
         # package -- it removes at most one trailing CR and one LF, in that order, refuses an
         # interior separator, and right-pads a short line to the declared width. Restating it
@@ -859,7 +923,7 @@ class SeedCorpus:
             Via :func:`pytest.fail`, if the name is malformed, escapes the seed root, or names
             no committed file under either spelling.
         """
-        # WHY (Trade-offs): the bare spelling is accepted as a convenience, and the prefix it
+        # WHY : Trade-offs: the bare spelling is accepted as a convenience, and the prefix it
         # prepends is a measured property of the thirteen committed files rather than a
         # convention invented here. The full name is tried first so an exact file name always
         # wins, which keeps the fallback from ever changing which file an unambiguous
@@ -909,7 +973,8 @@ class SeedCorpus:
         Returns
         -------
         str
-            The whole file as text, terminators included.
+            The whole file as text, every terminator exactly as committed -- a carriage return
+            and newline where the row carries both, a bare newline where it carries one.
 
         Raises
         ------
@@ -919,12 +984,26 @@ class SeedCorpus:
             If the file holds a byte outside ASCII, which would mean the seed tree had changed
             shape.
         """
-        # WHY (Assumptions): the codec is ``ascii`` for the reason recorded on
+        # WHY : Assumptions: the codec is ``ascii`` for the reason recorded on
         # :meth:`FixtureCorpus.text` -- character count must equal byte count for every
         # fixed-width offset to hold, and a permissive codec would break that silently. It is
         # named here too rather than factored out, because a shared reader would have to take the
         # encoding as an argument and the point is that neither corpus may choose a different one.
-        return self.ascii_path(dataset).read_text(encoding="ascii")
+        # WHY : Refactoring Rationale: ``newline=""`` disables universal-newline translation, and
+        #   without it this method contradicted its own contract. Measured on the committed tree:
+        #   tcatbal.txt holds 49 carriage returns, and a default read returns text holding ZERO of
+        #   them, because translation rewrites every CRLF as a bare newline before the caller sees
+        #   it. So a method documenting "terminators included" was handing back a normalised
+        #   reading, and the seed corpus -- the only mixed-terminator data this suite has -- could
+        #   not exercise the production CR-stripping rule at all: every line arrived already 50
+        #   characters, so the branch that removes one trailing carriage return was dead against
+        #   real data and only a hand-built string could reach it.
+        # WHY : Assumptions: the mixture is the point, not an artifact. tcatbal.txt is 49 CRLF
+        #   rows plus one bare-newline final row, and trantype.txt is 6 plus 1 -- so both are
+        #   genuinely ragged rather than uniformly one convention, which is precisely the input
+        #   `iter_ascii_text_records` states it tolerates. Passing the unnormalised text through
+        #   is what turns that statement into something a test can hold it to.
+        return self.ascii_path(dataset).read_text(encoding="ascii", newline="")
 
     def ascii_records(self, dataset: str) -> tuple[str, ...]:
         """Return one ASCII seed dataset as whole records padded to the declared width.
@@ -974,7 +1053,7 @@ class SeedCorpus:
         Failed
             Via :func:`pytest.fail`, propagated from :meth:`ebcdic_path`.
         """
-        # WHY (Assumptions): these thirteen files hold no line terminator at all, so there is
+        # WHY : Assumptions: these thirteen files hold no line terminator at all, so there is
         # nothing for a text reader to split on and the record boundary is the declared length
         # alone. The reference emulator helper reaches the same conclusion from the other
         # direction, uploading such a dataset straight from its path because round-tripping it
@@ -1062,7 +1141,7 @@ class SeedCorpus:
         Failed
             Via :func:`pytest.fail`, if the name belongs to neither tree.
         """
-        # WHY (Assumptions): the export extract is answered before the registry is consulted,
+        # WHY : Assumptions: the export extract is answered before the registry is consulted,
         # because it has no registry entry by design -- a 500-byte export record is a fixed
         # header followed by one of five branches chosen by record type, so the header
         # descriptor is what carries its physical width. Its branch layouts are selected
@@ -1118,7 +1197,7 @@ class SeedCorpus:
             Via :func:`pytest.fail`, if the name appears in neither table under either
             spelling.
         """
-        # WHY (Assumptions): the bare EBCDIC spelling is tried only AFTER both tables have
+        # WHY : Assumptions: the bare EBCDIC spelling is tried only AFTER both tables have
         # been consulted with the name exactly as given. Prepending the prefix first would let
         # a bare name shadow a real ASCII file name, and the two trees share four spellings.
         candidates = (dataset, f"{EBCDIC_DATASET_PREFIX}{dataset}")
@@ -1216,7 +1295,7 @@ class SecUserRecordBuilder:
         FakeClientContractError
             If the descriptor declares any field that is not character storage.
         """
-        # WHY (Assumptions): every SECUSER field is TEXT, and this builder pads with spaces on
+        # WHY : Assumptions: every SECUSER field is TEXT, and this builder pads with spaces on
         # exactly that basis. A space is the correct pad for character storage and is WRONG
         # for every other kind -- a zoned field padded with spaces has no sign overpunch and a
         # packed field padded with spaces is not valid packed decimal, yet both would still be
@@ -1271,7 +1350,7 @@ class SecUserRecordBuilder:
             If any part is longer than its declared width, if ``user_type`` is not ``"A"`` or
             ``"U"``, or if the assembled record is not exactly the declared record length.
         """
-        # WHY (Assumptions): the type domain is checked here because it is a documented
+        # WHY : Assumptions: the type domain is checked here because it is a documented
         # property of the copybook field rather than of its width -- the descriptor can only
         # prove the field is one character wide, and any single character would satisfy that.
         # An out-of-domain value would load into a target column whose check constraint admits
@@ -1291,7 +1370,7 @@ class SecUserRecordBuilder:
         for field in self.spec.fields:
             value = parts[field.name]
             if len(value) > field.length:
-                # WHY (Assumptions): the offending VALUE is quoted for every field except the
+                # WHY : Assumptions: the offending VALUE is quoted for every field except the
                 # password slot, whose content is never echoed anywhere. The slot is
                 # unreachable here in practice because its filler is a constant of the
                 # declared width, but the guard is written so that no future edit can make
@@ -1340,7 +1419,7 @@ class SecUserRecordBuilder:
         UnicodeEncodeError
             If a part holds a character the code page cannot represent.
         """
-        # WHY (Alternatives Considered): encoding through the package's own EBCDIC codec.
+        # WHY : Alternatives Considered: encoding through the package's own EBCDIC codec.
         # Rejected because that module owns a code-page allow-list and its own validation,
         # which is the subject of other tests rather than a dependency of this builder -- a
         # fixture that produced its bytes through the code under test could not be used to
@@ -1375,7 +1454,7 @@ def _reject_float(value: object, *, context: str) -> object:
     FakeClientContractError
         If the value is a ``float``.
     """
-    # WHY (Assumptions): the check is on ``float`` specifically, and ``Decimal``, ``int`` and
+    # WHY : Assumptions: the check is on ``float`` specifically, and ``Decimal``, ``int`` and
     # ``str`` all pass. A binary float cannot represent ten cents exactly, so a money total
     # routed through one is wrong by an amount that grows with the number of rows and is
     # invisible in any single value. ``bool`` and ``int`` are exact and are therefore
@@ -1452,7 +1531,7 @@ class FakeAuroraCopy:
             raise FakeClientContractError(
                 f"a row was written after the copy stream for {self.statement!r} had closed"
             )
-        # WHY (Assumptions): a ``str`` is refused even though it is a Sequence. Passing one
+        # WHY : Assumptions: a ``str`` is refused even though it is a Sequence. Passing one
         # would make each CHARACTER a field, so a ten-character key would be recorded as ten
         # columns -- an arity error the driver reports but which a permissive double would
         # accept and then attribute to the loader's column list.
@@ -1965,7 +2044,7 @@ class FakeAuroraConnection:
         return self
 
     def __exit__(self, *exc_info: object) -> None:
-        """Leave the connection's context manager, committing or rolling back accordingly.
+        """Leave the connection's context manager, committing or rolling back, then closing.
 
         Parameters
         ----------
@@ -1975,21 +2054,37 @@ class FakeAuroraConnection:
         Returns
         -------
         None
-            Returning ``None`` lets any exception propagate.
+            Returning ``None`` lets any exception propagate. The connection is closed on the
+            way out, so any later cursor, commit, rollback or transaction on it is refused.
 
         Raises
         ------
         None
             Recording the outcome cannot fail.
         """
-        # WHY (Assumptions): the driver's connection context manager ends the TRANSACTION and
-        # leaves the connection open, so this commits or rolls back without closing. A double
-        # that closed here would make a loader reusing one connection across two units of work
-        # fail in the double only, which is the least useful kind of difference.
+        # WHY : Refactoring Rationale: this CLOSES the connection, where it previously committed
+        #   or rolled back and deliberately left it open on the stated grounds that "the driver's
+        #   connection context manager ends the TRANSACTION and leaves the connection open". That
+        #   is not what the pinned driver does. Read from the installed psycopg 3.3.4,
+        #   ``Connection.__exit__`` returns early if already closed, commits or rolls back, and
+        #   then calls ``self.close()`` unless the connection belongs to a pool. So the double was
+        #   MORE PERMISSIVE than production: a loader reusing a connection after its ``with``
+        #   block would pass every test here and raise on the real driver, which is the direction
+        #   of difference that lets a defect reach a deployment rather than one that merely
+        #   annoys a test author.
+        # WHY : Assumptions: the close is unconditional because this double hands out direct
+        #   connections only -- ``FakeAuroraDatabase.connect`` models no pool -- so the driver's
+        #   pool exemption has nothing to apply to. The transaction-only, non-closing block the
+        #   old comment was describing does exist and is reached the same way it is on the driver:
+        #   through :meth:`transaction`, which ends the unit of work and leaves the connection
+        #   usable. A test needing two units of work on one connection uses that.
+        if self.closed:
+            return
         if exc_info and exc_info[0] is not None:
             self.rollback()
         else:
             self.commit()
+        self.close()
 
 
 class FakeAuroraDatabase:
@@ -2086,7 +2181,7 @@ class FakeAuroraDatabase:
             :data:`carddemo_migration.config.REQUIRED_SSL_MODE`, or if ``sslrootcert`` is
             absent.
         """
-        # WHY (Assumptions): the TLS keywords are checked here because a loader is expected to
+        # WHY : Assumptions: the TLS keywords are checked here because a loader is expected to
         # build its parameters by CALLING ``as_connection_params``, which emits them
         # unconditionally, and hand-rolling the dict is the way that guarantee gets lost. The
         # bootstrap SQL refuses an unencrypted session, so such a loader would fail against the
@@ -2135,7 +2230,7 @@ class FakeAuroraDatabase:
         None
             Masking cannot fail.
         """
-        # WHY (Trade-offs): an empty or absent password is deliberately NOT replaced with the
+        # WHY : Trade-offs: an empty or absent password is deliberately NOT replaced with the
         # marker. Doing so would make "a credential was supplied" and "no credential was
         # supplied" render identically, and the second is a real defect a test should be able to
         # catch. The accepted cost is that the mapping distinguishes the two states, which is
@@ -2173,7 +2268,7 @@ class FakeAuroraDatabase:
         """
         if not statement_fragment.strip():
             raise FakeClientContractError("a result-set fragment must be non-blank")
-        # WHY (Assumptions): arranged rows are float-checked as well as executed parameters,
+        # WHY : Assumptions: arranged rows are float-checked as well as executed parameters,
         # because a verification pass compares what the database returned against what the file
         # held. A float on the arranged side would make an exact-money assertion pass against a
         # value the real NUMERIC column could never produce, which is the one direction of this
@@ -2278,7 +2373,7 @@ class FakeAuroraDatabase:
         None
             Reporting a breach is not itself an error; see the rationale below.
         """
-        # WHY (Trade-offs): a breach is REPORTED rather than raised at execution time. Raising
+        # WHY : Trade-offs: a breach is REPORTED rather than raised at execution time. Raising
         # would abort the loader from inside the double, and the traceback would point at this
         # module rather than at the statement's author; a test asserting that this tuple is
         # empty fails with the label and the offending SQL in the message, which is where a
@@ -2391,7 +2486,7 @@ class FakeObjectStorePaginator:
         None
             An unmatched prefix yields one empty page.
         """
-        # WHY (Assumptions): the delimiter collapses everything below the first separator into
+        # WHY : Assumptions: the delimiter collapses everything below the first separator into
         # ONE common prefix, and that rollup is the whole mechanism generation discovery relies
         # on -- the staging loader lists the family prefix to learn the ``dt=`` folders, then
         # lists each of those to learn the ``gen=`` folders. A double that returned raw keys
@@ -2432,7 +2527,7 @@ class FakeObjectStorePaginator:
         None
             An unmatched prefix yields one empty page.
         """
-        # WHY (Assumptions): delete markers are reported alongside versions because the bucket
+        # WHY : Assumptions: delete markers are reported alongside versions because the bucket
         # this stands in for is VERSIONED, and permanent cleanup has to name both. A marker left
         # behind keeps the key present in a version listing forever, so a double that omitted
         # markers would report a prefix as fully scratched while the real bucket still held it.
@@ -2468,7 +2563,7 @@ class FakeObjectStorePaginator:
         None
             Paging cannot fail.
         """
-        # WHY (Assumptions): the result is split across SEVERAL pages even when it would fit in
+        # WHY : Assumptions: the result is split across SEVERAL pages even when it would fit in
         # one, because a caller that reads only the first page is a real and silent defect --
         # it would scratch only the oldest few generations and report success. Serving one page
         # would make that defect invisible in every test. The size is small and configurable so
@@ -2551,9 +2646,15 @@ class FakeObjectStore:
             )
         self.page_size = page_size
         self.put_calls: list[Mapping[str, Any]] = []
+        self.get_calls: list[Mapping[str, Any]] = []
         self.delete_calls: list[Mapping[str, Any]] = []
         self.list_calls: list[tuple[str, str, str]] = []
-        self._objects: dict[tuple[str, str], list[tuple[str, bytes]]] = {}
+        # WHY : Assumptions: a stored version is a THREE-part record -- identifier, body and
+        # metadata -- because the staging loader writes its length and SHA-256 anchors as object
+        # metadata and states that a verification pass reads them back from the object rather
+        # than from a log. A double that dropped the metadata would let that claim be made and
+        # never checked.
+        self._objects: dict[tuple[str, str], list[tuple[str, bytes, Mapping[str, str]]]] = {}
         self._markers: dict[tuple[str, str], list[str]] = {}
         self._delete_errors: list[dict[str, str]] = []
         self._next_version = 0
@@ -2575,28 +2676,286 @@ class FakeObjectStore:
         Raises
         ------
         FakeClientContractError
-            If ``Bucket`` or ``Key`` is absent, or if ``Body`` is not ``bytes``.
+            If ``Bucket`` or ``Key`` is absent, if ``Body`` is neither ``bytes`` nor a readable
+            binary stream, if a supplied ``ContentLength`` disagrees with the body's real length,
+            if ``Metadata`` is not a mapping of text to text, or if ``IfNoneMatch`` carries
+            anything but ``"*"``.
+        FakeServiceError
+            If ``IfNoneMatch`` is ``"*"`` and the key already holds a live version, reported as
+            ``PreconditionFailed`` exactly as the service reports a refused conditional create.
         """
         bucket = kwargs.get("Bucket")
         key = kwargs.get("Key")
-        body = kwargs.get("Body")
         if not bucket or not key:
             raise FakeClientContractError("a put_object call named no Bucket or no Key")
-        # WHY (Assumptions): a ``str`` body is refused rather than encoded on the caller's
-        # behalf. Encoding it here would pick a code page this double has no business choosing,
-        # and for an EBCDIC or packed generation any choice is wrong -- the staging loader already
-        # requires bytes for exactly this reason, so accepting text would let a defect through
-        # the double that the real path rejects.
-        if not isinstance(body, bytes):
-            raise FakeClientContractError(
-                f"a staged body must be bytes, but {key!r} was given "
-                f"{type(body).__name__}; a text body has no code page this double may choose"
-            )
-        self.put_calls.append(MappingProxyType(dict(kwargs)))
+
+        body = self._staged_body(str(key), kwargs.get("Body"))
+        self._require_declared_length(str(key), body, kwargs.get("ContentLength"))
+        metadata = self._staged_metadata(str(key), kwargs.get("Metadata"))
+        self._require_conditional_create(str(bucket), str(key), kwargs.get("IfNoneMatch"))
+
+        # WHY : Refactoring Rationale: the recorded call carries the RESOLVED bytes under
+        # ``Body`` rather than the argument as supplied. A streamed body is an open handle that is
+        # exhausted and closed by the time any test reads this log, so recording it verbatim made
+        # every streamed put look like a zero-byte write to the one reader that exists for this
+        # list -- an assertion about a payload would have been vacuous exactly where the payload
+        # matters. Every other argument is recorded untouched.
+        # WHY : Trade-offs: the log therefore differs from the literal call for one key, which is
+        # accepted because the alternative is a log that cannot answer what was written. A test
+        # needing to know which FORM the caller used asserts on the staging function's own
+        # contract, not on this record.
+        recorded = dict(kwargs)
+        if "Body" in recorded:
+            recorded["Body"] = body
+        self.put_calls.append(MappingProxyType(recorded))
         self._next_version += 1
         version_id = f"v{self._next_version:04d}"
-        self._objects.setdefault((str(bucket), str(key)), []).append((version_id, body))
+        self._objects.setdefault((str(bucket), str(key)), []).append((version_id, body, metadata))
         return {"VersionId": version_id, "ETag": f'"{version_id}"'}
+
+    def _staged_body(self, key: str, body: object) -> bytes:
+        """Return the exact bytes of a put body, accepting the two forms the loader sends.
+
+        Purpose
+        -------
+        Read a body that is either a bytes object already in memory or an open binary stream,
+        without normalising a single byte of either.
+
+        Parameters
+        ----------
+        key : str
+            The object key, named in a refusal.
+        body : object
+            The ``Body`` argument as supplied.
+
+        Returns
+        -------
+        bytes
+            The body's exact bytes.
+
+        Raises
+        ------
+        FakeClientContractError
+            If the body is text, is not readable, or reads back as anything but bytes.
+        """
+        # WHY : Refactoring Rationale: a file-like body is now ACCEPTED, where this double
+        # previously required bytes and refused anything else. That refusal made the double
+        # unusable for the very path it exists to cover: the file-staging entry point streams
+        # from an open descriptor precisely so the extract is never buffered whole, so every test
+        # of it had to fall back to the in-memory sibling -- and the streaming path, its
+        # ``ContentLength``, its metadata anchors and its rewind were exercised by nothing at all.
+        # WHY : Assumptions: a ``str`` body is still refused rather than encoded on the caller's
+        # behalf. Encoding it here would pick a code page this double has no business choosing,
+        # and for an EBCDIC or packed generation any choice is wrong.
+        if isinstance(body, str):
+            raise FakeClientContractError(
+                f"a staged body must be bytes or a binary stream, but {key!r} was given text;"
+                " a text body has no code page this double may choose"
+            )
+        if isinstance(body, bytes | bytearray):
+            return bytes(body)
+        reader = getattr(body, "read", None)
+        if reader is None:
+            raise FakeClientContractError(
+                f"a staged body must be bytes or a readable binary stream, but {key!r} was given"
+                f" {type(body).__name__}"
+            )
+        # WHY : Assumptions: the stream is read to EXHAUSTION from wherever it is positioned, and
+        # is neither seeked nor rewound first. That is what the service does, and it is the only
+        # way this double can catch a loader that hashed a descriptor and forgot to rewind it --
+        # which would otherwise upload zero bytes and look like a successful write.
+        raw = reader()
+        if not isinstance(raw, bytes | bytearray):
+            raise FakeClientContractError(
+                f"the stream staged for {key!r} read back {type(raw).__name__} rather than bytes;"
+                " a body opened in text mode has already lost the byte values a fixed-point"
+                " field is made of"
+            )
+        return bytes(raw)
+
+    def _require_declared_length(self, key: str, body: bytes, declared: object) -> None:
+        """Require a supplied ``ContentLength`` to agree with the body actually received.
+
+        Purpose
+        -------
+        Reproduce the service-side length check the staging loader relies on, so a truncated
+        stream fails the write here as it would against AWS.
+
+        Parameters
+        ----------
+        key : str
+            The object key, named in a refusal.
+        body : bytes
+            The bytes actually received.
+        declared : object
+            The ``ContentLength`` argument, or ``None`` when the caller supplied none.
+
+        Returns
+        -------
+        None
+            Returns nothing when the length is absent or agrees.
+
+        Raises
+        ------
+        FakeClientContractError
+            If the declared length is not a non-negative integer, or disagrees with the body.
+        """
+        # WHY : Assumptions: the check is reproduced because the loader documents ``ContentLength``
+        # as buying "a service-side rejection if the stream ends early". A double that recorded
+        # the header without enforcing it would let that claim be written and never tested, and
+        # the first truncated transfer would be discovered in a bucket rather than in a test.
+        if declared is None:
+            return
+        if isinstance(declared, bool) or not isinstance(declared, int) or declared < 0:
+            raise FakeClientContractError(
+                f"the ContentLength staged for {key!r} is {declared!r}, which is not a"
+                " non-negative integer"
+            )
+        if declared != len(body):
+            raise FakeClientContractError(
+                f"the object staged for {key!r} declared a ContentLength of {declared} but"
+                f" carried {len(body)} bytes; the service refuses that write rather than storing"
+                " a short object"
+            )
+
+    def _staged_metadata(self, key: str, metadata: object) -> Mapping[str, str]:
+        """Return the user metadata to store beside one object version.
+
+        Purpose
+        -------
+        Keep the staged length and digest anchors so a test can read them back from the object,
+        which is what the loader says a verification pass will do.
+
+        Parameters
+        ----------
+        key : str
+            The object key, named in a refusal.
+        metadata : object
+            The ``Metadata`` argument, or ``None`` when the caller supplied none.
+
+        Returns
+        -------
+        Mapping[str, str]
+            A read-only copy of the metadata, empty when none was supplied.
+
+        Raises
+        ------
+        FakeClientContractError
+            If the metadata is not a mapping, or any key or value is not text.
+        """
+        if metadata is None:
+            return MappingProxyType({})
+        if not isinstance(metadata, Mapping):
+            raise FakeClientContractError(
+                f"the Metadata staged for {key!r} is {type(metadata).__name__} rather than a"
+                " mapping"
+            )
+        # WHY : Assumptions: both halves are required to be text because the service accepts only
+        # text metadata, and the loader stores a byte COUNT among them -- so a loader that passed
+        # the integer rather than its string form would be accepted by a lax double and refused by
+        # the service.
+        for name, value in metadata.items():
+            if not isinstance(name, str) or not isinstance(value, str):
+                raise FakeClientContractError(
+                    f"the Metadata staged for {key!r} carries a non-text entry"
+                    f" {name!r}: {type(value).__name__}"
+                )
+        return MappingProxyType(dict(metadata))
+
+    def _require_conditional_create(self, bucket: str, key: str, condition: object) -> None:
+        """Enforce a conditional create, refusing the write when the key already exists.
+
+        Purpose
+        -------
+        Reproduce the one service guarantee generation reservation is built on: a put carrying
+        ``IfNoneMatch: *`` succeeds only if nothing is stored at that key, evaluated atomically.
+
+        Parameters
+        ----------
+        bucket : str
+            The bucket being written to.
+        key : str
+            The object key being created.
+        condition : object
+            The ``IfNoneMatch`` argument, or ``None`` for an unconditional put.
+
+        Returns
+        -------
+        None
+            Returns nothing when the write may proceed.
+
+        Raises
+        ------
+        FakeClientContractError
+            If the condition is present but is not ``"*"``, which is the only form the loader
+            sends and the only one this double models.
+        FakeServiceError
+            If the key already holds a live version, reported as ``PreconditionFailed`` with
+            HTTP 412.
+        """
+        # WHY : Assumptions: only ``"*"`` is modelled, and any other condition is a contract error
+        # rather than silently ignored. Ignoring an ETag condition would be the dangerous
+        # direction: a test would see a conditional write succeed unconditionally and conclude the
+        # allocation was safe.
+        if condition is None:
+            return
+        if condition != "*":
+            raise FakeClientContractError(
+                f"the conditional put for {key!r} carried IfNoneMatch={condition!r}; this double"
+                ' models only the "*" form the staging loader sends'
+            )
+        if self._objects.get((bucket, key)):
+            raise FakeServiceError(
+                "PreconditionFailed",
+                412,
+                f"an object already exists at {key!r}",
+            )
+
+    def get_object(self, **kwargs: Any) -> dict[str, Any]:
+        """Return one object's newest body, metadata and length.
+
+        Purpose
+        -------
+        Serve the read that resolves a generation-claim conflict, so the loader can learn which
+        execution holds a claim rather than guessing from the error code alone.
+
+        Parameters
+        ----------
+        **kwargs : Any
+            The get arguments: ``Bucket`` and ``Key``.
+
+        Returns
+        -------
+        dict[str, Any]
+            A response carrying a readable ``Body``, the stored ``Metadata``, the
+            ``ContentLength`` and the ``VersionId`` of the newest version.
+
+        Raises
+        ------
+        FakeClientContractError
+            If ``Bucket`` or ``Key`` is absent.
+        FakeServiceError
+            If the key holds no live version, reported as ``NoSuchKey`` with HTTP 404 -- which
+            the loader must read as "unclaimed" rather than as a failure.
+        """
+        bucket = kwargs.get("Bucket")
+        key = kwargs.get("Key")
+        if not bucket or not key:
+            raise FakeClientContractError("a get_object call named no Bucket or no Key")
+        self.get_calls.append(MappingProxyType(dict(kwargs)))
+        held = self._objects.get((str(bucket), str(key)))
+        if not held:
+            raise FakeServiceError("NoSuchKey", 404, f"no object is stored at {key!r}")
+        version_id, body, metadata = held[-1]
+        # WHY : Assumptions: the body is returned as a fresh readable stream rather than as bytes,
+        # because that is the shape the SDK returns and the loader calls ``read`` on it. Returning
+        # bytes would let a loader that forgot the ``read`` call pass here and fail against AWS.
+        return {
+            "Body": io.BytesIO(body),
+            "Metadata": dict(metadata),
+            "ContentLength": len(body),
+            "VersionId": version_id,
+        }
 
     def delete_objects(self, **kwargs: Any) -> dict[str, list[dict[str, str]]]:
         """Delete the named object versions and report any arranged per-object errors.
@@ -2610,14 +2969,17 @@ class FakeObjectStore:
         Returns
         -------
         dict[str, list[dict[str, str]]]
-            A response carrying ``Errors``, which holds whatever
-            :meth:`fail_next_delete_with` arranged and is otherwise empty.
+            A response carrying ``Errors``, one entry per object an arrangement targeted, each
+            naming the ``Key``, ``VersionId`` and ``Code``. Empty when nothing was arranged.
+            ``Deleted`` is deliberately absent, because the loader deletes with ``Quiet`` set
+            and the service omits that list in quiet mode.
 
         Raises
         ------
         FakeClientContractError
-            If ``Bucket`` is absent, if ``Delete`` names no ``Objects``, or if more objects are
-            named than the service accepts in one call.
+            If ``Bucket`` is absent, if ``Delete`` names no ``Objects``, if more objects are
+            named than the service accepts in one call, or if an arranged error targeted an
+            object this batch did not name.
         """
         bucket = kwargs.get("Bucket")
         delete = kwargs.get("Delete") or {}
@@ -2626,7 +2988,7 @@ class FakeObjectStore:
             raise FakeClientContractError("a delete_objects call named no Bucket")
         if not objects:
             raise FakeClientContractError("a delete_objects call named no Delete['Objects']")
-        # WHY (Assumptions): the batch ceiling is asserted because the service enforces it and
+        # WHY : Assumptions: the batch ceiling is asserted because the service enforces it and
         # the staging loader batches against it. A double that accepted an over-long batch would
         # let a loader whose chunking was off by one pass here and fail on the first dataset
         # large enough to exceed it, which is the run least likely to be observed closely.
@@ -2636,11 +2998,87 @@ class FakeObjectStore:
                 f"{_MAX_DELETE_BATCH} the service accepts in one request"
             )
         self.delete_calls.append(MappingProxyType(dict(kwargs)))
-        for item in objects:
-            self._delete_one(str(bucket), str(item.get("Key", "")), item.get("VersionId"))
-        errors = list(self._delete_errors)
+        # WHY : Refactoring Rationale: each object is deleted only if no arrangement targets it,
+        #   where this method previously deleted EVERY named object and then returned the arranged
+        #   errors alongside. That modelled partial failure backwards. On a real bucket an object
+        #   the service reports in ``Errors`` is still there -- that is what the error means -- so
+        #   a retry finds it and can remove it. A double that deleted it anyway would let a test
+        #   claim it had exercised recovery while asserting against a store where the failed
+        #   version had already gone, so a loader that mistakenly treated a partial failure as
+        #   success would look correct here and lose data against the service.
+        arranged = list(self._delete_errors)
         self._delete_errors.clear()
+        errors: list[dict[str, str]] = []
+        for position, item in enumerate(objects):
+            key = str(item.get("Key", ""))
+            version_id = item.get("VersionId")
+            failure = self._claim_arranged_error(arranged, key, version_id, position)
+            if failure is not None:
+                errors.append(failure)
+                continue
+            self._delete_one(str(bucket), key, version_id)
+        # WHY : Assumptions: an arrangement left unmatched is a contract error rather than a
+        #   no-op. A test that arranged a failure for a key the batch never named would otherwise
+        #   see a fully successful delete and assert the partial-failure path while never having
+        #   entered it -- the same silent-pass class of defect this whole double exists to prevent.
+        if arranged:
+            unmatched = ", ".join(sorted(str(item.get("Key", "")) for item in arranged))
+            raise FakeClientContractError(
+                f"{len(arranged)} arranged delete error(s) targeted object(s) this batch did not"
+                f" name: {unmatched or '<unnamed>'}"
+            )
         return {"Errors": errors}
+
+    @staticmethod
+    def _claim_arranged_error(
+        arranged: list[dict[str, str]],
+        key: str,
+        version_id: object,
+        position: int,
+    ) -> dict[str, str] | None:
+        """Take the arranged error that targets one object, removing it from the arrangements.
+
+        Purpose
+        -------
+        Decide whether this particular object is the one a test arranged to fail, so the caller
+        can report it and leave it in place.
+
+        Parameters
+        ----------
+        arranged : list[dict[str, str]]
+            The outstanding arrangements. The matched entry is removed in place.
+        key : str
+            The key of the object being considered.
+        version_id : object
+            The version identifier named for it, or ``None``.
+        position : int
+            The object's zero-based position in the batch.
+
+        Returns
+        -------
+        dict[str, str] | None
+            The error entry to report, carrying the resolved key and version identifier, or
+            ``None`` when no arrangement targets this object.
+
+        Raises
+        ------
+        None
+            An object no arrangement targets is not an error; it is simply deleted.
+        """
+        for index, item in enumerate(arranged):
+            target = item.get("Key", "")
+            # WHY : Trade-offs: an arrangement naming no key targets the FIRST object in the
+            #   batch rather than every object. Targeting all of them would be the simpler rule
+            #   and would defeat the purpose: the failure being modelled is a PARTIAL one, where
+            #   some versions go and some remain, so a whole-batch failure would never produce
+            #   the half-scratched generation the loader has to refuse.
+            if target == key or (not target and position == 0):
+                arranged.pop(index)
+                reported = {"Key": key, "Code": item["Code"]}
+                if version_id is not None:
+                    reported["VersionId"] = str(version_id)
+                return reported
+        return None
 
     def get_paginator(self, operation_name: str) -> FakeObjectStorePaginator:
         """Return a paginator bound to one list operation.
@@ -2671,18 +3109,23 @@ class FakeObjectStore:
         hard failure -- a cleanup that deleted some versions and reported success would leave a
         generation half-scratched.
 
+        The targeted object is reported in the next call's ``Errors`` and is **not** deleted, as
+        the service leaves it in place, so a test can assert that a retry still has it to remove.
+
         Parameters
         ----------
         code : str
             The service error code to report, for example ``"AccessDenied"``.
         key : str
-            The key the error is attributed to. Empty by default, since the loader reports the
-            codes rather than the keys.
+            The key the error is attributed to. When empty -- the default -- the arrangement
+            targets the first object in the next batch, which keeps the modelled failure partial
+            without the test having to know which key the loader will name first.
 
         Returns
         -------
         None
-            The arrangement is consumed by the next :meth:`delete_objects` call.
+            The arrangement is consumed by the next :meth:`delete_objects` call, which raises if
+            the batch names no object the arrangement targets.
 
         Raises
         ------
@@ -2741,8 +3184,64 @@ class FakeObjectStore:
             If the key holds no version in the bucket, or if ``bucket`` is ``None`` and more
             than one bucket holds it.
         """
+        return self._newest(key, bucket)[1]
+
+    def metadata_of(self, key: str, *, bucket: str | None = None) -> Mapping[str, str]:
+        """Return the user metadata stored with the newest version of one key.
+
+        Purpose
+        -------
+        Let a test read the staged length and SHA-256 anchors back FROM THE OBJECT, which is what
+        the staging loader says a verification pass will do rather than trusting a log line.
+
+        Parameters
+        ----------
+        key : str
+            The object key.
+        bucket : str | None
+            The bucket to look in, or ``None`` to accept the only bucket holding the key.
+
+        Returns
+        -------
+        Mapping[str, str]
+            The metadata as stored, empty when the put carried none.
+
+        Raises
+        ------
+        FakeClientContractError
+            If the key holds no version in the bucket, or if ``bucket`` is ``None`` and more than
+            one bucket holds it.
+        """
+        return self._newest(key, bucket)[2]
+
+    def _newest(self, key: str, bucket: str | None) -> tuple[str, bytes, Mapping[str, str]]:
+        """Return the newest stored version record for one key.
+
+        Purpose
+        -------
+        Resolve a key to exactly one stored version, so the body and metadata accessors cannot
+        disagree about which bucket or which version they are reporting.
+
+        Parameters
+        ----------
+        key : str
+            The object key.
+        bucket : str | None
+            The bucket to look in, or ``None`` to accept the only bucket holding the key.
+
+        Returns
+        -------
+        tuple[str, bytes, Mapping[str, str]]
+            The version identifier, body and metadata of the newest version.
+
+        Raises
+        ------
+        FakeClientContractError
+            If the key holds no version in the bucket, or if ``bucket`` is ``None`` and more than
+            one bucket holds it.
+        """
         matches = [
-            (held_bucket, versions)
+            versions
             for (held_bucket, held_key), versions in self._objects.items()
             if held_key == key and versions and (bucket is None or held_bucket == bucket)
         ]
@@ -2752,7 +3251,7 @@ class FakeObjectStore:
             raise FakeClientContractError(
                 f"the key {key!r} is held in {len(matches)} buckets; name one explicitly"
             )
-        return matches[0][1][-1][1]
+        return matches[0][-1]
 
     def stored_versions(self, bucket: str) -> tuple[tuple[str, str], ...]:
         """Return every live key and version identifier held in one bucket.
@@ -2777,7 +3276,7 @@ class FakeObjectStore:
                 (key, version_id)
                 for (held_bucket, key), versions in self._objects.items()
                 if held_bucket == bucket
-                for version_id, _ in versions
+                for version_id, _, _ in versions
             )
         )
 
@@ -2832,7 +3331,7 @@ class FakeObjectStore:
             A key or version that is not held is not an error; the service reports such a
             delete as successful.
         """
-        # WHY (Assumptions): a delete with NO version identifier writes a marker rather than
+        # WHY : Assumptions: a delete with NO version identifier writes a marker rather than
         # removing anything, because that is what a versioned bucket does, and reproducing it is
         # the point. A loader that omitted the identifier would believe it had scratched a
         # generation while every version remained recoverable; because this double keeps the
@@ -2876,7 +3375,7 @@ def repo_root() -> Path:
         Via :func:`pytest.fail`, from :func:`_validate_repo_root`, if a marker directory is
         absent.
     """
-    # WHY (Assumptions): session scope is correct because the answer is a constant of the
+    # WHY : Assumptions: session scope is correct because the answer is a constant of the
     # checkout -- the validation reads three directory entries and cannot change during a run,
     # so repeating it per test would buy nothing. All validation lives in the helper rather
     # than in this body so a test can exercise the containment contract directly.
@@ -2904,7 +3403,7 @@ def fixture_corpus(repo_root: Path) -> FixtureCorpus:
     Failed
         Via :func:`pytest.fail`, propagated from the ``repo_root`` fixture.
     """
-    # WHY (Assumptions): the corpus is read IN PLACE from the reference tree, at its committed
+    # WHY : Assumptions: the corpus is read IN PLACE from the reference tree, at its committed
     # path, rather than being copied into a temporary directory first. Reading in place is what
     # makes an accidental write impossible to hide -- there is no staging copy whose divergence
     # from the original could go unnoticed -- and it is why every accessor uses a read-only open.
@@ -2963,7 +3462,7 @@ def workspace(tmp_path: Path) -> Iterator[Path]:
         Propagated from directory creation if the temporary root cannot be written, which would
         mean the run had no usable scratch space at all.
     """
-    # WHY (Assumptions): the workspace is built on ``tmp_path`` precisely because that directory
+    # WHY : Assumptions: the workspace is built on ``tmp_path`` precisely because that directory
     # is already OUTSIDE the checkout. Nothing this suite writes may land under ``app/**``,
     # ``tests/**`` or ``data-migration/**``: the first two are reference trees that must stay
     # byte-identical for the COBOL parity oracle to keep serving as the oracle, and a stray file
@@ -2973,7 +3472,7 @@ def workspace(tmp_path: Path) -> Iterator[Path]:
     root = tmp_path / "etl"
     root.mkdir()
     yield root
-    # WHY (Trade-offs): the tree is removed explicitly even though pytest retires its temporary
+    # WHY : Trade-offs: the tree is removed explicitly even though pytest retires its temporary
     # directories on its own, and errors are ignored while doing so. Pytest keeps the last few
     # runs' directories by design, so a staged dataset image can outlive the test that wrote it
     # by several runs; removing it here bounds that. Ignoring errors is deliberate, because a
@@ -3028,7 +3527,7 @@ def fake_aurora() -> FakeAuroraDatabase:
     None
         Construction records nothing and validates nothing.
     """
-    # WHY (Assumptions): function scope is a correctness requirement rather than a default. The
+    # WHY : Assumptions: function scope is a correctness requirement rather than a default. The
     # double's whole value is the statement log, and a session-scoped instance would let one
     # test's statements satisfy another's assertion that a forbidden one was never issued --
     # turning the privilege contract into a check on execution order.
@@ -3081,7 +3580,7 @@ def staging_settings() -> DatasetStagingSettings:
     ConfigurationError
         Propagated from the settings class if either value were blank, which these are not.
     """
-    # WHY (Assumptions): neither field is a credential -- a bucket name and an environment name
+    # WHY : Assumptions: neither field is a credential -- a bucket name and an environment name
     # are exactly what an operator needs to read in a staging log line -- which is why this class
     # keeps its generated repr where the connection settings mask theirs. The values are still
     # written to be unmistakably synthetic so no reader can mistake them for a deployed bucket,
@@ -3118,12 +3617,12 @@ def aurora_settings() -> AuroraConnectionSettings:
         Propagated from the settings class if any value were blank or the port out of range,
         which none is.
     """
-    # WHY (Assumptions): the host is in the reserved ``.invalid`` top-level domain and the trust
+    # WHY : Assumptions: the host is in the reserved ``.invalid`` top-level domain and the trust
     # anchor names a path that does not exist, so this object cannot reach anything even if a
     # future test handed it to a real driver by mistake -- name resolution fails before a socket
     # is opened. The settings class performs no filesystem check on the anchor, which is what
     # makes a non-existent path admissible here and keeps the fixture hermetic.
-    # WHY (Assumptions): the role name is taken from the eight-entry schema-to-role map rather
+    # WHY : Assumptions: the role name is taken from the eight-entry schema-to-role map rather
     # than written out, so it stays the role V0 actually creates for the ``auth`` context.
     return AuroraConnectionSettings(
         host="aurora.carddemo.invalid",

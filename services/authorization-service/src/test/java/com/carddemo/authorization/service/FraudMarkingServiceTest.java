@@ -22,12 +22,9 @@ import com.carddemo.authorization.repository.PendingAuthDetailRepository;
 import com.carddemo.authorization.repository.PendingAuthSummaryRepository;
 import com.carddemo.common.web.CursorToken;
 import java.math.BigDecimal;
-import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.NoSuchElementException;
@@ -86,8 +83,17 @@ class FraudMarkingServiceTest {
     /** The acquirer-supplied original date, six characters year-first. */
     private static final String AUTH_ORIG_DATE = "260803";
 
-    /** The instant the fixed clock reports, so both report dates are assertable. */
-    private static final Instant NOW = Instant.parse("2026-08-06T09:20:00Z");
+    /**
+     * The date the substituted repository reports as the DATABASE's current date.
+     *
+     * <p>Refactoring Rationale: this was an {@code Instant} handed to a fixed clock the service used to be
+     * built with. The service now reads its report date from
+     * {@link AuthFraudRepository#currentDate()}, because the reference system dates both of its writes from
+     * the database server, so a clock is no longer the value to fix and the substitute reports a date
+     * directly. The day is unchanged, which is what keeps the two rendering assertions below asserting the
+     * same strings they did.</p>
+     */
+    private static final LocalDate REPORT_DATE = LocalDate.of(2026, 8, 6);
 
     /** The authorization repository double. */
     private PendingAuthDetailRepository details;
@@ -120,8 +126,13 @@ class FraudMarkingServiceTest {
         byte[] keyMaterial = new byte[CursorToken.MIN_KEY_LENGTH];
         Arrays.fill(keyMaterial, (byte) 0x3C);
         this.mapper = new PendingAuthViewMapper(new CursorToken(keyMaterial, Duration.ofMinutes(5)));
+        // WHY : Assumptions: the report date is stubbed on the fraud repository rather than supplied to a
+        //       clock, because that is where the service reads it -- the database's own current date is
+        //       what the reference writes, and a substitute that answered a clock instead would leave the
+        //       assertion passing while the production path read a different source.
+        when(this.fraudRows.currentDate()).thenReturn(REPORT_DATE);
         this.service = new FraudMarkingService(this.details, this.summaries, this.fraudRows,
-                this.mapper, Clock.fixed(NOW, ZoneOffset.UTC));
+                this.mapper);
     }
 
     /**
@@ -271,13 +282,20 @@ class FraudMarkingServiceTest {
     }
 
     /**
-     * Both report dates one operation writes are the same day, because one clock produces both.
+     * Both report dates one operation writes are the same day, because one database read produces both.
      *
      * <p>Purpose: this is the assertion that pins divergence {@code D-AUTH-FRAUD-ONE-CLOCK}. The reference
      * system writes this date TWICE from TWO clocks in one operator action -- the segment copy from the
      * transaction monitor's clock at {@code cbl/COPAUS2C.cbl} L91 to L101, and the fraud row's column from
      * the database server's clock at L194 on the insert and L225 on the update -- so the two can name
-     * different days. The target reads one injected clock once, so they cannot.</p>
+     * different days. The target reads the DATABASE's date once and derives both values from it, so they
+     * cannot.</p>
+     *
+     * <p>Refactoring Rationale: the single read used to be of an injected application clock, which
+     * collapsed the two values correctly and collapsed them onto the wrong SOURCE -- the reference takes
+     * this date from the database server in both of its writes, and an application clock is a different
+     * process with an independently configured zone. Reading the database once preserves the collapse this
+     * test pins and puts it on the source the reference used.</p>
      *
      * <p>Assumptions: the two values are compared as DAYS and not as strings, because the two carry
      * deliberately different renderings of the same day -- the segment's eight characters are month first
@@ -302,7 +320,7 @@ class FraudMarkingServiceTest {
         LocalDate segmentDay = LocalDate.parse(row.getFraudReportDate(),
                 DateTimeFormatter.ofPattern("MM/dd/yy"));
         assertThat(segmentDay).isEqualTo(rowDay);
-        assertThat(rowDay).isEqualTo(LocalDate.ofInstant(NOW, ZoneOffset.UTC));
+        assertThat(rowDay).isEqualTo(REPORT_DATE);
     }
 
     /**

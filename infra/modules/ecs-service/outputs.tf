@@ -28,12 +28,12 @@
 #   do not expose, therefore surfaces at the calling root rather than here.
 #
 # Return values:
-#   Sixteen values -- fifteen strings and one number -- grouped below in the
+#   Seventeen values -- sixteen strings and one number -- grouped below in the
 #   order main.tf creates the resources behind them: the log group, the two IAM
 #   roles, the task definition and its container, the target group, the
 #   service, the autoscaling target. HCL declares no type on an output, so
 #   every description below states its value's type in words. Five of the
-#   sixteen are genuine cross-module contracts and say so where they are
+#   seventeen are genuine cross-module contracts and say so where they are
 #   declared:
 #     - target_group_arn        attached to a listener rule by
 #                               infra/modules/alb
@@ -44,13 +44,19 @@
 #     - target_group_arn_suffix the CloudWatch dimension observability needs
 #
 # Exceptions or errors:
-#   - Six outputs are null for one of the eight instantiations rather than
+#   - Six outputs are null for two of the nine instantiations rather than
 #     absent: service_name, service_arn, target_group_arn, target_group_name,
-#     target_group_arn_suffix and autoscaling_target_resource_id. ADR-002 runs
-#     batch as Step-Functions-invoked Fargate tasks rather than as a
-#     long-running service, so that instantiation sets create_service,
-#     attach_load_balancer and enable_autoscaling all false, and the three
-#     resources behind those six values are never created. Each description
+#     target_group_arn_suffix and autoscaling_target_resource_id. Each root
+#     instantiates this module once per key of its `workloads` local -- seven
+#     online services plus `batch` and `data-migration` -- and passes
+#     create_service, attach_load_balancer and enable_autoscaling all as that
+#     key's `online` flag. ADR-002 runs batch as Step-Functions-invoked Fargate
+#     tasks rather than as a long-running service, and the ETL is a load step
+#     rather than a service at all, so both are declared not online and the
+#     three resources behind those six values are never created for either.
+#     Refactoring Rationale: this paragraph said "one of the eight", which was
+#     measured before the ETL workload was added; the six values were then null
+#     for one instantiation out of eight rather than two out of nine. Each description
 #     restates its own condition, because a caller reading only this file must
 #     learn the nullability here rather than from a failed plan.
 #   - A caller that indexes or interpolates one of those six nulls, or passes

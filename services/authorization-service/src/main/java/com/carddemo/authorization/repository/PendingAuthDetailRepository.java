@@ -168,4 +168,31 @@ public interface PendingAuthDetailRepository
      */
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     Optional<PendingAuthDetail> findWithLockById(PendingAuthDetailKey id);
+
+    /**
+     * Returns every authorization beneath one account, in the order the reference segment is sequenced in.
+     *
+     * <p>Purpose: this is the child walk the unload and purge programs perform beneath each root --
+     * {@code PAUDBUNL.CBL} paragraph {@code 3000-FIND-NEXT-AUTH-DTL} at L253 and the equivalent scan in
+     * {@code CBPAUP0C.cbl} -- each of which issues an unqualified get-next-within-parent until the
+     * parent's children are exhausted, with no page boundary anywhere in the loop.
+     *
+     * <p>Assumptions: the order is DESCENDING on the two decoded key columns, and that is what reproduces
+     * the reference order rather than contradicting it. {@code ims/DBPAUTP0.dbd} L37 declares the child's
+     * unique sequence field {@code PAUT9CTS} over the first eight bytes of the segment, which hold the
+     * NINES COMPLEMENT of the date and time; ascending byte order on a complement is descending order on
+     * the value it complements. The key columns here store the DECODED date and time, so descending on
+     * them is ascending on the complement -- the twin order the reference walk observes, newest
+     * authorization first. Ordering ascending on the decoded columns would emit the file backwards.
+     *
+     * <p>Trade-offs: the whole child set of one account is returned rather than paged. An account's
+     * pending authorizations are bounded by the two four-digit counters its summary carries, so the set is
+     * small by construction, and both callers need every child of the account they are positioned on
+     * before they can decide anything about the parent. Paging it would add a cursor to a walk whose outer
+     * loop is already keyed, for no bound that the data does not already impose.
+     *
+     * @param accountId the account whose authorizations are required; must not be {@code null}
+     * @return every authorization beneath that account, newest first, empty when it has none
+     */
+    List<PendingAuthDetail> findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(Long accountId);
 }

@@ -1,6 +1,7 @@
 package com.carddemo.batch.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -12,18 +13,39 @@ import com.carddemo.batch.dto.BusinessDate;
 import com.carddemo.batch.dto.DatasetGeneration;
 import com.carddemo.batch.dto.DatasetGeneration.DatasetFamily;
 import com.carddemo.batch.dto.DatasetGeneration.GenerationReference;
+import java.io.IOException;
+import java.io.InputStream;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import software.amazon.awssdk.core.ResponseBytes;
+import software.amazon.awssdk.core.exception.SdkClientException;
+import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.CommonPrefix;
+import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
+import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.PutObjectResponse;
+import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.s3.paginators.ListObjectsV2Iterable;
 
 /**
@@ -151,13 +173,77 @@ class DatasetGenerationServiceTest {
     private static final BusinessDate BUSINESS_DATE = new BusinessDate("2022-07-18");
 
     /**
+     * A business date one day earlier than the shared one, for the cases that span a date boundary.
+     *
+     * <p>Assumptions: an EARLIER date is required rather than a later one, because the two rulings a
+     * second date settles are both about what happens on the first run of a NEW day: the current
+     * generation must be found under the previous day's partition, and retention must count across both.
+     * A later date would make the shared date the older one and would leave the ordering assertion
+     * reading backwards from the situation it describes.</p>
+     */
+    private static final BusinessDate EARLIER_BUSINESS_DATE = new BusinessDate("2022-07-17");
+
+    /**
+     * The status an object store reports when a conditional write lost to an object already present.
+     *
+     * <p>Assumptions: the number is spelled here rather than read from the service, because the service's
+     * own constant is private and, more importantly, because this value is the OBJECT STORE's contract
+     * rather than the service's. A stub that took the number from the subject under test would agree with
+     * it by construction and would still agree after the subject started reading the wrong status.</p>
+     */
+    private static final int PRECONDITION_FAILED_STATUS = 412;
+
+    /** The status an object store reports for a key that holds no object. */
+    private static final int NOT_FOUND_STATUS = 404;
+
+    /**
+     * The keys the most recently built stub holds, in the order they were created.
+     *
+     * <p>Assumptions: the backing store is exposed to the cases as a live view rather than copied out,
+     * because two of them assert what the service WROTE and one asserts what it did not write. A stub
+     * whose writes vanished would let a reservation defect pass as an absence of writes.</p>
+     */
+    private final Map<String, String> storedObjects = new LinkedHashMap<>();
+
+    /**
+     * How many further listings the most recently built stub is to fail before it starts answering.
+     *
+     * <p>Assumptions: the counter is held on the fixture rather than captured per stub so that the one
+     * listing implementation below can consult it, instead of a second listing implementation existing
+     * for the failing cases. Two implementations would mean the cases that exercise a failure exercised a
+     * different listing from every other case, and a defect in the real one could hide behind that.</p>
+     */
+    private final AtomicInteger listingFailuresRemaining = new AtomicInteger();
+
+    /**
+     * The exception the staged listing failures raise, or {@code null} when none is staged.
+     *
+     * <p>Assumptions: the instance is retained rather than rebuilt per throw, because one case asserts the
+     * translated exception's cause is THE instance the store raised. A freshly built equivalent would
+     * compare unequal and the retention assertion would fail against a service that retained it.</p>
+     */
+    private SdkException stagedListingFailure;
+
+    /**
      * Builds a stubbed object store whose listing reports exactly the supplied generations as present.
      *
-     * <p>Assumptions: the listing is answered from the REQUESTED prefix rather than returned wholesale, so
-     * a store staged with generations of several families answers each family's listing with only its own.
-     * Returning every staged prefix to every listing would let one family's generations raise another
-     * family's next number, which would quietly invalidate the case that proves the two are independent --
-     * it would still pass, while asserting the opposite of what it claims.</p>
+     * <p>Assumptions: the stub is backed by a key-to-body map and the LISTING is DERIVED from that map,
+     * rather than the listing being stubbed independently of the writes. That is what makes a generation
+     * the service itself claimed visible to the service's next listing, which is the whole property the
+     * durable reservation rests on -- a stub answering a fixed listing would report the number as free
+     * again on the very next call and the reservation would appear to work while proving nothing.</p>
+     *
+     * <p>Assumptions: a staged generation is seeded by writing its CLAIM MARKER rather than by adding a
+     * prefix to a listing, because that is exactly what a real staged generation holds. A generation
+     * whose prefix existed with nothing beneath it is not a state the object store can be in: a prefix in
+     * that store is an artefact of the keys under it and has no independent existence.</p>
+     *
+     * <p>Assumptions: the listing implements DELIMITER semantics -- each key under the requested prefix
+     * is truncated at the first separator that follows it, and the results are deduplicated. The previous
+     * form returned each staged generation's FULL key prefix to every listing, which happens to be
+     * correct for a listing made at the date partition and is wrong for one made at the family root: the
+     * family-root listing would answer with generation prefixes where a real store answers with date
+     * prefixes, so the two-level walk could not be exercised at all.</p>
      *
      * <p>Assumptions: the paginator returned is a REAL one constructed over this same stub, so the
      * kit's own pagination and its final {@code commonPrefixes} accessor execute for real and only the
@@ -168,35 +254,237 @@ class DatasetGenerationServiceTest {
      *     mix of families; an empty list stages a store holding no generation at all
      * @return the stubbed object store, never {@code null}
      */
-    private static S3Client objectStoreHolding(List<DatasetGeneration> staged) {
+    private S3Client objectStoreHolding(List<DatasetGeneration> staged) {
+        this.storedObjects.clear();
+
+        // WHY : Assumptions: the failure staging is cleared here rather than only set by the failing
+        //       builder, so that "a plain store never fails" holds by construction. Leaving a previous
+        //       case's staging in place would make a later case's outcome depend on the order the cases
+        //       happened to run in, which is the one property a fixture must never have.
+        this.listingFailuresRemaining.set(0);
+        this.stagedListingFailure = null;
+
+        for (DatasetGeneration generation : staged) {
+            this.storedObjects.put(
+                    generation.keyPrefix() + DatasetGenerationService.CLAIM_OBJECT_NAME, RUN_ID);
+        }
+
         S3Client objectStore = mock(S3Client.class);
 
         when(objectStore.listObjectsV2Paginator(any(ListObjectsV2Request.class)))
                 .thenAnswer(call -> new ListObjectsV2Iterable(objectStore, call.getArgument(0)));
 
         when(objectStore.listObjectsV2(any(ListObjectsV2Request.class))).thenAnswer(call -> {
-            String requestedPrefix = call.<ListObjectsV2Request>getArgument(0).prefix();
+            raiseAnyStagedListingFailure();
 
-            // WHY : Assumptions: the child prefixes are rendered by the coordinate itself rather than
-            //       spelled here. A generation's key prefix IS its partition prefix followed by the
-            //       generation segment and a separator, so a staged coordinate's own rendering is exactly
-            //       the child a real listing would return for it. Spelling the markers here instead would
-            //       put a second declaration of the segment convention in a test, and the service would
-            //       then be read back through a convention this file asserted rather than the one the
-            //       record publishes.
-            List<CommonPrefix> children = staged.stream()
-                    .map(DatasetGeneration::keyPrefix)
-                    .filter(childPrefix -> childPrefix.startsWith(requestedPrefix))
-                    .map(childPrefix -> CommonPrefix.builder().prefix(childPrefix).build())
-                    .toList();
+            String requestedPrefix = call.<ListObjectsV2Request>getArgument(0).prefix();
+            String delimiter = call.<ListObjectsV2Request>getArgument(0).delimiter();
+
+            // WHY : Assumptions: the child is computed by truncating at the first delimiter AFTER the
+            //       requested prefix, which is the rule the object store itself applies. No segment
+            //       marker is spelled here, so the service is read back through the convention the
+            //       coordinate record publishes rather than through one this file restates.
+            Set<String> children = new LinkedHashSet<>();
+            for (String key : this.storedObjects.keySet()) {
+                if (!key.startsWith(requestedPrefix)) {
+                    continue;
+                }
+                int boundary = key.indexOf(delimiter, requestedPrefix.length());
+                if (boundary >= 0) {
+                    children.add(key.substring(0, boundary + delimiter.length()));
+                }
+            }
 
             return ListObjectsV2Response.builder()
                     .isTruncated(false)
-                    .commonPrefixes(children)
+                    .commonPrefixes(children.stream()
+                            .map(child -> CommonPrefix.builder().prefix(child).build())
+                            .toList())
+                    .build();
+        });
+
+        installObjectAccess(objectStore);
+
+        return objectStore;
+    }
+
+    /**
+     * Wires the read and the conditional write of a single object onto a stubbed store.
+     *
+     * <p>Assumptions: this wiring is shared by every builder below rather than repeated per builder,
+     * because the durable reservation the service keeps is read through {@code getObjectAsBytes} on EVERY
+     * allocation, including the allocations made by cases that are really about the listing. A builder
+     * that omitted it would hand the service a read answering {@code null}, and the case would fail on a
+     * dereference of that null rather than on the property it was written to settle.</p>
+     *
+     * <p>Assumptions: an absent key is reported as the store's own not-found exception rather than as an
+     * empty body, because that is the distinction the service branches on -- it treats not-found as "this
+     * run has recorded nothing yet" and treats any other failure as a fault. A stub returning an empty
+     * body would drive the parse branch instead and would report a corrupt record where there is none.</p>
+     *
+     * @param objectStore the stubbed store to wire; must not be {@code null}
+     */
+    private void installObjectAccess(S3Client objectStore) {
+        when(objectStore.putObject(any(PutObjectRequest.class), any(RequestBody.class)))
+                .thenAnswer(call -> {
+                    PutObjectRequest request = call.getArgument(0);
+
+                    // WHY : Assumptions: the conditional guard is honoured by the stub rather than
+                    //       ignored, because the guard IS the mechanism under test. A stub that accepted
+                    //       every write would let two runs both claim one generation and the case that
+                    //       proves they cannot would pass without exercising anything.
+                    if (request.ifNoneMatch() != null
+                            && this.storedObjects.containsKey(request.key())) {
+                        throw S3Exception.builder()
+                                .statusCode(PRECONDITION_FAILED_STATUS)
+                                .message("stubbed object store: key already exists")
+                                .build();
+                    }
+
+                    this.storedObjects.put(request.key(), bodyOf(call.getArgument(1)));
+                    return PutObjectResponse.builder().build();
+                });
+
+        when(objectStore.getObjectAsBytes(any(GetObjectRequest.class))).thenAnswer(call -> {
+            String key = call.<GetObjectRequest>getArgument(0).key();
+            String body = this.storedObjects.get(key);
+            if (body == null) {
+                throw NoSuchKeyException.builder()
+                        .statusCode(NOT_FOUND_STATUS)
+                        .message("stubbed object store: no such key")
+                        .build();
+            }
+            return ResponseBytes.fromByteArray(
+                    GetObjectResponse.builder().build(), body.getBytes(StandardCharsets.UTF_8));
+        });
+    }
+
+    /**
+     * Raises the staged listing failure if any listing failures are still owed, and counts one off.
+     *
+     * <p>Assumptions: the failure is raised from the request-response boundary rather than from the
+     * paginator factory, so it travels the path a real transport failure travels -- the service consumes a
+     * real paginator inside its own {@code try} block, and the throw happens during that traversal.
+     * Throwing from the factory instead would bypass the block and the translation under test would never
+     * run.</p>
+     */
+    private void raiseAnyStagedListingFailure() {
+        if (this.stagedListingFailure != null && this.listingFailuresRemaining.get() > 0) {
+            this.listingFailuresRemaining.decrementAndGet();
+            throw this.stagedListingFailure;
+        }
+    }
+
+    /**
+     * Builds a stubbed store whose listing answers exactly the supplied child prefixes, verbatim.
+     *
+     * <p>Assumptions: this builder exists BESIDE {@link #objectStoreHolding(List)} rather than replacing
+     * it, and the two are used for different questions. The derived builder can only ever produce children
+     * that the coordinate record itself rendered, so it cannot stage a child the renderer never wrote --
+     * which is precisely what the four rejection cases need. This builder can stage anything, and is
+     * therefore the wrong tool for every case about what the service WROTE.</p>
+     *
+     * <p>Assumptions: a child that lies under the requested prefix is truncated at the delimiter that
+     * follows it -- the rule a real store applies -- while a child that lies OUTSIDE the requested prefix
+     * is returned unchanged. Filtering the outside child away instead would make one case below
+     * unwriteable: a real store would not return a foreign family's child, so the service's own partition
+     * check could only be exercised by a listing that deliberately breaks that guarantee.</p>
+     *
+     * <p>Assumptions: a child already closed by the delimiter is returned unchanged rather than truncated
+     * to itself, so a child closed by NO delimiter reaches the service intact. That is one of the four
+     * shapes the service rejects, and a stub that quietly dropped it would let the case pass while the
+     * rejection it names went unexecuted.</p>
+     *
+     * @param childPrefixes the children every listing is to report, in the order supplied
+     * @return the stubbed object store, never {@code null}
+     */
+    private S3Client objectStoreListingLiterally(List<String> childPrefixes) {
+        S3Client objectStore = objectStoreHolding(List.of());
+
+        when(objectStore.listObjectsV2(any(ListObjectsV2Request.class))).thenAnswer(call -> {
+            raiseAnyStagedListingFailure();
+
+            String requestedPrefix = call.<ListObjectsV2Request>getArgument(0).prefix();
+            String delimiter = call.<ListObjectsV2Request>getArgument(0).delimiter();
+
+            Set<String> children = new LinkedHashSet<>();
+            for (String child : childPrefixes) {
+                if (!child.startsWith(requestedPrefix)) {
+                    children.add(child);
+                    continue;
+                }
+                int boundary = child.indexOf(delimiter, requestedPrefix.length());
+                boolean closesTheChild = boundary < 0
+                        || boundary == child.length() - delimiter.length();
+                children.add(closesTheChild
+                        ? child
+                        : child.substring(0, boundary + delimiter.length()));
+            }
+
+            return ListObjectsV2Response.builder()
+                    .isTruncated(false)
+                    .commonPrefixes(children.stream()
+                            .map(child -> CommonPrefix.builder().prefix(child).build())
+                            .toList())
                     .build();
         });
 
         return objectStore;
+    }
+
+    /**
+     * Builds a stubbed store whose listing fails a stated number of times and then answers normally.
+     *
+     * <p>Assumptions: the failure count is a parameter rather than the builder always failing, because the
+     * property worth asserting is not that a failure is reported -- it is that a RETRY after a failure
+     * still allocates. A store that always failed could only ever show the first half of that.</p>
+     *
+     * <p>Assumptions: the successful answers come from {@link #objectStoreHolding(List)} unchanged, so the
+     * recovered listing is the SAME derived listing every other case reads, and the writes the retry makes
+     * are visible to the listing that follows them. A separately stubbed recovery listing would report the
+     * claimed generation as free again and the retry would appear to work while proving nothing.</p>
+     *
+     * @param failuresBeforeSuccess how many consecutive listings fail before the first one succeeds; zero
+     *     stages a store that never fails
+     * @param failure the exception each failing listing raises; must be an SDK exception, since that is
+     *     the only kind the service undertakes to translate
+     * @param staged the generations the store reports once it starts succeeding, in any order
+     * @return the stubbed object store, never {@code null}
+     */
+    private S3Client objectStoreFailingThenHolding(int failuresBeforeSuccess,
+            SdkException failure, List<DatasetGeneration> staged) {
+
+        S3Client objectStore = objectStoreHolding(staged);
+
+        // WHY : Assumptions: the staging is applied AFTER the builder runs, because the builder clears it
+        //       on entry so that a plain store cannot inherit a previous case's failures. Setting it first
+        //       would be silently undone and every failing case would pass against a store that never
+        //       failed.
+        this.stagedListingFailure = failure;
+        this.listingFailuresRemaining.set(failuresBeforeSuccess);
+
+        return objectStore;
+    }
+
+    /**
+     * Reads a request body back as the string the service wrote into it.
+     *
+     * <p>Assumptions: the body is drained through the kit's own content-stream provider rather than
+     * through any accessor for the original string, because a request body carries a stream provider and
+     * not the value it was built from. Draining once is safe here because each stub write consumes its
+     * body exactly once.</p>
+     *
+     * @param body the request body the service supplied; must not be {@code null}
+     * @return the body's bytes decoded as text, never {@code null}
+     * @throws IllegalStateException if the body's stream cannot be read, which would mean the stub was
+     *     handed a body backed by something other than the in-memory content this service writes
+     */
+    private static String bodyOf(RequestBody body) {
+        try (InputStream content = body.contentStreamProvider().newStream()) {
+            return new String(content.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (IOException unreadable) {
+            throw new IllegalStateException("a stubbed request body could not be read", unreadable);
+        }
     }
 
     /**
@@ -213,9 +501,10 @@ class DatasetGenerationServiceTest {
     /**
      * Builds a service over a store holding the supplied generations.
      *
-     * <p>Assumptions: a fresh service is built per case rather than shared, because the memoisation table
-     * is per instance and an instance shared across cases would carry one case's allocations into the
-     * next. That is the same reason one case below builds a SECOND instance deliberately.</p>
+     * <p>Assumptions: a fresh service is built per case rather than shared, because a store shared across
+     * cases would carry one case's claim markers into the next. The service itself now holds no
+     * per-instance allocation state at all -- the reservation lives in the store -- which is exactly what
+     * one case below builds a SECOND instance to demonstrate.</p>
      *
      * @param objectStore the stubbed store the service lists generations through
      * @return the service under test, never {@code null}
@@ -433,46 +722,63 @@ class DatasetGenerationServiceTest {
         }
 
         /**
-         * A fresh service instance allocates afresh, because the table does not outlive the run.
+         * A fresh service instance returns the SAME generation, because the reservation is durable.
          *
-         * <p>Pins the same one-job scope as {@code app/jcl/COMBTRAN.jcl:37} and {@code :44}. A batch task
-         * is one run, so a new instance is a new run and inherits no allocation from a previous one.</p>
+         * <p>Pins the same one-job scope as {@code app/jcl/COMBTRAN.jcl:37} and {@code :44}, and it is
+         * exactly the scope a process-local table could not hold. The two references a job makes to one
+         * family are not guaranteed to occur in one container: a batch step runs as a task invoked from a
+         * {@code Map} state that the orchestrator may redrive, so the reading reference can legitimately
+         * execute in a fresh process. It must still address the generation the writing reference
+         * created.</p>
          *
-         * <p>Assumptions: a second instance over the SAME stubbed store is what makes the leak observable.
-         * Sharing the store keeps the listing count cumulative across both instances, so a table that
-         * somehow survived instantiation would show as one listing rather than two.</p>
+         * <p>Refactoring Rationale: this case previously asserted the OPPOSITE -- that a fresh instance
+         * allocates afresh -- and passed, because the allocation was memoised in a field. That assertion
+         * described the defect rather than the requirement: a retried branch would allocate a second
+         * generation, write to a prefix the earlier attempt's reader was not looking at, and consume the
+         * five-generation retention window at twice the intended rate. The store is shared across both
+         * instances here, which is what makes the durable record the only thing the second instance can
+         * be reading.</p>
+         *
+         * <p>Assumptions: the second instance issues no listing at all, which is asserted rather than
+         * inferred. A durable record that was read but then ignored would still return the right
+         * coordinate while allocating again underneath, and only the listing count distinguishes the
+         * two.</p>
          */
         @Test
-        @DisplayName("allocate afresh on a fresh instance")
-        void freshInstanceAllocatesAfresh() {
+        @DisplayName("return the recorded generation on a fresh instance in the same run")
+        void freshInstanceReadsTheDurableReservation() {
             S3Client objectStore = objectStoreHolding(
                     List.of(generation(DatasetFamily.DALYREJS, 2)));
 
-            serviceOver(objectStore)
+            DatasetGeneration first = serviceOver(objectStore)
                     .allocateNewGeneration(DatasetFamily.DALYREJS, BUSINESS_DATE, RUN_ID);
-            serviceOver(objectStore)
+            DatasetGeneration afterRestart = serviceOver(objectStore)
                     .allocateNewGeneration(DatasetFamily.DALYREJS, BUSINESS_DATE, RUN_ID);
 
-            verify(objectStore, times(2)).listObjectsV2Paginator(any(ListObjectsV2Request.class));
+            assertThat(afterRestart).isEqualTo(first);
+            assertThat(first.generationNumber()).isEqualTo(3);
+            verify(objectStore, times(1)).listObjectsV2Paginator(any(ListObjectsV2Request.class));
         }
 
         /**
-         * A repeat allocation is non-fatal and provisions nothing, which is the tolerated-redefine analogue.
+         * A repeat allocation is non-fatal and writes nothing further, the tolerated-redefine analogue.
          *
          * <p>Pins {@code app/jcl/DEFGDGB.jcl:29}, {@code :35}, {@code :41}, {@code :47}, {@code :53} and
          * {@code :59}, each of which follows a base definition with a step that clears the condition code
          * so that an already-exists outcome is tolerated rather than failing the job.</p>
          *
-         * <p>Assumptions: the service exposes no create-if-absent operation to test directly, because it
-         * provisions nothing -- it creates no prefix and deletes no object, and the bucket and its prefixes
-         * are provisioned by {@code infra/modules/s3-datasets}. The migrated form of the tolerated redefine
-         * is therefore this: repeating the request neither raises nor writes. That is asserted both ways,
-         * by driving the repeat and by pinning that no object was put, so the claim that the service
-         * provisions nothing is checkable rather than only documented.</p>
+         * <p>Refactoring Rationale: this case previously asserted that the service writes NO object at
+         * all, on the stated ground that it provisions nothing. That ground held while the reservation was
+         * a field and cannot hold now: a reservation is durable only if it is written down. What the case
+         * asserts instead is the property that actually matters -- the FIRST allocation writes exactly the
+         * two reservation markers and the repeat writes nothing further -- so a repeat that quietly
+         * allocated again would be caught by the write count rather than by a claim that no write occurs.
+         * The service still provisions no bucket, no prefix and no lifecycle rule, and still deletes
+         * nothing.</p>
          */
         @Test
-        @DisplayName("tolerate a repeat request without provisioning anything")
-        void repeatAllocationIsNonFatalAndProvisionsNothing() {
+        @DisplayName("tolerate a repeat request without writing a second reservation")
+        void repeatAllocationIsNonFatalAndWritesNothingFurther() {
             S3Client objectStore = objectStoreHolding(
                     List.of(generation(DatasetFamily.TCATBALF_BKUP, 1)));
             DatasetGenerationService service = serviceOver(objectStore);
@@ -483,7 +789,70 @@ class DatasetGenerationServiceTest {
                     DatasetFamily.TCATBALF_BKUP, BUSINESS_DATE, RUN_ID);
 
             assertThat(repeated).isEqualTo(first);
-            verify(objectStore, never()).putObject(any(PutObjectRequest.class), any(RequestBody.class));
+            verify(objectStore, times(2))
+                    .putObject(any(PutObjectRequest.class), any(RequestBody.class));
+            assertThat(DatasetGenerationServiceTest.this.storedObjects)
+                    .containsKey(first.keyPrefix() + DatasetGenerationService.CLAIM_OBJECT_NAME);
+            assertThat(DatasetGenerationServiceTest.this.storedObjects.keySet())
+                    .anySatisfy(key -> assertThat(key)
+                            .startsWith(DatasetGenerationService.RUN_CLAIM_ROOT));
+        }
+
+        /**
+         * The first generation of an empty family is one, never zero.
+         *
+         * <p>Pins the reference baseline's own first generation. Every relative creation in the tree is
+         * spelled {@code (+1)} -- {@code app/jcl/TRANBKP.jcl:33} and {@code app/jcl/INTCALC.jcl:41} among
+         * fifteen such references -- and the catalog resolved the first of them to {@code G0001V00}. There
+         * is no generation zero to resolve to.</p>
+         *
+         * <p>Refactoring Rationale: this ruling was previously the opposite. The coordinate type admitted
+         * zero as its minimum and an empty partition therefore allocated a {@code gen=0000} prefix, which
+         * the sibling stager refuses to write at
+         * {@code data-migration/src/carddemo_migration/loaders/s3_stage.py:1010-1044} and which its own
+         * first-generation answer at {@code loaders/s3_stage.py:1328} contradicts. Two components writing
+         * one bucket disagreed about what the first generation is called, so a Java step's first write
+         * landed at a prefix the Python verification pass did not consider a generation at all.</p>
+         */
+        @Test
+        @DisplayName("allocate generation one into an empty family")
+        void emptyFamilyAllocatesGenerationOne() {
+            DatasetGeneration allocated = serviceOver(objectStoreHolding(List.of()))
+                    .allocateNewGeneration(DatasetFamily.TRANSACT_DALY, BUSINESS_DATE, RUN_ID);
+
+            assertThat(allocated.generationNumber())
+                    .isEqualTo(DatasetGeneration.MINIMUM_GENERATION_NUMBER)
+                    .isEqualTo(1);
+            assertThat(allocated.generationSegment()).endsWith("0001");
+        }
+
+        /**
+         * A generation claimed by another writer between the listing and the write is not taken twice.
+         *
+         * <p>Pins the property a process-local reservation cannot have. The nightly chain stages through a
+         * {@code Map} state running one containerised branch per dataset and the orchestrator may redrive a
+         * branch, so two writers can list the same family within one window. The conditional write is what
+         * decides between them, and the loser must re-list rather than proceed with a number it does not
+         * hold.</p>
+         *
+         * <p>Assumptions: the concurrent writer is simulated by claiming the next number through a SECOND
+         * service instance under a DIFFERENT run identifier, rather than by writing a key this file
+         * spells. Spelling the key would restate the reservation convention in a test, and the case would
+         * then prove the service agrees with this file rather than with itself.</p>
+         */
+        @Test
+        @DisplayName("re-list and take the next free number when a claim is lost")
+        void aLostClaimIsRetriedAtTheNextFreeNumber() {
+            S3Client objectStore = objectStoreHolding(
+                    List.of(generation(DatasetFamily.SYSTRAN, 1)));
+
+            DatasetGeneration otherRun = serviceOver(objectStore)
+                    .allocateNewGeneration(DatasetFamily.SYSTRAN, BUSINESS_DATE, OTHER_RUN_ID);
+            DatasetGeneration thisRun = serviceOver(objectStore)
+                    .allocateNewGeneration(DatasetFamily.SYSTRAN, BUSINESS_DATE, RUN_ID);
+
+            assertThat(otherRun.generationNumber()).isEqualTo(2);
+            assertThat(thisRun.generationNumber()).isEqualTo(3);
         }
     }
 
@@ -507,20 +876,20 @@ class DatasetGenerationServiceTest {
          * <p>Pins {@code app/jcl/COMBTRAN.jcl:24}, where the combine job reads {@code TRANSACT.BKUP(0)} as
          * a sort input. Reading an input must not consume the family's next generation.</p>
          *
-         * <p>Assumptions: the decisive assertion is the one AFTER the read. If reading had populated the
-         * memoisation table, the following allocation would have answered from it and returned the
-         * generation that already exists; it returns one past it instead, which is what proves the read left
-         * the table untouched. Nothing else the read returns could show this.</p>
+         * <p>Assumptions: the decisive assertion is the one AFTER the read. If reading had recorded a
+         * reservation, the following allocation would have answered from it and returned the generation
+         * that already exists; it returns one past it instead, which is what proves the read reserved
+         * nothing. Nothing else the read returns could show this.</p>
          */
         @Test
-        @DisplayName("allocate nothing and leave the run's table untouched")
+        @DisplayName("allocate nothing and reserve nothing for the run")
         void readingCurrentGenerationDoesNotAllocate() {
             S3Client objectStore = objectStoreHolding(
                     List.of(generation(DatasetFamily.TRANSACT_BKUP, 3)));
             DatasetGenerationService service = serviceOver(objectStore);
 
-            Optional<DatasetGeneration> current = service.resolveCurrentGeneration(
-                    DatasetFamily.TRANSACT_BKUP, BUSINESS_DATE);
+            Optional<DatasetGeneration> current =
+                    service.resolveCurrentGeneration(DatasetFamily.TRANSACT_BKUP);
 
             assertThat(current).isPresent();
             assertThat(current.orElseThrow().generationNumber()).isEqualTo(3);
@@ -553,7 +922,7 @@ class DatasetGenerationServiceTest {
             DatasetGenerationService service = serviceOver(objectStore);
 
             DatasetGeneration current = service
-                    .resolveCurrentGeneration(DatasetFamily.SYSTRAN, BUSINESS_DATE)
+                    .resolveCurrentGeneration(DatasetFamily.SYSTRAN)
                     .orElseThrow();
             DatasetGeneration allocated = service.allocateNewGeneration(
                     DatasetFamily.SYSTRAN, BUSINESS_DATE, RUN_ID);
@@ -571,26 +940,529 @@ class DatasetGenerationServiceTest {
         }
 
         /**
-         * A partition holding no generation is reported as absent rather than as the zeroth generation.
+         * A family holding no generation is reported as absent rather than as a first generation.
          *
          * <p>Pins the two reads at {@code app/jcl/COMBTRAN.jcl:24} and {@code :26}, which name inputs the
-         * combine job did not produce. Answering an unwritten partition with a coordinate would send the
+         * combine job did not produce. Answering an unwritten family with a coordinate would send the
          * merge at a prefix nothing was ever staged under and yield an empty output indistinguishable from a
          * successful merge of empty inputs.</p>
          *
-         * <p>Assumptions: absence and the zeroth generation are different answers because the record admits
-         * a generation numbered zero as a real coordinate. That is why an empty result rather than a
-         * substituted minimum is the correct report, and it is why this case asserts emptiness rather than
-         * a number.</p>
+         * <p>Assumptions: absence and a first generation are different answers, so an empty result rather
+         * than a substituted minimum is the correct report, and it is why this case asserts emptiness
+         * rather than a number.</p>
          */
         @Test
-        @DisplayName("report an unwritten partition as absent")
-        void unwrittenPartitionIsReportedAbsent() {
+        @DisplayName("report an unwritten family as absent")
+        void unwrittenFamilyIsReportedAbsent() {
             DatasetGenerationService service = serviceOver(objectStoreHolding(List.of()));
 
-            assertThat(service.resolveCurrentGeneration(DatasetFamily.SYSTRAN, BUSINESS_DATE)).isEmpty();
+            assertThat(service.resolveCurrentGeneration(DatasetFamily.SYSTRAN)).isEmpty();
+        }
+
+        /**
+         * The current generation is found under an EARLIER business date when today holds none.
+         *
+         * <p>Pins {@code app/jcl/COMBTRAN.jcl:24} and {@code :26} at the one moment the date scope decides
+         * the answer: the first run of a new business day. The catalog those two references were resolved
+         * against held one generation sequence per base and knew nothing of dates, so {@code (0)} named the
+         * newest generation of the base however long ago it was written.</p>
+         *
+         * <p>Refactoring Rationale: a date-scoped resolution answered EMPTY here, and empty is what the
+         * combine flow reads as "this input does not exist yet". The merge then ran over one input instead
+         * of two and produced a short output that no return code distinguished from a correct one -- which
+         * is precisely the class of defect a golden-master comparison catches only if a fixture happens to
+         * straddle midnight.</p>
+         */
+        @Test
+        @DisplayName("find the current generation under an earlier date partition")
+        void currentGenerationSpansBusinessDates() {
+            DatasetGenerationService service = serviceOver(objectStoreHolding(List.of(
+                    new DatasetGeneration(DatasetFamily.TRANSACT_BKUP, EARLIER_BUSINESS_DATE, 4))));
+
+            DatasetGeneration current =
+                    service.resolveCurrentGeneration(DatasetFamily.TRANSACT_BKUP).orElseThrow();
+
+            assertThat(current.generationNumber()).isEqualTo(4);
+            assertThat(current.businessDate()).isEqualTo(EARLIER_BUSINESS_DATE);
+        }
+
+        /**
+         * The newest generation of the LATER date outranks a higher-numbered one of an earlier date.
+         *
+         * <p>Pins the catalog's own ordering, which is chronological. Two dates' sequences each start at
+         * one, so a generation number compared on its own is not an ordering across a family at all.</p>
+         *
+         * <p>Refactoring Rationale: the ordering compared generation numbers alone, which ranked
+         * generation nine of the earlier date above generation one of the later one. That is the wrong
+         * answer to {@code (0)} and, in the retention rule, it kept the wrong five generations. The
+         * sibling stager derives the same date-then-generation ordering from its coordinate's field order
+         * at {@code data-migration/src/carddemo_migration/loaders/s3_stage.py:380-389}.</p>
+         */
+        @Test
+        @DisplayName("rank a later date above a higher generation of an earlier date")
+        void laterDateOutranksHigherEarlierGeneration() {
+            DatasetGenerationService service = serviceOver(objectStoreHolding(List.of(
+                    new DatasetGeneration(DatasetFamily.SYSTRAN, EARLIER_BUSINESS_DATE, 9),
+                    new DatasetGeneration(DatasetFamily.SYSTRAN, BUSINESS_DATE, 1))));
+
+            DatasetGeneration current =
+                    service.resolveCurrentGeneration(DatasetFamily.SYSTRAN).orElseThrow();
+
+            assertThat(current.businessDate()).isEqualTo(BUSINESS_DATE);
+            assertThat(current.generationNumber()).isEqualTo(1);
         }
     }
+
+    /**
+     * Settles that the five-generation window counts across a family rather than within a date.
+     *
+     * <p>Purpose: every one of the ten bases is defined {@code LIMIT(5)} with {@code SCRATCH} on the
+     * following line -- {@code app/jcl/DEFGDGB.jcl:26}, {@code :32}, {@code :38}, {@code :44}, {@code :50}
+     * and {@code :56}, {@code app/jcl/DEFGDGD.jcl:29}, {@code :52} and {@code :75}, and
+     * {@code app/jcl/DALYREJS.jcl:26}. The limit is a property of the BASE. A window counted per business
+     * date would retain five generations for every day the family was staged on, so a family staged on six
+     * days would hold thirty while every report of the rule still said five.</p>
+     */
+    @Nested
+    @DisplayName("the retention window across a family")
+    class FamilyWideRetention {
+
+        /**
+         * Six generations spread over two dates scratch exactly one, and it is the oldest overall.
+         *
+         * <p>Assumptions: the six are split across the boundary deliberately -- four under the earlier date
+         * and two under the later one -- so that neither date on its own exceeds the window. A date-scoped
+         * rule therefore scratches NOTHING here, which is what makes this case discriminate between the two
+         * scopes rather than merely counting.</p>
+         */
+        @Test
+        @DisplayName("count the window across dates and scratch the oldest overall")
+        void retentionCountsAcrossDates() {
+            List<DatasetGeneration> staged = new ArrayList<>();
+            for (int number = 1; number <= 4; number++) {
+                staged.add(new DatasetGeneration(
+                        DatasetFamily.TRANSACT_BKUP, EARLIER_BUSINESS_DATE, number));
+            }
+            for (int number = 1; number <= 2; number++) {
+                staged.add(new DatasetGeneration(DatasetFamily.TRANSACT_BKUP, BUSINESS_DATE, number));
+            }
+
+            List<DatasetGeneration> scratched = serviceOver(objectStoreHolding(staged))
+                    .generationsToScratch(DatasetFamily.TRANSACT_BKUP);
+
+            assertThat(scratched).containsExactly(
+                    new DatasetGeneration(DatasetFamily.TRANSACT_BKUP, EARLIER_BUSINESS_DATE, 1));
+        }
+
+        /**
+         * A family within the window scratches nothing, even when its generations span two dates.
+         *
+         * <p>Assumptions: this is the complement of the case above and is required rather than redundant.
+         * A rule that scratched by position without first checking the size would return the whole earlier
+         * date here, and only a case in which the correct answer is EMPTY can catch that.</p>
+         */
+        @Test
+        @DisplayName("scratch nothing while a family stays within the window")
+        void retentionScratchesNothingWithinTheWindow() {
+            List<DatasetGeneration> staged = List.of(
+                    new DatasetGeneration(DatasetFamily.DISCGRP_BKUP, EARLIER_BUSINESS_DATE, 1),
+                    new DatasetGeneration(DatasetFamily.DISCGRP_BKUP, EARLIER_BUSINESS_DATE, 2),
+                    new DatasetGeneration(DatasetFamily.DISCGRP_BKUP, BUSINESS_DATE, 1));
+
+            assertThat(serviceOver(objectStoreHolding(staged))
+                    .generationsToScratch(DatasetFamily.DISCGRP_BKUP)).isEmpty();
+        }
+
+        /**
+         * The pure decision orders by date before generation number, oldest first.
+         *
+         * <p>Assumptions: the pure decision is driven directly here, with the coordinates supplied out of
+         * order, because the family-wide overload above reads them from a listing that happens to arrive
+         * ordered. An ordering defect masked by an already-ordered input is exactly what a shuffled input
+         * exposes.</p>
+         */
+        @Test
+        @DisplayName("order the scratch list by date before generation number")
+        void scratchListIsOrderedByDateThenGeneration() {
+            List<DatasetGeneration> shuffled = List.of(
+                    new DatasetGeneration(DatasetFamily.TRANREPT, BUSINESS_DATE, 2),
+                    new DatasetGeneration(DatasetFamily.TRANREPT, EARLIER_BUSINESS_DATE, 7),
+                    new DatasetGeneration(DatasetFamily.TRANREPT, BUSINESS_DATE, 1),
+                    new DatasetGeneration(DatasetFamily.TRANREPT, EARLIER_BUSINESS_DATE, 6),
+                    new DatasetGeneration(DatasetFamily.TRANREPT, EARLIER_BUSINESS_DATE, 8),
+                    new DatasetGeneration(DatasetFamily.TRANREPT, EARLIER_BUSINESS_DATE, 5),
+                    new DatasetGeneration(DatasetFamily.TRANREPT, BUSINESS_DATE, 3));
+
+            assertThat(serviceOver(objectStoreHolding(List.of()))
+                    .generationsToScratch(shuffled))
+                    .containsExactly(
+                            new DatasetGeneration(DatasetFamily.TRANREPT, EARLIER_BUSINESS_DATE, 5),
+                            new DatasetGeneration(DatasetFamily.TRANREPT, EARLIER_BUSINESS_DATE, 6));
+        }
+    }
+
+    /**
+     * Settles that the current generation is the MAXIMUM present and not merely one that is present.
+     *
+     * <p>Purpose: every other case in this file stages a partition holding no generation or exactly one,
+     * so the maximum, the minimum, the first listed and the last listed are all the same value and the
+     * assertions cannot tell them apart. The service selects with an explicit maximum and its own comment
+     * declines to rely on the listing's ordering, and neither the selection nor that reasoning had a case
+     * that could fail if the selection were changed to take the first element, the last element or the
+     * smallest. These cases supply one.</p>
+     *
+     * <p>Refactoring Rationale: the discriminating input is three generations staged OUT OF ORDER, and the
+     * order is chosen so that every wrong selector yields a different wrong answer: staged 3, 7, 5, the
+     * first is 3, the last is 5, the smallest is 3 and only the maximum is 7. Staging an ascending run
+     * would have left the maximum and the last element equal, and staging two generations would have left
+     * a coin-flip between first and last passing half the time.</p>
+     */
+    @Nested
+    @DisplayName("selecting the current generation from several that are present")
+    class HighestGenerationSelection {
+
+        /** The generations staged out of order, whose maximum is neither the first nor the last. */
+        private static final List<Integer> UNORDERED_GENERATIONS = List.of(3, 7, 5);
+
+        /** The maximum of {@link #UNORDERED_GENERATIONS}, which is the only correct current generation. */
+        private static final int HIGHEST_STAGED = 7;
+
+        /**
+         * Builds the staged coordinates for one family from {@link #UNORDERED_GENERATIONS}, order kept.
+         *
+         * @param family the family the coordinates belong to
+         * @return the coordinates in the declared staging order, never {@code null}
+         */
+        private static List<DatasetGeneration> unorderedStaging(DatasetFamily family) {
+            return UNORDERED_GENERATIONS.stream().map(number -> generation(family, number)).toList();
+        }
+
+        /**
+         * The highest generation present is the current one, whatever order the listing reported.
+         *
+         * <p>Pins {@code app/jcl/COMBTRAN.jcl:24}, where the combine job reads {@code TRANSACT.BKUP(0)}.
+         * A {@code (0)} reference names the most recent generation, so reading any other present
+         * generation would silently merge stale input and produce an output that looks successful.</p>
+         *
+         * <p>Assumptions: the three wrong answers are asserted to be wrong explicitly rather than left
+         * implied by the right one. Writing only the expected 7 would pass under a selector taking the
+         * maximum and would also pass under any selector that happened to return 7 for this input; naming
+         * the first, the last and the smallest as values the answer must NOT equal is what records which
+         * substitutions this case is defending against.</p>
+         */
+        @Test
+        @DisplayName("answer the maximum, not the first, the last or the smallest listed")
+        void theHighestGenerationWinsRegardlessOfListingOrder() {
+            List<DatasetGeneration> staged = unorderedStaging(DatasetFamily.TRANSACT_BKUP);
+            DatasetGenerationService service = serviceOver(objectStoreHolding(staged));
+
+            Optional<DatasetGeneration> current = service.resolveCurrentGeneration(DatasetFamily.TRANSACT_BKUP);
+
+            assertThat(current).isPresent();
+            int resolved = current.orElseThrow().generationNumber();
+
+            assertThat(resolved).as("the current generation is the highest present")
+                    .isEqualTo(HIGHEST_STAGED);
+            assertThat(resolved).as("and so is not the first the listing reported")
+                    .isNotEqualTo(UNORDERED_GENERATIONS.get(0));
+            assertThat(resolved).as("nor the last the listing reported")
+                    .isNotEqualTo(UNORDERED_GENERATIONS.get(UNORDERED_GENERATIONS.size() - 1));
+            assertThat(resolved).as("nor the smallest present")
+                    .isNotEqualTo(UNORDERED_GENERATIONS.stream().min(Integer::compareTo).orElseThrow());
+        }
+
+        /**
+         * The next generation allocated after an out-of-order partition is one past the maximum.
+         *
+         * <p>Pins {@code app/jcl/COMBTRAN.jcl:37}, where the same job writes
+         * {@code TRANSACT.COMBINED(+1)}. A {@code (+1)} reference must not collide with a generation that
+         * already exists, and allocating one past anything other than the maximum would do exactly that:
+         * one past the first listed here is 4, which is already taken.</p>
+         *
+         * <p>Assumptions: the collision is asserted directly, not merely the number. Asserting 8 alone
+         * would leave a reader to work out why 8 rather than 4 or 6 matters; asserting that the allocated
+         * number is absent from the staged set states the property the number exists to satisfy.</p>
+         */
+        @Test
+        @DisplayName("allocate one past the maximum, colliding with no generation already present")
+        void allocationFollowsTheMaximumAndCollidesWithNothing() {
+            List<DatasetGeneration> staged = unorderedStaging(DatasetFamily.SYSTRAN);
+            DatasetGenerationService service = serviceOver(objectStoreHolding(staged));
+
+            DatasetGeneration allocated = service.allocateNewGeneration(
+                    DatasetFamily.SYSTRAN, BUSINESS_DATE, RUN_ID);
+
+            assertThat(allocated.generationNumber()).isEqualTo(HIGHEST_STAGED + 1);
+            assertThat(UNORDERED_GENERATIONS).doesNotContain(allocated.generationNumber());
+        }
+
+        /**
+         * The next-generation computation takes the maximum for both a rising and a falling input.
+         *
+         * <p>Assumptions: the computation is driven directly with a list rather than through a stubbed
+         * store, because the published operation accepts the existing generations as an argument and
+         * asserting it that way removes the listing from the question entirely. Two orderings are supplied
+         * because a selector reading a fixed position agrees with the maximum for one ordering or the
+         * other but never for both -- the ascending list's last element is the maximum and the descending
+         * list's first element is, so the pair excludes both positional readings at once.</p>
+         */
+        @Test
+        @DisplayName("compute the same next generation from an ascending and a descending list")
+        void nextGenerationTakesTheMaximumWhicheverWayTheListRuns() {
+            DatasetGenerationService service = serviceOver(objectStoreHolding(List.of()));
+            DatasetFamily family = DatasetFamily.TRANREPT;
+
+            List<DatasetGeneration> ascending = List.of(
+                    generation(family, 3), generation(family, 5), generation(family, HIGHEST_STAGED));
+            List<DatasetGeneration> descending = List.of(
+                    generation(family, HIGHEST_STAGED), generation(family, 5), generation(family, 3));
+
+            assertThat(service.nextGeneration(family, BUSINESS_DATE, ascending).generationNumber())
+                    .isEqualTo(HIGHEST_STAGED + 1);
+            assertThat(service.nextGeneration(family, BUSINESS_DATE, descending).generationNumber())
+                    .isEqualTo(HIGHEST_STAGED + 1);
+        }
+
+        /**
+         * A partition already holding the highest representable generation is reported as exhausted.
+         *
+         * <p>Assumptions: the ceiling is read from the coordinate's own published maximum rather than
+         * written as 9999, so this case states that the partition is full rather than restating the width
+         * the renderer happens to use. A literal here would let the test and the renderer disagree about
+         * the ceiling while both passed.</p>
+         *
+         * <p>Trade-offs: the reported message is asserted to name the family and the business date, not
+         * just to be an exception of the right type. The service's own reasoning for raising here rather
+         * than letting the coordinate's constructor refuse is that the constructor names only an
+         * out-of-range number while an operator needs the partition that is full -- so a case that
+         * accepted any message would leave the only reason this check exists unasserted.</p>
+         */
+        @Test
+        @DisplayName("report a full partition as exhausted, naming the family and the date")
+        void aFullPartitionIsReportedAsExhausted() {
+            DatasetFamily family = DatasetFamily.DALYREJS;
+            List<DatasetGeneration> full =
+                    List.of(generation(family, DatasetGeneration.MAXIMUM_GENERATION_NUMBER));
+            DatasetGenerationService service = serviceOver(objectStoreHolding(full));
+
+            assertThatThrownBy(() -> service.nextGeneration(family, BUSINESS_DATE, full))
+                    .isInstanceOf(DatasetGenerationService.DatasetGenerationException.class)
+                    .hasMessageContaining(family.mainframeBaseName())
+                    .hasMessageContaining(BUSINESS_DATE.token())
+                    .hasMessageContaining(String.valueOf(DatasetGeneration.MAXIMUM_GENERATION_NUMBER));
+
+            assertThatThrownBy(() -> service.allocateNewGeneration(family, BUSINESS_DATE, RUN_ID))
+                    .as("allocation reports the same exhaustion rather than wrapping round to zero")
+                    .isInstanceOf(DatasetGenerationService.DatasetGenerationException.class);
+        }
+    }
+
+    /**
+     * Settles what the listing does with a child it did not write, and what it does when it cannot read.
+     *
+     * <p>Purpose: the service filters every child prefix through four independent rejections -- a child
+     * outside the partition, a child not closed by a separator, a generation segment carrying more digits
+     * than the renderer emits, and a segment that does not round-trip the renderer's own padding -- and it
+     * translates a transport failure into its own exception naming the family and partition. None of that
+     * had a case, because the helper the other cases use maps a coordinate's own {@code keyPrefix} and so
+     * can only ever produce children that pass all four, and its stub cannot fail.</p>
+     *
+     * <p>Assumptions: an object-store partition is a shared namespace. A dataset bucket carries every
+     * family under one root, a lifecycle rule leaves delete markers behind, and an operator may stage a
+     * directory by hand, so a listing returning something the renderer never emitted is an ordinary
+     * event rather than a corrupt one. Reading such a child as a generation is the failure mode these
+     * cases exclude: a child ending {@code gen=10000/} read as generation 10000 would raise the next
+     * allocation past the representable range, and an unpadded {@code gen=7/} read as 7 would collide
+     * with the properly rendered {@code gen=0007/} sitting beside it.</p>
+     */
+    @Nested
+    @DisplayName("reading a partition that holds children the renderer never wrote")
+    class ForeignChildAndFailureHandling {
+
+        /** The family every case in this class reads, chosen for having a short path segment. */
+        private static final DatasetFamily FAMILY = DatasetFamily.SYSTRAN;
+
+        /** The generation whose well-formed child is staged alongside each malformed one. */
+        private static final int WELL_FORMED_GENERATION = 2;
+
+        /**
+         * Composes the partition prefix the service lists under, from the coordinate's own accessors.
+         *
+         * <p>Assumptions: the prefix is composed the way the service composes it -- the family's path
+         * segment, which already ends in a separator, then the date partition segment, then the one
+         * separator that closes it -- rather than spelled as a literal. Spelling it would put a second
+         * declaration of the key convention in this file, and these cases would then be written against
+         * the convention this file asserts instead of the one the record publishes.</p>
+         *
+         * @return the partition prefix for {@link #FAMILY} under the shared business date
+         */
+        private static String partitionPrefix() {
+            DatasetGeneration probe = generation(FAMILY, DatasetGeneration.MINIMUM_GENERATION_NUMBER);
+            return probe.family().pathSegment() + probe.datePartitionSegment() + "/";
+        }
+
+        /**
+         * Renders the well-formed child prefix the malformed cases stage alongside their subject.
+         *
+         * @return the key prefix of {@link #WELL_FORMED_GENERATION} for {@link #FAMILY}, as the owning
+         *     record renders it, never {@code null}
+         */
+        private static String wellFormedChild() {
+            return generation(FAMILY, WELL_FORMED_GENERATION).keyPrefix();
+        }
+
+        /**
+         * A malformed generation segment is skipped while a well-formed sibling beside it is read.
+         *
+         * <p>Assumptions: each malformed shape is paired with a well-formed child in the same listing and
+         * the surviving generation is asserted by number, so a blanket rejection is distinguishable from
+         * the selective one under test. A case staging only the malformed child would pass identically
+         * under a filter that rejected everything, which is the opposite of correct.</p>
+         *
+         * <p>Assumptions: the four suffixes are the four rejections the service performs, one each, and
+         * they are supplied as suffixes rather than whole prefixes so the partition they sit under is
+         * still composed rather than spelled. {@code gen=10000/} carries a fifth digit the renderer never
+         * emits; {@code gen=7/} carries the right digits without the padding, so it fails the round trip
+         * against {@code gen=0007}; {@code gen=current/} ends in no digit at all; and {@code gen=0003}
+         * is closed by no separator, so it is an object key rather than a generation directory.</p>
+         *
+         * @param malformedSuffix the child suffix, appended to the composed partition prefix
+         */
+        @ParameterizedTest
+        @ValueSource(strings = {"gen=10000/", "gen=7/", "gen=current/", "gen=0003"})
+        @DisplayName("skip a malformed generation child and still read its well-formed sibling")
+        void aMalformedGenerationChildIsSkipped(String malformedSuffix) {
+            S3Client objectStore = objectStoreListingLiterally(
+                    List.of(partitionPrefix() + malformedSuffix, wellFormedChild()));
+            DatasetGenerationService service = serviceOver(objectStore);
+
+            List<DatasetGeneration> present = service.listGenerations(FAMILY, BUSINESS_DATE);
+
+            assertThat(present).hasSize(1);
+            assertThat(present.get(0).generationNumber()).isEqualTo(WELL_FORMED_GENERATION);
+            assertThat(service.resolveCurrentGeneration(FAMILY).orElseThrow()
+                    .generationNumber())
+                    .as("the malformed child does not become the current generation either")
+                    .isEqualTo(WELL_FORMED_GENERATION);
+        }
+
+        /**
+         * A child belonging to another family is skipped even when the listing returns it.
+         *
+         * <p>Assumptions: the foreign child is a real, well-formed coordinate of a DIFFERENT family, not
+         * a malformed string. That is the harder case: its generation segment round-trips and it is closed
+         * by a separator, so the only thing disqualifying it is that it sits outside the requested
+         * partition. Staging a malformed foreign child would have let a segment check pass this case while
+         * the partition check was absent.</p>
+         *
+         * <p>Assumptions: the foreign generation number is deliberately HIGHER than the local one, so a
+         * service that failed to exclude it would report the foreign number as the current generation and
+         * the assertion would fail on the value rather than only on the count.</p>
+         */
+        @Test
+        @DisplayName("skip a well-formed child of another family sharing the bucket")
+        void aChildOfAnotherFamilyIsSkipped() {
+            DatasetGeneration foreign = new DatasetGeneration(
+                    DatasetFamily.TRANREPT, BUSINESS_DATE, WELL_FORMED_GENERATION + 5);
+            S3Client objectStore = objectStoreListingLiterally(
+                    List.of(foreign.keyPrefix(), wellFormedChild()));
+            DatasetGenerationService service = serviceOver(objectStore);
+
+            List<DatasetGeneration> present = service.listGenerations(FAMILY, BUSINESS_DATE);
+
+            assertThat(present).hasSize(1);
+            assertThat(present.get(0).family()).isEqualTo(FAMILY);
+            assertThat(present.get(0).generationNumber()).isEqualTo(WELL_FORMED_GENERATION);
+            assertThat(service.nextGeneration(FAMILY, BUSINESS_DATE, present).generationNumber())
+                    .as("the foreign generation does not raise this family's next number")
+                    .isEqualTo(WELL_FORMED_GENERATION + 1);
+        }
+
+        /**
+         * A transport failure is reported as this service's own exception, naming what was being read.
+         *
+         * <p>Assumptions: the message is asserted to carry the family base name, the partition prefix and
+         * the business-date token, because those three facts are the entire reason the service translates
+         * rather than letting the kit's exception through. Its own comment records that the kit's
+         * exception names an operation and a bucket and nothing else, so a case asserting only the
+         * exception type would leave the stated purpose of the translation unverified.</p>
+         *
+         * <p>Assumptions: the cause is asserted to be retained. The translation's justification is
+         * explicitly that nothing the kit reported is lost, and a wrapper that dropped the cause would
+         * satisfy every other assertion here.</p>
+         */
+        @Test
+        @DisplayName("translate a listing failure, naming the family, the prefix and the date")
+        void aListingFailureIsTranslatedWithItsCauseRetained() {
+            SdkClientException transportFailure =
+                    SdkClientException.create("the object store is unreachable");
+            DatasetGenerationService service = serviceOver(
+                    objectStoreFailingThenHolding(1, transportFailure, List.of()));
+
+            assertThatThrownBy(() -> service.listGenerations(FAMILY, BUSINESS_DATE))
+                    .isInstanceOf(DatasetGenerationService.DatasetGenerationException.class)
+                    .hasMessageContaining(FAMILY.mainframeBaseName())
+                    .hasMessageContaining(partitionPrefix())
+                    .hasMessageContaining(BUSINESS_DATE.token())
+                    .hasCause(transportFailure);
+        }
+
+        /**
+         * An allocation that failed can be retried, because a failed attempt reserves nothing.
+         *
+         * <p>Assumptions: the reservation this service keeps is DURABLE -- it is an object in the store,
+         * not an entry in a per-instance table -- so the property under test is that a failed attempt
+         * leaves no such object behind. The listing runs BEFORE anything is written, so a listing failure
+         * propagates with the store untouched and the next call starts from the same state as the first.
+         * Had the reservation been written ahead of the listing, the first failure would have been
+         * permanent for the run and every retry would have reported the recorded number against a
+         * generation that was never claimed. Nothing else in this file can show that, because nothing
+         * else lets a listing fail.</p>
+         *
+         * <p>Assumptions: the store is arranged to fail exactly once and then succeed, and the retry is
+         * asserted to produce the generation the recovered listing implies rather than merely to not
+         * throw. Asserting only the absence of an exception would pass against a service that had
+         * reserved a number during the failed attempt and answered from it -- which is the very thing
+         * being excluded.</p>
+         */
+        @Test
+        @DisplayName("allocate on a retry after a failed attempt, reserving nothing from the failure")
+        void aFailedAllocationLeavesNoReservationAndRetriesCleanly() {
+            SdkClientException transportFailure =
+                    SdkClientException.create("the object store is unreachable");
+            DatasetGenerationService service = serviceOver(objectStoreFailingThenHolding(
+                    1, transportFailure, List.of(generation(FAMILY, WELL_FORMED_GENERATION))));
+
+            assertThatThrownBy(() -> service.allocateNewGeneration(FAMILY, BUSINESS_DATE, RUN_ID))
+                    .isInstanceOf(DatasetGenerationService.DatasetGenerationException.class);
+
+            DatasetGeneration retried = service.allocateNewGeneration(FAMILY, BUSINESS_DATE, RUN_ID);
+
+            assertThat(retried.generationNumber())
+                    .as("the retry reads the recovered listing rather than anything the failure left")
+                    .isEqualTo(WELL_FORMED_GENERATION + 1);
+
+            // WHY : Assumptions: the SECOND successful call is asserted to answer identically, which is
+            //       what shows the successful attempt DID record its reservation. Without it this case
+            //       could pass against a service that recorded nothing at all, and the reservation's
+            //       purpose would be asserted only by the cases that never see a failure.
+            assertThat(service.allocateNewGeneration(FAMILY, BUSINESS_DATE, RUN_ID)).isEqualTo(retried);
+        }
+    }
+
+    /**
+     * Settles how a resolved coordinate becomes a location a step can be pointed at.
+     *
+     * <p>Purpose: a {@code DD DSN=} operand such as the one at {@code app/jcl/POSTTRAN.jcl:38} names a
+     * dataset a step writes, and the target equivalent is an object-store location. The service holds the
+     * one piece of that location the coordinate cannot carry -- the bucket -- and joins it to the prefix the
+     * coordinate renders.</p>
+     *
+     * <p>Assumptions: the division of labour is the thing under test here, not the spelling. The coordinate
+     * renders a prefix carrying no bucket and no scheme so that one value is valid unchanged in every
+     * environment, and the service supplies exactly the scheme and the bucket. These cases assert that
+     * split holds and assert nothing the coordinate's own test already settles.</p>
+     */
 
     /**
      * Settles how a resolved coordinate becomes a location a step can be pointed at.
@@ -769,6 +1641,81 @@ class DatasetGenerationServiceTest {
             assertThat(DatasetFamily.values()).allSatisfy(family ->
                     assertThat(DatasetFamily.resolveByMainframeBaseName(family.mainframeBaseName()))
                             .isEqualTo(family));
+        }
+    }
+
+    /**
+     * Holds the published surface of the service equal to the operations a landed job reaches.
+     *
+     * <p>Purpose: reviewing this class found every one of its operations published with no production
+     * caller. Four of them were reachable only from inside the class and from these tests and are now
+     * package-private; the six that remain public are each reached by a landed batch job, which
+     * {@code GenerationStagingJobsTest} and {@code BatchJobRosterTest} assert by execution rather than by
+     * charter prose. This nested class keeps the property mechanical, so that publishing a seventh
+     * operation -- or re-publishing one of the four -- fails here instead of waiting for a later review to
+     * notice it again.</p>
+     *
+     * <p>Assumptions: the two cases below check different things and both are needed. The first compares
+     * NAMES, which cannot distinguish overloads, so it would still pass if the list-taking
+     * {@code generationsToScratch} were re-published alongside the family-taking one. The second closes
+     * that gap by naming each internal helper's exact signature.</p>
+     */
+    @Nested
+    @DisplayName("the published surface")
+    class PublishedSurface {
+
+        /** The operations a landed batch job reaches, and therefore the whole published set. */
+        private static final Set<String> WIRED_OPERATIONS = Set.of(
+                "allocateNewGeneration", "resolveCurrentGeneration", "generationsToScratch",
+                "datasetUri", "stageDataset", "scratchGeneration");
+
+        /**
+         * Every published operation is one a job reaches, and every one a job reaches is published.
+         *
+         * <p>Assumptions: synthetic members are excluded because the compiler generates bridge methods
+         * that carry a declared method's name at a different erasure, and counting one would make the
+         * comparison depend on compilation details rather than on the surface as written.</p>
+         */
+        @Test
+        @DisplayName("publish exactly the operations a landed job reaches")
+        void publishedOperationsAreExactlyTheWiredSet() {
+            List<String> published = Arrays.stream(DatasetGenerationService.class.getDeclaredMethods())
+                    .filter(method -> Modifier.isPublic(method.getModifiers()))
+                    .filter(method -> !method.isSynthetic())
+                    .map(Method::getName)
+                    .toList();
+
+            assertThat(published).containsExactlyInAnyOrderElementsOf(WIRED_OPERATIONS);
+        }
+
+        /**
+         * The allocation and listing helpers are declared, and none of them is published.
+         *
+         * <p>Assumptions: each helper is looked up by its exact signature, so the case fails rather than
+         * passing vacuously if one is renamed or its parameters change -- a guard that silently stopped
+         * watching the methods it names would be worse than no guard, because the surface would look
+         * defended.</p>
+         *
+         * @throws NoSuchMethodException if a helper's signature has moved, which is a failure of this
+         *     guard rather than of the class under test
+         */
+        @Test
+        @DisplayName("keep the allocation and listing helpers unpublished")
+        void theInternalHelpersAreNotPublished() throws NoSuchMethodException {
+            List<Method> helpers = List.of(
+                    DatasetGenerationService.class.getDeclaredMethod("nextGeneration",
+                            DatasetFamily.class, BusinessDate.class, List.class),
+                    DatasetGenerationService.class.getDeclaredMethod("generationsToScratch", List.class),
+                    DatasetGenerationService.class.getDeclaredMethod("listGenerations",
+                            DatasetFamily.class, BusinessDate.class),
+                    DatasetGenerationService.class.getDeclaredMethod("listGenerations",
+                            DatasetFamily.class));
+
+            assertThat(helpers).allSatisfy(helper ->
+                    assertThat(Modifier.isPublic(helper.getModifiers()))
+                            .withFailMessage("%s is published again, so a caller can reach it without"
+                                    + " going through the operation that guards it", helper.getName())
+                            .isFalse());
         }
     }
 }

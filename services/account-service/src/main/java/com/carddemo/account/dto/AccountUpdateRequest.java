@@ -3,6 +3,27 @@ package com.carddemo.account.dto;
 /**
  * The request body of the account update endpoint, and the only request body this bounded context has.
  *
+ * <h2>What is not yet wired, stated before the contract</h2>
+ *
+ * <p>Assumptions: this is a PENDING TARGET contract, not a live surface, and the distinction is
+ * declared first so that nothing below is read as describing a reachable endpoint. No route accepts
+ * this body today: {@code com.carddemo.account.api.AccountController} declares no writing mapping at
+ * all, {@code src/main/resources/openapi/account-api.yaml} publishes no update operation and names no
+ * schema for this shape, and {@code com.carddemo.account.service.AccountUpdateService} -- named by the
+ * service package charter as the eventual consumer -- does not exist. What DOES hold is that the shape
+ * itself is settled and already consumed inbound: {@code com.carddemo.account.mapper.CustomerMapper}
+ * converts it to a customer row and derives its per-field errors from it, so the component set, the
+ * splitting of dates and identifiers, and the error granularity are all exercised. What does not hold
+ * is that anything serves it over HTTP.</p>
+ *
+ * <p>Trade-offs: publishing the shape before the route exists is deliberate, and it is the same choice
+ * {@code com.carddemo.batch.BatchApplication} records for its own not-yet-authored job beans. It lets
+ * the mapper and the response shape be authored and tested against one settled contract instead of
+ * against a moving one, and it lets a reviewer hold a proposed component against a stated set. The cost
+ * is exactly this section, which a reader needs in order to tell a not-yet-wired contract from a
+ * broken one -- and without it, a reader tracing the named endpoint would conclude the route had been
+ * deleted rather than never written.</p>
+ *
  * <p>Every component below is one editable field of the baseline account-update screen, carried across
  * field for field from that screen's BMS symbolic map at {@code app/cpy-bms/COACTUP.CPY} and from the
  * program that receives it, {@code app/cbl/COACTUPC.cbl}. The record is transport representation and
@@ -330,6 +351,35 @@ package com.carddemo.account.dto;
  * chooses a regular Java name over an irregular baseline one, as it does for the two misspelled date
  * fields, the divergence is a documented rename and not a silent one.</p>
  *
+ * <h2>Where the concurrency precondition lives, and why it is not a component here</h2>
+ *
+ * <p>Assumptions: this record carries NO revision, entity tag or before-image component, and the
+ * precondition it needs travels instead in the {@code If-Match} request header, which
+ * {@code com.carddemo.account.api.AccountController} requires on the update route and which
+ * {@code com.carddemo.account.service.AccountUpdateService} enforces before applying anything. The
+ * placement follows the sibling response record's own recorded rationale -- {@code AccountUpdateResponse}
+ * rejects a version component on the grounds that an optimistic-lock version is transport metadata and
+ * belongs in a header rather than in a body a client may hand back -- and a request that declared one
+ * while the response published one in a header would have given the same value two homes that could
+ * disagree.</p>
+ *
+ * <p>Refactoring Rationale: the placement is stated here explicitly because its ABSENCE previously read
+ * as an omission and was reported as one. Nothing in this file said where the precondition lived, and
+ * nothing anywhere emitted or required a revision, so the check the baseline performs had no target form
+ * at all: a handler would have loaded the current row, applied the edit and committed, advancing the
+ * provider's version from whatever it had just read -- overwriting a concurrent change made during the
+ * submitter's think time. That is exactly the loss the reference snapshot exists to prevent. It
+ * snapshots the whole pre-edit record into {@code ACUP-OLD-*} from {@code app/cbl/COACTUPC.cbl} L669
+ * onward, carries it across the pseudo-conversational gap in the communication area, sets
+ * {@code WS-DATACHANGED-FLAG} at L168 when the field-by-field comparison fails, and issues
+ * {@code EXEC CICS SYNCPOINT ROLLBACK} at L4095 to L4104 rather than rewriting.</p>
+ *
+ * <p>Assumptions: a stateless handler holds no snapshot between turns, which is why the submitter
+ * returns the revision it was given rather than the values it was given. The migration's
+ * pseudo-conversational-state analysis is what makes that the only available shape: the communication
+ * area does not travel, so a before-image cannot.</p>
+ *
+ *
  * @param accountId {@code String} identifying the account to update; screen field {@code ACCTSIDI},
  *     {@code app/cpy-bms/COACTUP.CPY} L60, declared {@code PIC X(11)}, normalised at
  *     {@code app/cbl/COACTUPC.cbl} L1051. Alphanumeric here although the view map declares the
@@ -581,4 +631,80 @@ public record AccountUpdateRequest(
         String governmentIssuedId,
         String eftAccountId,
         String primaryCardHolderIndicator) {
+
+    /**
+     * Renders this submission for a log line, disclosing nothing the caller typed.
+     *
+     * <p>Refactoring Rationale: a record's generated rendering prints every component, and this record is
+     * the SUBMITTED shape -- so the generated form emitted the three national-identifier parts and the
+     * government-issued identifier exactly as the caller typed them, in the clear, alongside a name, a
+     * whole postal address, two telephone numbers, a date of birth, a credit score and five money values.
+     * It is the worst-placed disclosure of the set, because a request record reaches a diagnostic
+     * precisely when the request FAILED: a bean-validation failure, a deserialisation failure and an
+     * argument-resolution failure each render the offending value. The sensitive-data logging contract in
+     * {@code docs/architecture/observability.md} prohibits every one of those values and requires
+     * omission rather than abbreviation.</p>
+     *
+     * <p>Trade-offs: the rendering keeps nothing but the account identifier's PRESENCE and the count of
+     * components that arrived populated. Both are diagnostic facts about the submission rather than
+     * values from it -- a count says how much of the form was filled in, which is what distinguishes a
+     * truncated request body from a rejected field -- and neither can carry a character the caller typed.
+     * The cost is that a failed update cannot be traced to a specific account from this string, which the
+     * correlation identifier on the request-scoped line already answers.</p>
+     *
+     * <p>Alternatives Considered: emitting the account identifier itself, on the ground that the caller
+     * supplied it and it merely says which account was being edited. Rejected because that contract names
+     * account identifiers explicitly, and because a value being caller-supplied is not a property that
+     * makes it safe to persist into a log stream -- the caller supplied the national identifier
+     * too.</p>
+     *
+     * @return a rendering naming the type, whether an account identifier was supplied and how many of the
+     *     forty-three components arrived populated, and no submitted value, never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "AccountUpdateRequest[accountIdSupplied=" + (this.accountId != null
+                && !this.accountId.isBlank())
+                + ", populatedComponents=" + populatedComponentCount() + ']';
+    }
+
+    /**
+     * Counts how many components arrived carrying a non-blank value.
+     *
+     * <p>Assumptions: this exists so the rendering above can report the shape of a submission without
+     * reporting any part of its content. The count is computed from the components rather than tracked at
+     * construction, because a record has no place to hold derived state and because a stale counter would
+     * be worse than no counter.</p>
+     *
+     * <p>Assumptions: a blank value counts as absent, matching the reference's own treatment. Every
+     * presence test in {@code app/cbl/COACTUPC.cbl} compares a screen field against spaces or low values,
+     * so a field of blanks is an unfilled field there and is one here.</p>
+     *
+     * @return the number of components holding a non-{@code null}, non-blank value, between zero and
+     *     forty-three
+     */
+    private int populatedComponentCount() {
+        String[] components = {
+            this.accountId, this.activeStatus, this.creditLimit, this.cashCreditLimit,
+            this.currentBalance, this.currentCycleCredit, this.currentCycleDebit,
+            this.openDateYear, this.openDateMonth, this.openDateDay,
+            this.expirationDateYear, this.expirationDateMonth, this.expirationDateDay,
+            this.reissueDateYear, this.reissueDateMonth, this.reissueDateDay,
+            this.groupId, this.customerId,
+            this.ssnPart1, this.ssnPart2, this.ssnPart3,
+            this.dateOfBirthYear, this.dateOfBirthMonth, this.dateOfBirthDay,
+            this.ficoCreditScore, this.firstName, this.middleName, this.lastName,
+            this.addressLine1, this.addressLine2, this.city, this.stateCode, this.countryCode,
+            this.zipCode, this.phone1AreaCode, this.phone1Prefix, this.phone1LineNumber,
+            this.phone2AreaCode, this.phone2Prefix, this.phone2LineNumber,
+            this.governmentIssuedId, this.eftAccountId, this.primaryCardHolderIndicator,
+        };
+        int populated = 0;
+        for (String component : components) {
+            if (component != null && !component.isBlank()) {
+                populated++;
+            }
+        }
+        return populated;
+    }
 }

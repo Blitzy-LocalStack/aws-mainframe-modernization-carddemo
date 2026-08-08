@@ -75,11 +75,21 @@ VSAM, Db2 or IMS. That is what makes the deployment satisfy the migration's
 > boundary, the normative layout catalogue, the zoned-decimal codec, the
 > packed-decimal and binary codecs, the per-field EBCDIC decoder, the S3
 > generation writer, the credential-application bootstrap, the schema/role DDL, the
-> masked reporting views, and the command-line entry point carrying the four
+> masked reporting views, the eleven fixed-width readers, the Aurora bulk loader, the
+> three verification passes, and the command-line entry point carrying the eight
 > subcommands whose backing modules are present — `list-datasets`, `decode-record`,
-> `stage-dataset` and `apply-credentials`. It does **not** yet deliver the readers,
-> the Aurora bulk loader or the three verification passes, so
-> `load-dataset` and the `verify-*` subcommands are **not registered** by the parser.
+> `stage-dataset`, `apply-credentials`, `load-dataset`, `verify-row-counts`,
+> `verify-checksum` and `verify-money-parity`. The one command still **not registered**
+> is `verify-all`, which would sequence the three passes and stop at the first failure:
+> it needs a dataset-to-source manifest this distribution does not carry, because every
+> verification command here is told its source explicitly.
+>
+> Refactoring Rationale: this note previously recorded the readers, the loader and the
+> verification passes as undelivered, and the parser correspondingly advertised four
+> subcommands rather than eight. Those modules are present, so the entry point was the
+> only thing standing between an operator and code that already worked — a verification
+> pass reachable from nothing but a test is a pass that has never been run against a
+> real delivery, which is the same argument that put `decode-record` on the parser.
 >
 > Refactoring Rationale: `decode-record` was added once the codec stack landed, because
 > the three codecs were otherwise reachable only from a test. A codec with no caller is
@@ -109,10 +119,12 @@ VSAM, Db2 or IMS. That is what makes the deployment satisfy the migration's
 > registered and made to fail. A registered command that cannot work would be
 > advertised by `--help`, an orchestrator author would wire a batch state to it, and
 > the failure would then arrive in a deployment instead of at the point where the
-> command was chosen. That is also why the `--encoding` selector described in
-> [§6.2](#62-what-the-shipped-seed-data-actually-contains) is a **future** contract
-> rather than a usable flag today: it belongs to `load-dataset`, which is not
-> registered, so no operator can reach it from this checkout.
+> command was chosen. The `--encoding` selector described in
+> [§6.2](#62-what-the-shipped-seed-data-actually-contains) is now a usable flag: it
+> belongs to `load-dataset` and to the three verification commands, all of which are
+> registered, and it is **required** on each of them rather than defaulted. Assumptions:
+> requiring it is deliberate — the seed form is declared rather than sniffed, because an
+> all-ASCII EBCDIC dataset sniffs as text and decodes to plausible wrong values.
 
 ---
 
@@ -129,9 +141,11 @@ data-migration/
 ├── sql/
 │   ├── V0__schemas_and_roles.sql       delivered -- 8 schemas, 1 role per context
 │   ├── V1__reporting_views.sql         delivered -- masked cross-schema views
+│   ├── V2__runtime_delete_grants.sql   delivered -- table-specific DELETE, 3 tables
 │   └── verify/
 │       ├── alternate_database_users.sql    delivered -- role-attribute ceiling
 │       ├── reporting_view_privileges.sql   delivered -- masked-view privileges
+│       ├── runtime_delete_grants.sql       delivered -- pairs with V2, fails on drift
 │       ├── row_counts.sql                  contracted -- pairs with verify/row_counts.py
 │       └── money_totals.sql                contracted -- pairs with verify/money_parity.py
 ├── src/carddemo_migration/
@@ -239,21 +253,32 @@ unrelated project from PyPI rather than this directory.
 ## 5. Command-line interface
 
 **This section is the contract.** [`src/carddemo_migration/cli.py`](src/carddemo_migration/cli.py)
-implements the four subcommands marked **registered** in
+implements the eight subcommands marked **registered** in
 [§5.2](#52-subcommands-and-their-arguments) below, and
 [`MIGRATION_README.md`](../MIGRATION_README.md) publishes the invocation. Nothing here
 describes a flag that should not be implemented, and no two subcommands do the same
 work.
 
-Assumptions: the five subcommands marked **contracted** are stated here but are
-deliberately **not registered** by the parser, because their backing modules —
-`readers/`, `loaders/aurora.py` and `verify/` — are not in this distribution. So
-`python -m carddemo_migration.cli --help` lists four subcommands, not nine, and
-naming a contracted one is refused as a usage error (exit 2). They remain documented
+Assumptions: the one subcommand marked **contracted** — `verify-all` — is stated here but
+is deliberately **not registered** by the parser, because it is the only one with no
+implementation: sequencing the three passes and stopping at the first failure needs a
+dataset-to-source manifest this distribution does not carry, since every verification
+command here is told its source explicitly. So
+`python -m carddemo_migration.cli --help` lists eight subcommands, not nine, and
+naming the contracted one is refused as a usage error (exit 2). It remains documented
 because the batch state machine and this package's `Dockerfile` are written against
 the whole set, and filling an interface in later is a smaller change than renaming one.
 
-Trade-offs: the alternative was to register all nine and have the five unbacked ones
+Refactoring Rationale: this section previously described four registered and five
+contracted subcommands, on the stated premise that the backing modules — `readers/`,
+`loaders/aurora.py` and `verify/` — were not in this distribution. They are: all three
+are present, so the premise was true of the distribution this text was written against
+and false of this one. Four commands were therefore documented as unreachable while the
+code behind them already worked, which is the same defect the paragraph below warns
+about with the sign reversed — a capability an operator cannot reach is as much a
+mismatch between `--help` and this table as a command that cannot run.
+
+Trade-offs: the alternative was to register all nine and have the one unbacked command
 fail when invoked. That was rejected: `--help` would advertise a command that cannot
 run, an orchestrator author would wire a batch state to it on that evidence, and the
 failure would surface in a deployment rather than at the point where the command was
@@ -291,11 +316,11 @@ carddemo-migrate <subcommand> [options]
 | `decode-record` | **registered** | Decode **one** record of a fixed-length extract through the per-field codec stack and print its fields, so a delivery can be proved against its declared geometry before anything is loaded. Sensitive fields are redacted ([§8.2](#82-sensitive-fields-in-diagnostic-output)) | `--dataset`, `--source` | `--record` (default 1), `--code-page` (default `cp037`) |
 | `stage-dataset` | **registered** | Stage **one** exported extract to object storage under the generation prefix convention, copying bytes verbatim | `--dataset`, `--source`, `--business-date`, `--generation`, `--domain` | `--object-name`, `--retain` (default 5) |
 | `apply-credentials` | **registered** | Give every service login role the credential it authenticates with, then prove each role can log in | none | none |
-| `load-dataset` | contracted | Decode **one** dataset per field and bulk-load it into the schema that owns it | `--dataset`, `--source` | `--encoding {ascii,ebcdic}`, `--dry-run` |
-| `verify-row-counts` | contracted | Verification pass 1 — loaded row count against source record count, per dataset | none | `--dataset` |
-| `verify-checksums` | contracted | Verification pass 2 — per-record checksum of loaded rows against the source image | none | `--dataset` |
-| `verify-money-totals` | contracted | Verification pass 3 — money-column totals against the source files | none | `--dataset` |
-| `verify-all` | contracted | Run all three passes in the fixed order 1, 2, 3 and stop at the first failure | none | none |
+| `load-dataset` | **registered** | Decode **one** dataset per field and bulk-load it into the schema that owns it, as a single committed unit of work | `--dataset`, `--source`, `--encoding {ascii,ebcdic}` | none |
+| `verify-row-counts` | **registered** | Verification pass 1 — loaded row count against source record count, for one dataset | `--dataset`, `--source`, `--encoding {ascii,ebcdic}` | none |
+| `verify-checksum` | **registered** | Verification pass 2 — per-record digest of the loaded rows against the source image, for one dataset. No field value is printed | `--dataset`, `--source`, `--encoding {ascii,ebcdic}` | none |
+| `verify-money-parity` | **registered** | Verification pass 3 — exact money totals from the source bytes against the database's own `SUM` of each column they load into, for one dataset | `--dataset`, `--source`, `--encoding {ascii,ebcdic}` | none |
+| `verify-all` | contracted | Run all three passes in the fixed order 1, 2, 3 and stop at the first failure. Needs a dataset-to-source manifest this distribution does not carry, so it is not registered | none | none |
 
 Assumptions: `list-datasets` prints the five properties
 [`layouts.py`](src/carddemo_migration/copybook/layouts.py) holds authoritatively, and
@@ -317,28 +342,34 @@ becomes optional when the mapping has an authoritative home in code.
 |---|---|---|
 | `list-datasets` | The contract table on standard output. Touches no database, no object store and no credential | the requested format is unknown |
 | `decode-record` | One record's field map as JSON on standard output, every value rendered as a string and every sensitive field redacted. Touches no database, no object store and no credential | the layout name is unknown, the ordinal is below one or past the end of the dataset, the source is unreadable, the dataset does not divide into whole records, or a field fails to decode |
-| `stage-dataset` | One object at `<domain>/<dataset>/dt=YYYY-MM-DD/gen=NNNN/<object-name>` in the dataset bucket, then permanently scratches generations that roll off. The bucket, deployment and effective region are logged before the write | the source is unreadable, the dataset identifier is unknown, the generation is outside 1–9999, or the write or the scratch fails |
+| `stage-dataset` | One object at `<domain>/<dataset>/dt=YYYY-MM-DD/gen=NNNN/<object-name>` in the dataset bucket, carrying a service-verified `ChecksumSHA256` plus the digest and byte count as object metadata, then permanently scratches generations that roll off. The bucket, deployment and effective region are logged before the write, and the digest beside the key after it | the source cannot be staged — absent, a symbolic link, not a regular file, unreadable, or modified while it was being transferred — the dataset identifier is unknown, the generation is outside 1–9999, or the write or the scratch fails |
 | `load-dataset` | Rows in the owning schema's table, inside one transaction; a per-dataset summary on standard output | a record fails the width contract, a field fails to decode, or the load transaction cannot commit |
 | `apply-credentials` | A SCRAM verifier on each of the service login roles. The plaintext credential never crosses the connection | any role is missing, cannot be given its verifier, or cannot then log in |
 | `verify-row-counts` | A per-dataset expected-versus-actual table | any dataset's counts differ |
-| `verify-checksums` | The identifier of every record whose checksum differs, with sensitive fields masked | any record differs |
-| `verify-money-totals` | A per-column source-versus-loaded total table | any total differs by any amount |
+| `verify-checksum` | The identifier of every record whose checksum differs, with sensitive fields masked | any record differs |
+| `verify-money-parity` | A per-column source-versus-loaded total table | any total differs by any amount |
 | `verify-all` | The three tables above, in order | any one pass fails |
 
 ### 5.3 Applying the DDL is deliberately not a subcommand
 
 There is no `bootstrap-schemas` subcommand, and there will not be one.
-[`sql/V0__schemas_and_roles.sql`](sql/V0__schemas_and_roles.sql) is applied by
+All three shipped DDL files — [`sql/V0__schemas_and_roles.sql`](sql/V0__schemas_and_roles.sql),
+[`sql/V1__reporting_views.sql`](sql/V1__reporting_views.sql) and
+[`sql/V2__runtime_delete_grants.sql`](sql/V2__runtime_delete_grants.sql) — are applied by
 [the data-migration runbook](../docs/runbooks/data-migration.md), with
 `psql -v ON_ERROR_STOP=1` under a temporary administrative identity, and
-[§11](#11-schema-and-role-bootstrap) describes what it creates.
+[§11](#11-schema-and-role-bootstrap) describes what they create.
 
 Alternatives Considered: wrapping it as a subcommand, which would put the whole
 bootstrap behind one entry point and is the tidier-looking arrangement. Rejected
 because the script creates roles, and role creation is cluster-wide authority that no
 ETL task role holds or should hold — exposing it here would mean the loader's identity
 had to carry role-creation authority for the lifetime of every load, which is the
-opposite of the least-privilege boundary the eight per-context roles exist to draw.
+opposite of the least-privilege boundary the eight per-context roles exist to draw. The
+same objection disqualifies `V1` and `V2` for a narrower reason: both issue `GRANT`,
+which only an object's owner or a superuser may do, so exposing either would mean the
+loader's identity had to hold grant authority over tables it is otherwise only allowed
+to read and write rows in.
 `apply-credentials` is the one bootstrap step that **is** exposed, because it needs
 only the cluster's administrative secret for the duration of a single invocation and
 because the module that implements it asks to be reached through the command line
@@ -381,6 +412,19 @@ once per execution and passed to every step that touches the family. Two steps e
 deriving "the next generation" for themselves resolve to two different prefixes, and
 a later step then reads an empty location while the earlier step's output sits
 elsewhere.
+
+Where a caller does **not** hold a generation number, `stage_family_file` will
+reserve one through `reserve_generation` instead of computing it. Trade-offs: that
+costs an extra conditional write per staging step and it buys two properties a
+computed number cannot have. The reservation is a conditional create keyed by
+execution token, family and business date, so two writers racing for the same number
+cannot both win it — the service arbitrates rather than each writer's own listing.
+And presenting the same execution token again returns the same number, so a retried
+step rewrites one key instead of consuming a second generation for a byte-identical
+copy. `next_generation` remains available and still answers "what would a baseline
+`(+1)` reference resolve to?", but it is a **query, not an allocation**: two callers
+asking it concurrently receive the same answer, which is exactly why allocation does
+not go through it.
 
 ### 5.6 Exit semantics
 
@@ -1010,6 +1054,42 @@ marker beneath the prefixes that roll off. With the count at five, staging a six
 logical generation scratches the oldest complete prefix, which is the direct analogue
 of `LIMIT(5) SCRATCH`.
 
+### 9.0 Transfer integrity: one descriptor, one checksum, one reservation
+
+Three properties hold for every staged object, and each replaces a specific defect.
+
+**The extract is opened exactly once.** The digest pass and the transfer read the
+same held descriptor, and its `fstat` identity — inode, device, size and nanosecond
+modification time — is recorded at open and compared again after the transfer.
+Refactoring Rationale: staging previously opened the pathname three separate times,
+once to probe readability, once to digest and once to send, so the bytes measured and
+the bytes uploaded were not provably the same file. That is a time-of-check to
+time-of-use gap (CWE-367), and it was reachable because the staging directory is not
+owned exclusively by the step that reads from it. The final component is opened with
+`O_NOFOLLOW`, so a symbolic link planted at the extract's own name is refused rather
+than followed. Assumptions: `O_NOFOLLOW` guards the final component only — an
+intermediate directory symlink is still traversed — and that narrower scope is stated
+here so the flag is not over-trusted.
+
+**The digest is verified by the service, not merely recorded.** The SHA-256 is sent
+as `ChecksumSHA256`, so S3 recomputes it over the bytes it received and rejects the
+write on a mismatch. Trade-offs: the same digest is *also* stored as object metadata,
+and the two are not redundant. Metadata is an opaque string the service never reads,
+so on its own it records a *claim* that the transfer was intact; the checksum
+parameter is what makes the service enforce it. Metadata is still written because the
+later verification pass reads the expected digest from the object itself rather than
+from whatever the staging step happened to log.
+
+**Generation numbers are reserved, not computed.** Allocation is a conditional create
+keyed by execution token, family and business date, so two writers cannot take the
+same number and a retry reuses the number its first attempt took. Refactoring
+Rationale: the earlier form listed the prefixes, took the maximum and added one — a
+sequence with no atomicity anywhere. Two concurrent allocators read the same maximum
+and computed the same successor, and the second write landed on the first one's key.
+A retry was worse in the opposite direction: it saw its own completed write and
+allocated the *next* number, staging a duplicate generation of identical bytes and
+consuming one of the five the family retains.
+
 ### 9.1 There are ten generation families, not six
 
 This was confirmed by reading all three authoritative `DEFINE` blocks. Six sit in one
@@ -1146,6 +1226,25 @@ Two consequences of that ordering are worth stating because they look like defec
   `NOLOGIN`, so schema ownership is unreachable by authentication. `apply-credentials` ([§5.2](#52-subcommands-and-their-arguments)) is the
   delivered mechanism that makes them able to authenticate, and it must run
   immediately after this script and before any loader.
+
+The same ordering constraint is what makes
+[`sql/V2__runtime_delete_grants.sql`](sql/V2__runtime_delete_grants.sql) a separate file
+rather than another section of `V0`, and that file must run **AFTER** every per-service
+migration — the exact inverse of the rule above. It grants `DELETE` on three tables and
+only three: `reference.transaction_types` and `reference.transaction_categories`, behind
+the two published delete routes, and `"authorization".auth_reply_outbox`, behind
+`OutboxPublisher.purgePublished()`'s scheduled retention sweep.
+
+Assumptions: the two forms of grant available to `V0` before any table exists —
+`GRANT ... ON ALL TABLES IN SCHEMA` and `ALTER DEFAULT PRIVILEGES` — are both
+schema-wide, and `reference` holds six tables of which only two have a delete operation
+at any layer. Expressing this in `V0` would therefore have had to be four tables wider
+than the contract. Trade-offs: a second file is one more artifact an operator has to
+apply in the right order, which is a real cost, and it is preferred to a grant that is
+correct in aggregate and wrong per table. [`sql/verify/runtime_delete_grants.sql`](sql/verify/runtime_delete_grants.sql)
+is the paired check; it returns rows only on failure and covers both directions — the
+three tables that must be deletable, and every other table in those schemas, which must
+not be.
 
 ### 11.1 The batch role's cross-schema grant
 

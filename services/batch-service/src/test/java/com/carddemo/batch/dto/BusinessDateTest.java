@@ -309,13 +309,32 @@ class BusinessDateTest {
         //       for a substring such as a present-day accessor. A substring search passes as soon
         //       as someone chooses a different name for the same host-clock read, whereas an exact
         //       set fails on any addition at all and therefore has to be updated deliberately.
+        // WHY : Refactoring Rationale: this set was updated deliberately, which is the mechanism the
+        //       note above describes working as intended. identifierPrefix() and its private helper
+        //       isAllAsciiDigits() were added to close a defect in which a SEPARATED business-date
+        //       token, concatenated into a transaction identifier as supplied, produced a
+        //       sixteen-character value that is not a number -- and the two interactive write paths
+        //       that later derived their own next key from the stored maximum then failed on a numeric
+        //       parse. Neither addition reads a clock, which is what this test is guarding against.
         assertThat(Arrays.stream(BusinessDate.class.getDeclaredMethods()).map(Method::getName))
                 .containsExactlyInAnyOrder(
-                        "token", "parseIsoDateForRangeComparison", "toString", "hashCode", "equals");
+                        "token", "parseIsoDateForRangeComparison", "identifierPrefix",
+                        "isAllAsciiDigits", "toString", "hashCode", "equals");
 
+        // WHY : Refactoring Rationale: this asserted that NO static method is declared at all, and it
+        //       is narrowed to the two shapes a clock-reading factory can actually take: a static
+        //       method returning this type, or any static method reachable from outside this class.
+        //       The blanket form was a proxy for that intent and it refused a legitimate private pure
+        //       helper -- isAllAsciiDigits() takes a string and returns a boolean, so it can neither
+        //       manufacture an instance nor be called by anyone. Narrowing keeps the guard exact while
+        //       letting the class hold a helper; widening it to permit static methods generally would
+        //       have surrendered the guarantee this test exists for.
         assertThat(Arrays.stream(BusinessDate.class.getDeclaredMethods())
-                .filter(method -> Modifier.isStatic(method.getModifiers())))
-                .as("a static method here would be the shape a clock-reading factory takes")
+                .filter(method -> Modifier.isStatic(method.getModifiers()))
+                .filter(method -> method.getReturnType() == BusinessDate.class
+                        || !Modifier.isPrivate(method.getModifiers())))
+                .as("a static method returning this type, or any externally reachable static method,"
+                        + " would be the shape a clock-reading factory takes")
                 .isEmpty();
 
         assertThat(Arrays.stream(BusinessDate.class.getDeclaredFields())
@@ -323,10 +342,25 @@ class BusinessDateTest {
                 .as("a self-typed constant here would be the shape a default instance takes")
                 .isEmpty();
 
+        // WHY : Refactoring Rationale: this set was updated deliberately alongside the method set above,
+        //       for the same addition. The four constants added are the layout facts identifierPrefix()
+        //       reads -- the two hyphen positions of the separated layout, the hyphen character itself,
+        //       and the two trailing digits the baseline's own compact parameter carries. None of them
+        //       is self-typed, so the neighbouring assertion still rules out a default instance, and
+        //       none holds mutable state, so none can become hidden per-instance state.
+        // WHY : Alternatives Considered: leaving this as an open assertion on the self-typed check alone
+        //       and deleting the name list. Rejected because the name list is what makes an added
+        //       constant a deliberate edit: a clock-reading factory needs somewhere to keep a formatter
+        //       or a zone, and a new static field is where that would appear first.
+        // WHY : Assumptions: order-insensitive matching, unlike the previous single-element form which
+        //       could not tell the difference. java.lang.Class does not specify the order
+        //       getDeclaredFields returns, so asserting a sequence would make this test's outcome depend
+        //       on a compiler and runtime detail rather than on the class's contents.
         assertThat(Arrays.stream(BusinessDate.class.getDeclaredFields())
                 .filter(field -> Modifier.isStatic(field.getModifiers()))
                 .map(Field::getName))
-                .containsExactly("TOKEN_LENGTH");
+                .containsExactlyInAnyOrder("TOKEN_LENGTH", "YEAR_MONTH_HYPHEN_INDEX",
+                        "MONTH_DAY_HYPHEN_INDEX", "HYPHEN", "COMPACT_TRAILING_DIGITS");
     }
 
     /**

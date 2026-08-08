@@ -12,21 +12,38 @@
  * reconstruct from the files.</p>
  *
  * <p>What is present in the tree as this charter is written, enumerated so the
- * distinction above is checkable rather than merely declared: seven
- * subpackages exist, each carrying its own charter, and each carries at least
- * one test class. {@code api} holds {@code ReferenceApiRoutingContractTest}.
- * {@code config} holds {@code ReferenceApiContractTest} and
+ * distinction above is checkable rather than merely declared: EIGHT
+ * subpackages exist, each carrying its own charter, and SEVEN of the eight
+ * carry at least one test class. {@code api} holds
+ * {@code ReferenceApiRoutingContractTest}. {@code config} holds
+ * {@code ReferenceApiContractTest} and
  * {@code SecurityConfigTest}. {@code domain} holds
  * {@code ReferenceKeyCanonicalityTest}. {@code dto} holds
  * {@code ReferenceWireContractTest}. {@code fixtures} holds
  * {@code ReferenceFixtureContractTest} and {@code ReferenceFixtureTest}.
  * {@code mapper} holds {@code DateInquiryReplyMapperTest}. {@code service}
  * holds {@code DateInquiryMessageListenerTest} and
- * {@code ReferenceWriteBehaviourTest}. That is ten test classes, every one of
+ * {@code ReferenceWriteBehaviourTest}. The eighth, {@code repository}, holds
+ * its charter and NO test class. That is ten test classes, every one of
  * them named {@code Test}, so this module contributes no class named
  * {@code IT}. This package root holds this charter and no test class, which
  * makes {@code ReferenceMoneyPathRulesTest}, reserved for it below, a name
  * this charter reserves rather than a file it describes.</p>
+ *
+ * <p>Refactoring Rationale: this enumeration read "seven subpackages exist,
+ * each carrying its own charter, and each carries at least one test class",
+ * and listed seven while eight directories were present -- {@code repository}
+ * was absent from both the count and the list. The count was the smaller half
+ * of the error: the clause "each carries at least one test class" was the part
+ * that could mislead, because it converts an empty package into an invisible
+ * one. A reader auditing this tree against the charter would have found a
+ * directory the charter did not mention, and the only conclusions available
+ * would have been that the charter was stale or that the directory was
+ * unauthorised; neither is true. The ten-class total was correct throughout,
+ * which is exactly why nothing else in the tree contradicted the wrong count
+ * and why it had to be measured against the directory rather than derived from
+ * the list. This paragraph is the one to re-measure when a subpackage is added
+ * or when {@code repository} gains its first test class.</p>
  *
  * <p>Refactoring Rationale: the paragraph above is written as an enumeration a
  * reader can check entry by entry instead of as a summary, and the reason is
@@ -65,14 +82,27 @@
  * type it covers without that type widening its visibility for the test's
  * benefit. The mirror is deliberately not total in two directions, and both
  * are decisions rather than omissions. The main tree's {@code repository}
- * package has no counterpart here, because the assertions that would live
- * there need a database and this module contributes no container-backed class.
- * This tree's {@code fixtures} package has no counterpart in the main tree,
+ * package is mirrored here by a directory holding a CHARTER AND NO TEST CLASS,
+ * because the assertions that would live there need a database and this module
+ * contributes no container-backed class -- so the package exists to record that
+ * emptiness and its reason, rather than being absent and leaving a reader to
+ * guess whether the coverage was considered. This tree's {@code fixtures}
+ * package has no counterpart in the main tree,
  * because the fixed-width fixture records it reads are test material with no
  * production peer; that package's own charter records why a fixture without an
  * executable consumer documents an intention instead of asserting a fact. A
  * reader should not read either asymmetry as a set waiting to be
  * completed.</p>
+ *
+ * <p>Refactoring Rationale: the first asymmetry read "has no counterpart here",
+ * which described the intent correctly and the tree incorrectly -- the
+ * counterpart directory is present, carrying its charter. The distinction
+ * matters in the one direction a reader acts on: told the package is absent,
+ * a reader adding container-backed coverage would create the directory and
+ * author a new charter, and the ruling the existing charter records about why
+ * that coverage does not belong in this module would be silently replaced
+ * rather than argued with. Stating that the package exists and is deliberately
+ * empty routes that reader to the ruling instead.</p>
  *
  * <p>Assumptions: {@code com/carddemo} above this directory is an
  * organisational segment of the package path holding no compilation unit, so

@@ -3,6 +3,7 @@ package com.carddemo.account.config;
 import com.carddemo.common.security.InternalServiceToken;
 import io.swagger.v3.oas.models.Components;
 import io.swagger.v3.oas.models.OpenAPI;
+import io.swagger.v3.oas.models.SpecVersion;
 import io.swagger.v3.oas.models.info.Info;
 import io.swagger.v3.oas.models.info.License;
 import io.swagger.v3.oas.models.security.SecurityRequirement;
@@ -139,6 +140,16 @@ public class OpenApiConfig {
     /** The version of the published contract, reproduced from the contract of record. */
     private static final String CONTRACT_VERSION = "1.0.0";
 
+    /**
+     * The OpenAPI specification version this document declares, reproduced from the contract of
+     * record so a comparison of the two finds the member equal.
+     *
+     * <p>This is the specification's own version and not the API's; {@link #CONTRACT_VERSION}
+     * carries the latter. It is set explicitly rather than left to the document model's default,
+     * because that default is a 3.0 value -- see the rationale recorded at the assembly site.</p>
+     */
+    private static final String SPEC_VERSION = "3.1.0";
+
     /** The short-form statement of what the published surface is for. */
     private static final String CONTRACT_SUMMARY = """
             The internal read surface of the account bounded context, through which another \
@@ -242,6 +253,18 @@ public class OpenApiConfig {
     /** The component name of the reusable security scheme, as the contract of record declares it. */
     private static final String INTERNAL_TOKEN_SCHEME_NAME = "internalServiceToken";
 
+    /**
+     * The vendor-extension member on the security scheme that names the scope a presented token
+     * must carry.
+     *
+     * <p>An {@code x-} member is the specification's own mechanism for data it does not define, and
+     * it is used here in preference to the security requirement's list for the reason recorded at
+     * the assembly site: 3.1 permits that list to name roles but defines them as not exchanged
+     * in-band, so a populated list would read as an OAuth scope while carrying no more force than
+     * this does.</p>
+     */
+    private static final String REQUIRED_SCOPE_EXTENSION_NAME = "x-carddemo-required-scope";
+
     // Assumptions: these two are the specification's lower-case transport token and an
     //   informational token format. Neither validates anything at run time, which is the whole
     //   point of decision D4 recorded on the scheme method below.
@@ -299,22 +322,39 @@ public class OpenApiConfig {
         //       starter this module declares, and the specification family is settled at OpenAPI 3.1
         //       by the migration plan's API decision.
         //
-        // WHY : Assumptions: the specification version is deliberately NOT set on this object,
-        //       because the publishing library owns it outright. The springdoc.api-docs.version key
-        //       in application.yml selects the 3.1 form, and the library's document-assembly step
-        //       then overwrites BOTH the version string and the specification flag on whatever
-        //       document this method returns. A value set here would be discarded without
-        //       complaint, which is worse than absent: it would read as the effective version while
-        //       having no effect.
+        // WHY : Assumptions: the specification version is set on this object in BOTH of the two
+        //       places that carry it -- the constructor's specification flag and the version string
+        //       -- because the document model defaults both to a 3.0 value and this contract is 3.1.
+        //       Two members of this document exist only in 3.1: the summary on the information block
+        //       and the SPDX identifier on the licence. Which of them survive is decided by which
+        //       serialiser the publishing library runs, selected by the springdoc.api-docs.version
+        //       key in application.yml, and NOT by the flag set here; the 3.1 serialiser emits both
+        //       members from a document constructed either way. The two carriers are INDEPENDENT: the
+        //       constructor sets the flag and leaves the string at 3.0.1, so setting the flag alone
+        //       still serves a document declaring 3.0.1 while carrying 3.1-only members and while the
+        //       contract of record declares 3.1.0 -- internally contradictory, and silently so. That
+        //       is why the string is set here as well rather than expected to follow from the flag.
         //
-        //       One consequence is worth stating because it looks like a defect on first encounter.
-        //       The document model initialises its own version string to a 3.0 value, so this
-        //       object inspected OUTSIDE the library's assembly step reports 3.0 rather than the 3.1
-        //       the contract of record declares. That is the model's default showing through, not a
-        //       version this class chose, and it is replaced before the document is served. A test
-        //       asserting the served specification version must therefore exercise the library
-        //       rather than this method's return value, or it will assert against that default and
-        //       report a mismatch that does not exist in the published document.
+        //       Refactoring Rationale: an earlier revision of this comment asserted that the
+        //       library's assembly step overwrites both the flag and the version string, and
+        //       therefore that setting either here would be discarded without complaint. Assembly
+        //       clones this document through an object mapper, and MEASUREMENT of that clone -- the
+        //       case named below -- shows the two carriers behave differently rather than either
+        //       being discarded. The version STRING survives every clone path, so the value set here
+        //       does reach the served document; without it the document is served declaring the
+        //       model's 3.0.1 default. The FLAG survives swagger's own 3.1 mapper and is reset to
+        //       V30 by a plain one, which is exactly why the string is set explicitly instead of
+        //       being left to follow from the flag.
+        //
+        //       Trade-offs: both are set although only one is load-bearing at the served document.
+        //       The flag is what any reader of this bean sees before assembly -- a test comparing it
+        //       to the contract, or a future library path that consults it -- so leaving it at a 3.0
+        //       default while the document carries 3.1-only members would be a contradiction inside
+        //       this object. Setting it also removes the dependence on the configuration key being
+        //       present: transaction-service in this repository pins no version key at all and rests
+        //       entirely on its constructor, which is the shape that survives someone tidying the
+        //       key away. Both facts are asserted by config/OpenApiDocumentTest.java, so neither can
+        //       drift back into prose that nothing checks.
         //
         // WHY : Assumptions: decision D8 -- the health endpoint is absent from this document, and
         //       its absence is deliberate rather than an oversight. It is contributed by the
@@ -336,23 +376,29 @@ public class OpenApiConfig {
         //       security annotation, so a requirement expressed here is the only form that reaches
         //       the generated document at all; the alternative would be annotating each handler,
         //       which would put the same fact in as many places as there are handlers.
-        return new OpenAPI()
+        return new OpenAPI(SpecVersion.V31)
+                .openapi(SPEC_VERSION)
                 .info(contractInfo())
                 .addServersItem(new Server()
                         .url(ORIGIN_RELATIVE_SERVER_URL)
                         .description(ORIGIN_RELATIVE_SERVER_DESCRIPTION))
-                // Assumptions: the scope is taken from the same constant the enforcing filter chain
-                //   composes its required authority from, rather than written as a literal here, so
-                //   the scope this document advertises and the scope InternalApiSecurityConfig
-                //   actually demands cannot drift apart. Trade-offs: the specification asks for an
-                //   empty scope list on any scheme that is neither oauth2 nor openIdConnect, and
-                //   this scheme is of HTTP type, so naming the scope is a deliberate departure. It
-                //   is chosen because the contract of record names it, and agreement with that file
-                //   is what this bean is for; a caller reading the document also learns which scope
-                //   to request instead of having to read a filter chain to find out.
-                .addSecurityItem(new SecurityRequirement().addList(
-                        INTERNAL_TOKEN_SCHEME_NAME,
-                        InternalServiceToken.SCOPE_ACCOUNT_CONTEXT_READ))
+                // Assumptions: the requirement's list is EMPTY, and empty is the deliberate value
+                //   rather than an unfinished one. Under 3.1 a non-empty list on a scheme that is
+                //   neither oauth2 nor openIdConnect is permitted and denotes role names required
+                //   for execution -- so the populated form an earlier revision used here was legal
+                //   for this document, not the specification violation it was once read as. It is
+                //   still dropped, for a reason the legality does not settle: 3.1 defines those
+                //   names as neither exchanged nor otherwise defined in-band, so the list is
+                //   documentation whichever way it is written, and the populated form reads as an
+                //   OAuth scope to every 3.0-era reader and tool that meets it. Trade-offs: the
+                //   scope stops being machine-readable HERE, so it is published on the scheme
+                //   instead -- as the x- extension below, taken from the same constant the
+                //   enforcing filter chain composes its required authority from, so what this
+                //   document advertises and what InternalApiSecurityConfig demands still cannot
+                //   drift apart. That also makes this the same shape the other six contexts
+                //   publish, so the one populated list in the fleet stops being a difference a
+                //   reader has to explain.
+                .addSecurityItem(new SecurityRequirement().addList(INTERNAL_TOKEN_SCHEME_NAME))
                 .components(new Components()
                         .addSecuritySchemes(INTERNAL_TOKEN_SCHEME_NAME, internalServiceTokenScheme()));
     }
@@ -410,10 +456,24 @@ public class OpenApiConfig {
         //       arrives from configuration at run time, and a scheme description is published to
         //       whoever can fetch the document, so a value written here would be both redundant and
         //       readable by its intended attacker.
-        return new SecurityScheme()
+        // WHY : Trade-offs: the required scope is published as a vendor extension rather than in the
+        //       security requirement's list, which is where a reader familiar with oauth2 would look
+        //       for it. The reasoning is recorded at the requirement site; in short, 3.1 permits the
+        //       list to name roles but defines them as not exchanged in-band, so the value is
+        //       documentation either way and an x- member says plainly that it is this system's
+        //       vocabulary rather than an OAuth scope a token endpoint would issue. The value is
+        //       read from the same constant InternalApiSecurityConfig composes its required
+        //       authority from, so the two cannot disagree.
+        // Assumptions: the extension is added in a separate statement rather than chained, because
+        //   addExtension on this type returns void where every other setter returns the scheme, so
+        //   chaining it does not compile.
+        SecurityScheme scheme = new SecurityScheme()
                 .type(SecurityScheme.Type.HTTP)
                 .scheme(BEARER_HTTP_SCHEME)
                 .bearerFormat(BEARER_TOKEN_FORMAT)
                 .description(INTERNAL_TOKEN_SCHEME_DESCRIPTION);
+        scheme.addExtension(REQUIRED_SCOPE_EXTENSION_NAME,
+                InternalServiceToken.SCOPE_ACCOUNT_CONTEXT_READ);
+        return scheme;
     }
 }

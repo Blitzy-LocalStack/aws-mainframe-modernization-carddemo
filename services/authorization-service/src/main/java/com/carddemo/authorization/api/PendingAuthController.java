@@ -2,20 +2,22 @@ package com.carddemo.authorization.api;
 
 import com.carddemo.authorization.dto.PendingAuthDetailView;
 import com.carddemo.authorization.dto.PendingAuthListView;
+import com.carddemo.authorization.dto.PendingAuthPageQuery;
 import com.carddemo.authorization.service.PendingAuthDetailService;
 import com.carddemo.authorization.service.PendingAuthSummaryService;
 import com.carddemo.common.web.CursorToken;
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import java.security.Principal;
 import java.util.Objects;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
@@ -71,44 +73,28 @@ public class PendingAuthController {
     public static final String BASE_PATH = "/api/v1/authorizations";
 
     /**
-     * The eleven-digit domain the account scope is published in.
+     * The literal path the paged listing is requested at.
      *
-     * <p>Assumptions: the value is a digit STRING and not a number. The datum is
-     * {@code PA-ACCT-ID PIC S9(11) COMP-3} at {@code cpy/CIPAUSMY.cpy} L19 and the column is an integer,
-     * but a leading zero is data in this identifier and a JSON or query number would lose it before any
-     * validation could see it.</p>
+     * <p>Refactoring Rationale: the listing was a {@code GET} on {@link #BASE_PATH} carrying its account
+     * scope, cursor and direction as query parameters. It is a {@code POST} on this literal segment
+     * because the scope is an account identifier and a query string is part of the request line, which the
+     * load balancer writes into its access log itself before any application code runs. The scope was
+     * REQUIRED, so every request to this listing disclosed one account identifier into that log.</p>
+     *
+     * <p>Assumptions: a literal segment beneath the collection rather than a {@code POST} on the
+     * collection itself, matching the card context's search path. A {@code POST} to a collection reads as
+     * a create, and this contract publishes none -- a pending authorization comes into existence only when
+     * the message-driven half of this context accepts a request.</p>
+     *
+     * <p>Assumptions: the overlap with the single-authorization path resolves in this operation's favour
+     * for the documented reason that a literal pattern is selected ahead of a templated one, and because a
+     * sealed selector cannot spell this literal -- it begins with a version marker and is far longer.</p>
      */
-    private static final String ACCOUNT_ID_DOMAIN = "^[0-9]{11}$";
+    public static final String SEARCH_PATH = "/search";
 
-    /**
-     * The two directions the contract publishes for a paging move.
-     *
-     * <p>Assumptions: constrained here as well as in the service, and the duplication is deliberate. The
-     * constraint here refuses an unpublished value with a per-field entry keyed {@code direction} before
-     * any handler runs, which is what the contract describes; the service's own check is what makes the
-     * rule hold for any caller reaching it other than through this route.</p>
-     */
-    private static final String DIRECTION_DOMAIN = "^(next|previous)$";
 
-    /**
-     * The sentence the reference program displays when the account scope is blank.
-     *
-     * <p>Assumptions: carried character for character from {@code cbl/COPAUS0C.cbl} L268 to L269,
-     * INCLUDING the absence of a space before its ellipsis, which differs from the sibling sentence below.
-     * Transformation rule T8 requires every user-visible string to be carried across unchanged, and the
-     * contract publishes this one as the aggregate and as the per-field entry of a 400.</p>
-     */
-    private static final String MESSAGE_ACCOUNT_ID_REQUIRED = "Please enter Acct Id...";
 
-    /**
-     * The sentence the reference program displays when the account scope carries a non-digit.
-     *
-     * <p>Assumptions: carried character for character from {@code cbl/COPAUS0C.cbl} L277 to L278,
-     * including the single space before its ellipsis. The reference tests it only after the blank test
-     * passed, at L272, and the shared advice reproduces that short-circuit by latching the first rejected
-     * parameter's sentence as the aggregate.</p>
-     */
-    private static final String MESSAGE_ACCOUNT_ID_NUMERIC = "Acct Id must be Numeric ...";
+
 
     /**
      * The list behaviour, which owns the page size and the look-ahead probe.
@@ -146,11 +132,9 @@ public class PendingAuthController {
      * that the shared advice answers as a server fault, which is the correct answer for an unvalidated
      * parse and the wrong answer for a caller's malformed input.
      *
-     * @param accountId the account whose authorizations are wanted, as exactly eleven digits; must not be
-     *     blank
-     * @param cursor the sealed paging position to continue from, or {@code null} for the opening page
-     * @param direction {@code next} or {@code previous}, or {@code null} to default to next; meaningful
-     *     only alongside a cursor
+     * @param query the search criteria -- the required account scope, an optional sealed cursor and an
+     *     optional direction. The scope travels in this body rather than in a query string because it is
+     *     an account identifier; the reasoning is on {@link PendingAuthPageQuery}
      * @param principal the authenticated caller, supplied by the framework; the boundary tokens this
      *     operation issues are sealed against its name, so a page issued to one operator cannot be
      *     replayed by another
@@ -158,22 +142,19 @@ public class PendingAuthController {
      *     sentence when the request was a paging move that had already reached a boundary; never
      *     {@code null}
      */
-    @GetMapping
+    @PostMapping(path = SEARCH_PATH, consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<PendingAuthListView> list(
-            @RequestParam(name = "accountId")
-            @NotBlank(message = MESSAGE_ACCOUNT_ID_REQUIRED)
-            @Pattern(regexp = ACCOUNT_ID_DOMAIN, message = MESSAGE_ACCOUNT_ID_NUMERIC)
-            String accountId,
-            @RequestParam(name = "cursor", required = false)
-            @Size(max = CursorToken.MAX_TOKEN_LENGTH)
-            String cursor,
-            @RequestParam(name = "direction", required = false)
-            @Pattern(regexp = DIRECTION_DOMAIN)
-            String direction,
+            @Valid @RequestBody PendingAuthPageQuery query,
             Principal principal) {
 
-        return ResponseEntity.ok(this.summaries.list(Long.valueOf(accountId), cursor, direction,
-                principal.getName()));
+        // WHY : Refactoring Rationale: the three criteria arrived as query parameters and now arrive as
+        //       members of a validated body. The constraints moved WITH them onto
+        //       PendingAuthPageQuery rather than being restated here, so a caller experiences the same
+        //       refusals and the same baseline message text as before; what changed is only that the
+        //       account identifier no longer travels in the request line, where the load balancer's
+        //       access log would have retained it.
+        return ResponseEntity.ok(this.summaries.list(Long.valueOf(query.accountId()), query.cursor(),
+                query.direction(), principal.getName()));
     }
 
     /**

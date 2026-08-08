@@ -8,7 +8,6 @@ import com.carddemo.authorization.mapper.PendingAuthViewMapper;
 import com.carddemo.authorization.repository.PendingAuthDetailRepository;
 import com.carddemo.authorization.repository.PendingAuthSummaryRepository;
 import com.carddemo.common.error.ClientInputException;
-import com.carddemo.common.web.PageResponse;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;

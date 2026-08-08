@@ -338,6 +338,30 @@
             <artifactId>spring-cloud-aws-starter-secrets-manager</artifactId>
         </dependency>
 
+        <!--
+          Assumptions: the key-management client, for the two protected customer
+          identifier columns. config/CustomerIdentifierProtectionConfig is the only
+          class here that reaches it, and it is the implementation of the port
+          mapper/CustomerMapper declares. Until it existed the port had no
+          implementation anywhere in the reactor, so any context refresh that
+          scanned the mapper package failed on the missing bean.
+
+          Assumptions: the low-level SDK artifact rather than a Spring starter,
+          matching card-service, which enciphers its verification value the same
+          way. A starter would add parameter-store and secrets-manager
+          autoconfiguration this module already declares separately, and would
+          change what happens at start-up to supply one client.
+
+          Trade-offs: the version is managed by the AWS SDK bill of materials the
+          parent imports, so it is not pinned here. Pinning it locally would let
+          this module's client drift from the one card-service uses against the
+          same keys.
+        -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>kms</artifactId>
+        </dependency>
+
 
         <!--
         =============================================================================
@@ -377,6 +401,43 @@
             <artifactId>postgresql</artifactId>
             <scope>runtime</scope>
         </dependency>
+
+        <!--
+        WHY : Assumptions: the key-management module is declared because this
+              context stores TWO values as ciphertext, namely CUST-SSN PIC 9(09)
+              at app/cpy/CVCUS01Y.cpy L17 and CUST-GOVT-ISSUED-ID PIC X(20) at
+              L18, in the ssn_encrypted and govt_issued_id_encrypted BYTEA columns
+              V1__account.sql declares. service/CustomerIdentifierCipher.java
+              obtains a data key per value and enciphers locally, so this is the
+              only AWS API coordinate the context needs for that boundary. One
+              module per API keeps the image small and keeps the task role's
+              policy legible: the only calls this context can make are the ones
+              this coordinate makes reachable, which is GenerateDataKey on one
+              key and nothing else.
+        WHY : Assumptions: the version is inherited from the AWS SDK bill of
+              material the aggregator imports, so it cannot drift from the other
+              services' SDK modules.
+        WHY : Refactoring Rationale: this coordinate was absent while
+              mapper/CustomerMapper.java already declared and required the
+              CustomerIdentifierProtection port, so the context could not be
+              created and the two columns had no production encipherment at all.
+              Adding the coordinate is what lets the implementation exist. The
+              alternative, relaxing the mapper so an absent boundary was
+              tolerated, would have started the service and then written
+              plaintext into a column named for ciphertext.
+        WHY : Alternatives Considered: enciphering each identifier directly under
+              the customer-managed key rather than under a per-value data key,
+              which would need this same coordinate and less code. Rejected
+              because it puts the plaintext on the wire to a second service and
+              into that service's request path, which is the one path a national
+              identifier must not travel; the rationale is recorded in full on
+              the cipher class.
+        -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>kms</artifactId>
+        </dependency>
+
         <!--
         WHY : Assumptions: the STARTER is what activates migration, and naming it
               rather than flyway-core is the load bearing half of this pair.

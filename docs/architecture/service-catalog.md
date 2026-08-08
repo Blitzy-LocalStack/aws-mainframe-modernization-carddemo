@@ -13,10 +13,10 @@
 >
 > This document is the **naming authority** for the migration. Every sibling
 > architecture document is expected to use the service names and population figures
-> fixed here. The Maven module directories already use those names; the planned
-> per-module READMEs do not yet exist. A variant service name or a conflated count
-> introduced here propagates outward, so each figure below was measured directly
-> from the repository rather than carried over from prose.
+> fixed here. The Maven module directories use those names, and so does the README of
+> each of the nine modules, all nine of which are authored. A variant service name or a
+> conflated count introduced here propagates outward, so each figure below was measured
+> directly from the repository rather than carried over from prose.
 >
 > **Source of truth.** Four bodies of reference material, all read and none
 > modified:
@@ -499,25 +499,43 @@ address validation in `account-service` reads. Without it, that seeded reference
 data would have had to live inside whichever context happened to read it first,
 which reproduces the same split-ownership problem the folding above avoids.
 
-**All nine candidate responsibilities are assigned; they are not all implemented.**
-The target packaging maps nine candidates to eight deployables, with the two folded
-responsibilities specified as adapters inside the contexts that own the underlying
-tables. Nothing from the candidate list is dropped from the design. In the current
-source tree, however, only `batch-service` and `reporting-service` contain
-non-`package-info.java` main-source Java; the other six service modules do not yet
-contain their controllers, services, repositories or adapters. Of those two,
-`reporting-service` is complete against its own charter: both controllers, all three
-services, all five read-only repository roles, all seven view projections and the
-published contract are authored, and its four operations are asserted against the
-handlers that serve them.
+**All nine candidate responsibilities are assigned, and all eight deployables are
+now implemented.** The target packaging maps nine candidates to eight deployables,
+with the two folded responsibilities delivered as adapters inside the contexts that
+own the underlying tables. Nothing from the candidate list is dropped from the
+design.
+
+Measured across the current source tree, every module carries its controllers,
+services, repositories and adapters as non-`package-info.java` main-source Java:
+
+| Maven module | main-source classes | owned Flyway migrations |
+|---|---:|---|
+| `common-lib` | 35 | none — it owns no schema |
+| `auth-service` | 26 | `V1__auth.sql` |
+| `account-service` | 38 | `V1__account.sql` |
+| `card-service` | 23 | `V1__card.sql` |
+| `transaction-service` | 32 | `V1__ledger.sql`, `V2__ledger_transaction_id_allocator.sql` |
+| `reference-service` | 54 | `V1__reference.sql`, `V2__seed_reference.sql` |
+| `batch-service` | 51 | `V1__batch.sql` |
+| `authorization-service` | 48 | `V1__authorization.sql` |
+| `reporting-service` | 44 | none by design — it owns no table, only read-only views |
+
+*Refactoring Rationale:* this paragraph reported that "only `batch-service` and
+`reporting-service` contain non-`package-info.java` main-source Java" and that the
+other six modules did "not yet contain their controllers, services, repositories or
+adapters". That was true of the tree it was written against and is now false of
+every one of the six. It is replaced by a measured table rather than by a corrected
+sentence, because a sentence of that shape has no way to be checked and this one
+survived six modules landing. The counts exclude package charters, which are
+documentation rather than delivery.
 
 
 ## The eight bounded contexts
 
 The names in the first column are **canonical**. They are the names used by every
 sibling document in this folder, by the Maven module directories and by the Java
-package roots. They are also the names the planned per-service READMEs must use;
-none of those README files is authored yet.
+package roots. They are also the names each module's own README uses; all nine of those
+README files are authored.
 
 | Service | Maven module | Java package root | Owned schema | Source COBOL programs |
 |---|---|---|---|---|
@@ -686,11 +704,17 @@ documented business rule fails silently.
 
 The business date is a job parameter rather than a clock read, preserving the
 baseline's injected-date behaviour and with it the reproducibility that
-golden-master comparison depends on. `batch_run` gives each step an idempotency
-key, so a resumed step that already completed is a no-op; the baseline has no
-checkpoint contract at all — its only restart directive is commented out — so this
-is documented as an addition rather than as a port. The state-by-state mapping
-lives in [`batch-orchestration.md`](batch-orchestration.md).
+golden-master comparison depends on. `batch_run` is designed to give each step an
+idempotency key, so that a resumed step which already completed becomes a no-op; the
+baseline has no checkpoint contract at all — its only restart directive is commented
+out — so this is documented as an addition rather than as a port. Trade-offs: the table
+and its repository are landed, but the idempotency is **not operative yet**, because the
+only class that reads or writes the ledger has no production caller while this service's
+`Job` beans remain unauthored. The guarantee that does hold today is coarser: the
+business date is an identifying job parameter, so a repeat of a whole business date is
+recognised, while a resumed step within one night is not yet distinguishable from a first
+attempt at it. The state-by-state mapping lives in
+[`batch-orchestration.md`](batch-orchestration.md).
 
 ### `authorization-service`
 
@@ -828,9 +852,13 @@ report against `V1__reporting_views.sql`, never something for a service to creat
 for itself.
 
 **Measured artifact status:** V1 is authored and has been executed successfully
-against a disposable PostgreSQL validation database. It is not evidence of a
-deployed environment, and the repository-wide migration sequence still requires the
-absent account and card source-table migrations before the view artifact can run.
+against a disposable PostgreSQL validation database. It is not evidence of a deployed
+environment. Refactoring Rationale: this note previously added that the migration
+sequence still required the absent account and card source-table migrations before the
+view artifact could run. Both migrations are now authored — `V1__account.sql` and
+`V1__card.sql` — so every source table the views read is created by a committed
+migration, and the qualification is removed rather than left to imply a blocker that no
+longer exists.
 
 > Trade-offs: **read-only views on the writer rather than a separate reporting
 > store.** The alternatives were a read replica or a dedicated reporting datastore

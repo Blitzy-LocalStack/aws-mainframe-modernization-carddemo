@@ -553,7 +553,13 @@ public class PendingAuthViewMapper {
         try {
             return new PendingAuthDetailKey(Long.valueOf(parts[0]), Integer.valueOf(parts[1]),
                     Integer.valueOf(parts[2]));
-        } catch (NumberFormatException malformed) {
+        } catch (IllegalArgumentException malformed) {
+            // WHY : Refactoring Rationale: the catch is IllegalArgumentException where it was the
+            //       narrower NumberFormatException, because the key type now enforces its own domain and
+            //       raises the wider type for a part that parses as a number but is not a date or a time
+            //       the column admits. Leaving the narrower catch would let that refusal escape as a 500
+            //       from a value the client supplied, which is the one outcome this whole boundary exists
+            //       to prevent; NumberFormatException is a subtype, so the parse failure still lands here.
             // WHY : Trade-offs: the refused text is NOT quoted, here or in the message above. The first
             //       part of this payload is an account identifier, and a diagnostic that echoed a payload
             //       it could not fully parse would put that identifier into an error body and a log line
@@ -561,8 +567,9 @@ public class PendingAuthViewMapper {
             //       ORDER is named instead, which is what a client debugging its own echoing needs and is
             //       the most this class can say without disclosing a value.
             throw new InvalidSelectorException(fieldKey,
-                    "sealed value payload does not carry three numeric parts in the order account"
-                            + " identifier, authorization date, authorization time");
+                    "sealed value payload does not carry three numeric parts, each within the domain"
+                            + " its column declares, in the order account identifier, authorization"
+                            + " date, authorization time");
         }
     }
 

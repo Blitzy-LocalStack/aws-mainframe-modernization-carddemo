@@ -186,8 +186,9 @@ same resources mechanically.
 | `aws_cognito_user_pool_domain.this` | `count`, default zero | Created only when `var.domain_prefix` is set. Nothing authenticates through a hosted page, and a domain prefix is globally unique within a region, so two environments in one region would collide on apply |
 | `random_id.seed_user_secret` | Per seed user | A 128-bit handle that keeps the identity out of a secret's **name**, so listing secrets discloses no user id to a principal without permission to read the value |
 | `aws_secretsmanager_secret.seed_user` | Per seed user, CMK-encrypted | Holds the one-time initial credential |
-| `terraform_data.seed_user` | Per seed user | Creates and converges the pool user; a destroy-time counterpart removes it |
-| `aws_cognito_user_in_group.seed_user` | Per seed user | Membership is a separate resource from the user, so a role change is an in-place membership change that does not touch the identity or its credential |
+| `aws_cognito_user.seed_user` | Per seed user | The identity itself. Attribute changes converge **in place**, so a name correction, a role change or a credential rotation never mints a new `sub`. Publishes that `sub` for the `auth.users` join |
+| `terraform_data.seed_user_credential` | Per seed user | Assigns and publishes the one-time handover password only. Its triggers are the rotation counter, the secret ARN and the user's `sub` — **not** the profile fields |
+| `aws_cognito_user_in_group.seed_user` | Per seed user | Membership is a separate resource from the user, so a role change is a replacement of the membership alone and does not touch the identity or its credential |
 
 Alternatives Considered: keying per-seed-user resources by list position with
 `count`. Rejected because removing one entry from the middle re-indexes every
@@ -253,9 +254,11 @@ replacement path is:
 1. `seed_user_bootstrap.py` generates a policy-compliant value **in process
    memory**, using a cryptographically secure generator seeded per required
    character class and then shuffled.
-2. It is applied to the pool user through AWS CLI **JSON files** rather than process
-   arguments, so it never appears in a command line, and the pool receives it as a
-   **temporary** password that must be changed at first sign-in.
+2. It is applied to the **already-existing** pool user through AWS CLI **JSON
+   files** rather than process arguments, so it never appears in a command line, and
+   the pool receives it as a **temporary** password that must be changed at first
+   sign-in. The script neither creates a user nor sets any attribute — see the
+   identity-continuity note below for why that separation matters.
 3. The same value is written to that user's Secrets Manager entry, encrypted under
    the customer-managed key supplied as `var.secrets_kms_key_arn`.
 4. `outputs.tf` publishes only each entry's **ARN and name**, keyed by the opaque
@@ -263,6 +266,24 @@ replacement path is:
 5. An operator retrieves it out of band under their own
    `secretsmanager:GetSecretValue` and `kms:Decrypt` permissions, which leaves a
    record in CloudTrail.
+
+**Identity continuity.** Refactoring Rationale: the identity and its credential are
+two resources, and they were one. The identity used to be a `terraform_data` whose
+`triggers_replace` listed `given_name`, `family_name`, `user_type` and the rotation
+counter, with a `when = destroy` provisioner running `admin-delete-user`.
+`terraform_data` cannot update in place — its only response to a changed trigger is
+destroy-then-create — so correcting a surname, moving one person between `'A'` and
+`'U'`, or rotating a password **deleted the Cognito identity and created a new one**.
+Everything Cognito owns and Terraform cannot recreate went with it: a fresh `sub`,
+which breaks the `auth.users.cognito_sub` join declared `NOT NULL UNIQUE`; the
+password the person had chosen since handover; their registered MFA factors; and
+their remembered devices. None of those changes is a deletion in Cognito's own terms
+— `custom:user_type` is declared `mutable = true` precisely so a role change is an
+attribute update. `aws_cognito_user` now carries the identity and converges it with
+`AdminUpdateUserAttributes`, deleting only on its own destroy;
+`terraform_data.seed_user_credential` carries the credential alone, and the profile
+fields are absent from its triggers because renaming somebody is not a reason to
+invalidate their password.
 
 Trade-offs: generating in process memory keeps credentials out of Terraform state,
 but the operator must change a revision input to request a deliberate rotation.
@@ -318,12 +339,21 @@ module "cognito" {
   advanced_security_mode = var.environment == "prod" ? "ENFORCED" : "AUDIT"
   deletion_protection    = var.deletion_protection ? "ACTIVE" : "INACTIVE"
 
+  # Both environment roots pass the baseline's ten identities from
+  # app/jcl/DUSRSECJ.jcl L35-L44, in the record's own upper case so the pool and
+  # auth.users agree on the value. Abridged here to the first of each user_type.
   seed_users = [
     {
-      user_id     = "ADM00001"
-      given_name  = "Demo"
-      family_name = "Admin"
+      user_id     = "ADMIN001"
+      given_name  = "MARGARET"
+      family_name = "GOLD"
       user_type   = "A"
+    },
+    {
+      user_id     = "USER0001"
+      given_name  = "LAWRENCE"
+      family_name = "THOMAS"
+      user_type   = "U"
     },
   ]
 }
@@ -482,6 +512,7 @@ it by hand; regenerate it instead, and keep hand-written prose outside the marke
 |------|------|
 | [aws_cloudformation_stack.app_client](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudformation_stack) | resource |
 | [aws_cognito_resource_server.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cognito_resource_server) | resource |
+| [aws_cognito_user.seed_user](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cognito_user) | resource |
 | [aws_cognito_user_group.admin](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cognito_user_group) | resource |
 | [aws_cognito_user_group.user](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cognito_user_group) | resource |
 | [aws_cognito_user_in_group.seed_user](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cognito_user_in_group) | resource |
@@ -491,7 +522,7 @@ it by hand; regenerate it instead, and keep hand-written prose outside the marke
 | [aws_secretsmanager_secret.seed_user](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/secretsmanager_secret) | resource |
 | [random_id.seed_user_secret](https://registry.terraform.io/providers/hashicorp/random/latest/docs/resources/id) | resource |
 | [terraform_data.app_client_secret_rotation](https://registry.terraform.io/providers/hashicorp/terraform/latest/docs/resources/data) | resource |
-| [terraform_data.seed_user](https://registry.terraform.io/providers/hashicorp/terraform/latest/docs/resources/data) | resource |
+| [terraform_data.seed_user_credential](https://registry.terraform.io/providers/hashicorp/terraform/latest/docs/resources/data) | resource |
 
 ### Inputs
 
@@ -536,8 +567,9 @@ it by hand; regenerate it instead, and keep hand-written prose outside the marke
 | <a name="output_issuer_uri"></a> [issuer\_uri](#output\_issuer\_uri) | OpenID Connect issuer URI of the user pool, shaped https://cognito-idp.<region>.amazonaws.com/<user-pool-id>. Two consumers need this exact string verbatim: infra/modules/api-gateway-http takes it as cognito\_issuer\_uri and makes it its JWT authorizer's jwt\_configuration.issuer, and each Spring Boot service's OAuth2 resource-server issuer-uri property reads it back from Parameter Store where the calling root writes it. Publishing it already composed means neither consumer re-derives it and neither can get the composition wrong; without it every token-validating component would assemble its own copy of a value that must be identical in all of them. |
 | <a name="output_resource_server_identifier"></a> [resource\_server\_identifier](#output\_resource\_server\_identifier) | Identifier of the Cognito resource server representing the CardDemo API. It is the namespace every scope below is qualified by, and the calling root writes it to Parameter Store for the services that declare required scopes. Without it a caller cannot tell which resource server a scope string belongs to. |
 | <a name="output_resource_server_scope_identifiers"></a> [resource\_server\_scope\_identifiers](#output\_resource\_server\_scope\_identifiers) | Fully-qualified scope strings the resource server declares, as the provider composes them from the identifier and each scope name. infra/modules/api-gateway-http consumes them in route\_authorization\_scopes, where they become the scopes a route requires of a presented token. Without them the calling root would have to rebuild each string by hand, and any divergence would appear only as an authorization failure in production. |
-| <a name="output_seed_user_secret_arns"></a> [seed\_user\_secret\_arns](#output\_seed\_user\_secret\_arns) | Secrets Manager ARNs of generated initial passwords, as a map keyed by an opaque 128-bit handle rather than a user id. Consumed by IAM policy statements in the calling root that scope secretsmanager:GetSecretValue to exactly these entries. No password or identity value is published; the username remains inside the encrypted secret value for authorized retrieval. |
-| <a name="output_seed_user_secret_names"></a> [seed\_user\_secret\_names](#output\_seed\_user\_secret\_names) | Secrets Manager names of the same entries, keyed by the same opaque handle. Published alongside the ARNs because an IAM statement scopes to an ARN while the retrieval command in docs/runbooks/deploy.md takes a name. No password, user id or personal name is exposed through this output. |
+| <a name="output_seed_user_secret_arns"></a> [seed\_user\_secret\_arns](#output\_seed\_user\_secret\_arns) | Secrets Manager ARNs of generated initial passwords, as a map keyed by an opaque 128-bit handle rather than a user id. Published so that an operator can scope a secretsmanager:GetSecretValue grant, or an audit query, to exactly these entries; no root currently reads this output, because seed retrieval is an out-of-band operator step performed with an already-privileged principal rather than a Terraform-wired one. No password or identity value is published; the username remains inside the encrypted secret value for authorized retrieval. |
+| <a name="output_seed_user_secret_names"></a> [seed\_user\_secret\_names](#output\_seed\_user\_secret\_names) | Secrets Manager names of the same entries, keyed by the same opaque handle. Published alongside the ARNs because an IAM statement scopes to an ARN while the retrieval command documented in this module README takes a name; that command is the only consumer today, and no root reads this output. No password, user id or personal name is exposed through this output. |
+| <a name="output_seed_user_subjects"></a> [seed\_user\_subjects](#output\_seed\_user\_subjects) | Cognito subject (sub) of each seed identity, as a map keyed by the eight-character SEC-USR-ID. Consumed by the calling root, which publishes it to Parameter Store so the ETL can populate auth.users.cognito\_sub, declared UUID NOT NULL UNIQUE in V1\_\_auth.sql. Carries no credential: a subject is the opaque identifier already present in the sub claim of every token the user presents. |
 | <a name="output_user_group_name"></a> [user\_group\_name](#output\_user\_group\_name) | Name of the group carrying the baseline's ordinary user type: SEC-USR-TYPE 'U' (app/cpy/CSUSR01Y.cpy L22), whose condition name is 88 CDEMO-USRTYP-USER VALUE 'U' at app/cpy/COCOM01Y.cpy L28. Consumed exactly as the administrator group is, and it routes to the main menu -- the client-side equivalent of the transfer to COMEN01C at app/cbl/COSGN00C.cbl L237. The two names together are the whole authorization domain, which the copybook closes at these two values. |
 | <a name="output_user_pool_arn"></a> [user\_pool\_arn](#output\_user\_pool\_arn) | ARN of the user pool, for the IAM policy documents the calling root builds. It is what scopes the auth service's task-role statements for AdminCreateUser, AdminAddUserToGroup and AdminDeleteUser to this one pool. Without it those statements can only name a wildcard resource, which is the opposite of the least-privilege posture the migration commits to. |
 | <a name="output_user_pool_client_id"></a> [user\_pool\_client\_id](#output\_user\_pool\_client\_id) | Identifier of the app client the auth service authenticates through. infra/modules/api-gateway-http takes it in cognito\_app\_client\_ids and makes it the JWT authorizer's jwt\_configuration.audience, so a token whose audience claim falls outside that set is rejected at the edge before any integration runs; services/auth-service sends it as ClientId on every authentication call; and the calling root writes it to Parameter Store for both. Without it the edge cannot pin which client's tokens it accepts. |

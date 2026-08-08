@@ -82,21 +82,49 @@
  * <h2>Target contract, and the tree state measured against it</h2>
  *
  * <p>Assumptions: the inventory below states this package's <b>target
- * contract</b> as the migration plan assigns it, not a listing of the directory
- * beside this file. The distinction is declared in one place, here, so that a
- * reader can tell a member that is PLANNED from one that is LANDED without
- * having to guess which of the two a sentence means. Three source files
- * constitute this package and no more:
+ * contract</b> as the migration plan assigns it, and every member of that
+ * contract has now LANDED, so for this package the inventory and a listing of
+ * the directory beside this file agree. The PLANNED and LANDED labels are kept
+ * rather than dropped, because they are what let a reader tell the two apart in
+ * a sibling package where they still differ. Four source files constitute this
+ * package and no more, and that is measured rather than asserted:
+ *
+ * <pre>
+ * this directory: 4 java files = 3 tests + 1 charter
+ * </pre>
+ *
+ * <p>Refactoring Rationale: the marker line above was added because the sentence
+ * beside it -- "four source files constitute this package and no more" -- is a
+ * closed-set claim that nothing checked. A fourth test authored here without an
+ * entry below would have left the claim quietly false, which is the failure mode
+ * every inventory in this tree has actually suffered. The line and the names under
+ * it are compared with this directory on every build by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java}.</p>
  *
  * <ul>
  *   <li>{@code package-info.java} -- this charter. LANDED.</li>
- *   <li>{@code TransactionMapperTest} -- PLANNED. Covers the mapper over the
+ *   <li>{@code TransactionMapperTest} -- LANDED. Covers the mapper over the
  *       350-byte transaction record, whose length {@code app/cpy/CVTRA05Y.cpy}
- *       declares at its line 2.</li>
+ *       declares at its line 2, across 26 cases.</li>
  *   <li>{@code BillPaymentMapperTest} -- LANDED. Covers the bill-payment
  *       conversions, the assembled acknowledgement text and the invariant
- *       members of the appended ledger row.</li>
+ *       members of the appended ledger row, across 19 cases.</li>
+ *   <li>{@code BillPaymentMappingTest} -- LANDED. Covers the conversion that
+ *       reports a posted bill payment and the pay-in-full balance semantic it
+ *       fixes, across 6 cases.</li>
  * </ul>
+ *
+ * <p>Refactoring Rationale: this inventory recorded {@code TransactionMapperTest}
+ * as PLANNED after it had landed, and omitted {@code BillPaymentMappingTest}
+ * altogether while declaring the set closed at three members. Both halves of that
+ * are the same defect: a measured statement that stopped being re-measured. It
+ * matters more here than a stale sentence usually would, because the paragraph
+ * above invites a reader to trust the inventory OVER the directory -- so a reader
+ * following the charter would have concluded the transaction mapper had no
+ * executable consumer, which is exactly the gap {@code TransactionMapperTest}
+ * exists to close, and would not have found the fourth file at all. The counts are
+ * stated per member so that a future divergence is arithmetic rather than
+ * impression.
  *
  * <p>Alternatives Considered: withholding this charter until every member of
  * that set exists, which would let the inventory be read as a plain listing and

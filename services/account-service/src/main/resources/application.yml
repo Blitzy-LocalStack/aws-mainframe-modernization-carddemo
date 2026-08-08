@@ -1241,6 +1241,26 @@ carddemo:
       admin-group-name: ${CARDDEMO_COGNITO_ADMIN_GROUP_NAME:carddemo-admin}
       user-group-name: ${CARDDEMO_COGNITO_USER_GROUP_NAME:carddemo-user}
 
+    # WHY : (1) Assumptions: the key arrives from the environment with NO default, so a
+    #       deployment that has not been given one fails at start-up rather than
+    #       enciphering the two protected customer identifiers under the account's
+    #       default key. An envelope wrapped under a key nobody named is one no re-key
+    #       and no cross-environment restore can locate, and the failure would surface
+    #       only when a value had to be read back -- long after the rows were written.
+    #       (2) Trade-offs: this mirrors card-service's carddemo.security.cvv.key-id
+    #       exactly, including the absence of a default. The cost is that a developer
+    #       running this module locally must set one variable; the benefit is that
+    #       pointing development at the production key, or the reverse, yields
+    #       envelopes that fail to decipher instead of yielding national identifiers
+    #       across an environment boundary.
+    #       (3) Assumptions: ONE key for both protected columns rather than one each.
+    #       The envelopes are bound to their column through the encryption context
+    #       carddemo:column, which is authenticated additional data, so an envelope
+    #       moved between ssn_encrypted and govt_issued_id_encrypted already fails its
+    #       authentication check. A second key would add a second rotation schedule and
+    #       a second grant to manage for a separation the context already provides.
+    customer-identifier:
+      key-id: ${CARDDEMO_SECURITY_CUSTOMER_IDENTIFIER_KEY_ID}
 
   account:
     inquiry:
@@ -1338,6 +1358,38 @@ carddemo:
     #       it is read through @Value. A deployment missing it fails fast rather than
     #       serving the internal paths with a chain that can verify nothing.
     signing-key: ${CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY}
+
+  reference-context:
+    # WHY : (1) Assumptions: the account update path validates three address fields
+    #       against allow-lists this service does not own. app/cbl/COACTUPC.cbl
+    #       checks the phone area code at line 2298, the state code and the
+    #       state-with-postal-prefix pairing against the lists that originate in
+    #       app/cpy/CSLKPCDY.cpy at L521, L931, L1013 and L1073. The migration seeds
+    #       those rows into the reference context's schema, so under
+    #       schema-per-service they are read over that context's published contract
+    #       rather than over a database grant.
+    #       (2) Assumptions: the address carries NO default, for the same reason the
+    #       account context's own callers give. A default would let this service
+    #       start against a plausible-looking wrong address and then report every
+    #       address as invalid or every lookup as unavailable -- a wrong answer an
+    #       operator would read as a data problem rather than as a misconfiguration.
+    #       The value arrives from a Terraform output; infra/envs/{dev,prod}/main.tf
+    #       set it.
+    #       (3) Alternatives Considered: no internal-identity credential is needed
+    #       for this hop, unlike the transaction context's reads of THIS service.
+    #       The reference service grants every GET under /api/v1/reference/** to
+    #       either group -- see the read rule in its config/SecurityConfig.java -- so
+    #       service/RestReferenceAddressLookup.java relays the calling user's own
+    #       bearer token. A minted machine token would grant MORE than the caller
+    #       holds and would require a new audience, a new chain on the far side and a
+    #       new key here, all to express an authority the caller already has.
+    #       (4) Trade-offs: both timeouts are set and both are short, because setting
+    #       one leaves the other unbounded and it is the read that hangs. These calls
+    #       run inside the account update request, so an unbounded read would hold
+    #       that request open for as long as the dependency stayed silent.
+    base-url: ${CARDDEMO_REFERENCE_CONTEXT_BASE_URL}
+    connect-timeout-ms: 2000
+    read-timeout-ms: 3000
 
 # =============================================================================
 # Closing notes

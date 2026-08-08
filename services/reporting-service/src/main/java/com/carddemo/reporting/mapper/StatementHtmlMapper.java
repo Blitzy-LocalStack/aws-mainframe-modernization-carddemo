@@ -1,5 +1,6 @@
 package com.carddemo.reporting.mapper;
 
+import com.carddemo.common.security.HtmlTextEncoder;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.CharacterCodingException;
@@ -204,7 +205,10 @@ import java.util.Objects;
  * {@code CUST-FIRST-NAME} is declared {@code PIC X(25)} at line 6 of {@code app/cpy/CVCUS01Y.cpy}
  * and {@code TRAN-DESC} is declared {@code PIC X(100)} at line 9 of {@code app/cpy/CVTRA05Y.cpy},
  * and an {@code X} picture admits every character in the character set, angle brackets included.
- * Every such value is therefore passed through {@link #escapeForMarkup(String, String)} before
+ * Every such value is therefore passed through {@link #escapeForMarkup(String, String)} -- which
+ * refuses the characters this artifact cannot carry and then delegates the entity replacement to
+ * {@link com.carddemo.common.security.HtmlTextEncoder}, the shared kernel's single implementation of
+ * the HTML text-node encoding -- before
  * it is concatenated into a record, so that the five characters which change how a browser parses
  * the surrounding document -- {@code &}, {@code <}, {@code >}, {@code "} and {@code '} -- leave as
  * character references rather than as markup.</p>
@@ -1447,37 +1451,83 @@ public final class StatementHtmlMapper {
      *     encoding
      */
     private static String escapeForMarkup(String value, String component) {
-        StringBuilder rendered = new StringBuilder(value.length());
+        // WHY : Refactoring Rationale: the two obligations are now separated and only ONE of them is
+        //       implemented here. The character-domain refusal is specific to this artifact -- it
+        //       exists because the output is a fixed-length record data set, so an embedded terminator
+        //       forges a record boundary -- and it stays. The entity replacement is not specific to
+        //       anything: it is the ordinary HTML text-node encoding, and
+        //       com.carddemo.common.security.HtmlTextEncoder is the shared kernel's implementation of
+        //       exactly it. This method previously carried a second implementation of that encoding,
+        //       so the migration held two five-character replacement tables that were byte-identical
+        //       by coincidence rather than by construction, and a correction applied to one of them
+        //       would have left the other wrong. Delegating leaves one table.
+        // WHY : Assumptions: the refusal runs FIRST and completely, rather than being interleaved with
+        //       the replacement as it was. Observable behaviour is unchanged -- the same
+        //       IllegalArgumentException naming the same component and the same first offending
+        //       zero-based position -- because the previous single pass also threw before returning
+        //       anything, and its builder was local. What changes is that the refusal no longer has to
+        //       be expressed as the default arm of a switch over the replaced characters, which is what
+        //       forced the two concerns into one loop to begin with.
+        // WHY : Alternatives Considered: moving the refusal into the shared encoder as an optional
+        //       strict mode. Rejected because the bound it enforces is this artifact's record contract
+        //       and not a property of HTML: the shared encoder is also used where a control character
+        //       is merely undesirable rather than structurally fatal, and giving it a mode would make
+        //       every caller choose one, which is how a caller ends up choosing wrong.
+        requireRenderableInput(value, component);
+        return HtmlTextEncoder.encode(value);
+    }
+
+    /**
+     * Refuses a value carrying any character this artifact cannot represent in a display picture.
+     *
+     * <p>Assumptions: the bound is the printable US-ASCII range, and both ends matter for different
+     * reasons. Below {@value #LOWEST_RENDERABLE_CHARACTER} lie the control characters, of which a
+     * carriage return or a line feed would forge a record boundary in a fixed-length data set and
+     * displace every record after it. At or above {@code LOWEST_REFUSED_HIGH_CHARACTER} lies
+     * everything outside US-ASCII, which the artifact's declared encoding cannot carry in one byte, so
+     * a single such character would change the byte length of a record whose length is contracted.</p>
+     *
+     * <p>Trade-offs: an unrenderable character is REFUSED rather than dropped or substituted. Dropping
+     * it would silently alter customer data and substituting it would put a character into the record
+     * the customer's data does not contain; refusal stops the document instead of corrupting it, which
+     * is the direction chosen because a corrupted fixed-length record is not detectable downstream.</p>
+     *
+     * <p>Trade-offs: the diagnostic names the COMPONENT and the zero-based position and never the
+     * character or the surrounding text, so a refusal is actionable without reproducing customer,
+     * address or merchant content in a message that reaches a log.</p>
+     *
+     * <p>Assumptions: this guard and {@link #requireRenderable(String, String)} apply the SAME
+     * character bound at two different points and are deliberately not one method. This one inspects a
+     * value a CALLER supplied, before it is encoded, and reports {@code IllegalArgumentException} --
+     * the argument is wrong. That one inspects a record this class has already ASSEMBLED and reports
+     * {@code IllegalStateException} -- an assembled record carrying such a character means this class
+     * introduced it, which is a defect here rather than a bad argument. Collapsing them would have to
+     * pick one exception type and would then misreport whichever case it did not pick, and the two
+     * diagnostics differ for the same reason: the assembled-record guard may name the offending code
+     * point because by construction no declared item can hold it, while this one may not, because the
+     * character came from customer data.</p>
+     *
+     * @param value the dynamic value about to enter a markup text node; must not be {@code null}
+     * @param component the name of the item being rendered, reported in the diagnostic so a refusal
+     *     identifies which value was refused without quoting any of it
+     * @throws IllegalArgumentException if the value carries a character below
+     *     {@value #LOWEST_RENDERABLE_CHARACTER} or at or above
+     *     {@code LOWEST_REFUSED_HIGH_CHARACTER}
+     */
+    private static void requireRenderableInput(String value, String component) {
         for (int position = 0; position < value.length(); position++) {
             char character = value.charAt(position);
-            switch (character) {
-                // WHY : Refactoring Rationale: the five replacements read from the constants above
-                //       rather than repeating their literals. Three of those constants existed and
-                //       were referenced only by a second, narrower escaper that escaped three
-                //       characters instead of five; that method has been removed and its constants
-                //       kept, because the alternative left every entity spelled in two places and
-                //       the two places disagreeing on how many characters are significant.
-                case '&' -> rendered.append(AMPERSAND_ENTITY);
-                case '<' -> rendered.append(LESS_THAN_ENTITY);
-                case '>' -> rendered.append(GREATER_THAN_ENTITY);
-                case '"' -> rendered.append(QUOTE_ENTITY);
-                case '\'' -> rendered.append(APOSTROPHE_ENTITY);
-                default -> {
-                    if (character < LOWEST_RENDERABLE_CHARACTER
-                            || character >= LOWEST_REFUSED_HIGH_CHARACTER) {
-                        throw new IllegalArgumentException(component
-                                + " carries a character this artifact cannot render at zero-based"
-                                + " position " + position
-                                + "; every item it declares is a display picture, so no control"
-                                + " character and no character outside US-ASCII is representable in"
-                                + " one, and either would break the "
-                                + HTML_RECORD_LENGTH + "-character record contract");
-                    }
-                    rendered.append(character);
-                }
+            if (character < LOWEST_RENDERABLE_CHARACTER
+                    || character >= LOWEST_REFUSED_HIGH_CHARACTER) {
+                throw new IllegalArgumentException(component
+                        + " carries a character this artifact cannot render at zero-based"
+                        + " position " + position
+                        + "; every item it declares is a display picture, so no control"
+                        + " character and no character outside US-ASCII is representable in"
+                        + " one, and either would break the "
+                        + HTML_RECORD_LENGTH + "-character record contract");
             }
         }
-        return rendered.toString();
     }
 
     /**

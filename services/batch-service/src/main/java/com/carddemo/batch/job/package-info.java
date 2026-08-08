@@ -2,23 +2,38 @@
  * Spring Batch job definitions for the CardDemo nightly batch chain, migrated
  * from z/OS JCL.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ * <h2>What is landed, and what is not</h2>
  *
- * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
- * beside this one today. The migration lands its artifacts in plan order and this charter is
- * authored first, so at the checkpoint that authored it this directory holds this charter and
- * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
- * missing, and a count below is a target total rather than a measurement of the directory.</p>
+ * <p>Assumptions: five of the seven jobs the roster below describes are LANDED and two are not.
+ * {@code PreflightDailyTransactionsJob}, {@code PostTransactionsJob}, {@code CalculateInterestJob},
+ * {@code BackupTransactionsJob} and {@code CombineTransactionsJob} each have a file in this directory,
+ * register a job bean under their token, and are reached by
+ * {@code services/batch-service/src/test/java/com/carddemo/batch/job/BatchJobRosterTest.java}.
+ * {@code ExportJob} and {@code ImportJob} have no file. That is a measurement of this directory rather
+ * than a target, and the roster test asserts it in BOTH directions -- so neither a token advertised with
+ * nothing behind it nor a job that has landed while still being described as absent can pass.</p>
  *
- * <p>Alternatives Considered: withholding this charter until every class it governs
- * exists. Rejected, because the charter is what the authors of those classes work
- * from -- which type belongs here, which may not, what the closed set is -- so
- * writing it last would leave the package with no stated contract during exactly
- * the interval in which one is needed. The cost of authoring it first is that its
- * inventory reads as present tense unless the distinction is declared, which is
- * what this section is for; the sentence above is the single place a reader has to
- * look to tell a target from a measurement.</p>
+ * <p>Refactoring Rationale: this section previously declared that every inventory in this charter was a
+ * target rather than a measurement, and that anything named without a file was planned rather than
+ * missing. That device is withdrawn here, because it makes the charter unfalsifiable: a reader cannot tell
+ * an intended class from a forgotten one, and no test can either. It is replaced by a measured statement
+ * plus a test that keeps the statement true.</p>
+ *
+ * <p>Assumptions: the two unlanded jobs are unlanded for a stated reason rather than by sequencing. Both
+ * re-express programs that read the customer and card masters -- {@code app/jcl/CBEXPORT.jcl:49-57} names
+ * five input data definitions, two of them those masters -- and this module holds no customer entity and
+ * no card entity, because the account and card contexts own them. Landing the pair means widening this
+ * module's domain and repository sets for a job that stands outside the nightly chain. There is also no
+ * oracle to verify a migration of them against: {@code tests/README.md:53-69} records that
+ * {@code CBEXPORT} and {@code CBIMPORT} do not compile under the open-source compiler at all, because
+ * both declare a record key on a field that exists only in working storage, so no golden master exists for
+ * either.</p>
+ *
+ * <p>Assumptions: the two tokens are NOT removed from {@code BatchJobName} to close the gap. That
+ * enumeration is an external contract -- the state machine names its states by those tokens -- so removing
+ * one would change a contract outside this repository's Java sources to make an inventory tidy. The entry
+ * point's own registry lookup reports an unregistered token by name and lists what is registered, which is
+ * the honest behaviour for a token that is real and not yet served.</p>
  *
  * <p>Every type in this package is a job definition and nothing more: it wires
  * readers, processors, writers and step ordering, and it delegates every
@@ -113,7 +128,15 @@
  * differs by one character compiles, deploys, and then fails at run time inside
  * the state machine with an unresolved-job error rather than at build time —
  * which is exactly why the identity is stated here in prose that a reviewer
- * reads, in addition to being asserted by test.</p>
+ * reads, in addition to being asserted by
+ * {@code services/batch-service/src/test/java/com/carddemo/batch/job/BatchJobRosterTest.java}, which
+ * compares each landed class's own {@code JOB_NAME} constant against the enumeration and refuses a
+ * duplicate.</p>
+ *
+ * <p>Assumptions: each landed job also declares a distinct {@code STEP_NAME}, and the distinctness is
+ * asserted rather than assumed. The durable step ledger keys on the run identifier paired with the STEP
+ * name, so two jobs sharing a step name would make the second one to run in a given execution report as
+ * already complete and skip its work silently -- an omission with no failure to notice it by.</p>
  *
  * <p>Assumptions: the container command supplies the job token
  * and the business date as process arguments. Step Functions passes them

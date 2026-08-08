@@ -276,31 +276,75 @@ of them lives inside the timed execution.
 Status Change` for this module's own daily machine with a status of `TIMED_OUT`,
 `ABORTED` or `FAILED`, and invokes the resume function through an input
 transformer that supplies `action`, the parameter to clear, the terminating
-execution's name and its terminal status. It passes no expected lease owner: the
-two in-graph edges name one so that a chain which never took the bracket cannot
-clear it, whereas this rule exists for the execution that DID take it and then
-stopped, so requiring an owner here would refuse the very invocation the rule was
-added for. An absent expected owner is read as an unconditional release. `FAILED` is
-matched even though the in-execution failure path already resumes, because that
-path is itself a state and can fail: a chain whose `ResumeOnlineWritesOnFailure`
-state errors ends `FAILED` with the bracket still engaged, which is precisely the
-outage this rule exists to prevent. The duplicate release that a matched `FAILED`
-implies on an ordinary failure is harmless -- the handler reads the flag before it
-writes, finds it already released, and skips the write, so a second invocation is
+execution's name and its terminal status. It passes that same execution name as
+`expectedLeaseOwner`, so this rule is checked exactly like the two in-graph edges:
+it can clear the lease of the execution that just terminated, and no other.
+
+Refactoring Rationale: this rule previously passed **no** expected owner, and an
+absent owner was read as an unconditional release. That reading was forced rather
+than chosen -- the bracket was stored as a bare boolean, so no owner existed to
+compare a claim against and "unconditional" was the only release the handler could
+implement. The consequence was an outage the rule itself could cause: it fires per
+terminating execution, so a chain that lost the lease and failed fast triggered a
+release that re-enabled online writes underneath the execution which legitimately
+held the window. The owner was available all along -- the transformer already
+extracted `$.detail.name` -- so naming it costs nothing now that there is a durable
+owner to check it against.
+
+Trade-offs: making this rule conditional does not strand a bracket whose owner died
+before the event was delivered, because the handler's release condition also admits
+an **expired** lease and the graph records an expiry equal to the state machine's
+own timeout. The watchdog is therefore the fast path rather than the only path: a
+lost event delays release to the lease's expiry instead of requiring an operator.
+
+`FAILED` is matched even though the in-execution failure path already resumes,
+because that path is itself a state and can fail: a chain whose
+`ResumeOnlineWritesOnFailure` state errors ends `FAILED` with the bracket still
+engaged, which is precisely the outage this rule exists to prevent. The duplicate
+release that a matched `FAILED` implies on an ordinary failure is harmless -- the
+lease has already been deleted, so the conditional delete finds nothing to remove
+and the handler reports "no lease is held" without writing the parameter, which is
 one extra log line and no parameter version. `SUCCEEDED` is deliberately not
 matched: it is reachable only after `ResumeOnlineWrites` has already run. The rule
 invokes the function through an `aws_lambda_permission` scoped to the rule's own
 ARN rather than through the execution role, because EventBridge invokes Lambda via
 the function's resource policy.
 
-`QuiesceOnlineWrites` additionally publishes the bracket as a lease:
-`leaseStartedAt` is the execution start time and `leaseSeconds` is
-`state_machine_timeout_seconds`, so a reader of the flag can compute the instant
-after which a still-quiesced flag has outlived any execution that could
-legitimately hold it, and fail safe. The lease length is derived from the
-execution ceiling rather than accepted as its own input, so it cannot be
-configured to lapse while a chain is still running. The finalizer rule is what
-releases the bracket; the lease is what lets a consumer notice before it does.
+`QuiesceOnlineWrites` takes the bracket as a real lease, in a DynamoDB item the
+environment root provisions, and not in the flag. `leaseStartedAt` is the execution
+start time and `leaseSeconds` is `state_machine_timeout_seconds`, which the handler
+stores as an absolute `expiresAt` on the lease item. The lease length is derived
+from the execution ceiling rather than accepted as its own input, so it cannot be
+configured to lapse while a chain is still running.
+
+Refactoring Rationale: the bracket used to be the flag itself, and that could not be
+a lease. Parameter Store offers no compare-and-set for a plain String parameter, so
+acquisition was a read of the flag followed by a write of it -- two executions
+reading in the same instant both concluded they had acquired it -- and release had no
+stored owner to check a claimed one against. The lease item supplies the
+compare-and-set the flag cannot: acquisition is a conditional `PutItem` that
+succeeds only when no lease is stored or the stored one has expired, and release is
+a conditional `DeleteItem` that succeeds only for the recorded owner or an expired
+lease. Trade-offs: the **flag stays exactly where it was**, at the same parameter
+path with the same boolean spelling, and is now written as a consequence of the
+lease decision rather than being the lease. Moving the flag instead of the bracket
+was the alternative and was rejected because every online service reads that flag;
+this way none of them gains a second client or a second thing to read.
+
+`CheckQuiesceLeaseAcquired` is what makes the lease decide whether the chain runs.
+Refactoring Rationale: the quiesce state used to continue straight to
+`StageSeedDatasets` whether or not it had acquired the bracket, so the lease was
+computed, reported and then ignored on the success edge -- the only place the graph
+consulted it was the failure edge. An execution starting while a previous night
+still held the window therefore went on to post transactions and accrue interest
+with online writes enabled, which is the condition the bracket exists to prevent. A
+refused acquisition now routes to `OnlineWriteLeaseUnavailable`, a `Fail` state that
+deliberately passes through no resume state at all: another execution owns the
+bracket, so clearing the flag would re-enable online writes underneath a run still
+inside its window. Alternatives Considered: waiting and retrying instead of failing,
+rejected because the schedule starts one execution per night, so a refused
+acquisition means the previous night is still running -- waiting would stack a second
+chain behind an overdue run and hide that fact, where failing surfaces it.
 
 Refactoring Rationale: an earlier revision wired TWO equivalent out-of-graph
 release rules, one matching `TIMED_OUT` and `ABORTED` only and one matching all
@@ -434,6 +478,7 @@ scope.
 | <a name="input_adhoc_report_timeout_seconds"></a> [adhoc\_report\_timeout\_seconds](#input\_adhoc\_report\_timeout\_seconds) | Ceiling on a single ad-hoc report execution, applied at the top level of the ad-hoc state machine definition. Separate from the daily ceiling because one on-demand report is a far smaller unit of work than the nightly chain, and a shared value would have to be sized for the larger of the two. | `number` | `7200` | no |
 | <a name="input_batch_container_name"></a> [batch\_container\_name](#input\_batch\_container\_name) | Name of the container inside the batch task definition whose command each job state overrides. The environment root passes the name published by the batch ecs-service instance. An override addresses its container by name and a name that matches nothing is ignored rather than rejected, so a wrong value here silently runs the image's baked-in command instead of the intended job. | `string` | `"batch"` | no |
 | <a name="input_data_migration_container_name"></a> [data\_migration\_container\_name](#input\_data\_migration\_container\_name) | Name of the container inside the data-migration task definition whose command each staging branch overrides, matched by name exactly as the batch container name is, and published by the data-migration ecs-service instance. | `string` | `"data-migration"` | no |
+| <a name="input_dataset_staging_root"></a> [dataset\_staging\_root](#input\_dataset\_staging\_root) | Absolute path inside the data-migration container where the exported seed extracts are mounted. The staging command joins each dataset's registered source file name to this directory; it ships no extract in its image, so this is the only thing that tells it where to read. Populating the path is an operator action documented in docs/runbooks/data-migration.md. | `string` | `"/mnt/carddemo-extracts"` | no |
 | <a name="input_log_group_kms_key_arn"></a> [log\_group\_kms\_key\_arn](#input\_log\_group\_kms\_key\_arn) | ARN of the customer-managed key both execution log groups are encrypted with, published as an output by infra/modules/kms and passed in by the environment root. Null leaves the log groups on CloudWatch's own service-managed encryption. | `string` | `null` | no |
 | <a name="input_log_include_execution_data"></a> [log\_include\_execution\_data](#input\_log\_include\_execution\_data) | Whether each logged event carries the state's input and output payload as well as the transition itself. Safe to leave on because this chain's payloads are business dates, dataset names, job names and execution identities -- no cardholder data, primary account number or credential enters either state machine. It remains an input so that a future change threading record-level data through an execution can turn it off. | `bool` | `true` | no |
 | <a name="input_log_level"></a> [log\_level](#input\_log\_level) | Which execution events reach both state-machine log groups: ERROR records failures, FATAL only terminal failures, and ALL every transition. Logging cannot be disabled, because execution history is the target analogue of the baseline job log. | `string` | `"ALL"` | no |
@@ -443,7 +488,7 @@ scope.
 | <a name="input_retry_backoff_rate"></a> [retry\_backoff\_rate](#input\_retry\_backoff\_rate) | Multiplier applied to the retry interval on each successive attempt. A value of 1 makes every wait equal to the interval, which is a flat retry rather than a backoff; higher values grow the wait geometrically. | `number` | `2` | no |
 | <a name="input_retry_interval_seconds"></a> [retry\_interval\_seconds](#input\_retry\_interval\_seconds) | Seconds a state waits before its first retry. Subsequent waits are this interval multiplied by the backoff rate, compounding per attempt, so this value and the rate together bound how long a retrying state can occupy the batch window. | `number` | `30` | no |
 | <a name="input_retry_max_attempts"></a> [retry\_max\_attempts](#input\_retry\_max\_attempts) | Retry attempts each state makes after its first failure, before its catch handler runs. This is the per-state half of the durable retry tier; the other half is that a failed execution can be redriven from the state that failed, and that the batch run ledger makes a step which already completed a no-op when it is retried. | `number` | `3` | no |
-| <a name="input_seed_datasets"></a> [seed\_datasets](#input\_seed\_datasets) | Dataset names the seed-staging state iterates over, one Map branch and one data-migration task per name. The default is the ten loaded masters, one per IDCAMS master-refresh load job in app/jcl/; DALYTRAN is absent because posting reads it directly as sequential input rather than loading it into a master table. An environment may pass a subset to restage one master without a module edit. | `list(string)` | <pre>[<br/>  "accounts",<br/>  "cards",<br/>  "customers",<br/>  "card_xref",<br/>  "transactions",<br/>  "disclosure_groups",<br/>  "transaction_category_balances",<br/>  "transaction_types",<br/>  "transaction_categories",<br/>  "users"<br/>]</pre> | no |
+| <a name="input_seed_datasets"></a> [seed\_datasets](#input\_seed\_datasets) | Generation families the seed-staging state iterates over, one Map branch and one data-migration task per name. Each value is passed verbatim as the ETL container's --dataset argument, so it MUST be a name that command's generation-family registry knows; the ten defaults are the ten generation-data-group bases the baseline defines across app/jcl/DEFGDGB.jcl, DEFGDGD.jcl and DALYREJS.jcl. An environment may pass a subset to restage one family without a module edit. | `list(string)` | <pre>[<br/>  "transact-bkup",<br/>  "transact-daly",<br/>  "tranrept",<br/>  "tcatbalf-bkup",<br/>  "systran",<br/>  "transact-combined",<br/>  "trantype-bkup",<br/>  "trancatg-bkup",<br/>  "discgrp-bkup",<br/>  "dalyrejs"<br/>]</pre> | no |
 | <a name="input_stage_datasets_max_concurrency"></a> [stage\_datasets\_max\_concurrency](#input\_stage\_datasets\_max\_concurrency) | Maximum number of seed-staging Map branches allowed to run at once. The environment root may lower it to fit Aurora connection and Fargate task quotas; the default permits parallel loads without starting all ten branches simultaneously. A sizing value, so it is one of the few a root may legitimately differ on. | `number` | `3` | no |
 | <a name="input_state_machine_timeout_seconds"></a> [state\_machine\_timeout\_seconds](#input\_state\_machine\_timeout\_seconds) | Ceiling on a single daily-batch execution, applied at the top level of the state machine definition rather than to any one state. It bounds the whole chain: an execution that stalls where no individual state's timeout applies would otherwise wait indefinitely, holding the online read-only flag set, because the resume state runs only after the chain finishes or fails. The ceiling caps how long the flag can be held rather than releasing it -- a timed-out execution runs no further state -- so release on that path comes from the out-of-execution watchdog rule, and this same value is published to the quiesce call as the bracket's lease length. | `number` | `28800` | no |
 | <a name="input_state_timeout_seconds"></a> [state\_timeout\_seconds](#input\_state\_timeout\_seconds) | Ceiling on each of the eleven work states, keyed by the state name exactly as main.tf spells it. The default sizes the long-running states -- seed staging, posting, interest, statements and reports -- above the states that only toggle a flag or refresh statistics. Every key must be present, so a state can never be left without a timeout: a state with no ceiling waits indefinitely, which holds the whole chain open and leaves the online read-only flag set until an operator intervenes. | `map(number)` | <pre>{<br/>  "AnalyzeTables": 1800,<br/>  "BackupTransactions": 3600,<br/>  "CalculateInterest": 7200,<br/>  "CombineTransactions": 3600,<br/>  "GenerateReports": 3600,<br/>  "GenerateStatements": 7200,<br/>  "PostTransactions": 7200,<br/>  "PreflightDailyTransactions": 1800,<br/>  "QuiesceOnlineWrites": 300,<br/>  "ResumeOnlineWrites": 300,<br/>  "StageSeedDatasets": 3600<br/>}</pre> | no |

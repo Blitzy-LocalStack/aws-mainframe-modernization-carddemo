@@ -231,11 +231,19 @@ tags:
       COUSR03C.cbl. Every operation carries x-required-authority carddemo-admin.
 
 # WHY : Assumptions: a document-level default makes the unauthenticated
-#       operation the explicit exception rather than the silent norm, so an
+#       operations the explicit exception rather than the silent norm, so an
 #       operation added later without a security block inherits the
-#       authenticated posture instead of being published open. The sign-on
-#       operation overrides this with an empty requirement, which is the only
-#       override in the document.
+#       authenticated posture instead of being published open.
+# WHY : Assumptions: THREE operations override this default with an empty
+#       requirement -- signOn, answerSignOnChallenge and refreshTokens -- and they
+#       are exactly the three the Sign-On tag covers and the three
+#       SecurityConfig names in its unauthenticated list. Each is open for the
+#       same reason: between them they are the operations that ISSUE a token, so
+#       none of them can require one. Sign-on issues the first, the challenge
+#       issues the one a temporary password could not, and the renewal issues a
+#       replacement for one that has expired -- a caller holding only an expired
+#       access token must still be able to renew. The five user operations
+#       inherit the default and override nothing.
 security:
   - bearerAuth: []
 
@@ -551,11 +559,18 @@ paths:
               $ref: "#/components/schemas/TokenRefreshRequest"
       responses:
         "200":
-          # Assumptions: the renewed set carries a null refreshToken, because the
-          #   pool does not reissue one on renewal: the caller keeps the token it
-          #   already holds until that token itself expires. The property is nullable
-          #   on the shared shape precisely so this operation can return the same
-          #   schema without a second, nearly identical one.
+          # Assumptions: the renewed set carries a NEW refreshToken and the caller must
+          #   replace the one it sent. The app client is provisioned with refresh-token
+          #   rotation enabled and a zero retry grace period
+          #   (infra/modules/cognito/main.tf:581-584), so the pool issues a replacement
+          #   and invalidates the submitted token at once.
+          # Refactoring Rationale: this note previously stated the opposite -- that the
+          #   property is null here because the pool does not reissue one -- which was
+          #   false against the provisioned client and not merely imprecise. A caller
+          #   following it would keep the token it sent, and its SECOND renewal would be
+          #   refused as a reuse, so the operation would appear to work once and then
+          #   fail permanently. The property remains nullable on the shared shape for
+          #   the sign-on direction, where the pool may legitimately return none.
           description: >-
             The refresh token was accepted. The body is the same token set shape
             sign-on returns, carrying a new access token and identity token and a
@@ -728,7 +743,7 @@ paths:
         authority. A page holds at most ten rows and that size is set by the
         contract rather than chosen by the caller. Paging is by key in one
         direction at a time: send no cursor for the first page, then send the
-        nextCursor of the page you hold to move forward or its prevCursor to move
+        lastKey of the page you hold to move forward or its firstKey to move
         back, with direction naming which of the two you sent.
 
 
@@ -772,15 +787,18 @@ paths:
         #   periods; treat it as text to be echoed unchanged and never parse or
         #   construct one.
         # Refactoring Rationale: ONE cursor parameter, and an earlier revision of
-        #   this document declared two -- named lastKey and firstKey, which are
-        #   also the names of the page envelope's two ROW IDENTITIES, while its
-        #   two paging POSITIONS are named nextCursor and prevCursor. Naming the
-        #   inputs after the identities invited a client to page from the wrong
-        #   members, and on a page whose rows were all removed by a filter after
-        #   being read the identities are null while the positions are not, so
-        #   that client would have seen no cursor and stopped paging on a page
-        #   that had a successor. One input named cursor cannot name the wrong
-        #   member. It also makes this document agree with the card and
+        #   this document declared two, named lastKey and firstKey after the two
+        #   members a caller copies them FROM. Two inputs named after the two
+        #   members invited a client to send the wrong one for its direction,
+        #   because nothing in either name says which direction it belongs to.
+        #   One input named cursor cannot be the wrong one, the direction
+        #   parameter beside it carrying that choice explicitly instead.
+        # Assumptions: the envelope publishes exactly four members -- items,
+        #   firstKey, lastKey and hasNext -- and an earlier revision of this
+        #   document described two further paging positions named nextCursor and
+        #   prevCursor. Those were WITHDRAWN, as the card contract records at its
+        #   own envelope, so a caller pages from firstKey and lastKey and no
+        #   member of either other name exists to copy. It also makes this document agree with the card and
         #   transaction contracts, which declare the same single parameter, so
         #   there is one paging shape across this migration rather than three.
         # Assumptions: the direction is carried in the SEAL of each token as well
@@ -1457,8 +1475,8 @@ components:
       in: query
       required: false
       description: >-
-        The paging position to continue from: copy the nextCursor member of the
-        page you hold to advance past it, or its prevCursor member to retreat from
+        The paging position to continue from: copy the lastKey member of the
+        page you hold to advance past it, or its firstKey member to retreat from
         it, and state the matching direction. Omit it, and the direction, for the
         first page. It is opaque and sealed -- a version marker, a payload and an
         authentication code separated by full stops -- and must be echoed exactly
@@ -1628,6 +1646,27 @@ components:
         #   least one non-whitespace character", which is precisely what @NotBlank
         #   asserts. Anchoring it would instead demand the whole value be a single
         #   non-whitespace character and would refuse every real identifier.
+        # Refactoring Rationale: this facet also had to be made to appear in the
+        #   OTHER document this service publishes, and the review found that it did
+        #   not. The document served from /v3/api-docs is GENERATED from the Java
+        #   annotations, and a non-blank constraint contributes a minimum length and
+        #   no pattern at all, so the generated description of this property was
+        #   strictly weaker than this committed one -- it admitted a value of spaces
+        #   that both this document and the record refuse. The Java record now
+        #   publishes the identical string through a schema-documentation annotation,
+        #   declared once as SignOnRequest.NON_WHITESPACE_PATTERN, so the two
+        #   documents agree character for character.
+        # Alternatives Considered: adding a bean-validation @Pattern carrying this
+        #   expression, which would have been a runtime constraint rather than a
+        #   documentation one. Rejected on two independent grounds. A
+        #   bean-validation pattern is matched against the WHOLE value, so "\\S"
+        #   there would demand a single non-whitespace character and refuse every
+        #   real identifier -- the expression would have had to change here to a form
+        #   correct under both readings, altering a published facet. And it would be
+        #   REDUNDANT: @NotBlank already refuses exactly the values this pattern
+        #   refuses, so a second constraint would add a second violation for one
+        #   fault and put two entries for one property into a fieldErrors array this
+        #   document declares as one entry per offending field.
         # Trade-offs: the rule is now stated twice, once as minLength and once as
         #   a pattern, and the pattern alone would suffice. Both are kept because
         #   minLength is the constraint a code generator maps to a length check and
@@ -1677,7 +1716,7 @@ components:
         #   express would collide with it. The cost is one arbitrary-looking
         #   number; what it buys is that this operation cannot be used to relay
         #   unbounded input to a third party.
-        # Assumptions: the same unanchored non-whitespace pattern as the identifier
+        # Assumptions: the same non-whitespace pattern as the identifier
         #   above, for the same reason and from the same baseline check -- the
         #   presence test at app/cbl/COSGN00C.cbl line 123 is the credential's
         #   branch of the identifier's EVALUATE, testing "= SPACES OR LOW-VALUES"
@@ -1708,20 +1747,37 @@ components:
         them with. Both are required.
       additionalProperties: false
       required: [userId, refreshToken]
+      # Refactoring Rationale: both properties carry the non-whitespace pattern the
+      #   sign-on identifier records the full argument for. Neither had one while
+      #   this schema had no implementing record; TokenRefreshRequest now annotates
+      #   both @NotBlank, which refuses exactly what this facet refuses, and
+      #   publishes this identical string into the generated document through a
+      #   schema-documentation annotation. minLength: 1 alone would have admitted a
+      #   token of spaces -- which cannot be a value the pool issued, and which this
+      #   service would have relayed to a third party before learning so.
       properties:
         userId:
           type: string
           minLength: 1
           maxLength: 8
+          pattern: "\\S"
           description: >-
             The identifier the token set being renewed was issued for, at most eight
-            characters.
+            characters. Must not be blank.
+        # Assumptions: no maxLength, deliberately. The value is opaque and
+        #   provider-sized, so a bound guessed here would refuse a token the pool had
+        #   legitimately issued -- which on this operation means locking a caller out
+        #   until it signs on again with a credential it may no longer hold. An
+        #   oversized body is refused by the transport's own request-size limit
+        #   instead, one hop later than a field constraint would refuse it.
         refreshToken:
           type: string
           minLength: 1
+          pattern: "\\S"
           writeOnly: true
           description: >-
-            The refresh token a previous sign-on returned, replayed unaltered.
+            The refresh token a previous sign-on returned, replayed unaltered. Must
+            not be blank.
             Write-only: it travels in this request only and appears in no response.
 
     SignOnResponse:
@@ -1897,22 +1953,33 @@ components:
         not.
       additionalProperties: false
       required: [userId, session, newPassword]
+      # Refactoring Rationale: all three properties carry the non-whitespace pattern
+      #   the sign-on identifier records the full argument for. None had one while
+      #   this schema had no implementing record; SignOnChallengeRequest now annotates
+      #   all three @NotBlank, which refuses exactly what this facet refuses, and
+      #   publishes this identical string into the generated document through a
+      #   schema-documentation annotation. minLength: 1 alone would have admitted a
+      #   session of 4096 spaces -- which cannot be a value the pool issued, and which
+      #   this service would have relayed to a third party before learning so.
       properties:
         userId:
           type: string
           minLength: 1
           maxLength: 8
+          pattern: "\\S"
           description: >-
             The identifier the challenge was raised for, as returned on the
-            challenge body. It must match the one the session was issued for; the
-            pool refuses the exchange otherwise.
+            challenge body. Must not be blank. It must match the one the session was
+            issued for; the pool refuses the exchange otherwise.
         session:
           type: string
           minLength: 1
           maxLength: 4096
+          pattern: "\\S"
           writeOnly: true
           description: >-
-            The session value from the challenge body, echoed back verbatim. It is
+            The session value from the challenge body, echoed back verbatim. Must not
+            be blank. It is
             single-use: a second attempt with the same value requires a fresh
             sign-on.
         # Assumptions: this member is bounded and present-checked here and its
@@ -1929,9 +1996,11 @@ components:
           format: password
           minLength: 1
           maxLength: 256
+          pattern: "\\S"
           writeOnly: true
           description: >-
-            The permanent password to set. Its length and composition are governed
+            The permanent password to set. Must not be blank; its length and
+            composition are otherwise governed
             by the pool's password policy, not by this contract. Never persisted,
             logged or echoed by this service.
 
@@ -2066,7 +2135,11 @@ components:
       #   the whole value be one non-whitespace character and would refuse every
       #   real name. This is the same form and the same reasoning the sign-on
       #   schema above already uses, stated once per schema because a generator
-      #   reads each schema independently.
+      #   reads each schema independently. The record implementing this body
+      #   publishes the identical string into the generated document through a
+      #   schema-documentation annotation, so the two documents agree; the reason
+      #   that is a documentation annotation rather than a second runtime
+      #   constraint is recorded on the sign-on identifier above.
       # Assumptions: userType needs no pattern. Its enum admits exactly "A" and
       #   "U", neither of which is blank, so the domain constraint already refuses
       #   every whitespace value and a pattern beside it would restate a rule the
@@ -2157,16 +2230,20 @@ components:
         to look overlooked.
       additionalProperties: false
       required: [firstName, lastName, userType]
-      # Refactoring Rationale: the two name properties carry pattern "\\S" for the
-      #   same reason the create body's do, and the correction is made here as well
-      #   even though the record implementing this body is not yet authored. The
-      #   defect being closed is INTERNAL to this document and does not depend on a
-      #   Java class existing: each description asserted the value must not be
-      #   blank while the constraints beside it admitted a value of twenty spaces,
-      #   so the document contradicted itself. Leaving it until the record lands
-      #   would guarantee the disagreement is reintroduced at that moment, because
-      #   the baseline branch cited on each property is a not-blank check and the
-      #   record will annotate it @NotBlank.
+      # Refactoring Rationale: the two name properties carry the non-whitespace
+      #   pattern for the same reason the create body's do -- each description
+      #   asserted the value must not be blank while minLength: 1 beside it admitted
+      #   a value of twenty spaces, so the document contradicted itself.
+      # Refactoring Rationale: this note previously said the record implementing
+      #   this body was "not yet authored" and that the disagreement would be
+      #   reintroduced when it landed. It has landed:
+      #   com.carddemo.auth.dto.UpdateUserRequest annotates both names @NotBlank,
+      #   which refuses exactly what this facet refuses, and publishes this identical
+      #   string into the GENERATED document through a schema-documentation
+      #   annotation -- which was the half the review found missing, since a
+      #   non-blank constraint renders as a minimum length and no pattern. The
+      #   expression is stated once in Java, on
+      #   SignOnRequest.NON_WHITESPACE_PATTERN.
       properties:
         firstName:
           type: string

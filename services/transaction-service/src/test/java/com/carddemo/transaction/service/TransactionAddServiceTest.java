@@ -145,13 +145,22 @@ class TransactionAddServiceTest {
                 .hasMessage(TransactionAddService.MESSAGE_ACCOUNT_XREF_LOOKUP_FAILED);
     }
 
-    /** A confirmed submission writes one row keyed one past the highest existing identifier. */
+    /**
+     * A confirmed submission writes one row keyed by the value the database allocator issued.
+     *
+     * <p>Refactoring Rationale: this stubbed the maximum-key read and expected the service to add one.
+     * The service now takes the value from a database sequence instead, because deriving it from a
+     * maximum was neither atomic across concurrent callers nor safe once a business-date-prefixed
+     * identifier became the maximum. The stub therefore supplies the ALLOCATED value directly, which
+     * is also a stronger assertion: it pins that the service renders what it was given rather than
+     * performing arithmetic of its own.</p>
+     */
     @Test
-    @DisplayName("derive the next identifier as one past the highest stored one")
+    @DisplayName("render the identifier the database allocator issued")
     void confirmedSubmissionDerivesTheNextIdentifier() {
         when(this.accounts.findCardXrefByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(
                 new AccountContextClient.CardXref(ACCOUNT_ID, CARD_NUMBER)));
-        when(this.transactions.findMaxTranId()).thenReturn(Optional.of("0000000000000008"));
+        when(this.transactions.allocateTransactionId()).thenReturn(9L);
         when(this.transactions.save(any())).thenAnswer(call -> call.getArgument(0));
 
         TransactionAddResponse answer = this.service.addTransaction(submission(ACCOUNT_ID, "", "Y"));
@@ -163,13 +172,19 @@ class TransactionAddServiceTest {
                 .endsWith("0000000000000009" + TransactionAddService.MESSAGE_ADDED_SUFFIX);
     }
 
-    /** An empty table yields the first identifier, which the reference also produces. */
+    /**
+     * The first allocation yields the first identifier, which the reference also produces.
+     *
+     * <p>Assumptions: the allocator's own migration positions the sequence so that its first value is
+     * one against an empty ledger, matching the reference, which moves zeros into its key when the
+     * browse finds no record and therefore derives one.</p>
+     */
     @Test
-    @DisplayName("derive the first identifier from an empty table")
+    @DisplayName("render the first allocated identifier as sixteen zero-padded digits")
     void emptyTableYieldsTheFirstIdentifier() {
         when(this.accounts.findCardXrefByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(
                 new AccountContextClient.CardXref(ACCOUNT_ID, CARD_NUMBER)));
-        when(this.transactions.findMaxTranId()).thenReturn(Optional.empty());
+        when(this.transactions.allocateTransactionId()).thenReturn(1L);
         when(this.transactions.save(any())).thenAnswer(call -> call.getArgument(0));
 
         assertThat(this.service.addTransaction(submission(ACCOUNT_ID, "", "Y")).transactionId())
@@ -182,7 +197,7 @@ class TransactionAddServiceTest {
     void failingWriteReportsTheReferenceSentence() {
         when(this.accounts.findCardXrefByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(
                 new AccountContextClient.CardXref(ACCOUNT_ID, CARD_NUMBER)));
-        when(this.transactions.findMaxTranId()).thenReturn(Optional.of("0000000000000008"));
+        when(this.transactions.allocateTransactionId()).thenReturn(9L);
         when(this.transactions.save(any())).thenThrow(new RuntimeException("constraint"));
 
         assertThatThrownBy(() -> this.service.addTransaction(submission(ACCOUNT_ID, "", "Y")))

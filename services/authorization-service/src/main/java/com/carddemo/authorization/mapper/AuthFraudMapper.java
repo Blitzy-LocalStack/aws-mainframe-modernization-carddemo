@@ -7,9 +7,11 @@ import com.carddemo.authorization.domain.PendingAuthDetailKey;
 import com.carddemo.authorization.dto.FraudMarkRequest;
 import com.carddemo.authorization.dto.FraudMarkResponse;
 import com.carddemo.common.money.Money;
+import com.carddemo.common.security.CardNumberMasker;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Objects;
 
 /**
@@ -208,6 +210,18 @@ public final class AuthFraudMapper {
      * a reading.</p>
      */
     static final int MERCHANT_NAME_COLUMN_WIDTH = 22;
+
+    /**
+     * The pattern the reference application renders the segment's fraud report date with.
+     *
+     * <p>Assumptions: month first, solidus separators, two-digit year -- exactly what
+     * {@code EXEC CICS FORMATTIME ... MMDDYY(WS-CUR-DATE) DATESEP} at {@code cbl/COPAUS2C.cbl} L95 to
+     * L100 produces before its L101 moves the result into the segment. It is declared here rather than in
+     * the service that writes it so that this class holds both directions of the format and neither can
+     * drift from the other.
+     */
+    private static final DateTimeFormatter SEGMENT_REPORT_DATE =
+            DateTimeFormatter.ofPattern("MM/dd/yy");
 
     /**
      * Prevents instantiation of a class that holds only mapping functions.
@@ -426,6 +440,36 @@ public final class AuthFraudMapper {
      */
     public static LocalDate segmentFraudReportDate(String storedDate) {
         return PendingAuthDetailMapper.parseFraudReportDate(storedDate);
+    }
+
+    /**
+     * Renders a report date into the eight characters the detail segment's own column holds.
+     *
+     * <p>Purpose: this is the ENCODE direction of {@link #segmentFraudReportDate(String)} and the
+     * migrated form of two reference statements taken together -- {@code EXEC CICS FORMATTIME ...
+     * MMDDYY(WS-CUR-DATE) DATESEP} at {@code cbl/COPAUS2C.cbl} L95 to L100, whose result its L101 moves
+     * straight into {@code PA-AUTH-FRAUD-RPT-DATE}. The eight characters are month first with solidus
+     * separators and a two-digit year, which is why that column stores characters rather than a date: the
+     * form is not ISO-ordered, so a lexical compare on it is not a date compare.
+     *
+     * <p>Refactoring Rationale: the rendering used to live in {@code FraudMarkingService} as a formatter
+     * of its own, which put the two directions of one eight-character format in two classes. A pattern
+     * stated twice can diverge, and a divergence here is silent in the worst way: the write would emit a
+     * form this class's own parse would then refuse, so a row written by the online path would be
+     * unreadable by the load path, and the failure would surface against the reader rather than the
+     * writer. Both directions now sit beside each other so a reader checks them in one place.
+     *
+     * <p>Assumptions: the stamp is UNCONDITIONAL on the reference path -- L101 executes before any fork
+     * in that program -- so a caller writes it on the remove path exactly as on the report path and must
+     * not make it conditional on the action.
+     *
+     * @param reportDate the date the fraud state was reported or withdrawn on; must not be {@code null}
+     * @return exactly eight characters, month first and solidus-separated, with a two-digit year
+     * @throws NullPointerException if {@code reportDate} is {@code null}
+     */
+    public static String segmentFraudReportDateText(LocalDate reportDate) {
+        Objects.requireNonNull(reportDate, "reportDate must not be null");
+        return SEGMENT_REPORT_DATE.format(reportDate);
     }
 
     /**
@@ -760,5 +804,46 @@ public final class AuthFraudMapper {
             String merchantName,
             Long accountId,
             Long customerId) {
+
+        /**
+         * Renders the fraud row for a diagnostic line, omitting the amounts, the merchant text and both
+         * identifiers.
+         *
+         * <p>Assumptions: the two amounts, the merchant name and the two identifiers are OMITTED. Part
+         * one of the rendering rule in {@code docs/architecture/observability.md} names monetary
+         * amounts, merchant free text, account identifiers and customer identifiers as a class, and it
+         * requires omission rather than abbreviation for all of them. The merchant name is the clearest
+         * case on this record: it is carried "exactly as stored, trailing spaces included" because a
+         * fraud investigator needs the stored bytes, and stored bytes from an acquirer are exactly the
+         * attacker-influenced free text the rule withholds.</p>
+         *
+         * <p>Assumptions: what remains is a masked card number, two dates and a transaction identifier.
+         * Part two of the same rule sanctions a primary account number through {@code CardNumberMasker}
+         * and only where a rendering has no other way to say which row it describes, and that is the
+         * position here: a fraud row is identified by the card and the authorization instant together,
+         * so with the card omitted entirely a line could not be matched to the row an investigator is
+         * looking at. Part three admits the timestamps, the marker and the transaction identifier
+         * directly.</p>
+         *
+         * <p>Trade-offs: the masked value is passed through {@link CardNumberMasker} again on the way
+         * out, even though this component's contract is that it already arrives masked. The cost is one
+         * redundant pass over a short string; what it buys is that the single sanctioned abbreviation
+         * cannot be bypassed by a caller that constructed this record from a projection other than this
+         * mapper's -- the component is a plain {@code String} and its type cannot enforce the
+         * contract.</p>
+         *
+         * @return a single-line rendering naming the masked card number, the authorization instant, the
+         *     fraud marker, the report date and the transaction identifier, and no amount, merchant text
+         *     or identifier; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "FraudRowView[maskedCardNumber="
+                    + CardNumberMasker.maskEmbeddedCardNumbers(this.maskedCardNumber)
+                    + ", authTimestamp=" + this.authTimestamp
+                    + ", fraudMarker=" + this.fraudMarker
+                    + ", fraudReportDate=" + this.fraudReportDate
+                    + ", transactionId=" + this.transactionId + "]";
+        }
     }
 }

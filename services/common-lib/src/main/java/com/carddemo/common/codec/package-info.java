@@ -558,39 +558,65 @@
  *
  * <h2>The count canon</h2>
  *
- * <p>The shared kernel's target inventory is <b>21 production classes</b> and <b>9</b> package
- * charter files, for <b>30</b> compilation units in total:
+ * <p>The shared kernel holds <b>35 production classes</b> and <b>10</b> package
+ * charter files, for <b>45</b> compilation units in total:
  *
  * <pre>
  * package             production classes   charter   compilation units
  * common (root)                        1         1                   2
  * common.money                         2         1                   3
- * common.codec                         5         1                   6
- * common.error                         3         1                   4
+ * common.codec                         6         1                   7
+ * common.error                         7         1                   8
  * common.web                           3         1                   4
- * common.security                      3         1                   4
- * common.observability                 1         1                   2
+ * common.security                      8         1                   9
+ * common.observability                 3         1                   4
  * common.time                          1         1                   2
  * common.validation                    2         1                   3
+ * common.messaging                     2         1                   3
  * </pre>
  *
  * <p>Read down the table. Cross-check by production class:
- * 1 + 2 + 5 + 3 + 3 + 3 + 1 + 1 + 2 = 21, the root contributing one. Cross-check by
- * compilation unit: 2 + 3 + 6 + 4 + 4 + 4 + 2 + 2 + 3 = 30. Both sums agree, and
- * this file is one of the nine charters. Each sum is kept whole on one line so
- * that it can be checked by eye and matched by a search without a line break
- * splitting it.
  *
- * <p>Assumptions: the authoritative figures are <strong>21 production classes
- * across 8 subpackages and the root, in 30 compilation units, of which 9 are charters</strong>.
+ * <pre>
+ * root 1 + money 2 + codec 6 + error 7 + web 3 + security 8 + observability 3 + time 1 + validation 2 + messaging 2 = 35
+ * </pre>
+ *
+ * <p>Cross-check by compilation unit:
+ *
+ * <pre>
+ * root 2 + money 3 + codec 7 + error 8 + web 4 + security 9 + observability 4 + time 2 + validation 3 + messaging 3 = 45
+ * </pre>
+ *
+ * <p>Both sums agree, and this file is one of the ten charters. Each sum is kept
+ * whole on one line, and each addend is labelled with the package it counts, so
+ * that a single wrong figure is locatable rather than merely detectable.
+ *
+ * <p>Assumptions: the authoritative figures are <strong>35 production classes
+ * across 9 subpackages and the root, in 45 compilation units, of which 10 are charters</strong>.
  * Both cross-checks above re-derive them independently, by class and by
  * compilation unit, so any other class count fails both sums and is wrong.
  *
- * <p>This package's own share of that canon is <b>five production classes plus
- * this charter, so exactly six compilation units in {@code codec}, no more and
- * no fewer</b>. There are no subpackages beneath it. Stating the closed figure
- * here is what lets a reader tell a class absent from the module from one the
- * contract never admitted.
+ * <p>This package's own share of that canon is:
+ *
+ * <pre>
+ * this package: codec 6 production + 1 charter = 7 compilation units
+ * </pre>
+ *
+ * <p>There are no subpackages beneath it. Stating the closed figure here is what
+ * lets a reader tell a class absent from the module from one the contract never
+ * admitted.
+ *
+ * <p>Refactoring Rationale: this section stated the migration plan's TARGET
+ * inventory -- 21 production classes, 9 charters, 30 compilation units, and five
+ * classes in this package -- and presented it as the canon. The delivered module had
+ * already exceeded every one of those figures, this package included:
+ * {@code InquiryRequestCodec} is a sixth codec, and a tenth subpackage,
+ * {@code messaging}, existed with no row at all. A target the delivery has overshot
+ * reads as a closed inventory and is therefore worse than no figure, because it tells
+ * a reader that classes which are present were never admitted. The figures above are
+ * measurements of this tree, and {@code SharedKernelInventoryTest} re-derives every
+ * addend, both totals and this package's own share from the directory on each build,
+ * so the canon cannot drift again without failing.
  *
  * <h2>Boundaries: the dependency arrow points inward only</h2>
  *

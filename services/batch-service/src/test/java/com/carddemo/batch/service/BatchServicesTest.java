@@ -288,16 +288,25 @@ class BatchServicesTest {
                     .isEqualTo(DatasetGeneration.MINIMUM_GENERATION_NUMBER);
         }
 
-        /** Scratched generations are returned oldest first, so a caller deletes in a stable order. */
+        /**
+         * Scratched generations are returned oldest first, so a caller deletes in a stable order.
+         *
+         * <p>Assumptions: the expected numbers are derived from the minimum rather than written as
+         * literals. The run this case builds starts at the minimum, so the three oldest of it ARE the
+         * minimum and its two successors -- and writing them as literals is what made this case need
+         * editing when the minimum moved from zero to one, which is exactly the coupling a derived
+         * expectation removes.</p>
+         */
         @Test
         @DisplayName("return scratched generations oldest first")
         void scratchedGenerationsAreOldestFirst() {
             List<DatasetGeneration> existing = generations(
                     DatasetGeneration.RETAINED_GENERATION_COUNT + 3);
+            int first = DatasetGeneration.MINIMUM_GENERATION_NUMBER;
 
             assertThat(this.service.generationsToScratch(existing))
                     .extracting(DatasetGeneration::generationNumber)
-                    .containsExactly(0, 1, 2);
+                    .containsExactly(first, first + 1, first + 2);
         }
 
         /**

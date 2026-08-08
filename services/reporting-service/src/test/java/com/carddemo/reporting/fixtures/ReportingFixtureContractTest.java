@@ -247,6 +247,81 @@ class ReportingFixtureContractTest {
     }
 
     /**
+     * Supplies each fixture paired with the trailing-pad character its reference extract uses.
+     *
+     * <p>Assumptions: the pad character is a per-record-type fact taken from the shipped extracts
+     * under {@code app/data/ASCII/}, and it is NOT one convention for the whole directory. Measured
+     * across those extracts, {@code acctdata.txt} and {@code custdata.txt} pad with BLANKS while
+     * {@code tcatbal.txt}, {@code trantype.txt} and {@code trancatg.txt} pad with ASCII ZEROES, and
+     * the sibling fixture trees agree -- {@code transaction-service}'s balance fixtures and
+     * {@code reference-service}'s type and category fixtures all pad with zeroes.</p>
+     *
+     * <p>Refactoring Rationale: three of this directory's five fixtures padded with blanks where
+     * their extracts pad with zeroes, so the same record type was written two ways two directories
+     * apart -- {@code reference-service}'s {@code trantype.txt} and this one differed in their last
+     * eight bytes while claiming the same descriptor. The three are corrected and the convention is
+     * asserted here so it cannot drift back silently, because a wrong pad byte changes nothing a
+     * decode can detect: {@code FILLER} is a character field, so blanks and zeroes both decode, both
+     * re-encode and both round-trip byte for byte.</p>
+     *
+     * <p>Alternatives Considered: padding every fixture in this directory with zeroes, which is the
+     * simpler rule and is what a one-line reading of the defect suggests. Rejected on measurement:
+     * it would have changed {@code acctfile.txt} and {@code custfile.txt} away from what their own
+     * extracts do, replacing three divergences with two new ones. The pad belongs to the record
+     * type, not to the directory.</p>
+     *
+     * @return a stream of fixture name, descriptor name and the single character its pad is made of
+     */
+    private static Stream<Arguments> everyFixturePad() {
+        return Stream.of(
+                Arguments.of("acctfile.txt", "ACCOUNT", ' '),
+                Arguments.of("custfile.txt", "CUSTOMER", ' '),
+                Arguments.of("tcatbal.txt", "TCATBAL", '0'),
+                Arguments.of("trantype.txt", "TRANTYPE", '0'),
+                Arguments.of("trancatg.txt", "TRANCAT", '0'));
+    }
+
+    /**
+     * Asserts every fixture's trailing pad is made of the character its reference extract uses.
+     *
+     * @param fileName the fixture under test
+     * @param descriptorName the registered layout the fixture is written against
+     * @param padCharacter the single character the pad must consist of
+     */
+    @ParameterizedTest(name = "{0} pads its trailing FILLER with ''{2}''")
+    @MethodSource("everyFixturePad")
+    @DisplayName("every fixture pads its trailing FILLER with its extract's own character")
+    void everyFixturePadsWithItsExtractsCharacter(String fileName, String descriptorName,
+            char padCharacter) {
+        CopybookLayout.RecordSpec spec = CopybookLayout.layout(descriptorName);
+        List<CopybookLayout.FieldSpec> fields = spec.fields();
+        CopybookLayout.FieldSpec pad = fields.get(fields.size() - 1);
+
+        // WHY : Assumptions: the pad is located as the LAST declared field rather than by name,
+        //       because the security-user record names its trailing pad SEC-USR-FILLER and a
+        //       name match would silently skip a record whose pad is spelled differently. Its
+        //       being a FILLER is then asserted, so a record whose last field is real content
+        //       fails here rather than having its content compared against a pad character.
+        assertThat(pad.name()).as("last declared field of %s", descriptorName).isEqualTo("FILLER");
+        assertThat(pad.end()).isEqualTo(spec.reclen());
+
+        String expected = String.valueOf(padCharacter).repeat(pad.length());
+        for (String row : records(fileName)) {
+            assertThat(row.substring(pad.start(), pad.end()))
+                    .as("trailing pad of a %s row in %s", descriptorName, fileName)
+                    .isEqualTo(expected);
+        }
+
+        // WHY : Assumptions: the two pad characters are asserted to be DIFFERENT in the same test,
+        //       so the parameter is doing work. A suite that only checked "the pad is all of one
+        //       character" would pass for a directory that had standardised on blanks and lost the
+        //       per-record-type distinction this case exists to hold.
+        assertThat(everyFixturePad().map(arguments -> arguments.get()[2]).distinct().count())
+                .as("the pad character is a per-record-type fact, not one directory convention")
+                .isEqualTo(2);
+    }
+
+    /**
      * Asserts that a row one byte short of its record length is refused rather than mis-decoded.
      */
     @Test

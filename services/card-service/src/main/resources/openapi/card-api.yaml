@@ -3,22 +3,44 @@
 # -----------------------------------------------------------------------------
 # Purpose:
 #   The hand-authored OpenAPI 3.1 contract of record for the card bounded
-#   context. It settles, for the four synchronous operations this service
-#   exposes, the paths, the operation identifiers, the parameter and property
+#   context. It settles, for the FIVE synchronous operations this context
+#   publishes, the paths, the operation identifiers, the parameter and property
 #   names, the response shapes and the error vocabulary. Every other tree that
 #   touches this context is written against this document rather than against a
-#   reading of the baseline. Its consumers are the browser client at
-#   ui/src/api/cards.ts, which declares CardSummary, CardDetail and the
-#   four-member page envelope from the schemas below; the assertions at
-#   services/card-service/src/test/java/com/carddemo/card/config/CardApiContractTest.java,
-#   which hold this document and SecurityConfig to each other; and this module's
-#   own controllers, request and response shapes and mapper, which implement the
-#   shapes below rather than defining them.
+#   reading of the baseline.
 #
-#   The document the springdoc library generates from those controllers at
-#   run time is therefore not a second source of truth - it is a check on this
-#   one. The two must agree, and a difference between them is a defect in
-#   whichever side drifted rather than a formatting artifact to be tolerated.
+#   Refactoring Rationale: this sentence read "four" while the paths block below
+#   declares five -- listCards, lookupCard, getCard, updateCard and
+#   getAdminCardDetail. The count has now been wrong in both directions across
+#   revisions of this file and of the api package charter, so it is stated here
+#   as a measurement against the paths block rather than as a figure carried in
+#   prose, and CardApiContractTest.theContractPublishesExactlyTheFiveContracted-
+#   Operations is what holds the two equal. The operation an undercount loses is
+#   lookupCard, which is the one operation accepting a full primary account
+#   number -- so a reader who trusted the count would most likely overlook the
+#   operation with the most careful transport handling in the document.
+#
+# Delivery state, measured rather than remembered:
+#   - PRESENT and bound by this document: the browser client ui/src/api/cards.ts,
+#     which declares CardSummary, CardDetail and the four-member page envelope
+#     from the schemas below; the assertions at
+#     services/card-service/src/test/java/com/carddemo/card/config/CardApiContractTest.java,
+#     which hold this document and SecurityConfig to each other; and this
+#     module's response shapes (dto/CardSummary, dto/CardDetail), request shape
+#     (dto/CardUpdateRequest), mapper (mapper/CardMapper), repository, entity,
+#     sealed selector, verification-value cipher and four configuration classes.
+#   - NOT yet authored: a CardController. The api package holds its charter
+#     alone, so NONE of the five operations below is served yet, and a reader
+#     should not expect to find a handler for one. Refactoring Rationale: an
+#     earlier revision of this header listed "this module's own controllers"
+#     among the consumers implementing these shapes, which read as a claim that
+#     handlers existed; the shapes, the mapper and the tests do, and the handler
+#     does not, so the two are now stated separately.
+#
+#   Once handlers exist, the document the springdoc library generates from them
+#   at run time is not a second source of truth - it is a check on this one. The
+#   two must agree, and a difference between them is a defect in whichever side
+#   drifted rather than a formatting artifact to be tolerated.
 #   That relationship is already recorded on the springdoc keys that publish
 #   the generated document, at application.yml:719-729, and the specification
 #   version those keys pin (openapi_3_1, application.yml:755) is the version
@@ -218,12 +240,12 @@ info:
   title: CardDemo Card Service API
   version: 1.0.0
   summary: >-
-    Card list, card detail, administrative card detail and card update for the
-    card bounded
+    Card list, card lookup, card detail, administrative card detail and card
+    update for the card bounded
     context of the migrated CardDemo credit-card management application.
   description: >-
     The card bounded context owns one table, card.cards, and exposes it through
-    four synchronous operations that carry across three online baseline
+    five synchronous operations that carry across three online baseline
     programs: the card list app/cbl/COCRDLIC.cbl, the card detail
     app/cbl/COCRDSLC.cbl and the card update app/cbl/COCRDUPC.cbl. Those three
     ran as CICS transactions CCLI, CCDL and CCUP respectively
@@ -267,7 +289,7 @@ servers:
       unchanged, so no host, port or environment name is recorded here.
 
 # WHY : Assumptions: authorization is asserted at the document level and
-#       inherited by all four operations, rather than repeated per operation
+#       inherited by all five operations, rather than repeated per operation
 #       with the risk that one is forgotten. There is no unauthenticated
 #       operation in this context and none may be added: a bearer requirement
 #       omitted from a single operation is invisible in review, whereas a
@@ -331,7 +353,7 @@ tags:
 
 paths:
 
-  /api/v1/cards:
+  /api/v1/cards/search:
 
     description: >-
       The collection of cards this context owns, addressable only as a
@@ -341,7 +363,26 @@ paths:
       the baseline offered neither and card.cards is the system of record for
       every downstream authorization decision.
 
-    get:
+
+      Refactoring Rationale: the listing was a GET on /api/v1/cards and took its
+      account narrowing, cursor and direction as QUERY PARAMETERS. It is a POST
+      on this literal path taking them in a body, because a query string is part
+      of the request line and the load balancer writes the request line into its
+      access log itself, before any application code runs. The lookup operation
+      below already removed a card number from the request line on exactly that
+      basis, and the migration's sensitive-data logging contract names ACCOUNT
+      AND CUSTOMER IDENTIFIERS in the same sentence as the primary account
+      number -- so leaving the account number in the query string applied that
+      finding to only one of the two values it covers.
+
+
+      Alternatives Considered: a POST on /api/v1/cards itself, which would need
+      no new segment. Rejected because a POST to a collection reads as a create
+      and this contract publishes none for cards deliberately. The literal
+      segment resolves against /api/v1/cards/{cardKey} the same way
+      /api/v1/cards/lookup does, and for the reasons recorded there.
+
+    post:
       operationId: listCards
       tags:
         - cards
@@ -392,12 +433,24 @@ paths:
       #       around it.
       # WHY : Assumptions: the account filter is OPTIONAL, so a request carrying no
       #       criteria at all is the whole collection one page at a time, which is
-      #       the screen's initial state.
+      #       the screen's initial state. The request body itself is therefore
+      #       optional too: an absent body means exactly that opening request, and
+      #       requiring a body of three nulls to express it would make the
+      #       commonest request the most awkward one.
+      # WHY : Assumptions: the cursor and direction travel in the body alongside the
+      #       narrowing although neither is a prohibited value. Splitting them --
+      #       narrowing in the body, paging in the query string -- was rejected
+      #       because it gives one operation two places to carry its criteria, and
+      #       because a GET cannot carry a body reliably, so the operation had to
+      #       become a POST once the narrowing moved regardless.
       parameters:
         - $ref: '#/components/parameters/CorrelationIdHeader'
-        - $ref: '#/components/parameters/AccountIdFilter'
-        - $ref: '#/components/parameters/Cursor'
-        - $ref: '#/components/parameters/PagingDirection'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CardPageQuery'
       responses:
         '200':
           description: >-
@@ -861,138 +914,6 @@ components:
       example: 'fake-selector-example-not-a-real-sealed-value-0000000000000'
 
 
-    AccountIdFilter:
-      name: accountId
-      in: query
-      required: false
-      description: >-
-        Narrows the list to the cards of one account. Eleven digit characters
-        exactly, and not all zeros, when supplied; omit it to list across all
-        accounts. This carries across the ACCTSIDI PIC X(11) filter field of
-        the list screen at app/cpy-bms/COCRDLI.CPY:66, and its constraint is
-        the one the baseline states in the message it raises for a bad value,
-        'Account number must be a non zero 11 digit number' at
-        app/cbl/COCRDUPC.cbl:189-192. Supplying it is served by the secondary
-        index idx_cards_account_id, which is the target of the VSAM alternate
-        index declared KEYS(11 16) NONUNIQUEKEY UPGRADE at
-        app/jcl/CARDFILE.jcl:85-87, so the filter is a real access path rather
-        than a scan.
-      schema:
-        type: string
-        minLength: 11
-        maxLength: 11
-        pattern: '^[0-9]{11}$'
-      example: '00000000011'
-
-    # WHY : Refactoring Rationale: ONE cursor input replaces the two an earlier
-    #       revision of this document declared, and the reason is a defect that
-    #       two produced rather than a preference for brevity. That revision named
-    #       its two request parameters lastKey and firstKey - the same two names
-    #       the RESPONSE uses for its ROW IDENTITIES - while the response's paging
-    #       POSITIONS were named nextCursor and prevCursor. The already-authored
-    #       browser client read the identically-named response members and paged
-    #       from those, at ui/src/api/cards.ts and ui/src/screens/cardList, so on
-    #       any page whose rows were all removed by the account filter after being
-    #       read - which this operation explicitly permits - the identities were
-    #       null while the positions were present, the client saw no cursor and
-    #       disabled both paging controls, and the browse dead-ended on a page
-    #       that had a further page. Collapsing the request side to one parameter
-    #       named cursor makes it impossible to name the wrong member.
-    # WHY : Assumptions: the direction is carried in the SEAL of each token, not
-    #       only in the direction parameter, so replaying prevCursor with
-    #       direction=next cannot silently return the wrong page. The sealing
-    #       binding of com.carddemo.common.web.CursorToken includes the direction
-    #       the token was minted for, so a mismatched pair fails to open and is
-    #       refused with 400. This is what makes a single cursor parameter as safe
-    #       as two named ones while removing the both-supplied and
-    #       mismatched-pair cases the two-parameter form had to define errors for.
-    # WHY : Alternatives Considered: positioning a page by a row ordinal -
-    #       counting rows from the start of the ordered set and asking for the
-    #       rows after the nth - was evaluated and rejected on a specific defect
-    #       rather than a preference. The count of rows preceding a position
-    #       changes underneath a reader when rows are inserted or removed between
-    #       one request and the next, so a page positioned that way omits some
-    #       rows and presents others twice, while a key already read keeps its
-    #       place in the ordering whatever is inserted around it. No ordinal,
-    #       row-skip or row-count input exists anywhere in this document as a
-    #       result.
-    # WHY : Refactoring Rationale: paging by key is a one-for-one substitution and
-    #       not an approximation, because the baseline's own browse state was
-    #       already a cursor over keys. app/cbl/COCRDLIC.cbl declares the last key
-    #       of the page at :230-232 and the first key of it at :233-235, both as
-    #       real key values, and its further-page indicator at :242-244 records
-    #       nothing but whether another page exists. There is no count of consumed
-    #       rows anywhere in that structure, so nothing had to be invented here
-    #       and nothing discarded. What changed is where the state lives: it sat
-    #       in a buffer the terminal echoed back, so continuity depended on the
-    #       client returning it intact, and it now travels as a sealed token the
-    #       service verifies on receipt.
-    # WHY : Assumptions: the ordering key is the card number ALONE, not the
-    #       twenty-seven-character composite of card number and account
-    #       identifier that app/cbl/COCRDLIC.cbl:137-141 declares. The browse
-    #       verbs position on WS-CARD-RID-CARDNUM and pass its length as the
-    #       key length - at :1131-1132 and :1150-1151 going forward and at
-    #       :1275-1276 and :1298-1299 going backward - and the move that would
-    #       have added the account identifier to that record identifier is
-    #       commented out at :449, :476, :491, :507 and :577. Because the card
-    #       number is the unique primary key of card.cards, no tie-breaking
-    #       column is needed and paging by it is total and exact; adding the
-    #       account identifier as a second sort column would reorder the set
-    #       and produce plausible pages in the wrong sequence.
-    # WHY : Refactoring Rationale: THERE IS NO CARD-NUMBER QUERY PARAMETER, and one
-    #       stood here until a review established that a query string is retained by
-    #       the load-balancer access log on exactly the same terms as a path. A
-    #       previous revision of this block argued that "the redaction that protects
-    #       the path protects the query string with it"; both halves of that
-    #       sentence are now known to be false, because the redaction protects
-    #       neither -- it bounds this service's own log lines and error bodies, and
-    #       the access-log record is written by the load balancer before any
-    #       application code sees the request. The second filter of the baseline
-    #       list screen is therefore served by the lookup operation, which takes the
-    #       typed number in a REQUEST BODY and answers with the card itself, rather
-    #       than by a filter that would have placed it in the request line. The
-    #       rationale on the list operation records the same decision from the
-    #       operation's side.
-    Cursor:
-      name: cursor
-      in: query
-      required: false
-      description: >-
-        The paging position to continue from: copy the lastKey member of the
-        response to advance past it, or the firstKey member to retreat from
-        it, and state the matching direction. Omit it, and the direction, to
-        obtain the opening page. The value is opaque and must be echoed exactly
-        as received; it is not a card number and cannot be constructed by a
-        client. The two members it is copied from carry across
-        WS-CA-LAST-CARDKEY at app/cbl/COCRDLIC.cbl:230-232 and
-        WS-CA-FIRST-CARDKEY at :233-235, the latter being what the baseline
-        moves into its browse positioning field at :1268.
-      schema:
-        $ref: '#/components/schemas/CursorToken'
-
-    # WHY : Trade-offs: the direction is an explicit input rather than being
-    #       inferred from which of the two response members the caller copied.
-    #       Inferring it is impossible now that one parameter carries both, and
-    #       was already undesirable when two did: a request that carried both
-    #       cursors, or one alongside a stated direction it did not belong to, was
-    #       ambiguous in a way the service had to resolve silently. The cost is
-    #       one more input for the caller to set; what it buys is that a request
-    #       whose direction and cursor disagree is refused with 400 and named,
-    #       rather than being answered with a page from the other end of the set.
-    PagingDirection:
-      name: direction
-      in: query
-      required: false
-      description: >-
-        Which way to move from the supplied cursor. It is meaningful only
-        alongside a cursor, and the two are sent together or not at all. Reading
-        next seeks keys strictly greater than the cursor in ascending order and
-        is the default, which with no cursor supplied returns the opening page;
-        reading previous seeks keys strictly less than it, returned in the same
-        ascending order as every other page. Supplying a direction with no
-        cursor, or a cursor sealed for the other direction, is a 400.
-      schema:
-        $ref: '#/components/schemas/PageDirection'
 
     # WHY : Refactoring Rationale: the correlation identity is declared as a
     #       request parameter here and not left implicit, and an earlier revision
@@ -1383,6 +1304,144 @@ components:
 
 
   schemas:
+    CardPageQuery:
+      type: object
+      additionalProperties: false
+      description: >-
+        The search criteria of the paged card listing. Every member is optional and a
+        body with none of them set lists the whole collection one page at a time,
+        which is the baseline list screen's initial state.
+
+
+        Refactoring Rationale: these three were QUERY PARAMETERS of a GET on
+        /api/v1/cards, named AccountIdFilter, Cursor and PagingDirection. They became
+        members of a request body because the account narrowing is an account
+        identifier, and a query string is part of the request line the load balancer
+        writes into its access log itself, before any application code runs. The
+        rationale carried down from those parameter definitions is preserved on the
+        members below, because it documents decisions about cursor design that the
+        move did not change.
+      properties:
+        accountId:
+          description: >-
+            Narrows the list to the cards of one account. Eleven digit characters
+            exactly, and not all zeros, when supplied; omit it to list across all
+            accounts. This carries across the ACCTSIDI PIC X(11) filter field of
+            the list screen at app/cpy-bms/COCRDLI.CPY:66, and its constraint is
+            the one the baseline states in the message it raises for a bad value,
+            'Account number must be a non zero 11 digit number' at
+            app/cbl/COCRDUPC.cbl:189-192. Supplying it is served by the secondary
+            index idx_cards_account_id, which is the target of the VSAM alternate
+            index declared KEYS(11 16) NONUNIQUEKEY UPGRADE at
+            app/jcl/CARDFILE.jcl:85-87, so the filter is a real access path rather
+            than a scan.
+          type: string
+          minLength: 11
+          maxLength: 11
+          pattern: '^[0-9]{11}$'
+          example: '00000000011'
+
+        # WHY : Refactoring Rationale: ONE cursor input replaces the two an earlier
+        #       revision of this document declared, and the reason is a defect that
+        #       two produced rather than a preference for brevity. That revision named
+        #       its two request parameters lastKey and firstKey - the same two names
+        #       the RESPONSE uses for its ROW IDENTITIES - while the response's paging
+        #       POSITIONS were named nextCursor and prevCursor. The already-authored
+        #       browser client read the identically-named response members and paged
+        #       from those, at ui/src/api/cards.ts and ui/src/screens/cardList, so on
+        #       any page whose rows were all removed by the account filter after being
+        #       read - which this operation explicitly permits - the identities were
+        #       null while the positions were present, the client saw no cursor and
+        #       disabled both paging controls, and the browse dead-ended on a page
+        #       that had a further page. Collapsing the request side to one parameter
+        #       named cursor makes it impossible to name the wrong member.
+        # WHY : Assumptions: the direction is carried in the SEAL of each token, not
+        #       only in the direction parameter, so replaying prevCursor with
+        #       direction=next cannot silently return the wrong page. The sealing
+        #       binding of com.carddemo.common.web.CursorToken includes the direction
+        #       the token was minted for, so a mismatched pair fails to open and is
+        #       refused with 400. This is what makes a single cursor parameter as safe
+        #       as two named ones while removing the both-supplied and
+        #       mismatched-pair cases the two-parameter form had to define errors for.
+        # WHY : Alternatives Considered: positioning a page by a row ordinal -
+        #       counting rows from the start of the ordered set and asking for the
+        #       rows after the nth - was evaluated and rejected on a specific defect
+        #       rather than a preference. The count of rows preceding a position
+        #       changes underneath a reader when rows are inserted or removed between
+        #       one request and the next, so a page positioned that way omits some
+        #       rows and presents others twice, while a key already read keeps its
+        #       place in the ordering whatever is inserted around it. No ordinal,
+        #       row-skip or row-count input exists anywhere in this document as a
+        #       result.
+        # WHY : Refactoring Rationale: paging by key is a one-for-one substitution and
+        #       not an approximation, because the baseline's own browse state was
+        #       already a cursor over keys. app/cbl/COCRDLIC.cbl declares the last key
+        #       of the page at :230-232 and the first key of it at :233-235, both as
+        #       real key values, and its further-page indicator at :242-244 records
+        #       nothing but whether another page exists. There is no count of consumed
+        #       rows anywhere in that structure, so nothing had to be invented here
+        #       and nothing discarded. What changed is where the state lives: it sat
+        #       in a buffer the terminal echoed back, so continuity depended on the
+        #       client returning it intact, and it now travels as a sealed token the
+        #       service verifies on receipt.
+        # WHY : Assumptions: the ordering key is the card number ALONE, not the
+        #       twenty-seven-character composite of card number and account
+        #       identifier that app/cbl/COCRDLIC.cbl:137-141 declares. The browse
+        #       verbs position on WS-CARD-RID-CARDNUM and pass its length as the
+        #       key length - at :1131-1132 and :1150-1151 going forward and at
+        #       :1275-1276 and :1298-1299 going backward - and the move that would
+        #       have added the account identifier to that record identifier is
+        #       commented out at :449, :476, :491, :507 and :577. Because the card
+        #       number is the unique primary key of card.cards, no tie-breaking
+        #       column is needed and paging by it is total and exact; adding the
+        #       account identifier as a second sort column would reorder the set
+        #       and produce plausible pages in the wrong sequence.
+        # WHY : Refactoring Rationale: THERE IS NO CARD-NUMBER QUERY PARAMETER, and one
+        #       stood here until a review established that a query string is retained by
+        #       the load-balancer access log on exactly the same terms as a path. A
+        #       previous revision of this block argued that "the redaction that protects
+        #       the path protects the query string with it"; both halves of that
+        #       sentence are now known to be false, because the redaction protects
+        #       neither -- it bounds this service's own log lines and error bodies, and
+        #       the access-log record is written by the load balancer before any
+        #       application code sees the request. The second filter of the baseline
+        #       list screen is therefore served by the lookup operation, which takes the
+        #       typed number in a REQUEST BODY and answers with the card itself, rather
+        #       than by a filter that would have placed it in the request line. The
+        #       rationale on the list operation records the same decision from the
+        #       operation's side.
+        # WHY : Trade-offs: the direction is an explicit input rather than being
+        #       inferred from which of the two response members the caller copied.
+        #       Inferring it is impossible now that one parameter carries both, and
+        #       was already undesirable when two did: a request that carried both
+        #       cursors, or one alongside a stated direction it did not belong to, was
+        #       ambiguous in a way the service had to resolve silently. The cost is
+        #       one more input for the caller to set; what it buys is that a request
+        #       whose direction and cursor disagree is refused with 400 and named,
+        #       rather than being answered with a page from the other end of the set.
+        cursor:
+          description: >-
+            The paging position to continue from: copy the lastKey member of the
+            response to advance past it, or the firstKey member to retreat from
+            it, and state the matching direction. Omit it, and the direction, to
+            obtain the opening page. The value is opaque and must be echoed exactly
+            as received; it is not a card number and cannot be constructed by a
+            client. The two members it is copied from carry across
+            WS-CA-LAST-CARDKEY at app/cbl/COCRDLIC.cbl:230-232 and
+            WS-CA-FIRST-CARDKEY at :233-235, the latter being what the baseline
+            moves into its browse positioning field at :1268.
+          $ref: '#/components/schemas/CursorToken'
+        direction:
+          description: >-
+            Which way to move from the supplied cursor. It is meaningful only
+            alongside a cursor, and the two are sent together or not at all. Reading
+            next seeks keys strictly greater than the cursor in ascending order and
+            is the default, which with no cursor supplied returns the opening page;
+            reading previous seeks keys strictly less than it, returned in the same
+            ascending order as every other page. Supplying a direction with no
+            cursor, or a cursor sealed for the other direction, is a 400.
+          $ref: '#/components/schemas/PageDirection'
+
 
     # WHY : Refactoring Rationale: the selector declares a shape of its OWN and is a
     #       separate schema from CursorToken, and an earlier revision of this file had

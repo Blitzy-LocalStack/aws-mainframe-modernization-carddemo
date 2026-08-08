@@ -9,7 +9,6 @@ import com.carddemo.batch.mapper.ExportRecordMapper.OpaqueSensitiveValue;
 import com.carddemo.batch.mapper.ExportRecordMapper.Prefix;
 import com.carddemo.batch.mapper.ExportRecordMapper.RecordType;
 import com.carddemo.common.codec.CopybookLayout;
-import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Map;
 import org.junit.jupiter.api.DisplayName;

@@ -24,6 +24,8 @@
  * `default-src 'self'` without needing any `connect-src` entry. Only the API calls need one.
  */
 
+import { recordServerDate } from './serverClock';
+
 /** Same-origin path the deployment publishes the configuration document to. */
 const RUNTIME_CONFIG_PATH = '/config.json';
 
@@ -105,6 +107,15 @@ export async function loadRuntimeConfig(): Promise<RuntimeConfig | undefined> {
   } catch {
     return undefined;
   }
+  // WHY : Assumptions: the server clock is anchored from THIS response, before any status check,
+  //       because the header band needs a server instant on the very first paint and this fetch is
+  //       the only server contact `ui/src/main.tsx` awaits before rendering. The sign-on screen
+  //       paints before any API call, so without this it alone would fall back to the browser clock.
+  //       Trade-offs: anchored even for a 404 or an error status. A response that says the document
+  //       is absent still came from the server and still carries its `Date`, so discarding it would
+  //       throw away a usable anchor for a reason unrelated to timekeeping -- and the absent-document
+  //       case is the normal one for a local development server.
+  recordServerDate(response.headers.get('Date'));
   if (response.status === 404) {
     return undefined;
   }

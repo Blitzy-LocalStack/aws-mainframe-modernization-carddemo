@@ -91,8 +91,7 @@ def test_every_authorization_field_is_named_or_withheld(
     for field in segment.fields:
         expected = field.name not in layouts._AUTHORIZATION_DISCLOSABLE_FIELDS
         assert field.sensitive is expected, (
-            f"field {field.name} of {segment.name} must be withheld unless the allowlist"
-            " names it"
+            f"field {field.name} of {segment.name} must be withheld unless the allowlist names it"
         )
 
 
@@ -153,9 +152,7 @@ def test_the_allowlist_names_no_field_that_neither_segment_declares() -> None:
     # Assumptions: a dead name in an allowlist is worse than useless. It reads as a decision that
     #   some field is disclosable when no such field exists, and if a field is later added under
     #   that name it becomes disclosable with nobody having decided so.
-    declared = {
-        field.name for segment in _AUTHORIZATION_SEGMENTS for field in segment.fields
-    }
+    declared = {field.name for segment in _AUTHORIZATION_SEGMENTS for field in segment.fields}
     assert layouts._AUTHORIZATION_DISCLOSABLE_FIELDS <= declared
 
 
@@ -249,12 +246,10 @@ def test_no_withheld_field_leaks_content_into_a_decode_diagnostic(
                 f"the diagnostic for {field.name} of {segment.name} must name the field"
             )
             assert _NIBBLE_CLAUSE not in text, (
-                f"the diagnostic for withheld field {field.name} of {segment.name}"
-                " quoted a nibble"
+                f"the diagnostic for withheld field {field.name} of {segment.name} quoted a nibble"
             )
             assert _VALUE_CLAUSE not in text, (
-                f"the diagnostic for withheld field {field.name} of {segment.name}"
-                " quoted a value"
+                f"the diagnostic for withheld field {field.name} of {segment.name} quoted a value"
             )
 
     # Assumptions: the count is asserted so the sweep cannot become vacuous. A character field
@@ -262,8 +257,7 @@ def test_no_withheld_field_leaks_content_into_a_decode_diagnostic(
     #   withheld field stopped raising -- because a codec grew tolerant, say -- the loop above
     #   would assert nothing at all and still pass.
     assert probed > 0, (
-        f"no withheld field of {segment.name} produced a diagnostic, so this probe proves"
-        " nothing"
+        f"no withheld field of {segment.name} produced a diagnostic, so this probe proves nothing"
     )
 
 
@@ -291,7 +285,6 @@ def test_closing_disclosure_leaves_the_geometry_contract_intact(
     offset = 0
     for field in segment.fields:
         assert field.start == offset, (
-            f"field {field.name} of {segment.name} starts at {field.start},"
-            f" not at {offset}"
+            f"field {field.name} of {segment.name} starts at {field.start}, not at {offset}"
         )
         offset += field.length

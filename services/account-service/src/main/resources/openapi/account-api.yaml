@@ -2,86 +2,108 @@
 # services/account-service/src/main/resources/openapi/account-api.yaml
 # -----------------------------------------------------------------------------
 # Purpose:
-#   The OpenAPI 3.1 contract of record for the three internal read operations
-#   the account bounded context publishes to another bounded context. It settles
-#   the paths, the operation identifiers, the property names, the response
-#   shapes, the rendering of money and the not-found behaviour of each, so that
-#   the one consumer of these operations is written against this document rather
-#   than against a reading of this module's Java.
+#   The OpenAPI 3.1 contract of record for every operation the account bounded
+#   context publishes. It settles the paths, the operation identifiers, the
+#   property names, the response shapes, the rendering of money, the concurrency
+#   precondition and the status set of each, so that a consumer is written
+#   against this document rather than against a reading of this module's Java.
 #
-#   The consumer is the pending-authorization context. Its client is
+# The two surfaces this document covers, and how to tell them apart:
+#   THREE INTERNAL READS, tagged internal, are consumed by the
+#   pending-authorization context. Its client is
 #   services/authorization-service/src/main/java/com/carddemo/authorization/
 #   service/RestAccountContextClient.java, which builds each path itself and
 #   deserialises each response into its own record. The two modules are separate
 #   deployables and the layering rules forbid either importing the other's
-#   types, so no compiler and no build sees both halves of this agreement. This
+#   types, so no compiler and no build sees both halves of that agreement. This
 #   document is the only place the whole of it is written down.
 #
-# Why this document records only what exists:
-#   Assumptions: the four sibling contracts in this repository lead their Java.
-#   Each declares the operations its module is planned to publish and says so in
-#   its own header, because in each case the document was authored before the
-#   controllers. This document does the opposite: it declares exactly the three
-#   operations this module publishes today and declares nothing else.
+#   THREE END-USER OPERATIONS, tagged end-user, are consumed by the browser
+#   client. They are the migrated forms of the two account screens and of the
+#   baseline's by-account alternate-index browse.
 #
-#   Alternatives Considered: following the sibling convention and additionally
-#   declaring the human-facing account view and account update operations, which
-#   the package charter at src/main/java/com/carddemo/account/api/package-info.java
-#   names as this package's target contract from app/cbl/COACTVWC.cbl and
-#   app/cbl/COACTUPC.cbl. Rejected, and the reason is specific to these three
-#   operations rather than a general preference. They are already consumed by a
-#   deployed caller, so this document records an agreement that currently binds
-#   two running services. A document that mixed binding operations with planned
-#   ones would give a reader no way to tell which is which, and the reader who
-#   most needs to tell is the one debugging a 404 between two live services.
+#   Assumptions: the two surfaces are distinguished three ways at once, each
+#   machine-readable rather than prose: by tag, by the security scheme each
+#   operation names, and by the origin each declares under servers. They are
+#   NOT distinguished by path prefix, because the account master is legitimately
+#   read both ways and a second prefix for one caller would mean two published
+#   contracts and two handlers for one query -- recorded in full on
+#   SecurityConfig.ACCOUNT_PATH_PATTERN, where the separation is made by filter
+#   CHAIN instead.
 #
-#   Trade-offs: the cost is that this file must be extended when the view and
-#   update operations arrive, rather than already describing them. That cost is
-#   accepted and it is made visible: the contract test at
-#   src/test/java/com/carddemo/account/api/AccountContextContractTest.java
-#   asserts that this document declares EXACTLY these three paths, so a
-#   controller added without a contract entry fails the build, and so does a
-#   contract entry added without a controller.
+# Why every mounted operation appears here:
+#   Refactoring Rationale: an earlier revision of this document declared the
+#   three internal reads ALONE, and recorded a deliberate decision to leave the
+#   human account view and update out until they were built. They were then
+#   built and mounted, and this document was not extended -- so three routes
+#   answered requests that no contract described, which is the exact inverse of
+#   the defect the sibling auth and card contracts were corrected for, where a
+#   contract published operations no handler served. Both directions are now
+#   asserted mechanically: AccountContextContractTest compares the set of
+#   mapping annotations across all three adapters of this package with the set
+#   of operations declared below and fails on any difference in either
+#   direction, so a route added without a contract entry fails the build and so
+#   does a contract entry added without a route.
 #
 # Parameters:
-#   Requests carry input in three forms and each is described again where it is
+#   Requests carry input in four forms and each is described again where it is
 #   declared.
 #     - Two path parameters: the account identifier and the customer
 #       identifier, both integers, declared under components/parameters.
-#     - One request body: CardXrefLookupRequest, carried by the cross-reference
-#       operation alone. The card number travels in a body rather than in a path
-#       for the reason recorded on that operation.
-#     - No query parameter and no request header is required by any operation.
-#       The correlation header the platform propagates is accepted on every
-#       path in this system and is not redeclared per operation here.
+#     - Two request bodies: CardXrefLookupRequest on the internal
+#       cross-reference lookup, whose card number travels in a body rather than
+#       in a path for the reason recorded on that operation; and
+#       AccountUpdateRequest on the end-user update.
+#     - One required request header: If-Match on the update, carrying the
+#       revision the caller was given. It is required rather than optional
+#       because an optional precondition is one a caller opts out of by omitting
+#       it, and opting out means the silent overwrite the check exists to
+#       remove.
+#     - No query parameter is accepted by any operation. The correlation header
+#       the platform propagates is accepted on every path in this system and is
+#       not redeclared per operation here.
 #
 # Return values:
-#     - CardXrefView, from the cross-reference operation: the account and the
-#       customer the card belongs to. It does not echo the card number.
-#     - AccountContextView, from the account operation: the credit limit, the
-#       cash credit limit and the posted balance, each rendered as a JSON
+#     - CardXrefView, from the internal cross-reference lookup: the account and
+#       the customer the card belongs to. It does not echo the card number.
+#     - AccountContextView, from the internal account read: the credit limit,
+#       the cash credit limit and the posted balance, each rendered as a JSON
 #       string.
-#     - No body at all from the customer operation. Its whole answer is its
-#       status.
+#     - No body at all from the internal customer probe. Its whole answer is
+#       its status.
+#     - AccountViewResponse, from the end-user view: the account's ten fields
+#       beside its customer's eighteen, with the revision in an ETag header.
+#     - AccountUpdateResponse, from the end-user update: the committed state and
+#       the NEW revision in an ETag header, so consecutive edits need no
+#       intervening read.
+#     - An array of CardXrefResponse from the end-user by-account listing,
+#       empty when the account holds no card.
 #
 # Exceptions / error responses:
-#   Every failure is rendered by the shared handler in common-lib as a problem
+#   Every failure is rendered by the shared advice in common-lib as one problem
 #   document, so the error vocabulary is identical to every other contract in
-#   this migration. Three statuses are declared per operation where they apply:
-#   400 for a request whose declared constraints are not met, 401 for a caller
-#   presenting no acceptable internal credential, and 404 for an absent row. The
-#   customer operation declares no 400 because an unparseable identifier cannot
-#   reach it.
+#   this migration and a client writes one error handler rather than one per
+#   service. Assumptions: each operation declares EVERY status it can produce
+#   and no status it cannot. Both halves of that are load bearing -- a declared
+#   status no response can produce is a branch a client writes and never
+#   reaches, and an undeclared status it does produce is a branch the client
+#   does not write at all. Two consequences are worth naming because they are
+#   easy to get wrong in the other direction: the by-account listing declares NO
+#   404, because an account with no card is an empty list rather than an absence;
+#   and every operation with a numeric path parameter declares 400, because a
+#   segment that will not convert to that number is refused as caller input.
 #
 # Authorization:
-#   Assumptions: these three paths are NOT reachable with a human token. They
-#   are governed by a dedicated filter chain,
+#   The internal reads are governed by a dedicated filter chain,
 #   src/main/java/com/carddemo/account/config/InternalApiSecurityConfig.java,
-#   ordered ahead of the application chain and matching exactly these three
+#   ordered ahead of the application chain and matching exactly their three
 #   paths. It requires a bearer token issued by the calling service and carrying
-#   the scope named below. The identity-provider tokens every other path in this
-#   service accepts do not satisfy it, and the credential named below does not
-#   satisfy any other path.
+#   the scope named on each. An identity-provider token does not satisfy it.
+#   The end-user operations are governed by the application chain in
+#   src/main/java/com/carddemo/account/config/SecurityConfig.java, whose
+#   catch-all admits either business group -- so each declares
+#   x-required-authorities naming both, and the contract test compares that list
+#   with the constant the chain enforces.
 #
 # Reference sources (REFERENCE-ONLY; read as the specification, never modified):
 #   app/cbl/CBACT03C.cbl  - the cross-reference reader, 178 lines. Its file is
@@ -89,10 +111,20 @@
 #                           takes a card number and returns the two identifiers.
 #   app/cbl/CBACT01C.cbl  - the account master reader, 430 lines.
 #   app/cbl/CBCUS01C.cbl  - the customer master reader, 178 lines.
+#   app/cbl/COACTVWC.cbl  - the account-view screen program, migrated as the
+#                           end-user view operation.
+#   app/cbl/COACTUPC.cbl  - the account-update screen program, migrated as the
+#                           end-user update operation. Its before-image
+#                           comparison at L669 and L521 is what the ETag and
+#                           If-Match pair reproduces.
 #   app/cpy/CVACT03Y.cpy  - the 50-byte cross-reference record layout.
 #   app/cpy/CVACT01Y.cpy  - the 300-byte account record layout, which declares
 #                           each monetary field as a signed zoned decimal with
 #                           two fractional digits.
+#   app/cpy/CVCUS01Y.cpy  - the 500-byte customer record layout.
+#   app/cpy-bms/COACTVW.CPY, app/cpy-bms/COACTUP.CPY - the two symbolic maps the
+#                           end-user shapes take their SCREEN widths from, which
+#                           disagree with the record widths for four fields.
 #   app/csd/CARDDEMO.CSD  - L63 defines the CXACAIX alternate index this
 #                           context replaces with a secondary index.
 # =============================================================================
@@ -100,17 +132,20 @@
 openapi: 3.1.0
 
 info:
-  title: CardDemo Account Context - Internal Read API
-  version: 1.0.0
+  title: CardDemo Account Context API
+  version: 2.0.0
   summary: >-
-    The three account-context reads the pending-authorization context resolves
-    each incoming authorization against.
+    The account master, its customer and its card cross-reference, published to
+    the pending-authorization context as three internal reads and to the browser
+    client as the two migrated account screens and the by-account browse.
   description: >-
-    This document covers only the internal read surface of the account bounded
-    context. Each operation replaces one keyed file read performed by a
-    reference batch program, and together they supply the three facts an
-    authorization decision needs: which account and customer a card belongs to,
-    what that account's limits and balance are, and whether the customer exists.
+    This document covers both surfaces of the account bounded context. The three
+    internal reads each replace one keyed file read performed by a reference
+    batch program, and together they supply the three facts an authorization
+    decision needs: which account and customer a card belongs to, what that
+    account's limits and balance are, and whether the customer exists. The three
+    end-user operations replace app/cbl/COACTVWC.cbl, app/cbl/COACTUPC.cbl and
+    the baseline's CXACAIX alternate-index browse.
 
 
     Money is rendered as a JSON string throughout. That is not a stylistic
@@ -120,6 +155,14 @@ info:
     every such value exactly. Transformation rule T3 of the migration plan
     forbids binary floating point anywhere in the money path, and a string is
     how that prohibition survives the wire.
+
+
+    The version is 2.0.0 rather than 1.1.0 because the previous revision
+    described this service as publishing an internal read surface only, and the
+    shape of the ApiError problem document it declared was not the shape this
+    system emits -- so a client generated from 1.0.0 has both an incomplete
+    route set and an error type it cannot bind. Neither is a compatible
+    addition.
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
@@ -139,11 +182,28 @@ servers:
           the development default; each environment supplies its own and the
           caller reads it from configuration rather than composing it.
 
+# WHY : Assumptions: two of the five tags name the SURFACE rather than the
+#       subject, and every operation carries one of them. That is what makes the
+#       internal / end-user split machine-readable: a generator, a gateway or a
+#       reviewer can select one surface without reading prose, where the previous
+#       revision's split was implicit in which operations happened to be present.
 tags:
+  - name: internal
+    description: >-
+      Reachable only with a service-minted token carrying the internal read
+      scope, and only from inside the private network. An identity-provider
+      token does not satisfy these operations and the internal token satisfies
+      no other path.
+  - name: end-user
+    description: >-
+      Reachable with an identity-provider token carrying either business group,
+      through the public edge. These are the migrated online screens.
   - name: card-cross-reference
-    description: Resolution of a primary account number to its account and customer.
+    description: >-
+      Resolution of a primary account number to its account and customer, and
+      the by-account listing that replaces the CXACAIX alternate index.
   - name: account
-    description: Reads of the account master.
+    description: Reads and edits of the account master.
   - name: customer
     description: Presence checks against the customer master.
 
@@ -151,7 +211,7 @@ paths:
 
   /api/v1/card-xrefs/lookup:
     post:
-      tags: [card-cross-reference]
+      tags: [internal, card-cross-reference]
       operationId: lookupCardCrossReference
       summary: Resolve a primary account number to its account and customer.
       description: >-
@@ -171,7 +231,7 @@ paths:
         was rejected for the same reason: query strings are logged with the
         path.
       security:
-        - internalServiceToken: [internal:account-context.read]
+        - internalServiceToken: []
       requestBody:
         required: true
         content:
@@ -193,6 +253,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           description: >-
             No cross-reference row exists for the card. The problem document's
@@ -204,10 +266,12 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        '500':
+          $ref: '#/components/responses/InternalError'
 
   /api/v1/accounts/{accountId}:
     get:
-      tags: [account]
+      tags: [internal, account]
       operationId: readAccountContext
       summary: Read the limits and posted balance of one account.
       description: >-
@@ -217,7 +281,7 @@ paths:
         published, because a consumer that does not read a value should not
         receive it.
       security:
-        - internalServiceToken: [internal:account-context.read]
+        - internalServiceToken: []
       parameters:
         - $ref: '#/components/parameters/AccountIdPath'
       responses:
@@ -231,6 +295,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           description: >-
             The account master holds no such row. The calling context reads this
@@ -240,6 +306,253 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    put:
+      tags: [end-user, account]
+      operationId: updateAccount
+      summary: Apply an edited account and customer under a revision precondition.
+      description: >-
+        Replaces app/cbl/COACTUPC.cbl. One submission carries the account's
+        editable fields and its customer's together, because the reference screen
+        does: its map has 128 fields across both records and one enter key
+        commits them, so splitting them into two operations would make a screen
+        that either succeeded or failed as a whole succeed in halves.
+
+
+        The precondition is REQUIRED. The reference performs a genuine
+        before-image comparison across the pseudo-conversational gap -- it
+        snapshots the whole pre-edit record at app/cbl/COACTUPC.cbl L669 and
+        tests a change flag at L521 -- because its read-for-update lock is not
+        held across a user's think time. The target reproduces that with an
+        optimistic version, published as an ETag by the view operation and
+        required back here as If-Match.
+
+
+        Alternatives Considered: answering a stale precondition with 412
+        Precondition Failed, which is the status HTTP defines for a failed
+        If-Match. Rejected in favour of 409, because the reference's own answer
+        is a screen message naming the condition and this system carries that
+        sentence verbatim in a conflict body; 412 is defined as bodyless in
+        spirit and would leave the sentence nowhere to go. The trade-off is
+        recorded rather than hidden: a client written to HTTP semantics alone
+        will not expect 409 here, which is why it is declared explicitly below.
+      servers:
+        - url: /
+          description: >-
+            The origin that served this document. This operation is published at
+            the public edge behind the gateway's identity-provider authorizer,
+            not at the internal origin the document-level entry names.
+      security:
+        - bearerAuth: []
+      x-required-authorities: [carddemo-admin, carddemo-user]
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+        - $ref: '#/components/parameters/IfMatchHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccountUpdateRequest'
+      responses:
+        '200':
+          description: >-
+            The edit committed. The body carries the state as stored, with both
+            protected identifiers already masked, and the ETag header carries the
+            NEW revision so a caller performing consecutive edits does not have
+            to re-read the account between them.
+          headers:
+            ETag:
+              $ref: '#/components/headers/RevisionETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountUpdateResponse'
+        '400':
+          description: >-
+            The request was refused before anything was written. Five causes
+            produce this status and each names its offending request property in
+            the fieldErrors array: the If-Match header was absent; the body could
+            not be read; the account identifier in the path would not convert to
+            a number; a submitted value was absent where the reference requires
+            one, was wider than the field it is stored in, held a character its
+            numeric picture cannot carry, or was one part of a telephone number
+            or date of birth whose other parts were not supplied; or a submitted
+            state, postal or area code lies outside a reference allow-list.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: >-
+            The account master or the customer the account resolves to holds no
+            such row. Nothing was written.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: >-
+            The precondition does not name the stored state, so the record was
+            changed by someone else since the caller read it, and nothing was
+            written. The body carries the reference's own changed-record sentence
+            and a fieldErrors entry keyed version reporting the CURRENT revision,
+            so a caller can re-read and retry without a second round trip to
+            discover what it changed to. The same status answers a blank
+            precondition and a version the persistence provider found stale
+            between this transaction's read and its flush.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/accounts/{accountId}/view:
+    get:
+      tags: [end-user, account]
+      operationId: readAccountView
+      summary: Read one account and its customer for the account-view screen.
+      description: >-
+        Replaces app/cbl/COACTVWC.cbl, which reads the account master by key,
+        follows the pairing to the customer master and fills one screen from
+        both. Both reads happen in ONE read-only transaction, so the account and
+        the customer on one screen are consistent with each other; two
+        transactions could return a pairing that never existed.
+
+
+        This is a SEPARATE path from the internal read at the parent address, and
+        deliberately so: that one serves a neighbouring bounded context and
+        carries three amounts, this one serves a screen and carries the account's
+        ten fields beside its customer's eighteen. One path returning whichever
+        shape a caller preferred would make the response type depend on a header,
+        and neither caller could then be given a stable contract.
+
+
+        The customer is located through the CROSS-REFERENCE rather than through a
+        column on the account, because the account record declares no customer
+        identifier -- the baseline resolves the pairing through CXACAIX. A
+        missing cross-reference row and a missing customer row are reported as
+        the same 404 as a missing account: the distinction is real but is not
+        actionable by the caller, and naming which would disclose the shape of
+        the data.
+      servers:
+        - url: /
+          description: >-
+            The origin that served this document. This operation is published at
+            the public edge behind the gateway's identity-provider authorizer,
+            not at the internal origin the document-level entry names.
+      security:
+        - bearerAuth: []
+      x-required-authorities: [carddemo-admin, carddemo-user]
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      responses:
+        '200':
+          description: >-
+            The account and its customer. The ETag header carries the revision
+            the update operation requires back as If-Match; a caller that intends
+            to edit must keep it.
+          headers:
+            ETag:
+              $ref: '#/components/headers/RevisionETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountViewResponse'
+        '400':
+          description: >-
+            The account identifier in the path would not convert to a number. The
+            fieldErrors array names accountId.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: >-
+            The account master holds no such row, or the account has no
+            cross-reference row, or the row names a customer the customer master
+            does not hold.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/accounts/{accountId}/card-cross-references:
+    get:
+      tags: [end-user, card-cross-reference]
+      operationId: listAccountCardCrossReferences
+      summary: List an account's card cross-reference rows in card-number order.
+      description: >-
+        This is the CXACAIX access path, which the baseline surfaces to the
+        online region as an alternate index over the cross-reference file and
+        reads by account. The target declares idx_card_xref_account_id and reads
+        it with an ordered query.
+
+
+        The order is by card number ascending and is part of the CONTRACT rather
+        than an artefact of the query, because an alternate-index read returns
+        its rows in index order and a caller diffing the list depends on that
+        order being stable.
+
+
+        Assumptions: the route hangs off the ACCOUNT rather than living under a
+        cross-reference subtree of its own, because the by-account read is a
+        property of an account and because the standalone cross-reference subtree
+        is denied to end users by the filter chain -- it carries the by-card
+        lookup, which takes a whole primary account number and is reachable only
+        from inside the network.
+      servers:
+        - url: /
+          description: >-
+            The origin that served this document. This operation is published at
+            the public edge behind the gateway's identity-provider authorizer,
+            not at the internal origin the document-level entry names.
+      security:
+        - bearerAuth: []
+      x-required-authorities: [carddemo-admin, carddemo-user]
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      responses:
+        '200':
+          description: >-
+            The account's cross-reference rows in ascending card-number order.
+            An account with no card yields an EMPTY array rather than a 404,
+            matching an alternate-index browse that ends immediately: an account
+            legitimately has no card, and that is not an absence of the account.
+            Every card number is masked to its last four digits.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CardXrefResponse'
+        '400':
+          description: >-
+            The account identifier in the path would not convert to a number. The
+            fieldErrors array names accountId.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
 
   /api/v1/customers/{customerId}:
 
@@ -255,7 +568,7 @@ paths:
     #       codes rather than differing ones. They are NOT two operations that
     #       could diverge: a change to one changes both.
     head:
-      tags: [customer]
+      tags: [internal, customer]
       operationId: customerExistsHead
       summary: Report whether the customer master holds one customer, without a body.
       description: >-
@@ -264,19 +577,34 @@ paths:
         entirely by the status code, so a caller that needs only presence has no
         reason to request a body it would discard.
       security:
-        - internalServiceToken: [internal:account-context.read]
+        - internalServiceToken: []
       parameters:
         - $ref: '#/components/parameters/CustomerIdPath'
       responses:
         '204':
           description: The customer master holds the row.
+        # WHY : Refactoring Rationale: 400, 403 and 500 are declared here where an
+        #       earlier revision declared none of them and recorded that this
+        #       operation "declares no 400 because an unparseable identifier
+        #       cannot reach it". That was measured and is false: the identifier
+        #       is bound as a number, a segment that will not convert raises a
+        #       conversion failure at the binding stage, and the shared advice
+        #       answers it as caller input. A status a caller can provoke and the
+        #       document denies is worse than an undocumented one, because the
+        #       document is what a caller trusts.
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           description: The customer master holds no such row.
+        '500':
+          $ref: '#/components/responses/InternalError'
 
     get:
-      tags: [customer]
+      tags: [internal, customer]
       operationId: customerExists
       summary: Report whether the customer master holds one customer.
       description: >-
@@ -293,19 +621,25 @@ paths:
         therefore returns no body on either answer, which is what makes the HEAD
         form above identical rather than merely similar.
       security:
-        - internalServiceToken: [internal:account-context.read]
+        - internalServiceToken: []
       parameters:
         - $ref: '#/components/parameters/CustomerIdPath'
       responses:
         '204':
           description: The customer master holds the row. There is no body.
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           description: >-
             The customer master holds no such row. There is no body on this
             answer either, so that a HEAD request and a GET request receive the
             same shape.
+        '500':
+          $ref: '#/components/responses/InternalError'
 
 components:
 
@@ -314,6 +648,14 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+      # WHY : Trade-offs: the scope a presented token must carry is published HERE as a vendor
+      #   extension rather than in each operation's security requirement list. Under 3.1 that list
+      #   may name roles for a non-oauth2 scheme, so the populated form this file used to carry was
+      #   legal; it is dropped because 3.1 defines those names as not exchanged in-band, so the list
+      #   is documentation either way, and a populated one reads as an OAuth scope to every 3.0-era
+      #   reader and tool. An x- member says plainly that this is the system's own vocabulary. The
+      #   value is the same constant InternalApiSecurityConfig composes its required authority from.
+      x-carddemo-required-scope: internal:account-context.read
       description: >-
         A bearer token minted by the calling service and verified by this one
         against a signing key both hold. It is not an identity-provider token
@@ -337,7 +679,70 @@ components:
         refused rather than accepted for the wrong path. Its lifetime is bounded
         at five minutes and the caller mints a fresh one per request.
 
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        A JSON Web Token issued by the configured identity provider and validated
+        as a resource-server token. Its cognito:groups claim is converted to
+        authorities, where the baseline user type 'A' becomes carddemo-admin and
+        'U' becomes carddemo-user. Presenting no usable token yields 401;
+        presenting a valid token without the authority an operation requires
+        yields 403.
+
+
+        Assumptions: this scheme is named bearerAuth to match every other
+        end-user contract in this migration, so a generated client presents one
+        scheme name across services rather than one per service. It is a
+        DIFFERENT credential from internalServiceToken above and neither
+        satisfies the other's operations.
+
+  headers:
+    RevisionETag:
+      description: >-
+        The revision of the account and customer pair, as an opaque entity tag.
+        The update operation requires it back in If-Match.
+
+
+        Trade-offs: the tag is WEAK, prefixed W/. A strong tag asserts octet
+        equality of the representation, which this value cannot promise -- two
+        responses at the same revision are semantically identical but need not be
+        byte-identical, since the masked identifiers and the message channels are
+        assembled per response. A weak tag asserts semantic equivalence, which is
+        exactly what a revision means here.
+      required: true
+      schema:
+        type: string
+        pattern: '^W/"[^"]+"$'
+      example: 'W/"7:3"'
+
   parameters:
+    IfMatchHeader:
+      name: If-Match
+      in: header
+      required: true
+      description: >-
+        The revision the caller was given by the view operation, echoed back so
+        the edit is refused if the stored state moved in between. The value the
+        view emitted is accepted verbatim; the comparison tolerates the W/ prefix
+        and the surrounding quotes being reformatted, because an intermediary is
+        permitted to reformat an entity tag and a caller that echoes what it
+        received must not be refused for a difference it did not make.
+
+
+        Assumptions: absence is a 400 and not a 428. RFC 6585 defines 428
+        Precondition Required for exactly this case and would be the more precise
+        status, but it would be the only 428 in this migration and no client in it
+        handles one, whereas every client already handles the 400 shape and can
+        read which value was missing from the fieldErrors array. The precision is
+        traded for one client error vocabulary, and the trade is recorded here
+        rather than left to be discovered.
+      schema:
+        type: string
+        minLength: 1
+      example: 'W/"7:3"'
+
     AccountIdPath:
       name: accountId
       in: path
@@ -381,11 +786,50 @@ components:
 
     Unauthorized:
       description: >-
-        No acceptable internal credential was presented. Every distinguishable
-        cause -- an absent token, a token signed with another key, one naming
-        another audience, one that has expired -- produces this same status and
-        the same body, deliberately: telling a caller which check refused it
-        tells an unauthorized caller how to make progress.
+        No acceptable credential was presented. Every distinguishable cause -- an
+        absent token, a token signed with another key, one naming another
+        audience, one that has expired -- produces this same status and the same
+        body, deliberately: telling a caller which check refused it tells an
+        unauthorized caller how to make progress.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    Forbidden:
+      description: >-
+        A valid credential was presented and does not carry the authority this
+        operation requires -- for an internal operation, the read scope; for an
+        end-user operation, either business group.
+
+
+        Assumptions: this is declared on every operation rather than only where a
+        narrowing rule exists, because the refusal is produced by the filter chain
+        before any handler runs and is therefore reachable on all of them. The
+        previous revision declared it on none, which left a client with no branch
+        for the one refusal it can provoke by presenting the wrong credential type
+        to the right path.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    InternalError:
+      description: >-
+        The request could not be completed. The body carries an abend block whose
+        four members are the target form of the reference's own ABEND-CODE,
+        ABEND-CULPRIT, ABEND-REASON and ABEND-MSG fields at app/cpy/CSMSG02Y.cpy
+        L45 to L53, and its message never carries a value the caller sent: the
+        advice logs a reduced representation of the failure that keeps the type
+        chain and the frames and drops every message, so a driver or parser
+        sentence quoting a record cannot reach either destination.
+
+
+        Assumptions: this status is declared on every operation because any of
+        them can meet an unavailable dependency. On the update it is also the
+        status a failure of the reference-context lookup produces, which is a
+        transport failure rather than a validation outcome and is deliberately not
+        reported as the caller's mistake.
       content:
         application/problem+json:
           schema:
@@ -465,6 +909,606 @@ components:
             The posted balance, from ACCT-CURR-BAL PIC S9(10)V99. It may be
             negative, and the sign is carried as a leading minus in the string.
 
+    # WHY : Assumptions: the six schemas below are named for the Java records they
+    #       describe -- AccountViewResponse, AccountDetail, CustomerDetail,
+    #       AccountUpdateRequest, AccountUpdateResponse, CardXrefResponse -- which
+    #       is the convention the three schemas above already follow. The naming is
+    #       not cosmetic: AccountContextContractTest reflects over each record's
+    #       components and asserts the schema of the same name declares exactly
+    #       those properties, so a component added to a record without a
+    #       corresponding property here fails the build. A schema named for the
+    #       operation rather than the record would leave that check with nothing to
+    #       resolve.
+    AccountViewResponse:
+      type: object
+      additionalProperties: false
+      required: [accountId, account, customer, informationMessage, returnMessage]
+      description: >-
+        One account and its customer, at the widths the account-view MAP declares
+        rather than at the widths the records declare. The two disagree for four
+        values -- the postal code, the national identifier and both telephone
+        numbers -- and the reference itself shows the narrower form on this screen
+        by moving a wider stored value into a narrower field, so the narrowing is
+        reproduced rather than corrected.
+      properties:
+        accountId:
+          type: string
+          maxLength: 11
+          pattern: '^[0-9]{1,11}$'
+          description: >-
+            The account read, echoed as digits. It is a string here and an integer
+            in the path parameter, and the difference is deliberate: the reference
+            holds it as an eleven-digit display field and every value on this
+            screen is character data, so a body member typed as a number would be
+            the only one a client had to convert.
+          example: '12345678901'
+        account:
+          $ref: '#/components/schemas/AccountDetail'
+        customer:
+          $ref: '#/components/schemas/CustomerDetail'
+        informationMessage:
+          oneOf:
+            - type: string
+              maxLength: 75
+            - type: 'null'
+          description: >-
+            The screen's information line, or null. It is always null on this
+            operation and is declared because the shape is shared with the update
+            response, where it is not. Assumptions: it is not omitted from the
+            response when null -- the serialiser emits declared members as null
+            rather than dropping them -- so a client sees the key either way.
+        returnMessage:
+          oneOf:
+            - type: string
+              maxLength: 75
+            - type: 'null'
+          description: >-
+            The screen's message line, or null; always null on this operation. The
+            width is the 75 characters CCARD-ERROR-MSG and CCARD-RETURN-MSG
+            declare, which is a rendering constraint carried across rather than a
+            suggestion.
+
+    AccountDetail:
+      type: object
+      additionalProperties: false
+      required:
+        - activeStatus
+        - openDate
+        - creditLimit
+        - expirationDate
+        - cashCreditLimit
+        - reissueDate
+        - currentBalance
+        - currentCycleCredit
+        - groupId
+        - currentCycleDebit
+      description: >-
+        The account's ten screen fields. The member ORDER is the order the
+        symbolic map declares them in, which is the order they appear on the
+        screen, and it is preserved so that a reader comparing this schema with
+        app/cpy-bms/COACTVW.CPY reads them in one order rather than two.
+      properties:
+        activeStatus:
+          type: string
+          maxLength: 1
+          description: ACSTTUSI PIC X(1), from ACCT-ACTIVE-STATUS PIC X(01).
+          example: 'Y'
+        openDate:
+          type: string
+          maxLength: 10
+          description: >-
+            ADTOPENI PIC X(10), from ACCT-OPEN-DATE PIC X(10). Carried as text
+            rather than as a date-typed member because the stored value is already
+            ISO-ordered characters, so a lexical comparison is a date comparison
+            and no conversion is owed by either side.
+          example: '2020-01-01'
+        creditLimit:
+          $ref: '#/components/schemas/Money'
+        expirationDate:
+          type: string
+          maxLength: 10
+          description: >-
+            AEXPDTI PIC X(10), from the field the baseline declares as
+            ACCT-EXPIRAION-DATE -- the misspelling is the reference's own and is
+            corrected in the target column name, which is recorded in
+            docs/architecture/data-model-and-schema-mapping.md so the lineage is
+            never ambiguous.
+          example: '2027-12-31'
+        cashCreditLimit:
+          $ref: '#/components/schemas/Money'
+        reissueDate:
+          type: string
+          maxLength: 10
+          description: AREISDTI PIC X(10), from ACCT-REISSUE-DATE PIC X(10).
+          example: '2024-06-01'
+        currentBalance:
+          $ref: '#/components/schemas/Money'
+        currentCycleCredit:
+          $ref: '#/components/schemas/Money'
+        groupId:
+          type: string
+          maxLength: 10
+          description: >-
+            AADDGRPI PIC X(10), from ACCT-GROUP-ID PIC X(10). The disclosure group
+            whose rate the interest calculation uses, falling back to the DEFAULT
+            group when the account's own group is not found.
+          example: 'DEFAULT'
+        currentCycleDebit:
+          $ref: '#/components/schemas/Money'
+
+    CustomerDetail:
+      type: object
+      additionalProperties: false
+      required:
+        - customerId
+        - ssnMasked
+        - dateOfBirth
+        - ficoCreditScore
+        - firstName
+        - middleName
+        - lastName
+        - addressLine1
+        - stateCode
+        - addressLine2
+        - zipCode
+        - city
+        - countryCode
+        - phoneNumber1
+        - governmentIssuedIdMasked
+        - phoneNumber2
+        - eftAccountId
+        - primaryCardHolderIndicator
+      description: >-
+        The customer's eighteen screen fields. Both protected identifiers are
+        MASKED and neither is ever carried whole: this service publishes no
+        clear-identifier accessor at all, so there is nothing for a caller to
+        request. Two members are declared nullable because the record declares
+        their columns nullable -- a middle name and a second telephone number are
+        legitimately absent.
+      properties:
+        customerId:
+          type: string
+          maxLength: 9
+          pattern: '^[0-9]{1,9}$'
+          description: ACSTNUMI PIC X(9), from CUST-ID PIC 9(09), digits only.
+          example: '987654321'
+        ssnMasked:
+          type: string
+          maxLength: 12
+          description: >-
+            ACSTSSNI PIC X(12), from CUST-SSN PIC 9(09). The baseline composes the
+            whole nine digits onto this screen; the target masks all but the last
+            four, which is a documented, deliberate divergence rather than an
+            omission -- the stored value is enciphered and this context has no
+            decipher route by design.
+          example: '***-**-6789'
+        dateOfBirth:
+          type: string
+          maxLength: 10
+          description: ACSTDOBI PIC X(10), from CUST-DOB-YYYY-MM-DD PIC X(10).
+          example: '1980-01-01'
+        ficoCreditScore:
+          type: string
+          maxLength: 3
+          pattern: '^[0-9]{1,3}$'
+          description: ACSTFCOI PIC X(3), from CUST-FICO-CREDIT-SCORE PIC 9(03).
+          example: '750'
+        firstName:
+          type: string
+          maxLength: 25
+          description: ACSFNAMI PIC X(25), from CUST-FIRST-NAME PIC X(25).
+          example: 'JOHN'
+        middleName:
+          oneOf:
+            - type: string
+              maxLength: 25
+            - type: 'null'
+          description: >-
+            ACSMNAMI PIC X(25), from CUST-MIDDLE-NAME PIC X(25). Nullable because
+            the column is: a customer legitimately has no middle name, and the
+            load records that trailing blanks in the fixed-width record are
+            padding rather than data.
+        lastName:
+          type: string
+          maxLength: 25
+          description: ACSLNAMI PIC X(25), from CUST-LAST-NAME PIC X(25).
+          example: 'DOE'
+        addressLine1:
+          type: string
+          maxLength: 50
+          description: ACSADL1I PIC X(50), from CUST-ADDR-LINE-1 PIC X(50).
+        stateCode:
+          type: string
+          maxLength: 2
+          description: >-
+            ACSSTTEI PIC X(2), from CUST-ADDR-STATE-CD PIC X(02). Whether the code
+            names a real state is answered against the reference lookup asset by
+            the reference bounded context, not here.
+          example: 'VA'
+        addressLine2:
+          oneOf:
+            - type: string
+              maxLength: 50
+            - type: 'null'
+          description: >-
+            ACSADL2I PIC X(50), from CUST-ADDR-LINE-2 PIC X(50). Nullable because
+            the column is.
+        zipCode:
+          type: string
+          maxLength: 5
+          description: >-
+            ACSZIPCI PIC X(5), narrowed from the wider CUST-ADDR-ZIP PIC X(10) by
+            the reference's own direct move. This is the FIRST of the four
+            record-versus-screen width disagreements, and the narrowing is
+            reproduced rather than corrected because the reference screen shows
+            five of the ten.
+          example: '12546'
+        city:
+          type: string
+          maxLength: 50
+          description: >-
+            ACSCITYI PIC X(50), sourced from CUST-ADDR-LINE-3 PIC X(50). The
+            screen labels the third address line as the city and there is no
+            stored field named for a city anywhere under app, so the screen name
+            appears only on this screen-derived shape.
+        countryCode:
+          type: string
+          maxLength: 3
+          description: ACSCTRYI PIC X(3), from CUST-ADDR-COUNTRY-CD PIC X(03).
+          example: 'USA'
+        phoneNumber1:
+          type: string
+          maxLength: 13
+          description: >-
+            ACSPHN1I PIC X(13), narrowed from CUST-PHONE-NUM-1 PIC X(15) by the
+            reference's own direct move, which drops exactly the declared
+            two-character trailing pad.
+          example: '(703)5551234'
+        governmentIssuedIdMasked:
+          type: string
+          maxLength: 20
+          description: >-
+            ACSGOVTI PIC X(20), from CUST-GOVT-ISSUED-ID PIC X(20), masked for the
+            same reason and on the same terms as the national identifier above.
+        phoneNumber2:
+          oneOf:
+            - type: string
+              maxLength: 13
+            - type: 'null'
+          description: >-
+            ACSPHN2I PIC X(13), narrowed from CUST-PHONE-NUM-2 PIC X(15). Nullable
+            because the column is.
+        eftAccountId:
+          type: string
+          maxLength: 10
+          description: ACSEFTCI PIC X(10), from CUST-EFT-ACCOUNT-ID PIC X(10).
+        primaryCardHolderIndicator:
+          type: string
+          maxLength: 1
+          description: ACSPFLGI PIC X(1), from CUST-PRI-CARD-HOLDER-IND PIC X(01).
+          example: 'Y'
+
+    AccountUpdateRequest:
+      type: object
+      additionalProperties: false
+      description: >-
+        One submission of the account-update screen, carrying the account's
+        editable fields and its customer's together. Every member is a string at
+        the width app/cpy-bms/COACTUP.CPY declares, because every field on that
+        map is character data and the reference validates each as characters
+        before it converts any.
+
+
+        Assumptions: this shape is INBOUND ONLY and is never a component of any
+        response. It carries the national identifier in three clear parts and the
+        government-issued identifier in the clear, because an edit has to be able
+        to replace them; the committed state comes back as AccountUpdateResponse,
+        whose customer member is the masked screen shape. Reusing this record
+        outbound would return both identifiers in the clear to whoever could read
+        one, which is why the two directions are separate types.
+
+
+        Assumptions: the three date fields arrive in PARTS rather than as one
+        value, matching the map, which declares a separate year, month and day
+        field for each. All three parts of one date are required together: the
+        reference composes them with separators into the stored ten characters, so
+        a missing part has no position to occupy. The same holds for each
+        telephone number's three parts.
+
+
+        Assumptions: no member is declared required. Presence is enforced one
+        layer down, per field, because the reference distinguishes a value that
+        was never supplied from one supplied and refused -- its FLG-*-BLANK and
+        FLG-*-NOT-OK conditions -- and a schema-level required list collapses that
+        distinction into a single body-shape refusal that names no field. A
+        refusal from the layer below names each offending property and its state,
+        which is what rule T7 asks of it.
+      properties:
+        accountId:
+          type: string
+          maxLength: 11
+          description: ACCTSIDI PIC X(11); the account being edited.
+        activeStatus:
+          type: string
+          maxLength: 1
+          description: ACSTTUSI PIC X(1), for ACCT-ACTIVE-STATUS PIC X(01).
+        creditLimit:
+          type: string
+          maxLength: 15
+          description: >-
+            ACRDLIMI PIC X(15), for ACCT-CREDIT-LIMIT PIC S9(10)V99. A string
+            rather than a number for the reason recorded on Money.
+        cashCreditLimit:
+          type: string
+          maxLength: 15
+          description: ACSHLIMI PIC X(15), for ACCT-CASH-CREDIT-LIMIT.
+        currentBalance:
+          type: string
+          maxLength: 15
+          description: ACURBALI PIC X(15), for ACCT-CURR-BAL.
+        currentCycleCredit:
+          type: string
+          maxLength: 15
+          description: ACRCYCRI PIC X(15), for ACCT-CURR-CYC-CREDIT.
+        currentCycleDebit:
+          type: string
+          maxLength: 15
+          description: ACRCYDBI PIC X(15), for ACCT-CURR-CYC-DEBIT.
+        openDateYear:
+          type: string
+          maxLength: 4
+          description: OPNYEARI PIC X(4); one part of ACCT-OPEN-DATE PIC X(10).
+        openDateMonth:
+          type: string
+          maxLength: 2
+          description: OPNMONI PIC X(2).
+        openDateDay:
+          type: string
+          maxLength: 2
+          description: OPNDAYI PIC X(2).
+        expirationDateYear:
+          type: string
+          maxLength: 4
+          description: EXPYEARI PIC X(4).
+        expirationDateMonth:
+          type: string
+          maxLength: 2
+          description: EXPMONI PIC X(2).
+        expirationDateDay:
+          type: string
+          maxLength: 2
+          description: EXPDAYI PIC X(2).
+        reissueDateYear:
+          type: string
+          maxLength: 4
+          description: RISYEARI PIC X(4).
+        reissueDateMonth:
+          type: string
+          maxLength: 2
+          description: RISMONI PIC X(2).
+        reissueDateDay:
+          type: string
+          maxLength: 2
+          description: RISDAYI PIC X(2).
+        groupId:
+          type: string
+          maxLength: 10
+          description: AADDGRPI PIC X(10), for ACCT-GROUP-ID PIC X(10).
+        customerId:
+          type: string
+          maxLength: 9
+          description: ACSTNUMI PIC X(9); the customer the account resolves to.
+        ssnPart1:
+          type: string
+          maxLength: 3
+          description: >-
+            ACTSSN1I PIC X(3); the first three digits of the national identifier.
+            Clear, inbound only, and never returned by any operation.
+        ssnPart2:
+          type: string
+          maxLength: 2
+          description: ACTSSN2I PIC X(2); the middle two digits.
+        ssnPart3:
+          type: string
+          maxLength: 4
+          description: ACTSSN3I PIC X(4); the last four digits.
+        dateOfBirthYear:
+          type: string
+          maxLength: 4
+          description: DOBYEARI PIC X(4); one part of CUST-DOB-YYYY-MM-DD.
+        dateOfBirthMonth:
+          type: string
+          maxLength: 2
+          description: DOBMONI PIC X(2).
+        dateOfBirthDay:
+          type: string
+          maxLength: 2
+          description: DOBDAYI PIC X(2).
+        ficoCreditScore:
+          type: string
+          maxLength: 3
+          description: ACSTFCOI PIC X(3), for CUST-FICO-CREDIT-SCORE PIC 9(03).
+        firstName:
+          type: string
+          maxLength: 25
+          description: ACSFNAMI PIC X(25).
+        middleName:
+          type: string
+          maxLength: 25
+          description: ACSMNAMI PIC X(25); optional, matching the nullable column.
+        lastName:
+          type: string
+          maxLength: 25
+          description: ACSLNAMI PIC X(25).
+        addressLine1:
+          type: string
+          maxLength: 50
+          description: ACSADL1I PIC X(50).
+        addressLine2:
+          type: string
+          maxLength: 50
+          description: ACSADL2I PIC X(50); optional.
+        city:
+          type: string
+          maxLength: 50
+          description: >-
+            ACSCITYI PIC X(50); stored as CUST-ADDR-LINE-3, for the reason
+            recorded on the view shape's city member.
+        stateCode:
+          type: string
+          maxLength: 2
+          description: >-
+            ACSSTTEI PIC X(2). A code outside the reference state list is refused
+            with a 400 naming this property.
+        countryCode:
+          type: string
+          maxLength: 3
+          description: ACSCTRYI PIC X(3).
+        zipCode:
+          type: string
+          maxLength: 5
+          description: >-
+            ACSZIPCI PIC X(5), the SCREEN width, against the stored
+            CUST-ADDR-ZIP PIC X(10). Assumptions: a five-character submission
+            replaces only the leading five of the stored ten and PRESERVES the
+            stored tail, because the screen cannot show the tail and a caller
+            cannot resubmit what it was never shown -- narrowing the stored value
+            to what the screen carries would delete positions 6 to 10 for every
+            edit of any other field on the form.
+        phone1AreaCode:
+          type: string
+          maxLength: 3
+          description: >-
+            ACTPHA1I PIC X(3); one part of CUST-PHONE-NUM-1 PIC X(15). An area code
+            outside the reference's general-purpose list is refused with a 400
+            naming this property.
+        phone1Prefix:
+          type: string
+          maxLength: 3
+          description: ACTPHB1I PIC X(3).
+        phone1LineNumber:
+          type: string
+          maxLength: 4
+          description: ACTPHC1I PIC X(4).
+        phone2AreaCode:
+          type: string
+          maxLength: 3
+          description: ACTPHA2I PIC X(3); one part of CUST-PHONE-NUM-2 PIC X(15).
+        phone2Prefix:
+          type: string
+          maxLength: 3
+          description: ACTPHB2I PIC X(3).
+        phone2LineNumber:
+          type: string
+          maxLength: 4
+          description: ACTPHC2I PIC X(4).
+        governmentIssuedId:
+          type: string
+          maxLength: 20
+          description: >-
+            ACSGOVTI PIC X(20), for CUST-GOVT-ISSUED-ID PIC X(20). Clear, inbound
+            only, never returned. Assumptions: OMITTING it preserves the stored
+            ciphertext rather than clearing it, because the screen shows a masked
+            value and a caller that did not retype what it could not read has not
+            asked for the identifier to be deleted.
+        eftAccountId:
+          type: string
+          maxLength: 10
+          description: ACSEFTCI PIC X(10).
+        primaryCardHolderIndicator:
+          type: string
+          maxLength: 1
+          description: ACSPFLGI PIC X(1).
+
+    AccountUpdateResponse:
+      type: object
+      additionalProperties: false
+      required: [accountId, informationMessage, returnMessage, fieldErrors, account, customer]
+      description: >-
+        The state as committed, with the reference's own acceptance sentence and
+        both protected identifiers already masked.
+
+
+        Assumptions: the account and customer members are the SAME two schemas the
+        view operation returns rather than an echo of the submission. That is what
+        keeps the clear identifiers out of every response: the submitted shape and
+        the returned shape are different types, so there is no path by which a
+        cleartext member reaches a body.
+
+
+        Assumptions: the revision is published as an ETag header and NOT as a body
+        member. An optimistic-lock version is transport metadata, and a value with
+        two homes is a value whose two homes can disagree.
+      properties:
+        accountId:
+          type: string
+          maxLength: 11
+          pattern: '^[0-9]{1,11}$'
+          description: The account that was updated, echoed as digits.
+          example: '12345678901'
+        informationMessage:
+          oneOf:
+            - type: string
+              maxLength: 75
+            - type: 'null'
+          description: The screen's information line, or null.
+        returnMessage:
+          oneOf:
+            - type: string
+              maxLength: 75
+            - type: 'null'
+          description: >-
+            The reference's own acceptance sentence, carried character for
+            character from app/cbl/COACTUPC.cbl rather than reworded.
+          example: 'Looks Good.... so far'
+        fieldErrors:
+          type: array
+          description: >-
+            Empty on this response, and declared because the shape is the one the
+            screen carries. A refusal is not returned here at all: it is a 400
+            whose problem document carries the entries, so a client reads field
+            errors from ONE place rather than from two shapes depending on status.
+          items:
+            $ref: '#/components/schemas/FieldError'
+        account:
+          $ref: '#/components/schemas/AccountDetail'
+        customer:
+          $ref: '#/components/schemas/CustomerDetail'
+
+    CardXrefResponse:
+      type: object
+      additionalProperties: false
+      required: [cardNumberMasked, customerId, accountId]
+      description: >-
+        One cross-reference row as an end user may see it, from the 50-byte record
+        at app/cpy/CVACT03Y.cpy. It differs from CardXrefView above in exactly one
+        respect and deliberately: it carries the card the row is FOR, masked to
+        its last four digits, because a list of an account's cards is unreadable
+        without something to tell the rows apart. CardXrefView omits the card
+        entirely because its caller supplied it.
+      properties:
+        cardNumberMasked:
+          type: string
+          maxLength: 16
+          description: >-
+            XREF-CARD-NUM PIC X(16), masked to its last four digits. The mask is
+            applied by the shared masker so that every context narrows a card
+            number the same way, and the length is preserved so the rendering
+            still aligns in a fixed-pitch column.
+          example: '************1111'
+        customerId:
+          type: string
+          maxLength: 9
+          pattern: '^[0-9]{1,9}$'
+          description: XREF-CUST-ID PIC 9(09), as digits.
+          example: '987654321'
+        accountId:
+          type: string
+          maxLength: 11
+          pattern: '^[0-9]{1,11}$'
+          description: XREF-ACCT-ID PIC 9(11), as digits.
+          example: '12345678901'
+
     Money:
       type: string
       pattern: '^-?[0-9]{1,10}\.[0-9]{2}$'
@@ -477,54 +1521,199 @@ components:
         - '-123.45'
         - '0.00'
 
+    # WHY : Refactoring Rationale: THIS SCHEMA WAS WRONG, and not in a detail. The
+    #       previous revision declared the RFC 7807 members type, title, detail and
+    #       instance, and this system emits none of them: the shared advice in
+    #       common-lib renders code, secondaryCode, message, severity, subsystem,
+    #       status, correlationId, path, timestamp, fieldErrors and abend. A client
+    #       generated from that revision could not bind a single error response,
+    #       and every sibling contract in this migration already declared the real
+    #       shape -- so this document alone described an error type that does not
+    #       exist. It is corrected here rather than referenced from elsewhere,
+    #       because this document has to be readable on its own.
     ApiError:
       type: object
+      additionalProperties: false
+      required:
+        - code
+        - secondaryCode
+        - severity
+        - subsystem
+        - status
+        - correlationId
+        - path
+        - timestamp
+        - fieldErrors
       description: >-
         The shared problem document this system returns for every failure. Its
-        shape is defined once in common-lib and is identical across every
-        service contract in this migration, so a client writes one error handler
-        rather than one per service. The members are described here rather than
-        referenced, because this document must be readable on its own.
+        shape is defined once in common-lib and is identical across every service
+        contract in this migration, so a client writes one error handler rather
+        than one per service.
       properties:
-        type:
+        code:
           type: string
-          description: A stable identifier for the kind of problem.
-        title:
+          maxLength: 13
+          description: >-
+            The stable identifier of the failure kind, matched on by alert rules
+            and log queries. It is a field of its own rather than a token inside
+            the message, because a token inside a sentence is matchable only by
+            substring.
+          example: 'CARDDEMO-0400'
+        secondaryCode:
           type: string
-          description: A short summary of the problem kind.
+          maxLength: 13
+          description: >-
+            A narrowing identifier where the kind has one, and the empty string
+            otherwise. It is never null, so a client need not distinguish absent
+            from empty.
+        message:
+          oneOf:
+            - type: string
+              maxLength: 75
+            - type: 'null'
+          description: >-
+            The operator- and user-facing sentence. Where the reference has its own
+            wording for the condition, that wording is carried character for
+            character; otherwise it is one of this system's fixed sentences. It
+            never carries a value the caller sent, an encrypted identifier, or a
+            message composed by a driver, a parser or a validation library.
+          example: 'Please correct the highlighted fields'
+        severity:
+          $ref: '#/components/schemas/Severity'
+        subsystem:
+          $ref: '#/components/schemas/Subsystem'
         status:
           type: integer
+          format: int32
+          minimum: 400
+          maximum: 599
           description: The HTTP status code, repeated in the body.
-        detail:
-          type: string
-          description: >-
-            An explanation of this occurrence. It never carries a primary account
-            number, an encrypted identifier or any other value the responding
-            service withholds from its own responses.
-        instance:
-          type: string
-          description: The path the failure occurred on.
         correlationId:
           type: string
           description: >-
-            The correlation identifier of the request, echoed so a caller can
-            find the same request in this service's logs.
+            The correlation identifier of the request, echoed so a caller can find
+            the same request in this service's logs.
+        path:
+          type: string
+          description: >-
+            The path the failure occurred on. Every digit run in it long enough to
+            be a primary account number is narrowed to a mask and its last four
+            digits before the value is emitted or logged.
         timestamp:
           type: string
-          format: date-time
-          description: When the failure was rendered.
+          description: >-
+            When the failure was rendered, in the reference's own 26-character
+            form. It is NOT an RFC 3339 instant and is deliberately not declared
+            with format date-time: the reference renders a timestamp as
+            'YYYY-MM-DD HH:MM:SS.mmmmmm' with a space rather than a T and no zone
+            designator, and this system carries that rendering unchanged so that a
+            value read from a migrated record and a value read from a response are
+            comparable as text.
+          pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}$'
+          example: '2026-08-07 00:00:00.000000'
         fieldErrors:
           type: array
           description: >-
-            One entry per rejected field on a 400. This is the target form of the
-            reference programs' FLG-*-NOT-OK and FLG-*-BLANK validation flags and
-            of the templated field highlight at app/cpy/CSSETATY.cpy L17-L27.
+            One entry per rejected field on a 400, and an empty array on every
+            other status. This is the target form of the reference programs'
+            FLG-*-NOT-OK and FLG-*-BLANK validation flags and of the templated
+            field highlight at app/cpy/CSSETATY.cpy L17 to L27. On a 409 it carries
+            one entry keyed version reporting the current revision.
           items:
-            type: object
-            properties:
-              field:
-                type: string
-                description: The rejected field's name.
-              message:
-                type: string
-                description: Why it was rejected. It never echoes the rejected value.
+            $ref: '#/components/schemas/FieldError'
+        abend:
+          oneOf:
+            - $ref: '#/components/schemas/AbendDetail'
+            - type: 'null'
+          description: >-
+            Present only on a 500, null otherwise. Its presence is the signal that
+            the failure was not the caller's: a refusal of caller input carries
+            warning severity and no abend block, and a service fault carries
+            critical severity and this one.
+
+    FieldError:
+      type: object
+      additionalProperties: false
+      required: [field, state, message, error]
+      description: >-
+        One failing property, keyed by the REQUEST PROPERTY the value arrived in so
+        that a form can attach the refusal to the control it submitted.
+      properties:
+        field:
+          type: string
+          minLength: 1
+          description: >-
+            The offending request property's name, or the literal 'request' when
+            the refusal names no single property, or 'version' on a 409.
+          example: 'stateCode'
+        state:
+          $ref: '#/components/schemas/FieldValidationState'
+        message:
+          type: string
+          minLength: 1
+          maxLength: 75
+          description: >-
+            Why it was rejected. It never echoes the rejected value: for a value
+            that will not convert, the property is named and the value is not, and
+            for a value that is too wide the declared width is reported rather than
+            the text.
+        error:
+          type: boolean
+          description: >-
+            Always true. It is a derived member of the emitted record rather than
+            one this contract chose, and it is declared because this schema seals
+            itself against unknown properties -- omitting it would make a strict
+            client validator reject every real response.
+
+    FieldValidationState:
+      type: string
+      enum: [NOT_OK, BLANK]
+      description: >-
+        Which of the reference's two failure conditions applies. BLANK means
+        nothing was supplied and additionally causes the client to render the
+        literal asterisk marker the reference copybook writes into an empty field;
+        NOT_OK means a value was supplied and refused, which the reference marks by
+        recolouring the field alone.
+
+    Severity:
+      type: string
+      enum: [LOG, INFO, WARNING, CRITICAL]
+      description: >-
+        How the failure should be read operationally. A refusal of caller input is
+        WARNING; a service fault is CRITICAL. The distinction is what keeps the
+        channel that means a service is broken from carrying a steady stream of
+        requests that were merely wrong.
+
+    Subsystem:
+      type: string
+      enum: [APPLICATION, CICS, IMS, RELATIONAL, QUEUE, OBJECT_STORE]
+      description: >-
+        Where the failure arose. A contention refusal reports RELATIONAL even when
+        this service, rather than the persistence provider, is what noticed it,
+        because it is the relational store the contention is over.
+
+    AbendDetail:
+      type: object
+      additionalProperties: false
+      required: [abendCode, abendCulprit, abendReason, abendMsg]
+      description: >-
+        The target form of the reference's own abend fields at
+        app/cpy/CSMSG02Y.cpy L45 to L53. Its four members are fixed text about
+        where the failure was recognised and never carry anything derived from the
+        caught throwable, so a provider's internal wording cannot reach a response
+        through them.
+      properties:
+        abendCode:
+          type: string
+          description: Which abend condition was recognised.
+          example: 'SVCE'
+        abendCulprit:
+          type: string
+          description: Which component recognised it, or the empty string.
+        abendReason:
+          type: string
+          description: Why it was recognised, or the empty string.
+        abendMsg:
+          type: string
+          maxLength: 75
+          description: The operator-facing sentence for the condition.

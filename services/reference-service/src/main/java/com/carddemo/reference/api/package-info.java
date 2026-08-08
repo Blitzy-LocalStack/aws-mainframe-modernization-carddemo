@@ -154,12 +154,43 @@
  * last-row key in ascending order; reading backward asks for keys strictly before the first-row key in
  * descending order. There is no offset pagination and no offset helper in this package.</p>
  *
- * <p>Assumptions: the page size is seven, and it is seven because the baseline names it as a constant
- * rather than because a screen was measured.
- * {@code app/app-transaction-type-db2/cbl/COTRTLIC.cbl} L60 declares
- * {@code 05  WS-MAX-SCREEN-LINES     PIC S9(4)      COMP VALUE 7}. Counting rows on a map would have
- * produced the same number by coincidence and would have left the next reader unable to tell an
- * intended limit from an artifact of a layout.</p>
+ * <p>Assumptions: the page size is stated PER ENDPOINT rather than once for the package, because two of
+ * the three list families here have a baseline antecedent and one does not.
+ *
+ * <ul>
+ *   <li>The transaction-type browse publishes <b>seven</b> rows, and it is seven because the baseline
+ *       names it as a constant rather than because a screen was measured:
+ *       {@code app/app-transaction-type-db2/cbl/COTRTLIC.cbl} L60 declares
+ *       {@code 05  WS-MAX-SCREEN-LINES     PIC S9(4)      COMP VALUE 7} and loops to that bound at
+ *       L940 and L1004, and {@code app/app-transaction-type-db2/cpy-bms/COTRTLI.cpy} carries exactly
+ *       {@code TRTSEL1I} through {@code TRTSEL7I}. Counting rows on the map alone would have produced
+ *       the same number by coincidence and would have left the next reader unable to tell an intended
+ *       limit from an artifact of a layout. This one is INHERITED: the migration plan lists page
+ *       boundaries among the preserved contracts, so it is not available to be chosen.</li>
+ *   <li>The transaction-category browse publishes <b>seven</b> as well, and here the number is CHOSEN.
+ *       The extension ships two maps only, {@code COTRTLI.bms} and {@code COTRTUP.bms}, so no baseline
+ *       screen browses categories and no boundary exists to preserve. Seven is taken from the sibling
+ *       browse so that two lists paged in the same session step by the same amount.</li>
+ *   <li>The three address-lookup browses -- area code, state and state/ZIP prefix -- publish
+ *       <b>twenty</b>, and that figure is ADDITIVE. Those domains exist in the baseline only as
+ *       condition-name allow-lists inside {@code app/cpy/CSLKPCDY.cpy}, tested against rather than
+ *       displayed, and no map browses any of them, so there is no row count to inherit. The reasoning
+ *       for twenty over seven is written at {@code AddressLookupController.PAGE_SIZE}.</li>
+ * </ul>
+ *
+ * <p>Refactoring Rationale: this paragraph asserted a single package-wide size of seven while the
+ * services published ten for both reference browses and the controller published twenty for the
+ * lookups, so a reader consulting the charter for the shape of a page would have been wrong about every
+ * endpoint in the package. The two reference browses are corrected to seven in code, because the type
+ * browse's number is a preserved contract and the category browse follows it; the lookups keep twenty
+ * and are recorded as additive. The claim is stated per endpoint rather than as one number because that
+ * is what is true, and because collapsing three different provenances into one figure is how the
+ * original error became possible.</p>
+ *
+ * <p>Assumptions: no page size is a request parameter in any of these operations, so none of these
+ * numbers is negotiable by a caller. {@code openapi/reference-api.yaml} declares no page-size, page-
+ * number, offset or total-pages parameter anywhere, which is what keeps the figures above a property of
+ * the published contract rather than of a particular request.</p>
  *
  * <p>Assumptions: the baseline was itself already walking by key rather than scanning by position, so
  * this is a transcription and not a redesign. The same program declares {@code C-TR-TYPE-FORWARD} at

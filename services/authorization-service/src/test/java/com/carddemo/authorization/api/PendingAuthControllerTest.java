@@ -5,6 +5,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -34,6 +35,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.converter.json.JacksonJsonHttpMessageConverter;
+import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import tools.jackson.databind.json.JsonMapper;
@@ -65,7 +67,35 @@ class PendingAuthControllerTest {
     private static final Principal PRINCIPAL = () -> SUBJECT;
 
     /** The collection route the contract publishes. */
-    private static final String LIST_ROUTE = "/api/v1/authorizations";
+    private static final String LIST_ROUTE = "/api/v1/authorizations/search";
+
+    /**
+     * Builds the JSON body the list route now takes its criteria in.
+     *
+     * <p>Refactoring Rationale: these criteria were sent as QUERY PARAMETERS against a GET of
+     * {@code /api/v1/authorizations}. They travel in a body because the account scope is an account
+     * identifier, and a query string is part of the request line the load balancer writes into its access
+     * log itself, before any application code runs -- a record the migration's sensitive-data logging
+     * contract forbids it to hold. This helper exists so each case states only the criteria it varies
+     * rather than repeating the JSON shape six times.</p>
+     *
+     * @param accountId the account scope to send, or {@code null} to omit the member entirely
+     * @param direction the paging direction to send, or {@code null} to omit the member
+     * @return a JSON object carrying exactly the members that were supplied, never {@code null}
+     */
+    private static String listBody(String accountId, String direction) {
+        StringBuilder body = new StringBuilder("{");
+        if (accountId != null) {
+            body.append("\"accountId\":\"").append(accountId).append('"');
+        }
+        if (direction != null) {
+            if (body.length() > 1) {
+                body.append(',');
+            }
+            body.append("\"direction\":\"").append(direction).append('"');
+        }
+        return body.append('}').toString();
+    }
 
     /** The member route the contract publishes, with a placeholder for the sealed selector. */
     private static final String READ_ROUTE = "/api/v1/authorizations/{key}";
@@ -139,7 +169,8 @@ class PendingAuthControllerTest {
     void listRouteAnswersOkWithMaskedCardAndStringMoney() throws Exception {
         when(this.summaries.list(ACCOUNT_ID, null, null, SUBJECT)).thenReturn(listView());
 
-        this.mockMvc.perform(get(LIST_ROUTE).param("accountId", ACCOUNT_ID_DIGITS)
+        this.mockMvc.perform(post(LIST_ROUTE).contentType(MediaType.APPLICATION_JSON)
+                        .content(listBody(ACCOUNT_ID_DIGITS, null))
                         .principal(PRINCIPAL))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.summary.accountId").value(ACCOUNT_ID_DIGITS))
@@ -165,7 +196,8 @@ class PendingAuthControllerTest {
     @Test
     @DisplayName("a blank account scope is refused with the reference sentence and the blank state")
     void blankAccountScopeIsRefusedWithTheReferenceSentence() throws Exception {
-        this.mockMvc.perform(get(LIST_ROUTE).param("accountId", "")
+        this.mockMvc.perform(post(LIST_ROUTE).contentType(MediaType.APPLICATION_JSON)
+                        .content(listBody("", null))
                         .principal(PRINCIPAL))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value(ApiError.CODE_VALIDATION))
@@ -190,7 +222,8 @@ class PendingAuthControllerTest {
     @Test
     @DisplayName("a non-digit account scope is refused with the reference numeric sentence")
     void nonDigitAccountScopeIsRefusedWithTheReferenceSentence() throws Exception {
-        this.mockMvc.perform(get(LIST_ROUTE).param("accountId", "0000000001X")
+        this.mockMvc.perform(post(LIST_ROUTE).contentType(MediaType.APPLICATION_JSON)
+                        .content(listBody("0000000001X", null))
                         .principal(PRINCIPAL))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.message").value("Acct Id must be Numeric ..."))
@@ -211,9 +244,9 @@ class PendingAuthControllerTest {
     @Test
     @DisplayName("an unpublished paging direction is refused at the boundary")
     void unpublishedPagingDirectionIsRefusedAtTheBoundary() throws Exception {
-        this.mockMvc.perform(get(LIST_ROUTE)
-                        .param("accountId", ACCOUNT_ID_DIGITS)
-                        .param("direction", "backwards")
+        this.mockMvc.perform(post(LIST_ROUTE)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(listBody(ACCOUNT_ID_DIGITS, "backwards"))
                         .principal(PRINCIPAL))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.fieldErrors[0].field").value("direction"));
@@ -238,9 +271,9 @@ class PendingAuthControllerTest {
                 PendingAuthSummaryService.DIRECTION_FIELD,
                 "a paging direction is meaningful only alongside a cursor"));
 
-        this.mockMvc.perform(get(LIST_ROUTE)
-                        .param("accountId", ACCOUNT_ID_DIGITS)
-                        .param("direction", "previous")
+        this.mockMvc.perform(post(LIST_ROUTE)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(listBody(ACCOUNT_ID_DIGITS, "previous"))
                         .principal(PRINCIPAL))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.fieldErrors.length()").value(1))
@@ -259,7 +292,8 @@ class PendingAuthControllerTest {
         when(this.summaries.list(ACCOUNT_ID, null, null, SUBJECT))
                 .thenThrow(new NoSuchElementException("no summary exists for the requested account"));
 
-        this.mockMvc.perform(get(LIST_ROUTE).param("accountId", ACCOUNT_ID_DIGITS)
+        this.mockMvc.perform(post(LIST_ROUTE).contentType(MediaType.APPLICATION_JSON)
+                        .content(listBody(ACCOUNT_ID_DIGITS, null))
                         .principal(PRINCIPAL))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.code").value(ApiError.CODE_NOT_FOUND));

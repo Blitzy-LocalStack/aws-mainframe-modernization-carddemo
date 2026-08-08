@@ -3,22 +3,33 @@ package com.carddemo.batch.service;
 import com.carddemo.batch.dto.BusinessDate;
 import com.carddemo.batch.dto.DatasetGeneration;
 import com.carddemo.batch.dto.DatasetGeneration.DatasetFamily;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
+import java.util.Set;
 import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import software.amazon.awssdk.core.exception.SdkException;
+import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.CommonPrefix;
+import software.amazon.awssdk.services.s3.model.Delete;
+import software.amazon.awssdk.services.s3.model.DeleteObjectsRequest;
+import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
+import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
+import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.S3Exception;
+import software.amazon.awssdk.services.s3.model.S3Object;
 
 /**
  * Resolves a generation-dataset reference to the object-store location one batch step reads or writes.
@@ -76,6 +87,28 @@ import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
  * anything this process remembers: the generation it must find was written by an earlier task in the
  * chain, in a different container, whose in-process state is long gone.</p>
  *
+ * <h2>The two relative forms have different scopes, and the difference is load-bearing</h2>
+ *
+ * <p>Assumptions: {@code (0)} resolves across the WHOLE family and {@code (+1)} is scoped to the target
+ * business date. The two are not symmetric and must not be made so. {@code app/jcl/COMBTRAN.jcl:24}
+ * reads {@code TRANSACT.BKUP(0)} and {@code :26} reads {@code SYSTRAN(0)}, and a date-scoped answer to
+ * either returns nothing on the first run of a new business day even though the generation the merge
+ * needs exists under the previous day's partition -- the catalog the notation came from held one
+ * generation sequence per base and knew nothing of dates. Conversely a family-wide {@code (+1)} would
+ * make a second staging run for an already-staged earlier date derive its number from some later date's
+ * generations, so re-running one day after a subsequent day had been staged would skip numbers and leave
+ * the two dates' sequences uncomparable. The sibling stager states both halves of this and enforces
+ * them the same way, family-wide at {@code loaders/s3_stage.py:1250-1256} and date-scoped at
+ * {@code loaders/s3_stage.py:1317-1323}.</p>
+ *
+ * <p>Refactoring Rationale: both forms were previously date-scoped, and so was retention. That made
+ * {@code (0)} answer empty at every date boundary and made the five-generation window count five
+ * generations PER DATE rather than five per family -- so a family staged on six days retained thirty
+ * generations while reporting that it retained five. Ordering across a family is total because a
+ * coordinate compares on its resolved partition date before its generation number, which is the same
+ * ordering the sibling's coordinate type derives from its own field order at
+ * {@code loaders/s3_stage.py:380-389}.</p>
+ *
  * <h2>The load-bearing ruling: an allocation happens once per run, not once per call</h2>
  *
  * <p>Assumptions: within one job, every {@code (+1)} reference to one base resolves to the SAME newly
@@ -95,10 +128,53 @@ import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
  *       {@code DISP=SHR} as the sort input.</li>
  * </ul>
  *
- * <p>Trade-offs: the consequence is that an allocation is memoised for the duration of a run rather than
- * recomputed, and the cost of holding that state is accepted in exchange for the second reference
+ * <p>Trade-offs: the consequence is that an allocation is recorded for the duration of a run rather than
+ * recomputed, and the cost of holding that record is accepted in exchange for the second reference
  * addressing the generation the first one created. {@link #allocateNewGeneration} documents the
  * alternative at the point the decision is made.</p>
+ *
+ * <p>Refactoring Rationale: that record was a process-local map, and a process-local map cannot hold the
+ * invariant the paragraph above states. A batch step runs as a Fargate task, the nightly chain stages
+ * through a {@code Map} state that runs one containerised branch per dataset, and Step Functions may
+ * retry a branch -- so the two references a job makes to one family are not guaranteed to occur in one
+ * process, and a retried branch begins with an empty map. The map therefore held the invariant only in
+ * the single case where nothing went wrong and everything ran in one container. It has been replaced by
+ * two conditionally-written objects in the dataset bucket, described under the next heading, which hold
+ * the same invariant across containers, across retries and across a restart.</p>
+ *
+ * <h2>The allocation is reserved durably, in the bucket, by conditional write</h2>
+ *
+ * <p>Assumptions: the bucket is the one durable state every branch and every attempt already agrees on,
+ * so it is where the reservation belongs. The sibling stager records the same conclusion for the same
+ * reason at {@code data-migration/src/carddemo_migration/loaders/s3_stage.py:1306-1316}: a counter held
+ * by a process is wrong twice over, because two {@code Map} branches each start from the same base and
+ * compute the same number, and because a retried branch recomputes the number its failed attempt already
+ * used and overwrites a generation that had completed.</p>
+ *
+ * <p>Assumptions: two objects are written, and each answers a different question. A marker at
+ * {@value #CLAIM_OBJECT_NAME} beneath the generation's own key prefix answers "is this number taken",
+ * and it is written with a conditional guard so that exactly one writer across all runs can create it.
+ * An entry beneath {@value #RUN_CLAIM_ROOT} answers "which number did this run already take for this
+ * family", and it is what a second reference, a retried branch or a restarted container reads instead of
+ * allocating again.</p>
+ *
+ * <p>Trade-offs: the per-generation marker sits UNDER the generation prefix deliberately, which means a
+ * claimed generation immediately becomes a listed common prefix for both implementations -- this one at
+ * {@link #listGenerations(DatasetFamily, BusinessDate)} and the sibling at
+ * {@code loaders/s3_stage.py:1150}. The accepted cost is one object of a few bytes per generation; the
+ * benefit is that a number claimed by a Java step is a number the Python stager also sees as taken,
+ * which no reservation held outside the bucket could achieve. The run entry sits at a top-level prefix
+ * outside every family root for the complementary reason: no family listing may return it, because a
+ * bookkeeping prefix appearing among a family's dates would be a candidate the parsers then have to
+ * reject.</p>
+ *
+ * <p>Trade-offs: an allocation that is claimed and then abandoned -- because the step failed after the
+ * conditional write -- permanently consumes that generation number. That is accepted, and it is also
+ * what the reference does: a job step that creates {@code (+1)} and then fails leaves a catalogued
+ * generation behind, and the retention rule is what eventually removes it. The alternative, deleting the
+ * marker on failure, was rejected because a delete cannot be guaranteed to run on the paths that matter
+ * -- a killed container runs no cleanup -- so it would replace a reliable small cost with an unreliable
+ * one.</p>
  *
  * <h2>What this class does not own</h2>
  *
@@ -109,9 +185,11 @@ import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
  * padding width cannot drift between two declarations, because there is only ever one. This class
  * decides WHICH generation a step addresses and never spells one.</p>
  *
- * <p>Assumptions: the bucket, the ten prefix families and the lifecycle configuration that enforces
- * retention are provisioned by {@code infra/modules/s3-datasets}. This class provisions nothing, creates
- * no prefix and deletes no object; it reports coordinates and leaves acting on them to its callers.</p>
+ * <p>Assumptions: the bucket, the ten prefix families, bucket versioning and the noncurrent-version
+ * lifecycle configuration are provisioned by {@code infra/modules/s3-datasets}. This class provisions
+ * none of them and deletes no object. The only objects it writes are the two reservation markers
+ * described above, each a few bytes and each written at most once; it reports coordinates and leaves
+ * staging the dataset bytes, and scratching an aged-out generation, to its callers.</p>
  *
  * <h2>Baseline lineage: provenance only</h2>
  *
@@ -186,41 +264,131 @@ public class DatasetGenerationService {
     private static final String KEY_SEGMENT_SEPARATOR = "/";
 
     /**
-     * The separator joining a run identifier to a family name in a memoisation key.
+     * The object name, beneath a generation's own key prefix, that marks the number as taken.
      *
-     * <p>Assumptions: a non-printing character is used rather than a punctuation mark so that no run
-     * identifier can contain it and thereby collide with a different run and family pair. The
-     * orchestrator supplies the execution name, which is constrained to printable characters, so a
-     * control character cannot occur inside one.</p>
+     * <p>Assumptions: the name opens with an underscore so that it sorts and reads as bookkeeping rather
+     * than as a staged dataset object, and it carries no run identifier or date in the name itself
+     * because its BODY carries the run identifier. Putting the run identifier in the key would make two
+     * runs able to create two different markers under one generation prefix, which is precisely the
+     * exclusivity this object exists to provide.</p>
      */
-    private static final char MEMOISATION_KEY_SEPARATOR = '\u0000';
+    public static final String CLAIM_OBJECT_NAME = "_generation.claim";
+
+    /**
+     * The top-level key prefix beneath which each run's per-family allocation is recorded.
+     *
+     * <p>Assumptions: the prefix is top-level, outside every family root, so that no family listing can
+     * return it. A bookkeeping prefix appearing among a family's date partitions would be a candidate
+     * every generation parser -- this module's and the sibling stager's -- would then have to reject, and
+     * a parser that rejects is a parser that can be made to accept by mistake.</p>
+     */
+    public static final String RUN_CLAIM_ROOT = "_generation-claims/";
+
+    /**
+     * The number of times an allocation re-lists and re-attempts its conditional claim before failing.
+     *
+     * <p>Assumptions: a bounded retry is required rather than an unbounded loop, because a loop that
+     * cannot end is a batch step that never returns and a state machine timeout rather than a diagnosable
+     * failure. Each iteration is lost only when a DIFFERENT run claimed the same number in the window
+     * between this run's listing and its conditional write, so the bound is the number of concurrent
+     * writers this method tolerates before reporting that it cannot make progress. Eight is comfortably
+     * above the widest fan-out the nightly chain has -- the staging {@code Map} state runs one branch per
+     * dataset family, and no two branches of it write the same family.</p>
+     */
+    public static final int MAX_ALLOCATION_ATTEMPTS = 8;
+
+    /**
+     * The conditional-write guard that succeeds only when the object does not already exist.
+     *
+     * <p>Assumptions: the asterisk form of the no-match precondition is the object store's
+     * compare-and-set primitive. It is what makes the claim atomic: two writers issuing it against one
+     * key produce exactly one success, decided by the store rather than by either writer's timing.</p>
+     */
+    private static final String ABSENT_OBJECT_GUARD = "*";
+
+    /**
+     * The status the object store reports when a conditional write lost to an existing object.
+     *
+     * <p>Assumptions: this status means the key exists and the caller did not win it. It is a normal
+     * outcome of a race rather than a fault, so it is translated into a retry rather than into a
+     * failure.</p>
+     */
+    private static final int PRECONDITION_FAILED_STATUS = 412;
+
+    /**
+     * The status the object store reports when a concurrent conditional write is already in flight.
+     *
+     * <p>Assumptions: this status is distinct from the precondition failure above and means the outcome
+     * is not yet decided rather than decided against the caller. Both are handled the same way here -- by
+     * listing again and re-attempting -- because the next listing observes whichever writer won, and a
+     * caller cannot act differently on "you lost" than on "ask again".</p>
+     */
+    private static final int CONDITIONAL_CONFLICT_STATUS = 409;
+
+    /**
+     * The separator between the run segment and the family segment of a run-claim key.
+     */
+    private static final String RUN_CLAIM_FAMILY_SEPARATOR = "/family=";
+
+    /**
+     * The literal opening the run segment of a run-claim key, {@code run=}.
+     */
+    private static final String RUN_CLAIM_RUN_MARKER = "run=";
+
+    /**
+     * The number of keys one deletion request carries, one thousand.
+     *
+     * <p>Assumptions: the value is the object store's own published maximum for a multiple-object delete,
+     * so batching at it issues the fewest requests the store permits. Exceeding it is rejected outright
+     * rather than silently truncated, which is why the batching is explicit rather than left to the size
+     * of whatever a listing returned.</p>
+     */
+    private static final int DELETE_BATCH_SIZE = 1000;
 
     /**
      * The value reported when a listed child prefix carries no readable generation number.
      *
      * <p>Assumptions: a negative sentinel is unambiguous because the lowest generation number the
-     * coordinate admits is zero, so no readable value can collide with it. The alternative, reporting
+     * coordinate admits is one, so no readable value can collide with it. The alternative, reporting
      * absence through an optional, would box a primitive on every child of every listing to express a
      * condition the caller checks immediately with a range comparison it performs anyway.</p>
      */
     private static final int UNREADABLE_GENERATION_NUMBER = -1;
+
+    /**
+     * Orders coordinates of one family as the reference catalog ordered its generations.
+     *
+     * <p>Assumptions: the resolved partition date is compared before the generation number, so every
+     * generation of an earlier date precedes every generation of a later one. The comparison uses the
+     * RESOLVED date rather than the supplied token, because two different tokens -- the ten-character
+     * separated layout and the eight-character compact layout the interest step's parameter carries --
+     * resolve to the same partition and would otherwise sort as two different days. The resolved form is
+     * year-month-day, so its lexical order is its chronological order and no date parsing is needed to
+     * compare two of them.</p>
+     */
+    private static final Comparator<DatasetGeneration> FAMILY_ORDER =
+            Comparator.comparing(DatasetGeneration::partitionDate)
+                    .thenComparingInt(DatasetGeneration::generationNumber);
+
+    /**
+     * The business date used to build a coordinate whose only purpose is to be asked how it renders.
+     *
+     * <p>Assumptions: the value never reaches a key. It is used to obtain a rendered date-partition
+     * segment from which the marker that opens it is recovered by subtraction, so that this class matches
+     * a marker it never spells. A constant is used rather than a fresh instance per call because the
+     * probe is immutable and its content is irrelevant -- only its shape is read.</p>
+     *
+     * <p>Assumptions: the token is deliberately a date whose digits are all distinct from one another's
+     * positions in the marker, so that a defect in the subtraction cannot be masked by a coincidental
+     * character match between the marker and the date.</p>
+     */
+    private static final BusinessDate PARTITION_PROBE_DATE = new BusinessDate("1970-01-02");
 
     /** The object-store client the generation listings are read through. */
     private final S3Client objectStore;
 
     /** The bucket every staged dataset generation lives in, supplied by configuration. */
     private final String datasetBucket;
-
-    /**
-     * The generation allocated for each run and family pair, so a repeat request returns the same one.
-     *
-     * <p>Assumptions: a concurrent map is used and the allocation goes through a single atomic
-     * compute-if-absent call. A batch task runs one step at a time, so an ordinary map guarded by
-     * nothing would be sufficient for the access pattern this class actually sees; the concurrent form
-     * is chosen because the bean is a singleton and costs nothing here, which removes the need to rely
-     * on that access pattern staying true.</p>
-     */
-    private final ConcurrentMap<String, DatasetGeneration> allocatedGenerations = new ConcurrentHashMap<>();
 
     /**
      * Builds the service over its object-store client and its configured bucket.
@@ -260,12 +428,14 @@ public class DatasetGenerationService {
      * @param runId the orchestrator execution this allocation belongs to, which is the execution name
      *     the state machine passes as {@code CARDDEMO_BATCH_RUN_ID}; must not be {@code null} or blank
      * @return the allocated generation, never {@code null}, and identical across repeat calls for the
-     *     same family and run
+     *     same family and run whether or not those calls occur in one process
      * @throws NullPointerException if {@code family}, {@code businessDate} or {@code runId} is
      *     {@code null}
      * @throws IllegalArgumentException if {@code runId} is blank
-     * @throws DatasetGenerationException if the existing generations of the family cannot be listed, or
-     *     if the family already holds the highest representable generation for the business date
+     * @throws DatasetGenerationException if the existing generations of the family cannot be listed, if
+     *     the reservation markers cannot be read or written, if the family already holds the highest
+     *     representable generation for the business date, or if {@value #MAX_ALLOCATION_ATTEMPTS}
+     *     successive attempts each lost their number to a concurrent writer
      */
     public DatasetGeneration allocateNewGeneration(
             DatasetFamily family, BusinessDate businessDate, String runId) {
@@ -274,7 +444,7 @@ public class DatasetGenerationService {
         Objects.requireNonNull(businessDate, "businessDate must not be null");
         requireNonBlank(runId, "runId");
 
-        // WHAT: one atomic compute-if-absent performs the allocation and the memoisation together.
+        // WHAT: an allocation already recorded for this run and family is returned without allocating.
         // WHY : Alternatives Considered: allocating on every call, which is the obvious reading of "(+1)
         //       means a new generation" and is wrong. Four jobs name one family twice through that same
         //       spelling and read back on the second reference -- COMBTRAN.jcl:37 then :44,
@@ -282,76 +452,244 @@ public class DatasetGenerationService {
         //       per-call allocation would hand the reading step a second, empty prefix, write two
         //       generations where the reference writes one, and consume the five-generation retention
         //       window at twice the intended rate.
-        // WHY : Alternatives Considered: a get followed by a put, which reads correctly and races. Two
-        //       callers finding the key absent would both list, both allocate and both store, and the
-        //       loser's coordinate would already have been handed out. Compute-if-absent evaluates the
-        //       allocation at most once per key, so the invariant this memoisation exists to hold is
-        //       enforced by the map rather than by call ordering.
-        // WHY : Assumptions: a failure inside the allocation propagates and leaves no entry behind, so a
-        //       run whose first attempt could not reach the object store retries cleanly instead of
-        //       caching a half-formed answer.
-        // WHY : Trade-offs: the allocation event is emitted INSIDE the mapping function and the
-        //       resolution event outside it, rather than one event after the call. One event would report
-        //       an allocation on a memoised call too, and an operator seeing the same family allocated
-        //       twice in one run would read it as the memoisation having failed, which is the one failure
-        //       this method exists to prevent. The cost is a log statement in a mapping function; it adds
-        //       no contention worth counting, because the listing that function performs already holds
-        //       the same bin for the duration of a network call.
-        DatasetGeneration allocated = this.allocatedGenerations.computeIfAbsent(
-                memoisationKey(runId, family),
-                key -> {
-                    DatasetGeneration fresh =
-                            nextGeneration(family, businessDate, listGenerations(family, businessDate));
-                    LOG.info("event=batch.generation.allocated runId={} family={} generation={} prefix={}",
-                            runId, family.name(), fresh.generationNumber(), fresh.keyPrefix());
-                    return fresh;
-                });
+        // WHY : Refactoring Rationale: this read was a lookup in a process-local map. The map answered
+        //       correctly only while both references occurred in one container and nothing was retried,
+        //       and neither holds for a Fargate task invoked from a Map state that Step Functions may
+        //       redrive. The record is now an object in the bucket, so a second reference made by a
+        //       different container, a retried branch or a restarted process reads the same answer.
+        Optional<DatasetGeneration> alreadyAllocated = recordedAllocation(family, businessDate, runId);
+        if (alreadyAllocated.isPresent()) {
+            LOG.debug("event=batch.generation.resolved runId={} family={} generation={} source=recorded",
+                    runId, family.name(), alreadyAllocated.get().generationNumber());
+            return alreadyAllocated.get();
+        }
 
-        LOG.debug("event=batch.generation.resolved runId={} family={} generation={}",
-                runId, family.name(), allocated.generationNumber());
+        DatasetGeneration claimed = claimNextUnclaimedGeneration(family, businessDate, runId);
+        recordAllocation(family, businessDate, runId, claimed);
+
+        // WHY : Assumptions: the recording step can only disagree with the claim when a second thread of
+        //       the SAME run raced this one, and it resolves that by returning the recorded answer rather
+        //       than the locally claimed one. Re-reading after the recording write is therefore not
+        //       redundant: it is what makes both racers return one coordinate.
+        DatasetGeneration allocated = recordedAllocation(family, businessDate, runId).orElse(claimed);
+
+        LOG.info("event=batch.generation.allocated runId={} family={} generation={} prefix={}",
+                runId, family.name(), allocated.generationNumber(), allocated.keyPrefix());
         return allocated;
+    }
+
+    /**
+     * Claims the lowest unclaimed generation of one family and date, re-listing when a claim is lost.
+     *
+     * <p>Assumptions: the candidate is recomputed from a fresh listing on every attempt rather than
+     * incremented locally. A lost claim means another writer created that number, and the only way to
+     * learn what else it may have created in the same window is to ask the store again.</p>
+     *
+     * @param family the family being allocated; must not be {@code null}
+     * @param businessDate the business date the allocation is partitioned under; must not be {@code null}
+     * @param runId the run the claim is recorded against; must not be {@code null}
+     * @return the generation this call successfully claimed, never {@code null}
+     * @throws DatasetGenerationException if the generations cannot be listed, if the claim cannot be
+     *     written for a reason other than losing the race, if the generation range is exhausted, or if
+     *     {@value #MAX_ALLOCATION_ATTEMPTS} attempts each lost
+     */
+    private DatasetGeneration claimNextUnclaimedGeneration(
+            DatasetFamily family, BusinessDate businessDate, String runId) {
+
+        for (int attempt = 1; attempt <= MAX_ALLOCATION_ATTEMPTS; attempt++) {
+            DatasetGeneration candidate =
+                    nextGeneration(family, businessDate, listGenerations(family, businessDate));
+
+            if (writeIfAbsent(candidate.keyPrefix() + CLAIM_OBJECT_NAME, runId)) {
+                return candidate;
+            }
+
+            LOG.info("event=batch.generation.claim-lost runId={} family={} generation={} attempt={}",
+                    runId, family.name(), candidate.generationNumber(), attempt);
+        }
+
+        throw new DatasetGenerationException("dataset family " + family.mainframeBaseName()
+                + " could not be allocated a generation for business date " + businessDate.token()
+                + " within " + MAX_ALLOCATION_ATTEMPTS + " attempts, because another writer claimed the"
+                + " next number on every attempt");
+    }
+
+    /**
+     * Reads the generation this run has already recorded for one family, if it has recorded one.
+     *
+     * <p>Assumptions: the recorded value is the generation NUMBER and the coordinate is rebuilt around
+     * it from the family and business date the caller supplied. Storing a rendered prefix instead and
+     * parsing it back would put a second reader of the prefix convention here, and the convention is
+     * owned by one type on purpose.</p>
+     *
+     * @param family the family whose recorded allocation is wanted; must not be {@code null}
+     * @param businessDate the business date to rebuild the coordinate under; must not be {@code null}
+     * @param runId the run whose record is read; must not be {@code null}
+     * @return the recorded generation, or an empty result when this run has recorded none for this
+     *     family; never {@code null}
+     * @throws DatasetGenerationException if the record exists but cannot be read, or if it holds
+     *     something other than a generation number this type accepts
+     */
+    private Optional<DatasetGeneration> recordedAllocation(
+            DatasetFamily family, BusinessDate businessDate, String runId) {
+
+        String key = runClaimKey(runId, family);
+        final String recorded;
+        try {
+            recorded = this.objectStore.getObjectAsBytes(GetObjectRequest.builder()
+                    .bucket(this.datasetBucket)
+                    .key(key)
+                    .build()).asUtf8String();
+        } catch (NoSuchKeyException absent) {
+            // WHY : Assumptions: an absent record is the ordinary first-call outcome and carries no
+            //       diagnostic value, so it is neither logged at an operational level nor wrapped. The
+            //       exception instance is deliberately unreferenced; naming it is what documents that
+            //       this branch is the store reporting absence rather than a fault being swallowed.
+            return Optional.empty();
+        } catch (SdkException failure) {
+            throw new DatasetGenerationException("could not read the recorded generation allocation of"
+                    + " dataset family " + family.mainframeBaseName() + " for run " + runId
+                    + " at key " + key, failure);
+        }
+
+        // WHY : Assumptions: the body is trimmed before parsing because a value written by a shell
+        //       redirection or an operator repair would carry a trailing newline, and a record that is
+        //       correct apart from one byte of whitespace should be honoured rather than failing a step.
+        String digits = recorded.trim();
+        try {
+            return Optional.of(new DatasetGeneration(family, businessDate, Integer.parseInt(digits)));
+        } catch (IllegalArgumentException malformed) {
+            // WHY : Assumptions: one catch covers both ways the record can be unusable, because the
+            //       parse failure the platform raises for a non-numeric body is itself a subclass of the
+            //       rejection the coordinate raises for a number outside the four-digit range. Naming
+            //       both would not compile, and naming only the parse failure would let an out-of-range
+            //       record propagate a rejection that names no key.
+            throw new DatasetGenerationException("the recorded generation allocation of dataset family "
+                    + family.mainframeBaseName() + " for run " + runId + " at key " + key
+                    + " does not hold a generation number this run can address", malformed);
+        }
+    }
+
+    /**
+     * Records the generation this run allocated for one family, unless a record already exists.
+     *
+     * <p>Assumptions: the write is conditional on absence, so two threads of one run cannot both record
+     * and the loser's value cannot overwrite the winner's. A losing write is not an error here -- the
+     * caller re-reads the record afterwards and both racers return whichever value was recorded.</p>
+     *
+     * @param family the family the allocation belongs to; must not be {@code null}
+     * @param businessDate the business date the allocation is partitioned under, named in the failure
+     *     message only; must not be {@code null}
+     * @param runId the run the allocation is recorded against; must not be {@code null}
+     * @param allocated the generation to record; must not be {@code null}
+     * @throws DatasetGenerationException if the record cannot be written for a reason other than one
+     *     already existing
+     */
+    private void recordAllocation(DatasetFamily family, BusinessDate businessDate, String runId,
+            DatasetGeneration allocated) {
+
+        if (!writeIfAbsent(runClaimKey(runId, family),
+                Integer.toString(allocated.generationNumber()))) {
+
+            LOG.info("event=batch.generation.record-lost runId={} family={} businessDate={}"
+                            + " generation={}",
+                    runId, family.name(), businessDate.token(), allocated.generationNumber());
+        }
+    }
+
+    /**
+     * Writes one small marker object, but only if no object already occupies that key.
+     *
+     * <p>Assumptions: the conditional guard is the object store's own compare-and-set, so exactly one of
+     * any number of concurrent writers succeeds and the store rather than the caller decides which. That
+     * is the whole reason the reservation is durable: no coordination between the writers is needed, and
+     * none of them has to be running at the same time as the others.</p>
+     *
+     * @param key the object key to create; must not be {@code null}
+     * @param body the marker content, written as its own bytes with no framing; must not be {@code null}
+     * @return {@code true} when this call created the object, {@code false} when an object already
+     *     existed at that key or a concurrent conditional write held it
+     * @throws DatasetGenerationException if the write failed for any reason other than the key being
+     *     taken
+     */
+    private boolean writeIfAbsent(String key, String body) {
+        try {
+            this.objectStore.putObject(
+                    PutObjectRequest.builder()
+                            .bucket(this.datasetBucket)
+                            .key(key)
+                            .ifNoneMatch(ABSENT_OBJECT_GUARD)
+                            .build(),
+                    RequestBody.fromString(body, StandardCharsets.UTF_8));
+            return true;
+        } catch (S3Exception rejected) {
+            // WHY : Assumptions: exactly two statuses mean "you do not hold this key" -- the
+            //       precondition failure, which means an object is already there, and the conditional
+            //       conflict, which means another conditional write is in flight and the outcome is not
+            //       yet visible. Both are reported as not-created so the caller lists again; every other
+            //       status is a real fault and is raised, because treating an authorisation or
+            //       key-management failure as a lost race would loop until the attempt bound and then
+            //       report contention that never occurred.
+            int status = rejected.statusCode();
+            if (status == PRECONDITION_FAILED_STATUS || status == CONDITIONAL_CONFLICT_STATUS) {
+                return false;
+            }
+            throw new DatasetGenerationException(
+                    "could not write the reservation marker at key " + key, rejected);
+        } catch (SdkException failure) {
+            throw new DatasetGenerationException(
+                    "could not write the reservation marker at key " + key, failure);
+        }
     }
 
     /**
      * Resolves the generation that already exists for one family, the analogue of a {@code (0)} reference.
      *
-     * <p>Trade-offs: an absent generation is reported as an empty result rather than as the zeroth
+     * <p>The answer spans the whole family rather than one business date. Every generation of an earlier
+     * date precedes every generation of a later one, and the newest of them all is returned.</p>
+     *
+     * <p>Trade-offs: an absent generation is reported as an empty result rather than as a first
      * generation or as an exception, and the distinction is load-bearing for the combine flow. That flow
      * is the only reader of this form -- {@code app/jcl/COMBTRAN.jcl:24} and {@code :26} -- and it merges
-     * two inputs it did not produce, so "the partition holds nothing yet" and "the partition holds the
-     * generation numbered zero" are different situations that must not answer alike: substituting the
-     * zeroth would send the merge at an unwritten prefix and produce an empty output that looks like a
+     * two inputs it did not produce, so "the family holds nothing yet" and "the family holds a
+     * generation" are different situations that must not answer alike: substituting a first generation
+     * would send the merge at an unwritten prefix and produce an empty output that looks like a
      * successful merge of empty inputs. An exception was the other candidate and was declined because a
      * caller that can legitimately proceed with one input present and one absent would then have to use
      * exception handling for a control decision. The cost is that every caller must unwrap the result and
      * decide, which is exactly the decision being surfaced.</p>
      *
+     * <p>Refactoring Rationale: this method took a business date and answered within that date's
+     * partition. The parameter has been removed rather than made optional, because a date-scoped
+     * {@code (0)} is not a weaker answer -- it is a wrong one, and leaving it reachable would leave the
+     * defect reachable. On the first run of a new business day the two inputs the combine flow merges
+     * exist under the PREVIOUS day's partition, so the date-scoped form reported both as absent and the
+     * merge silently produced an empty output. The reference catalog held one generation sequence per
+     * base and had no notion of a date to scope by, which is the shape restored here.</p>
+     *
      * @param family the generation-dataset family being read; must not be {@code null}
-     * @param businessDate the business date whose partition is inspected; must not be {@code null}
-     * @return the highest generation staged for that family and date, or an empty result when the
-     *     partition holds none; never {@code null}
-     * @throws NullPointerException if {@code family} or {@code businessDate} is {@code null}
+     * @return the newest generation staged for that family across every business date, or an empty
+     *     result when the family holds none; never {@code null}
+     * @throws NullPointerException if {@code family} is {@code null}
      * @throws DatasetGenerationException if the existing generations of the family cannot be listed
      */
-    public Optional<DatasetGeneration> resolveCurrentGeneration(
-            DatasetFamily family, BusinessDate businessDate) {
-
+    public Optional<DatasetGeneration> resolveCurrentGeneration(DatasetFamily family) {
         Objects.requireNonNull(family, "family must not be null");
-        Objects.requireNonNull(businessDate, "businessDate must not be null");
 
-        // WHY : Assumptions: the current generation is the highest-numbered one present, which holds
-        //       because a generation is written once and never renumbered. The listing is already
-        //       ordered, since the sibling pads the generation segment to a constant width precisely so
-        //       that the object store's lexicographic ordering matches the numeric one, but the maximum
-        //       is taken explicitly rather than by reading the last element: relying on the ordering
-        //       would make this method's correctness depend on a property of a different class that
-        //       nothing here asserts.
-        Optional<DatasetGeneration> current = listGenerations(family, businessDate).stream()
-                .max(Comparator.comparingInt(DatasetGeneration::generationNumber));
+        // WHY : Assumptions: the newest generation is the maximum under the family ordering, which
+        //       compares the resolved partition date before the generation number. Taking the maximum by
+        //       generation number alone would answer with generation three of Monday over generation two
+        //       of Tuesday, which inverts the catalog's own order at exactly the date boundary this form
+        //       exists to read across.
+        // WHY : Alternatives Considered: reading the last element of the listing, since the object
+        //       store's lexicographic ordering does agree with this ordering while the date stays
+        //       year-month-day and the generation stays padded. Declined: that makes this method's
+        //       correctness depend on two rendering properties of another type that nothing here
+        //       asserts, and the explicit maximum costs one pass over at most a handful of coordinates.
+        Optional<DatasetGeneration> current = listGenerations(family).stream().max(FAMILY_ORDER);
 
         if (current.isEmpty()) {
-            LOG.info("event=batch.generation.absent family={} businessDate={}",
-                    family.name(), businessDate.token());
+            LOG.info("event=batch.generation.absent family={}", family.name());
         }
 
         return current;
@@ -377,7 +715,16 @@ public class DatasetGenerationService {
      * @throws DatasetGenerationException if the highest present generation is already the highest the
      *     rendered width can represent, so no successor exists
      */
-    public DatasetGeneration nextGeneration(DatasetFamily family, BusinessDate businessDate,
+    // WHY : Refactoring Rationale: this decision is package-private rather than public because the only
+    //       caller outside this method is the allocation above it, and the only callers outside the class
+    //       are the tests in this package. Reviewing the surface found four operations published with no
+    //       production caller beyond the class itself; three of them -- this one and the two listings --
+    //       are genuinely used internally, so the honest correction is to stop publishing them rather
+    //       than to delete them or to invent a caller. Alternatives Considered: leaving them public and
+    //       recording that a job reaches them transitively, rejected because a published operation
+    //       invites a caller that bypasses the allocation's durable reservation and re-introduces the
+    //       two-writers-one-number defect the reservation exists to prevent.
+    DatasetGeneration nextGeneration(DatasetFamily family, BusinessDate businessDate,
             List<DatasetGeneration> existing) {
 
         Objects.requireNonNull(family, "family must not be null");
@@ -421,29 +768,64 @@ public class DatasetGenerationService {
      * calling this method and the bucket pruning on its own schedule agree rather than each acting on a
      * different window.</p>
      *
-     * @param existing every generation currently present for one family and date, in any order; must not
-     *     be {@code null}
+     * <p>Refactoring Rationale: the ordering was by generation number alone, which is correct only while
+     * a family holds generations of exactly one business date. Across two dates it ranked generation
+     * three of the earlier date above generation two of the later one, so the retained window kept the
+     * wrong five and the rule scratched a generation newer than one it left standing. Worse, when the
+     * caller passed one date's generations at a time -- which is what a date-scoped listing gave it --
+     * the count applied PER DATE, so a family staged on six days retained thirty generations while every
+     * call reported that it retained five. The ordering is now the family ordering, resolved date before
+     * generation number, matching the sibling stager at {@code loaders/s3_stage.py:380-389}.</p>
+     *
+     * @param existing every generation currently present for one family, across every business date, in
+     *     any order; must not be {@code null}
      * @return the generations beyond the retained count, oldest first, never {@code null} and empty when
      *     the family holds no more than the retained count
      * @throws NullPointerException if {@code existing} is {@code null}
      */
-    public List<DatasetGeneration> generationsToScratch(List<DatasetGeneration> existing) {
+    // WHY : Refactoring Rationale: the pure decision is package-private and the family-wide overload
+    //       below it is the published one, because a step that reaches this form directly has to have
+    //       obtained the list itself -- and a step that listed a single date and passed the result here
+    //       would apply the retained count PER DATE, which is exactly the defect the family-wide overload
+    //       exists to remove the opportunity for. Publishing only the overload makes that mistake
+    //       unreachable from outside the class instead of merely documented against.
+    List<DatasetGeneration> generationsToScratch(List<DatasetGeneration> existing) {
         Objects.requireNonNull(existing, "existing must not be null");
 
         List<DatasetGeneration> ordered = new ArrayList<>(existing);
-        ordered.sort(Comparator.comparingInt(DatasetGeneration::generationNumber).reversed());
+        ordered.sort(FAMILY_ORDER);
 
-        // WHY : Assumptions: the newest generation is index zero after the reverse sort, and the retained
-        //       window is the first GDG_GENERATION_LIMIT entries counted from it. Everything after that
-        //       window is scratched, which is the sixth-newest and older.
+        // WHY : Assumptions: the list is oldest first, so the retained window is the LAST
+        //       GDG_GENERATION_LIMIT entries and everything before them is scratched. Slicing from the
+        //       front rather than reversing and slicing from the back keeps the returned order oldest
+        //       first with no second sort, and the size guard above makes the bound safe -- an
+        //       arithmetic form such as subList(0, size - limit) would compute a negative bound for a
+        //       family holding fewer generations than the count.
         if (ordered.size() <= GDG_GENERATION_LIMIT) {
             return List.of();
         }
 
-        List<DatasetGeneration> scratched =
-                new ArrayList<>(ordered.subList(GDG_GENERATION_LIMIT, ordered.size()));
-        scratched.sort(Comparator.comparingInt(DatasetGeneration::generationNumber));
-        return List.copyOf(scratched);
+        return List.copyOf(ordered.subList(0, ordered.size() - GDG_GENERATION_LIMIT));
+    }
+
+    /**
+     * Returns the generations the retention rule removes from one family, read from the object store.
+     *
+     * <p>Assumptions: this is the family-wide entry point a retention step calls, and it exists so that
+     * no caller has to remember that the rule counts across a family rather than within a date. A step
+     * that listed one date and passed the result to the pure decision above would apply the count per
+     * date and retain five generations per day, which is the defect this overload removes the
+     * opportunity for.</p>
+     *
+     * @param family the family whose aged-out generations are wanted; must not be {@code null}
+     * @return the generations beyond the retained count, oldest first, never {@code null} and empty when
+     *     the family holds no more than the retained count
+     * @throws NullPointerException if {@code family} is {@code null}
+     * @throws DatasetGenerationException if the existing generations of the family cannot be listed
+     */
+    public List<DatasetGeneration> generationsToScratch(DatasetFamily family) {
+        Objects.requireNonNull(family, "family must not be null");
+        return generationsToScratch(listGenerations(family));
     }
 
     /**
@@ -473,6 +855,116 @@ public class DatasetGenerationService {
     }
 
     /**
+     * Writes one dataset file beneath a generation's prefix and returns the key it landed at.
+     *
+     * <p>Assumptions: the body is supplied as a file rather than as bytes, and the upload streams from it.
+     * A staged generation of the transaction master is as large as the master, so holding it as a byte
+     * array would bound the step by heap rather than by the container's ephemeral disk. The caller owns
+     * the file's lifetime, because only the caller knows whether it wants to inspect it after the
+     * upload.</p>
+     *
+     * <p>Assumptions: the write is NOT conditional, unlike the reservation markers. A generation is
+     * claimed before it is written, so by the time a step reaches this method it already holds the number
+     * exclusively and a conditional guard would only be able to fail against the step's own earlier
+     * attempt -- which is a retry that should overwrite rather than an intrusion that should be
+     * refused.</p>
+     *
+     * @param generation the generation the file belongs to; must not be {@code null}
+     * @param objectName the file's name within the generation prefix, with no separator in it; must not
+     *     be {@code null} or blank
+     * @param body the local file whose bytes are uploaded; must not be {@code null}
+     * @return the object key the file landed at, never {@code null}
+     * @throws NullPointerException if {@code generation} or {@code body} is {@code null}
+     * @throws IllegalArgumentException if {@code objectName} is blank or contains a key separator
+     * @throws DatasetGenerationException if the upload fails
+     */
+    public String stageDataset(DatasetGeneration generation, String objectName, Path body) {
+        Objects.requireNonNull(generation, "generation must not be null");
+        Objects.requireNonNull(body, "body must not be null");
+        requireNonBlank(objectName, "objectName");
+
+        // WHY : Assumptions: a separator in the name is rejected rather than accepted as a nested path.
+        //       A name carrying one would create a further prefix level beneath the generation, and the
+        //       generation listing walks exactly two levels -- so the object would be staged somewhere no
+        //       listing on either side of the migration reports.
+        if (objectName.contains(KEY_SEGMENT_SEPARATOR)) {
+            throw new IllegalArgumentException("objectName must name a file within one generation prefix"
+                    + " and must not contain '" + KEY_SEGMENT_SEPARATOR + "'");
+        }
+
+        String key = generation.keyPrefix() + objectName;
+        try {
+            this.objectStore.putObject(
+                    PutObjectRequest.builder().bucket(this.datasetBucket).key(key).build(), body);
+        } catch (SdkException failure) {
+            throw new DatasetGenerationException("could not stage dataset family "
+                    + generation.family().mainframeBaseName() + " generation "
+                    + generation.generationNumber() + " at key " + key, failure);
+        }
+
+        LOG.info("event=batch.generation.staged family={} generation={} key={}",
+                generation.family().name(), generation.generationNumber(), key);
+        return key;
+    }
+
+    /**
+     * Deletes every object beneath one generation's prefix, the {@code SCRATCH} half of the retention rule.
+     *
+     * <p>Assumptions: the deletion is addressed by a CONSTRUCTED COORDINATE rather than by a caller-supplied
+     * prefix string, and that is the whole safety argument. A coordinate cannot exist without a family, a
+     * business date and an in-range generation number, so the prefix this method derives always names one
+     * generation of one family on one date -- a family root, a bare date partition, an empty string and a
+     * prefix belonging to another family are all unrepresentable at this signature. A string parameter
+     * would make each of them a one-character typo away from deleting a whole family.</p>
+     *
+     * <p>Assumptions: the objects are listed and deleted rather than removed by a single prefix operation,
+     * because the object store has no prefix delete. The listing here is deliberately UNDELIMITED, unlike
+     * every other listing in this class: the goal is every key beneath the prefix rather than the prefix
+     * names one level down.</p>
+     *
+     * @param generation the generation to scratch; must not be {@code null}
+     * @return how many objects were deleted, which is zero when the generation held none
+     * @throws NullPointerException if {@code generation} is {@code null}
+     * @throws DatasetGenerationException if the listing or a deletion fails
+     */
+    public int scratchGeneration(DatasetGeneration generation) {
+        Objects.requireNonNull(generation, "generation must not be null");
+
+        String prefix = generation.keyPrefix();
+        List<ObjectIdentifier> doomed = new ArrayList<>();
+        try {
+            try (Stream<S3Object> contents = this.objectStore
+                    .listObjectsV2Paginator(ListObjectsV2Request.builder()
+                            .bucket(this.datasetBucket)
+                            .prefix(prefix)
+                            .build())
+                    .contents().stream()) {
+
+                contents.map(S3Object::key)
+                        .filter(Objects::nonNull)
+                        .forEach(key -> doomed.add(ObjectIdentifier.builder().key(key).build()));
+            }
+
+            for (int from = 0; from < doomed.size(); from += DELETE_BATCH_SIZE) {
+                List<ObjectIdentifier> slice =
+                        doomed.subList(from, Math.min(from + DELETE_BATCH_SIZE, doomed.size()));
+                this.objectStore.deleteObjects(DeleteObjectsRequest.builder()
+                        .bucket(this.datasetBucket)
+                        .delete(Delete.builder().objects(slice).build())
+                        .build());
+            }
+        } catch (SdkException failure) {
+            throw new DatasetGenerationException("could not scratch dataset family "
+                    + generation.family().mainframeBaseName() + " generation "
+                    + generation.generationNumber() + " under prefix " + prefix, failure);
+        }
+
+        LOG.info("event=batch.generation.scratched family={} generation={} objects={}",
+                generation.family().name(), generation.generationNumber(), doomed.size());
+        return doomed.size();
+    }
+
+    /**
      * Lists the generations already staged for one family under one business date.
      *
      * <p>Assumptions: the listing is delimited, so the object store returns one common prefix per
@@ -487,11 +979,165 @@ public class DatasetGenerationService {
      * @throws NullPointerException if {@code family} or {@code businessDate} is {@code null}
      * @throws DatasetGenerationException if the object store cannot be read
      */
-    public List<DatasetGeneration> listGenerations(DatasetFamily family, BusinessDate businessDate) {
+    // WHY : Refactoring Rationale: the date-scoped listing is package-private because it answers a
+    //       question only the allocation legitimately asks -- which numbers are already taken under the
+    //       date being written -- and answering it for an outside caller invites that caller to treat a
+    //       one-date listing as the family's contents. The current-generation and retention decisions
+    //       both read the family, so the listing they use is the family-wide walk below.
+    List<DatasetGeneration> listGenerations(DatasetFamily family, BusinessDate businessDate) {
         Objects.requireNonNull(family, "family must not be null");
         Objects.requireNonNull(businessDate, "businessDate must not be null");
 
-        String partitionPrefix = partitionKeyPrefix(family, businessDate);
+        return List.copyOf(generationsUnder(partitionKeyPrefix(family, businessDate), family,
+                businessDate));
+    }
+
+    /**
+     * Lists every generation staged for one family, across every business date it holds.
+     *
+     * <p>Assumptions: the walk is two levels of delimited listing -- the date partitions beneath the
+     * family root, then the generations beneath each date -- rather than one undelimited listing of the
+     * family. An undelimited listing returns one entry per OBJECT, so a family holding five generations
+     * of a three-hundred-and-fifty-byte extract returns every record key merely to learn five prefix
+     * names. The accepted cost is one request per date rather than one per family. The sibling stager
+     * walks the same two levels for the same reason at {@code loaders/s3_stage.py:1182-1188}.</p>
+     *
+     * <p>Assumptions: a date partition is accepted purely as an opaque prefix to descend into, and no
+     * attempt is made to validate it as a date. Whether a child under it is a generation is settled the
+     * same way it is for a single-date listing: by asking the coordinate's own renderer whether it would
+     * have produced that segment, under a business date read back from the partition itself. A prefix
+     * that is not a date partition therefore yields no generations rather than an error, which is what a
+     * bookkeeping prefix or a stray object placed under a family root should do.</p>
+     *
+     * @param family the family whose generations are listed; must not be {@code null}
+     * @return every generation the family holds, in no particular order, never {@code null} and empty
+     *     when the family holds none
+     * @throws NullPointerException if {@code family} is {@code null}
+     * @throws DatasetGenerationException if the object store cannot be read
+     */
+    // WHY : Refactoring Rationale: the family-wide walk is package-private for the same reason as the
+    //       date-scoped one -- the two decisions built on it, current generation and retention, are the
+    //       published operations, and a caller wanting either should ask for the answer rather than for
+    //       the raw listing. Trade-offs: a future step that genuinely needs the inventory itself, such as
+    //       an audit of what a family holds, would have to publish a named operation that says so, which
+    //       is a deliberate cost paid to keep the published surface equal to the wired surface.
+    List<DatasetGeneration> listGenerations(DatasetFamily family) {
+        Objects.requireNonNull(family, "family must not be null");
+
+        List<DatasetGeneration> present = new ArrayList<>();
+        for (String datePrefix : datePartitionsUnder(family)) {
+            Optional<BusinessDate> partitionDate = businessDateOfPartitionPrefix(datePrefix, family);
+            if (partitionDate.isEmpty()) {
+                LOG.debug("event=batch.generation.partition-skipped family={} prefix={}"
+                        + " reason=unrecognised", family.name(), datePrefix);
+                continue;
+            }
+            present.addAll(generationsUnder(datePrefix, family, partitionDate.get()));
+        }
+
+        return List.copyOf(present);
+    }
+
+    /**
+     * Lists the immediate date-partition prefixes beneath one family's root.
+     *
+     * @param family the family whose date partitions are listed; must not be {@code null}
+     * @return every child prefix of the family root, in listing order with duplicates removed; never
+     *     {@code null}
+     * @throws DatasetGenerationException if the object store cannot be read
+     */
+    private Set<String> datePartitionsUnder(DatasetFamily family) {
+        ListObjectsV2Request request = ListObjectsV2Request.builder()
+                .bucket(this.datasetBucket)
+                .prefix(family.pathSegment())
+                .delimiter(KEY_SEGMENT_SEPARATOR)
+                .build();
+
+        // WHY : Assumptions: the children are collected into an insertion-ordered set rather than a list,
+        //       because a paginator may legitimately return one common prefix on two pages. A duplicate
+        //       date would list that date's generations twice, and duplicated coordinates would make the
+        //       retained window drop one real generation too many.
+        Set<String> datePrefixes = new LinkedHashSet<>();
+        try {
+            try (Stream<CommonPrefix> children =
+                    this.objectStore.listObjectsV2Paginator(request).commonPrefixes().stream()) {
+                children.map(CommonPrefix::prefix)
+                        .filter(Objects::nonNull)
+                        .forEach(datePrefixes::add);
+            }
+        } catch (SdkException failure) {
+            throw new DatasetGenerationException("could not list the business-date partitions of dataset"
+                    + " family " + family.mainframeBaseName() + " under prefix "
+                    + family.pathSegment(), failure);
+        }
+
+        return datePrefixes;
+    }
+
+    /**
+     * Reads a listed child of a family root back as the business date its partition names.
+     *
+     * <p>Assumptions: the token is accepted only when a coordinate built from it renders back to
+     * byte-identically the same partition segment. That round trip is what keeps the segment spelling
+     * owned by one type -- this method matches no marker it declares itself -- and it is also what
+     * rejects a bookkeeping or stray prefix without this method having to enumerate what those look
+     * like.</p>
+     *
+     * @param datePrefix the full child prefix the family-root listing returned, including the family
+     *     segment and the trailing separator; must not be {@code null}
+     * @param family the family being listed; must not be {@code null}
+     * @return the business date the partition names, or an empty result when the child is not a partition
+     *     this family's renderer would have produced; never {@code null}
+     */
+    private Optional<BusinessDate> businessDateOfPartitionPrefix(String datePrefix,
+            DatasetFamily family) {
+
+        String familyPrefix = family.pathSegment();
+        if (!datePrefix.startsWith(familyPrefix) || !datePrefix.endsWith(KEY_SEGMENT_SEPARATOR)) {
+            return Optional.empty();
+        }
+
+        String segment = datePrefix.substring(
+                familyPrefix.length(), datePrefix.length() - KEY_SEGMENT_SEPARATOR.length());
+
+        // WHY : Assumptions: the token is recovered by stripping the marker the renderer emits, which is
+        //       read back from a probe rather than spelled here. The probe's own date segment is
+        //       "dt=" followed by its resolved date, so removing the resolved date from the end of it
+        //       leaves exactly the marker, and no literal spelling of the marker appears in this class.
+        DatasetGeneration probe =
+                new DatasetGeneration(family, PARTITION_PROBE_DATE,
+                        DatasetGeneration.MINIMUM_GENERATION_NUMBER);
+        String marker = probe.datePartitionSegment()
+                .substring(0, probe.datePartitionSegment().length() - probe.partitionDate().length());
+        if (!segment.startsWith(marker)) {
+            return Optional.empty();
+        }
+
+        final BusinessDate candidate;
+        try {
+            candidate = new BusinessDate(segment.substring(marker.length()));
+        } catch (IllegalArgumentException notADate) {
+            return Optional.empty();
+        }
+
+        DatasetGeneration rendered = new DatasetGeneration(family, candidate,
+                DatasetGeneration.MINIMUM_GENERATION_NUMBER);
+        return segment.equals(rendered.datePartitionSegment()) ? Optional.of(candidate)
+                : Optional.empty();
+    }
+
+    /**
+     * Lists the generation children of one already-resolved date-partition prefix.
+     *
+     * @param partitionPrefix the date-partition prefix to list beneath; must not be {@code null}
+     * @param family the family the partition belongs to; must not be {@code null}
+     * @param businessDate the business date the partition names; must not be {@code null}
+     * @return the generations the partition holds, in listing order; never {@code null}
+     * @throws DatasetGenerationException if the object store cannot be read
+     */
+    private List<DatasetGeneration> generationsUnder(String partitionPrefix, DatasetFamily family,
+            BusinessDate businessDate) {
+
         ListObjectsV2Request request = ListObjectsV2Request.builder()
                 .bucket(this.datasetBucket)
                 .prefix(partitionPrefix)
@@ -657,18 +1303,26 @@ public class DatasetGenerationService {
     }
 
     /**
-     * Builds the key under which one run's allocation for one family is memoised.
+     * Builds the object key under which one run's allocation for one family is recorded.
+     *
+     * <p>Assumptions: the run identifier is placed in its own key segment ahead of the family, so every
+     * record of one run sits under one prefix and an operator can list or remove a run's records
+     * together. The reverse order would scatter one run's records across ten family prefixes.</p>
      *
      * @param runId the orchestrator execution the allocation belongs to; must not be {@code null}
      * @param family the family being allocated; must not be {@code null}
-     * @return the memoisation key, never {@code null}
+     * @return the record's object key, never {@code null}
      */
-    private static String memoisationKey(String runId, DatasetFamily family) {
+    private static String runClaimKey(String runId, DatasetFamily family) {
         // WHY : Assumptions: the family's own constant name is used rather than its base name or its path
         //       segment. All three are unique across the ten, and the constant name is the one that cannot
         //       change without a compilation failure somewhere, whereas the other two are strings a future
         //       edit could align between two families without the compiler noticing.
-        return runId + MEMOISATION_KEY_SEPARATOR + family.name();
+        // WHY : Assumptions: the run identifier is used as supplied and is not escaped. The orchestrator
+        //       supplies a state-machine execution name, whose own character set is a subset of what an
+        //       object key accepts, so escaping would rewrite a value that is already valid and would make
+        //       the key a reader sees differ from the identifier the same reader finds in a log line.
+        return RUN_CLAIM_ROOT + RUN_CLAIM_RUN_MARKER + runId + RUN_CLAIM_FAMILY_SEPARATOR + family.name();
     }
 
     /**

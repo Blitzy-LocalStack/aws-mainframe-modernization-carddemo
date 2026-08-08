@@ -17,11 +17,16 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.math.BigDecimal;
+import java.net.URISyntaxException;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -33,30 +38,42 @@ import org.junit.jupiter.params.provider.ValueSource;
  * Enrolls every fixture in this module and asserts the contract each one carries.
  *
  * <p>Purpose: a fixture with no executable consumer is a file whose bytes can change while the whole
- * suite stays green. This class enrolls all thirty-three resources under
+ * suite stays green. This class enrolls all thirty-eight resources under
  * {@code src/test/resources/fixtures} as a closed set, and asserts for each one what
  * {@code src/test/resources/fixtures/README.md} states about it: the record width, the field values,
  * the final record, and the failure path where one exists.
  *
  * <p>Assumptions: enrolment and assertion are named apart, and the README's per-file table is what
- * says which each resource receives. Thirty-one of the thirty-three reach a contract assertion; the
- * remaining two -- the README itself and the 206-byte prefixed unload form, whose record length no
- * registry layout declares -- reach the inventory alone, and the README labels them so. Refactoring
- * Rationale: the distinction is drawn here because this summary previously said the class "consumes
- * every fixture", which read as a guarantee that each file had an oracle. One did not: the approved
- * reply wire reached only the presence check, so the field order and delimiter that constitute the
- * whole reply contract were ungated behind a sentence saying otherwise. The oracle is now
- * {@link #replyWireFixtureIsTheReplyEncodeOracle()}, and this summary states the two ideas separately
- * so that a future gap shows up as a resource with no row rather than as a sentence that has quietly
- * stopped being true.
+ * says which each resource receives. Thirty-seven of the thirty-eight reach a contract assertion; the
+ * remaining one -- the README itself -- reaches the inventory alone, and the README labels it so. The
+ * 206-byte prefixed unload form is not in the generic geometry check either, because no 206-byte
+ * layout is registered, but it does reach two dedicated cases of its own.
+ *
+ * <p>Refactoring Rationale: the distinction above is drawn here because this summary previously said
+ * the class "consumes every fixture", which read as a guarantee that each file had an oracle. One did
+ * not: the approved reply wire reached only the presence check, so the field order and delimiter that
+ * constitute the whole reply contract were ungated behind a sentence saying otherwise. The oracle is
+ * now {@link #replyWireFixtureIsTheReplyEncodeOracle()}, and this summary states the two ideas
+ * separately so that a future gap shows up as a resource with no row rather than as a sentence that
+ * has quietly stopped being true.
+ *
+ * <p>Refactoring Rationale: the count above was thirty-three and the directory held thirty-eight,
+ * because the closure assertion compared the enrolled list against a hard-coded size instead of
+ * against the directory. Five byte-exact artifacts -- the transmitted reply frame, the 500-byte
+ * request buffer, the date-format pair, the out-of-domain match status and the raw-complement trap --
+ * were therefore unenrolled and unread, and their bytes could have changed with nothing failing. The
+ * closure is now measured by {@link #fixtureDirectoryNames()} and each of the five has a contract case
+ * below, so the sentence above cannot go stale in that direction again: a wrong count fails rather
+ * than misinforming.
  *
  * <p>Assumptions: the tests read the resources through the classpath rather than through a filesystem
  * path, because that is how the packaged test jar reaches them and because a filesystem path would
  * make the suite depend on the working directory a runner happens to choose.
  *
- * <p>Assumptions: the inventory is asserted as a closed set before any file is read. A test that only
- * consumed the files it named would stay green after a fixture was added with no consumer, which is
- * the exact condition this class exists to prevent.
+ * <p>Assumptions: the inventory is asserted as a closed set before any file is read, by comparing the
+ * enrolled names with the names the fixture root actually holds. A test that only consumed the files
+ * it named would stay green after a fixture was added with no consumer, which is the exact condition
+ * this class exists to prevent.
  *
  * <p>Trade-offs: the binary fixtures are decoded through {@link FixedWidthCodec} against the registry
  * layouts rather than by hand-slicing byte ranges here. Hand-slicing would have made this class a
@@ -88,10 +105,13 @@ class AuthorizationFixtureContractTest {
             "auth-reply-approved-wire63.csv",
             "auth-reply-declined-reasons.csv",
             "auth-reply-encode-oracle-63.bin",
+            "auth-reply-transmitted-64.bin",
             "auth-request-amount-variants.csv",
+            "auth-request-buffer500.bin",
             "auth-request-canonical-wire170.csv",
             "auth-request-encode-oracle-170.bin",
             "auth-request-receiver-wire169-decode-only.csv",
+            "auth-request-short-numeric-display-oracle-170.bin",
             "pautdtl-canonical.bin",
             "pautdtl-filler-nonblank.bin",
             "pautdtl-fraud-marked.bin",
@@ -103,10 +123,13 @@ class AuthorizationFixtureContractTest {
             "pautdtl1-auth-fraud-domain.bin",
             "pautdtl1-auth-fraud-invalid.bin",
             "pautdtl1-canonical.bin",
+            "pautdtl1-date-formats.bin",
             "pautdtl1-match-status-domain.bin",
+            "pautdtl1-match-status-invalid.bin",
             "pautdtl1-merchant-name-notrim.bin",
             "pautdtl1-newyear-pair.bin",
             "pautdtl1-order-same-day-times.bin",
+            "pautdtl1-raw-complement-trap.bin",
             "pautdtl1-time-leading-nines.bin",
             "pautsum0-canonical.bin",
             "pautsum0-filler-nonblank.bin",
@@ -414,14 +437,52 @@ class AuthorizationFixtureContractTest {
     }
 
     /**
+     * Reads the fixture directory itself, so closure is measured rather than declared.
+     *
+     * <p>Refactoring Rationale: this exists because the closure assertion previously compared the
+     * enrolled list against a hard-coded size. That is not a closure check at all -- it is a check
+     * that the list has the length the list was written to have, and it passes unchanged after a
+     * fixture is added to the directory with no enrolment. Five fixtures reached the directory that
+     * way while the count still read thirty-three, so five byte-exact artifacts could have changed
+     * with the whole module green. Enumerating the real directory is the only form of the assertion
+     * that can fail for the reason it claims to.</p>
+     *
+     * <p>Assumptions: the directory is located through the classpath rather than through a source
+     * path, so what is enumerated is the resource root the tests actually read -- the same root
+     * {@link #bytesOf(String)} resolves against, populated by the build's resource copy. Reading
+     * {@code src/test/resources/fixtures} from the working directory instead would enumerate a
+     * directory the tests never open and would depend on the working directory a runner chose.</p>
+     *
+     * @return every regular file name directly beneath the fixture root, sorted
+     * @throws AssertionError if the fixture root does not resolve on the classpath
+     * @throws UncheckedIOException if the directory resolves but cannot be walked
+     */
+    private static List<String> fixtureDirectoryNames() {
+        URL root = AuthorizationFixtureContractTest.class.getClassLoader().getResource(FIXTURE_ROOT);
+        if (root == null) {
+            throw new AssertionError("the fixture root " + FIXTURE_ROOT + " is not on the classpath");
+        }
+        try (Stream<Path> entries = Files.list(Path.of(root.toURI()))) {
+            return entries.filter(Files::isRegularFile)
+                    .map(entry -> entry.getFileName().toString())
+                    .sorted()
+                    .toList();
+        } catch (IOException | URISyntaxException failure) {
+            throw new UncheckedIOException("the fixture root " + FIXTURE_ROOT + " could not be listed",
+                    failure instanceof IOException io ? io : new IOException(failure));
+        }
+    }
+
+    /**
      * Confirms the fixture directory holds exactly the resources this class enrolls, and no more.
      *
      * <p>Assumptions: what this one case establishes is PRESENCE and CLOSURE, and nothing else. Every
      * name is proved to resolve on the classpath and to be non-empty, the set is proved free of
-     * duplicates, and its size is proved equal to the count the fixture README publishes, so a fixture
-     * added to the directory without being enrolled here fails rather than sitting unread. The contract
-     * each file carries -- its width, its field values, its round trip, its failure path -- is asserted
-     * by the named cases below, one per contract, and not by this case.
+     * duplicates, and the enrolled set is compared ELEMENT FOR ELEMENT against the names the fixture
+     * directory actually holds, so a fixture added to the directory without being enrolled here fails
+     * rather than sitting unread. The contract each file carries -- its width, its field values, its
+     * round trip, its failure path -- is asserted by the named cases below, one per contract, and not
+     * by this case.
      *
      * <p>Refactoring Rationale: the distinction above is drawn explicitly because this case previously
      * announced that every fixture "is consumed here", and a non-empty check is not a consumption of
@@ -431,12 +492,13 @@ class AuthorizationFixtureContractTest {
      * display name asserted otherwise. That oracle is now
      * {@link #replyWireFixtureIsTheReplyEncodeOracle()}, and this case says only what it does.
      *
-     * <p>Assumptions: two enrolled resources are deliberately here for inventory alone, and naming them
-     * is what keeps the paragraph above honest. {@code README.md} is documentation and has no wire
-     * contract to assert; {@code unload-prefixed-detail-206.bin} carries a six-byte record prefix ahead
-     * of each 200-byte segment, and no 206-byte layout is registered, so the generic geometry check
-     * cannot divide it and inventing a layout to satisfy that check would assert a geometry no reader of
-     * this directory uses. The fixture README records both exclusions with the same reasons.
+     * <p>Assumptions: one enrolled resource is deliberately here for inventory alone, and naming it is
+     * what keeps the paragraph above honest. {@code README.md} is documentation and has no wire contract
+     * to assert. {@code unload-prefixed-detail-206.bin} is excluded from the GENERIC geometry check for
+     * a different reason -- it carries a six-byte record prefix ahead of each 200-byte segment and no
+     * 206-byte layout is registered, so that check cannot divide it and inventing a layout to satisfy it
+     * would assert a geometry no reader of this directory uses -- but it does reach two dedicated cases,
+     * so it is not inventory-only. The fixture README records both exclusions with the same reasons.
      */
     @Test
     @DisplayName("every fixture this module ships resolves on the classpath and the set is closed")
@@ -444,7 +506,17 @@ class AuthorizationFixtureContractTest {
         for (String name : EVERY_FIXTURE) {
             assertThat(bytesOf(name)).as("fixture %s", name).isNotEmpty();
         }
-        assertThat(EVERY_FIXTURE).doesNotHaveDuplicates().hasSize(33);
+        assertThat(EVERY_FIXTURE).doesNotHaveDuplicates();
+
+        // WHY : Assumptions: the comparison is a SET EQUALITY in both directions rather than a size
+        //       or a containment check. Containment one way would miss an unenrolled file and
+        //       containment the other would miss an enrolled name whose file had been deleted, and a
+        //       size comparison misses both whenever an addition and a removal land together. Naming
+        //       the two sets in one assertion is what makes the failure message say which file is
+        //       unaccounted for rather than merely that two numbers differ.
+        assertThat(fixtureDirectoryNames())
+                .as("the fixture directory and this class's inventory must name the same resources")
+                .containsExactlyInAnyOrderElementsOf(EVERY_FIXTURE);
     }
 
     /**
@@ -1399,6 +1471,15 @@ class AuthorizationFixtureContractTest {
         //     property under test is that a tolerated 64-byte input re-emits at the DECLARED 63 --
         //     the codec is interoperable in both directions without being byte-idempotent over every
         //     variant a producer might send.
+        // WHY Trade-offs: a committed 64-byte frame, auth-reply-transmitted-64.bin, now exists BESIDE
+        //     this derivation, and the two are kept for reasons that do not overlap. Derivation is
+        //     right here because the property is the CODEC's tolerance, and a test that appended its
+        //     own byte can only ever assert the byte it chose. The fixture pins something this cannot:
+        //     that byte 63 of the frame a real producer transmits is a blank and not a line
+        //     terminator, which matters because the .csv sibling is also 64 bytes and ends with one,
+        //     so length cannot tell the two apart. AuthorizationWireFrameFixtureTest asserts that
+        //     file's first 63 bytes against this same oracle, so the drift this derivation was chosen
+        //     to avoid is closed there rather than reintroduced here.
         byte[] transmitted = java.util.Arrays.copyOf(image, CsvAuthCodec.REPLY_WIRE_LENGTH + 1);
         transmitted[CsvAuthCodec.REPLY_WIRE_LENGTH] = (byte) 0x20;
         CsvAuthCodec.AuthReply fromFrame =
@@ -1779,15 +1860,34 @@ class AuthorizationFixtureContractTest {
     }
 
     /**
-     * Confirms the canonical and copybook payloads differ in exactly one field.
+     * Confirms the canonical and copybook payloads differ in the money field and the transaction
+     * identifier, and in no other position.
      *
      * <p>Assumptions: this is asserted as a property of the PAIR rather than of either file, because
-     * the pair's whole purpose is to isolate the money width. A difference in a second field would
-     * make a failure ambiguous between the width and whatever else had changed.</p>
+     * the pair's whole purpose is to isolate the money width. A difference in an UNEXPECTED field would
+     * make a failure ambiguous between the width and whatever else had changed, which is why the
+     * assertion names the two positions exactly rather than bounding their count.</p>
+     *
+     * <p>Assumptions: two positions differ and not one. Ordinal eight is the money token, which is the
+     * property under test -- the canonical vector carries the signed fourteen-character form and the
+     * receiver vector the narrower thirteen-character one. The last ordinal is the transaction
+     * identifier, and it differs deliberately: {@code src/test/resources/fixtures/README.md} records for
+     * this fixture that the identifier varies "because every committed row is deliberately
+     * distinguishable by it", so two payloads sharing one identifier could not both be carried through
+     * an outbox row in the same test run. The pair is therefore an A/B on the money width across the
+     * other SIXTEEN positions.</p>
+     *
+     * <p>Refactoring Rationale: this block and the display name below both used to say the two fixtures
+     * differ in one field, and in the money field alone, while the assertion required two indexes to
+     * differ. The assertion was right and the description was wrong, and the wrongness was the kind that
+     * costs a reader time rather than breaking a build: someone comparing the two files would find a
+     * second difference, believe they had found a fixture defect, and either edit a fixture the codec
+     * asserts byte for byte or weaken the assertion to match the sentence. The description now names
+     * both positions and why the second one is there.</p>
      */
     @Test
-    @DisplayName("the two request fixtures differ in the money field alone")
-    void theTwoRequestFixturesDifferInOneFieldOnly() {
+    @DisplayName("the two request fixtures differ in the money field and the transaction identifier only")
+    void theTwoRequestFixturesDifferInTheMoneyFieldAndTheTransactionIdentifierOnly() {
         String[] canonical = linesOf("auth-request-canonical-wire170.csv").get(0).split(",", -1);
         String[] copybook =
                 linesOf("auth-request-receiver-wire169-decode-only.csv").get(0).split(",", -1);

@@ -49,16 +49,19 @@ on silently.
 import argparse
 import json
 import logging
+import os
 import sys
 from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 from typing import Any, Final
 
-from carddemo_migration import credentials
+from carddemo_migration import credentials, seed_datasets
 from carddemo_migration.config import (
     ConfigurationError,
     DatasetStagingSettings,
+    quote_identifier,
+    resolve_aurora_settings,
     resolve_dataset_staging_settings,
 )
 from carddemo_migration.copybook import layouts
@@ -76,7 +79,18 @@ from carddemo_migration.credentials import (
     EXIT_OK,
     EXIT_USAGE,
 )
-from carddemo_migration.loaders.s3_stage import StagedGeneration, stage_generation
+from carddemo_migration.loaders.aurora import AuroraLoadError, connect, load_records, target_for
+from carddemo_migration.loaders.s3_stage import (
+    DatasetSourceError,
+    StagedObject,
+    reserve_generation,
+    stage_dataset_file,
+)
+from carddemo_migration.readers.factory import RecordReader
+from carddemo_migration.seed_datasets import SeedDatasetError
+from carddemo_migration.verify.checksum import digest_records
+from carddemo_migration.verify.money_parity import compare_money_totals
+from carddemo_migration.verify.row_counts import compare_counts
 
 # Assumptions: the public surface is declared explicitly and in sorted order, matching
 #   every other module in this package, so a reader can tell an entry point from a
@@ -101,7 +115,12 @@ PROGRAM_NAME: Final[str] = "python -m carddemo_migration.cli"
 #   -- app/jcl/DEFGDGB.jcl lines 25-57, app/jcl/DEFGDGD.jcl lines 28-76 and
 #   app/jcl/DALYREJS.jcl lines 24-26. It is a default rather than a fixed value because
 #   Terraform owns the effective per-family retention and can pass its own.
-DEFAULT_RETENTION_COUNT: Final[int] = 5
+DEFAULT_RETENTION_COUNT: Final[int] = seed_datasets.DEFAULT_GENERATION_RETENTION
+
+#: Environment variable carrying the orchestrator's execution name, which the generation
+#: reservation is keyed on. Step Functions already publishes it to every batch task, so this
+#: module reads the value the orchestrator sets rather than introducing a second identifier.
+_EXECUTION_TOKEN_VARIABLE: Final[str] = "CARDDEMO_BATCH_RUN_ID"
 
 # Trade-offs: the table columns are the five properties ``layouts`` holds
 #   authoritatively. The owning schema and the seed-extract encodings that README
@@ -124,6 +143,33 @@ _TABLE_COLUMNS: Final[tuple[str, ...]] = (
 _REDACTION_PLACEHOLDER: Final[str] = " "
 
 _LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
+
+# Assumptions: the two decode failures a delivered extract can produce -- a record that is
+#   not the declared length, and a field that cannot be decoded at its declared geometry --
+#   are SIBLING ``ValueError`` subclasses rather than one hierarchy, so both are named here.
+#   Naming only :class:`~carddemo_migration.copybook.layouts.LayoutError` would leave
+#   :class:`~carddemo_migration.copybook.layouts.RecordLengthError` uncaught, which is the
+#   commoner of the two in practice: a truncated transfer produces it on the first record.
+# WHY (Trade-offs): they are caught rather than propagated because README.md section 5.2
+#   contracts a non-zero EXIT for each of them, and an orchestrated batch state branching on
+#   a numeric return code cannot branch on a traceback. The cost is that the stack is not
+#   printed; the message carries the record number and the field, which is what an operator
+#   needs in order to look at the right offset of the right record.
+_DECODE_ERRORS: Final[tuple[type[Exception], ...]] = (
+    layouts.LayoutError,
+    layouts.RecordLengthError,
+)
+
+# Assumptions: every load and verification handler refuses on the same set, because each of
+#   them can fail for exactly the same four reasons -- an unregistered record name, an extract
+#   that does not decode, a target that has no declared mapping, or an environment whose
+#   credential cannot be resolved -- and a handler that caught a narrower set would turn one of
+#   those four into a traceback purely by where it happened to be invoked from.
+_STEP_ERRORS: Final[tuple[type[Exception], ...]] = (
+    AuroraLoadError,
+    ConfigurationError,
+    *_DECODE_ERRORS,
+)
 
 
 def _dataset_rows() -> list[dict[str, Any]]:
@@ -369,12 +415,25 @@ def _redacted(rendered: dict[str, str], layout: RecordSpec) -> dict[str, str]:
         if not field.sensitive:
             safe[field.name] = value
             continue
-        # Assumptions: every sensitive field in the registry decodes to characters at its
-        #   declared width, so mask_field applies directly -- verified across CARD and
-        #   CUSTOMER, the only two layouts carrying sensitive fields. The width branch below
-        #   is unreachable for that registry and is still written, because mask_field refuses
-        #   a mis-width chunk by raising, and a redaction that raised instead of redacting
-        #   would abort the command with the value still in the exception's own frame.
+        # Refactoring Rationale: this comment said every sensitive field decodes to characters
+        #   at its declared width, "verified across CARD and CUSTOMER, the only two layouts
+        #   carrying sensitive fields", and called the placeholder branch below "unreachable for
+        #   that registry". Both halves have since stopped being true, and the second is the
+        #   interesting one. ACCOUNT, TCATBAL and EXPORT-ACCOUNT-DATA now carry sensitive fields
+        #   too, and the fields they carry are MONEY: a decoded amount renders as "194.00" -- six
+        #   characters against a declared span of twelve -- so the width test fails and the
+        #   placeholder branch is taken for every one of them. Measured on record 1 of the
+        #   shipped account extract: the identifier and the postal code take the direct branch at
+        #   matching widths, and all five monetary fields take the placeholder branch.
+        # Assumptions: the branch being reached is CORRECT rather than a fallback that happens to
+        #   work, and it is what the redaction of a money field should be. mask_field over a
+        #   placeholder yields a keyed tag derived from no part of the value, so an amount is
+        #   withheld completely instead of being redacted to a suffix of itself -- which is what
+        #   the disclosure rule requires for a monetary amount, and which the direct branch could
+        #   not have given. The defensive branch turned out to be the one the policy depends on.
+        # Assumptions: the branch is still needed for the reason first recorded -- mask_field
+        #   refuses a mis-width chunk by raising, and a redaction that raised instead of redacting
+        #   would abort the command with the value still live in the exception's own frame.
         if len(value) == field.length:
             safe[field.name] = layouts.mask_field(field, value)
         else:
@@ -445,6 +504,96 @@ def _s3_client() -> Any:
     return boto3.client("s3")
 
 
+class _StagingEnvironmentError(RuntimeError):
+    """Raised when the deployment has not supplied something staging cannot proceed without.
+
+    Purpose
+    -------
+    Separate "this deployment is not configured" from "this request is wrong" and from "this step
+    failed", so the fatal tier is reported for a missing environment variable rather than the
+    usage tier. It is deliberately NOT a :class:`ValueError`, because the staging module's own
+    refusals are, and the two must not be caught by one clause.
+    """
+
+
+def _resolved_generation(
+    arguments: argparse.Namespace,
+    client: Any,
+    settings: DatasetStagingSettings,
+    descriptor: seed_datasets.SeedDataset,
+    domain: str,
+) -> int:
+    """Resolve the generation number to write, reserving one when none was supplied.
+
+    Purpose
+    -------
+    Let the orchestrator omit ``--generation`` -- which it does, and always did -- by reserving a
+    number durably instead of requiring the caller to have computed one.
+
+    Parameters
+    ----------
+    arguments : argparse.Namespace
+        Parsed arguments, read for ``generation``.
+    client : Any
+        S3 client used for the reservation.
+    settings : DatasetStagingSettings
+        Validated bucket and prefix settings.
+    descriptor : seed_datasets.SeedDataset
+        The resolved seed dataset, supplying the prefix segment the reservation is keyed on.
+    domain : str
+        The bounded-context prefix segment the reservation is keyed on.
+
+    Returns
+    -------
+    int
+        The caller's explicit generation when one was given, otherwise a freshly reserved one.
+
+    Raises
+    ------
+    _StagingEnvironmentError
+        If no generation was given and no orchestrator execution identifier is available to key
+        the reservation on.
+    GenerationRetentionError
+        If the reservation is refused as unacceptable.
+    GenerationDiscoveryError
+        If the generation space for that business date is exhausted.
+    """
+    if arguments.generation is not None:
+        return int(arguments.generation)
+
+    # Refactoring Rationale: `--generation` became OPTIONAL, and this is what makes that safe.
+    #   It was required because a computed "next generation" is unsafe to derive per process:
+    #   two branches deriving it concurrently resolve to the same number, and a retried branch
+    #   re-derives the number its first attempt already wrote. Requiring it pushed that problem
+    #   onto the caller, and the orchestrator did not solve it -- it simply never passed the
+    #   argument, so every staging branch failed in argument parsing. `reserve_generation` makes
+    #   allocation a conditional create keyed by execution, family and business date, so it is
+    #   exclusive between branches and replayable across retries. That is a property the caller
+    #   cannot supply, which is why deriving it here is now correct where computing it was not.
+    execution_token = os.environ.get(_EXECUTION_TOKEN_VARIABLE, "").strip()
+    # Assumptions: the reservation REFUSES to invent an execution identity. Falling back to a
+    #   process identifier, a host name or a timestamp was the alternative and was rejected
+    #   because each would make every retry look like a new execution, which is exactly the case
+    #   the reservation exists to recognise -- a retry that is not recognised consumes a second
+    #   generation for a byte-identical copy. The orchestrator already publishes this variable to
+    #   every batch task, so an absent value means the command is running outside that context.
+    if not execution_token:
+        raise _StagingEnvironmentError(
+            f"no --generation was given and {_EXECUTION_TOKEN_VARIABLE} is not set, so a "
+            f"generation cannot be reserved for {descriptor.token!r}; set "
+            f"{_EXECUTION_TOKEN_VARIABLE} to the orchestrator execution name, or pass "
+            f"--generation explicitly"
+        )
+    return reserve_generation(
+        client,
+        settings,
+        domain,
+        descriptor.dataset_segment,
+        arguments.business_date,
+        execution_token,
+    )
+
+
 def _stage_dataset(arguments: argparse.Namespace) -> int:
     """Stage one exported extract into the versioned dataset bucket.
 
@@ -456,16 +605,19 @@ def _stage_dataset(arguments: argparse.Namespace) -> int:
     Parameters
     ----------
     arguments : argparse.Namespace
-        Carries ``dataset``, ``source``, ``business_date``, ``generation``, ``domain``,
-        ``object_name`` and ``retain``.
+        Carries ``dataset`` and ``business_date``, which the orchestrator supplies, and
+        the optional ``source``, ``generation``, ``domain``, ``object_name`` and
+        ``retain`` overrides. Every optional value has an authoritative default in the
+        seed-dataset descriptor, so the two required arguments are sufficient.
 
     Returns
     -------
     int
         :data:`EXIT_OK` when the object is written and retention is enforced,
         :data:`EXIT_USAGE` when an argument is not acceptable, :data:`EXIT_FAILED` when
-        the source cannot be read or the write or the scratch fails, or
-        :data:`EXIT_FATAL` when the environment could not be resolved.
+        the source cannot be staged -- absent, a symbolic link, not a regular file,
+        unreadable, or modified while it was being transferred -- or when the write or the
+        scratch fails, or :data:`EXIT_FATAL` when the environment could not be resolved.
 
     Raises
     ------
@@ -474,26 +626,79 @@ def _stage_dataset(arguments: argparse.Namespace) -> int:
         deliberately not caught, because a bare ``except`` here would report a
         programming error as an operational one.
     """
-    # Assumptions: the dataset identifier is checked against the layout registry BEFORE
-    #   anything is read or any client is built. The bytes are copied verbatim, so this
-    #   command cannot detect a wrong dataset from the payload; the identifier is the
-    #   only thing that decides which prefix the object lands under, and a typo would
-    #   otherwise stage a real extract under a name nothing reads.
-    if arguments.dataset not in layouts.names():
-        _LOGGER.error(
-            "unknown dataset %r; the registered datasets are %s",
-            arguments.dataset,
-            ", ".join(layouts.names()),
-        )
+    # Refactoring Rationale: the dataset name is resolved through the SEED-DATASET
+    #   REGISTRY, where it was previously validated against the copybook layout registry.
+    #   That validation could never accept what the orchestrator sends. Step Functions
+    #   iterates plural snake-case tokens -- `accounts`, `card_xref`,
+    #   `transaction_category_balances` -- while the layout registry is keyed by short
+    #   upper-case layout names -- `ACCOUNT`, `XREF`, `TCATBAL` -- so every staging branch
+    #   was refused here before any staging code ran. Worse, the orchestrator supplies
+    #   only `--dataset` and `--business-date`, while `--source`, `--generation` and
+    #   `--domain` were all required, so the command exited in argument parsing with
+    #   status 2. Resolving one token and deriving the rest is what makes the
+    #   orchestrator's invocation the SAME invocation this command accepts.
+    # Assumptions: the token is resolved BEFORE anything is read or any client is built.
+    #   The bytes are copied verbatim, so this command cannot detect a wrong dataset from
+    #   the payload; the token is the only thing that decides which prefix the object
+    #   lands under, and a typo would otherwise stage a real extract where nothing reads.
+    try:
+        descriptor = seed_datasets.seed_dataset(arguments.dataset)
+    except SeedDatasetError as exc:
+        _LOGGER.error("%s", exc)
         return EXIT_USAGE
 
-    source = Path(arguments.source)
-    try:
-        payload = source.read_bytes()
-    except OSError as exc:
-        _LOGGER.error("the extract at %s could not be read: %s", source, exc)
-        return EXIT_FAILED
+    # Assumptions: the domain, the prefix segment and the retention limit all come from
+    #   the descriptor unless the caller overrides them. This is the mapping whose absence
+    #   previously forced `--domain` to be required: the owning bounded context was
+    #   tabulated in README.md section 6.1 and nowhere in code, so no default could be
+    #   offered without inventing it. The registry is now that authoritative home, so the
+    #   default is a lookup rather than a guess.
+    domain = arguments.domain if arguments.domain is not None else descriptor.domain
+    retention = arguments.retain if arguments.retain is not None else descriptor.retention_limit
 
+    # Trade-offs: an explicitly supplied `--source` suppresses the fixed-record-length
+    #   check, while a source derived from the descriptor enables it. The asymmetry is
+    #   measured rather than arbitrary: every descriptor names the EBCDIC form, and all
+    #   ten of those divide exactly by their declared record length (15 000/300, 7 500/150,
+    #   25 000/500, 2 500/50, 350/350, 2 550/50, 420/60, 1 080/60, 2 500/50, 800/80), so
+    #   the check is free evidence there. The ASCII forms are newline-delimited and their
+    #   byte lengths are NOT multiples of the record length, so applying the check to an
+    #   operator-supplied path would refuse a perfectly good extract.
+    if arguments.source is not None:
+        source = Path(arguments.source)
+        declared_length: int | None = None
+    else:
+        staging_root = os.environ.get(seed_datasets.STAGING_ROOT_VARIABLE, "").strip()
+        # Assumptions: the staging root is REQUIRED and is never defaulted to a path
+        #   inside the image. The container image ships no extract -- its Dockerfile
+        #   copies only `src/` and `sql/` -- so any baked-in default would name a file
+        #   that is not there, and the command would report a missing extract instead of
+        #   a missing configuration. Naming the variable in the diagnostic is what tells
+        #   an operator which of the two it actually is.
+        if not staging_root:
+            _LOGGER.error(
+                "no --source was given and %s is not set, so the extract for %r cannot be "
+                "located; set %s to the directory holding %s, or pass --source explicitly",
+                seed_datasets.STAGING_ROOT_VARIABLE,
+                descriptor.token,
+                seed_datasets.STAGING_ROOT_VARIABLE,
+                descriptor.source_object,
+            )
+            return EXIT_FATAL
+        source = Path(staging_root) / descriptor.source_object
+        declared_length = seed_datasets.record_length(descriptor)
+
+    # Refactoring Rationale: the environment is resolved BEFORE the extract is touched, where the
+    #   earlier shape read the source bytes first. The ordering changed because source
+    #   verification moved inside `stage_dataset_file`, which must open the file exactly once --
+    #   pre-reading it here to preserve the old order would restore the second open that the
+    #   single-descriptor discipline exists to remove. The resulting order also matches every
+    #   other subcommand in this module: argument FORM is checked first and reported as a usage
+    #   error, then the environment is resolved and reported as fatal, and only then is any work
+    #   attempted. One consequence is worth stating plainly, because it is observable: an absent
+    #   extract in an unconfigured environment now reports the fatal tier rather than the failed
+    #   tier. That is the more useful of the two answers -- nothing can be staged until the
+    #   environment resolves, so the environment is the blocker to fix first.
     try:
         settings: DatasetStagingSettings = resolve_dataset_staging_settings()
     except ConfigurationError as exc:
@@ -511,24 +716,65 @@ def _stage_dataset(arguments: argparse.Namespace) -> int:
     #   own output instead of leaving it to be inferred.
     region = getattr(getattr(client, "meta", None), "region_name", None)
     _LOGGER.info(
-        "staging to bucket %s (%s deployment) in region %s",
+        "staging %s to bucket %s (%s deployment) in region %s",
+        descriptor.token,
         settings.bucket,
         settings.environment,
         region,
     )
 
     try:
-        staged: StagedGeneration = stage_generation(
+        generation = _resolved_generation(arguments, client, settings, descriptor, domain)
+    except _StagingEnvironmentError as exc:
+        _LOGGER.error("%s", exc)
+        return EXIT_FATAL
+    except DatasetSourceError as exc:
+        _LOGGER.error("the generation for %r could not be reserved: %s", descriptor.token, exc)
+        return EXIT_FAILED
+    except ValueError as exc:
+        _LOGGER.error("the staging request was not acceptable: %s", exc)
+        return EXIT_USAGE
+
+    # Refactoring Rationale: this command stages FROM THE FILE PATH through
+    #   `stage_dataset_file`, replacing a `source.read_bytes()` into an in-memory buffer
+    #   passed to a byte-oriented staging call. The buffered form was wrong on three
+    #   counts that the hardened path fixes together, which is why the change is one
+    #   substitution rather than three patches here. It read the whole extract into
+    #   memory, so peak usage scaled with the dataset instead of staying bounded. It
+    #   opened the pathname separately from the transfer, so the bytes measured and the
+    #   bytes sent were not provably the same file. And it wrote the object with no
+    #   checksum the service could verify, so an in-flight corruption landed silently.
+    #   `stage_dataset_file` holds ONE descriptor across the digest and the transfer,
+    #   streams it in bounded chunks, states the length, supplies ChecksumSHA256 so S3
+    #   itself rejects a mismatch, and records the digest as object metadata for the later
+    #   verification pass.
+    # Assumptions: the prefix segment comes from the descriptor rather than from the token
+    #   directly. They coincide for all ten shipped datasets and are kept separable
+    #   because the prefix is a storage layout an operator browses while the token is an
+    #   orchestration identifier; binding them here would make a future rename of either
+    #   one silently rewrite the other.
+    try:
+        staged: StagedObject = stage_dataset_file(
             client=client,
             settings=settings,
-            domain=arguments.domain,
-            dataset=arguments.dataset,
+            domain=domain,
+            dataset=descriptor.dataset_segment,
             business_date=arguments.business_date,
-            generation=arguments.generation,
+            generation=generation,
+            source=source,
             object_name=_resolved_object_name(source, arguments.object_name),
-            payload=payload,
-            retention_count=arguments.retain,
+            retention_count=retention,
+            record_length=declared_length,
         )
+    except DatasetSourceError as exc:
+        # Assumptions: a source failure is the FAILED tier, not the usage tier, and it is
+        #   caught before the ValueError clause below because DatasetSourceError is a
+        #   subclass of it -- ordering the two the other way round would silently
+        #   reclassify every unreadable extract as a usage error. An absent, symlinked,
+        #   non-regular or mid-flight-modified extract is an operational condition of the
+        #   step's environment rather than a mistake in what the operator typed.
+        _LOGGER.error("the extract at %s could not be staged: %s", source, exc)
+        return EXIT_FAILED
     except ValueError as exc:
         # Assumptions: the staging module raises ValueError for a generation outside
         #   1-9999, an unacceptable object name and an unacceptable retention count --
@@ -537,10 +783,14 @@ def _stage_dataset(arguments: argparse.Namespace) -> int:
         _LOGGER.error("the staging request was not acceptable: %s", exc)
         return EXIT_USAGE
 
+    # Trade-offs: the digest is logged beside the key. It costs one line of output and it
+    #   buys an operator the anchor the verification pass compares against, so a staged
+    #   object can be checked from the step's own log without a separate metadata read.
     _LOGGER.info(
-        "staged %d bytes to %s and scratched %d rolled-off generation prefix(es)%s",
-        len(payload),
+        "staged %d bytes to %s (sha256 %s) and scratched %d rolled-off generation prefix(es)%s",
+        staged.byte_size,
         staged.key,
+        staged.sha256,
         len(staged.deleted_generation_prefixes),
         "".join(f"\n  scratched {prefix}" for prefix in staged.deleted_generation_prefixes),
     )
@@ -617,6 +867,312 @@ def _business_date(value: str) -> date:
         raise argparse.ArgumentTypeError(
             f"{value!r} is not an ISO calendar date in the form YYYY-MM-DD"
         ) from exc
+
+
+def _reader_and_records(arguments: argparse.Namespace) -> tuple[RecordReader, Any]:
+    """Resolve the reader for a record name and open its source in the requested form.
+
+    Purpose
+    -------
+    Give every load and verification handler one way to obtain decoded records, so the choice
+    of record and of seed form is made once rather than in each handler.
+
+    Parameters
+    ----------
+    arguments : argparse.Namespace
+        Carries ``dataset``, ``source`` and ``encoding``.
+
+    Returns
+    -------
+    tuple[RecordReader, Any]
+        The reader bound to the named layout, and an iterator of decoded records.
+
+    Raises
+    ------
+    LayoutError
+        If the record name is not a registered layout, or the named layout cannot be decoded
+        from text at all. The second case is raised lazily, on the first record consumed.
+    """
+    # WHY : the registry is asked through ``layouts.layout`` rather than indexed into
+    #   ``layouts.LAYOUTS``, so an unknown name is refused by the same call, with the same
+    #   message and the same exception type, as the ``decode-record`` command already uses.
+    #   Indexing the mapping directly would produce a KeyError that had to be re-wrapped, and a
+    #   second wording of "that name is not registered" free to drift from the first.
+    layout = layouts.layout(arguments.dataset)
+    reader = RecordReader(layout)
+    source = Path(arguments.source)
+    # WHY : the encoding is explicit rather than sniffed from the file. The two forms are
+    #   distinguishable only by inspecting bytes for characters outside the ASCII range, and a
+    #   seed extract whose records happen to be all-ASCII would sniff as text while being an
+    #   EBCDIC dataset -- decoding it as text then yields plausible wrong values rather than an
+    #   error, which is the failure this whole verification layer exists to catch.
+    if arguments.encoding == "ascii":
+        return reader, reader.read_ascii(source)
+    return reader, reader.read_ebcdic(source)
+
+
+def _read_back(connection: Any, target: Any) -> list[dict[str, Any]]:
+    """Read the loaded rows back as decoded-shaped records.
+
+    Purpose
+    -------
+    Rebuild the field-keyed shape a reader yields, out of the columns the target declares, so
+    the checksum verifier can digest both sides identically.
+
+    Parameters
+    ----------
+    connection : Any
+        An open database connection.
+    target : Any
+        The table target whose column mapping is inverted.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        One mapping per row, keyed by copybook field name.
+
+    Raises
+    ------
+    None
+    """
+    fields = tuple(target.columns)
+    names = ", ".join(quote_identifier(column) for column in target.columns.values())
+    order = ", ".join(quote_identifier(column) for column in target.columns.values())
+    statement = f"SELECT {names} FROM {target.qualified_name} ORDER BY {order}"  # noqa: S608
+    candidate = connection.cursor()
+    cursor = candidate.__enter__() if hasattr(candidate, "__enter__") else candidate
+    try:
+        cursor.execute(statement)
+        rows = cursor.fetchall()
+    finally:
+        if hasattr(candidate, "__exit__"):
+            candidate.__exit__(None, None, None)
+    return [dict(zip(fields, row, strict=True)) for row in rows]
+
+
+def _money_field_names(reader: RecordReader) -> tuple[str, ...]:
+    """List the money fields of a record, being its signed display fields.
+
+    Parameters
+    ----------
+    reader : RecordReader
+        The reader whose layout is inspected.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Every loaded field declaring the signed display regime, in declaration order.
+
+    Raises
+    ------
+    None
+    """
+    # WHY (Assumptions): a money field is exactly a SIGNED display field. An unsigned display
+    #   field is an identifier or a count -- a card number, a credit score -- and totalling one
+    #   would produce a number with no meaning that a source-versus-target comparison would then
+    #   solemnly confirm.
+    return tuple(field.name for field in reader.loaded_fields if field.kind is layouts.Kind.ZONED)
+
+
+def _load_dataset(arguments: argparse.Namespace) -> int:
+    """Bulk-load one decoded dataset into its target table.
+
+    Parameters
+    ----------
+    arguments : argparse.Namespace
+        Carries ``dataset``, ``source`` and ``encoding``.
+
+    Returns
+    -------
+    int
+        :data:`EXIT_OK` when the load committed, :data:`EXIT_FAILED` when it was rolled back.
+
+    Raises
+    ------
+    None
+    """
+    try:
+        _, records = _reader_and_records(arguments)
+        target = target_for(arguments.dataset)
+        connection = connect(resolve_aurora_settings(target.schema))
+    except _STEP_ERRORS as exc:
+        _LOGGER.error("%s", exc)
+        return EXIT_FAILED
+    try:
+        written = load_records(connection, target, records)
+    except AuroraLoadError as exc:
+        _LOGGER.error("%s", exc)
+        return EXIT_FAILED
+    finally:
+        connection.close()
+    _LOGGER.info(
+        "loaded record=%s rows=%d into %s.%s",
+        arguments.dataset,
+        written,
+        target.schema,
+        target.table,
+    )
+    print(f"loaded {written} row(s) of {arguments.dataset} into {target.schema}.{target.table}")
+    return EXIT_OK
+
+
+def _verify_row_counts(arguments: argparse.Namespace) -> int:
+    """Compare one dataset's record count against its target table's row count.
+
+    Parameters
+    ----------
+    arguments : argparse.Namespace
+        Carries ``dataset``, ``source`` and ``encoding``.
+
+    Returns
+    -------
+    int
+        :data:`EXIT_OK` when the counts agree, otherwise :data:`EXIT_FAILED`.
+
+    Raises
+    ------
+    None
+    """
+    try:
+        _, records = _reader_and_records(arguments)
+        target = target_for(arguments.dataset)
+        connection = connect(resolve_aurora_settings(target.schema))
+    except _STEP_ERRORS as exc:
+        _LOGGER.error("%s", exc)
+        return EXIT_FAILED
+    # WHY : the decode guard is repeated around the CONSUMPTION and not only around the setup
+    #   above, because ``_reader_and_records`` returns a lazy iterator: the width contract and
+    #   the per-field decode are checked on the first record pulled, which happens inside
+    #   ``compare_counts``, after the setup block has already returned successfully.
+    try:
+        outcome = compare_counts(
+            connection, arguments.dataset, target.schema, target.table, records
+        )
+    except _DECODE_ERRORS as exc:
+        _LOGGER.error("%s", exc)
+        return EXIT_FAILED
+    finally:
+        connection.close()
+    print(outcome.describe())
+    # WHY : a difference exits FAILED rather than raising. The rubric the runners share treats
+    #   8 as a failed check, and a verification command that raised would lose the report line
+    #   an operator needs in order to see WHICH side was short.
+    return EXIT_OK if outcome.matched else EXIT_FAILED
+
+
+def _verify_checksum(arguments: argparse.Namespace) -> int:
+    """Digest a dataset and compare it against the same digest taken over the loaded rows.
+
+    Parameters
+    ----------
+    arguments : argparse.Namespace
+        Carries ``dataset``, ``source`` and ``encoding``.
+
+    Returns
+    -------
+    int
+        :data:`EXIT_OK` when the two digests agree, otherwise :data:`EXIT_FAILED`.
+
+    Raises
+    ------
+    None
+    """
+    try:
+        _, records = _reader_and_records(arguments)
+        target = target_for(arguments.dataset)
+        connection = connect(resolve_aurora_settings(target.schema))
+    except _STEP_ERRORS as exc:
+        _LOGGER.error("%s", exc)
+        return EXIT_FAILED
+    fields = tuple(target.columns)
+    # WHY : the source digest is taken INSIDE the block that closes the connection, even though
+    #   it touches no database. Digesting drives the lazy reader, so it is where a width or
+    #   decode failure surfaces -- and outside this block that failure would return without ever
+    #   closing the connection it had already opened.
+    try:
+        source_digest = digest_records(records, fields)
+        # WHY : the loaded rows are read back and digested through the SAME field order and the
+        #   same canonical rendering, so the comparison is between two digests of the same
+        #   construction. Comparing a source digest against a value recorded in a file would
+        #   only prove the source had not changed, which is not what a load needs verifying.
+        loaded = _read_back(connection, target)
+    except _DECODE_ERRORS as exc:
+        _LOGGER.error("%s", exc)
+        return EXIT_FAILED
+    finally:
+        connection.close()
+    target_digest = digest_records(loaded, fields)
+    print(f"source {source_digest.describe()}")
+    print(f"target {target_digest.describe()}")
+    matched = source_digest.digest == target_digest.digest
+    print(("MATCH " if matched else "DIFFER ") + f"{arguments.dataset} -> {target.qualified_name}")
+    return EXIT_OK if matched else EXIT_FAILED
+
+
+def _verify_money_parity(arguments: argparse.Namespace) -> int:
+    """Compare a dataset's exact money totals against the target columns' own totals.
+
+    Parameters
+    ----------
+    arguments : argparse.Namespace
+        Carries ``dataset``, ``source`` and ``encoding``.
+
+    Returns
+    -------
+    int
+        :data:`EXIT_OK` when every money column agrees, otherwise :data:`EXIT_FAILED`.
+
+    Raises
+    ------
+    None
+    """
+    try:
+        reader, records = _reader_and_records(arguments)
+        target = target_for(arguments.dataset)
+        connection = connect(resolve_aurora_settings(target.schema))
+    except _STEP_ERRORS as exc:
+        _LOGGER.error("%s", exc)
+        return EXIT_FAILED
+    money_fields = _money_field_names(reader)
+    if not money_fields:
+        print(f"SKIP {arguments.dataset} declares no signed display field, so it holds no money")
+        connection.close()
+        return EXIT_OK
+    failures = 0
+    try:
+        # WHY : the records are collected INSIDE the block that closes the connection, and
+        #   collected rather than streamed, for two separate reasons. Inside, because draining
+        #   the lazy reader is where a width or decode failure surfaces and an early return from
+        #   outside would leak the open connection. Collected, because each money field is
+        #   totalled in its own pass and a one-shot iterator would silently total zero on every
+        #   pass after the first -- a difference of zero that reads as agreement.
+        collected = list(records)
+        for field in money_fields:
+            column = target.columns.get(field)
+            if column is None:
+                # WHY : a money field the target does not map is reported and not silently
+                #   passed. It means the load is dropping a monetary value, which is a finding
+                #   even though this particular comparison cannot be made.
+                print(f"UNMAPPED {arguments.dataset}.{field} has no target column")
+                failures += 1
+                continue
+            outcome = compare_money_totals(
+                connection,
+                arguments.dataset,
+                target.schema,
+                target.table,
+                column,
+                collected,
+                (field,),
+            )
+            print(outcome.describe())
+            failures += 0 if outcome.matched else 1
+    except _DECODE_ERRORS as exc:
+        _LOGGER.error("%s", exc)
+        return EXIT_FAILED
+    finally:
+        connection.close()
+    return EXIT_OK if failures == 0 else EXIT_FAILED
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -725,20 +1281,27 @@ def build_parser() -> argparse.ArgumentParser:
         "stage-dataset",
         help="stage one exported extract to object storage under the generation prefix",
         description=(
-            "Copy one local extract verbatim to "
+            "Copy one seed extract verbatim to "
             "<domain>/<dataset>/dt=YYYY-MM-DD/gen=NNNN/<object-name> in the dataset "
-            "bucket, then permanently scratch the generations that roll off."
+            "bucket, then permanently scratch the generations that roll off. Only "
+            "--dataset and --business-date are required: the domain, the source extract, "
+            "the record geometry and the retention limit all come from the seed-dataset "
+            "registry, and the generation is reserved."
         ),
     )
+    # Assumptions: this --dataset takes a SEED-DATASET TOKEN, whereas decode-record's
+    #   --dataset takes a copybook LAYOUT NAME. The two subcommands act on different
+    #   things -- staging moves a named dataset's extract, decoding interprets a record
+    #   against a named layout -- and each vocabulary is the authoritative one for its own
+    #   job. Forcing both onto one vocabulary was considered and rejected: layout names
+    #   alone cannot express the ten orchestrator tokens, and tokens alone cannot name the
+    #   four layouts (TRNX, REJECT, INTTRAN and the export record) that no seed extract
+    #   ships. The help text on each names which it wants so the difference is visible at
+    #   the point of use rather than only here.
     stage_dataset.add_argument(
         "--dataset",
         required=True,
-        help="dataset identifier; must be one reported by list-datasets",
-    )
-    stage_dataset.add_argument(
-        "--source",
-        required=True,
-        help="path to the local exported extract, copied byte for byte",
+        help=(f"seed dataset to stage; one of {', '.join(seed_datasets.seed_dataset_tokens())}"),
     )
     stage_dataset.add_argument(
         "--business-date",
@@ -746,23 +1309,38 @@ def build_parser() -> argparse.ArgumentParser:
         type=_business_date,
         help="business date for the dt= segment, as YYYY-MM-DD",
     )
+    # Refactoring Rationale: --source, --generation and --domain were all REQUIRED and are
+    #   now optional overrides. They were required because this distribution held no
+    #   dataset-to-context mapping, so no default could be offered without inventing one --
+    #   the owning schema was tabulated in README.md section 6.1 and nowhere in code. That
+    #   mapping now has an authoritative home in `carddemo_migration.seed_datasets`, so
+    #   each default is a lookup rather than a guess. The change is not cosmetic: the
+    #   orchestrator supplies only --dataset and --business-date, so while these three were
+    #   required every staging branch exited in argument parsing with status 2 and no
+    #   dataset was ever staged.
+    stage_dataset.add_argument(
+        "--source",
+        default=None,
+        help=(
+            "path to the extract, copied byte for byte; defaults to the registered source "
+            f"object beneath ${seed_datasets.STAGING_ROOT_VARIABLE}"
+        ),
+    )
     stage_dataset.add_argument(
         "--generation",
-        required=True,
         type=int,
-        help="generation number for the gen= segment, 1 to 9999",
+        default=None,
+        help=(
+            "generation number for the gen= segment, 1 to 9999; reserved automatically when omitted"
+        ),
     )
-    # Assumptions: --domain is REQUIRED here even though it is the bounded-context
-    #   segment a dataset belongs to and could in principle be derived. This
-    #   distribution holds no dataset-to-context mapping -- the owning schema is
-    #   tabulated in README.md section 6.1 and nowhere in code -- so a default would
-    #   have to invent that mapping, and an invented default that is wrong writes a real
-    #   extract to a prefix nothing reads. Requiring it keeps the caller's intent
-    #   explicit until the mapping has an authoritative home.
     stage_dataset.add_argument(
         "--domain",
-        required=True,
-        help="bounded-context segment of the prefix, for example account or ledger",
+        default=None,
+        help=(
+            "bounded-context segment of the prefix; defaults to the dataset's owning "
+            "context, for example account or ledger"
+        ),
     )
     stage_dataset.add_argument(
         "--object-name",
@@ -772,10 +1350,11 @@ def build_parser() -> argparse.ArgumentParser:
     stage_dataset.add_argument(
         "--retain",
         type=int,
-        default=DEFAULT_RETENTION_COUNT,
+        default=None,
         help=(
             "number of newest generations to preserve; the rest are scratched "
-            f"(default: {DEFAULT_RETENTION_COUNT}, the baseline's LIMIT(5) SCRATCH)"
+            f"(default: the dataset's registered limit, {DEFAULT_RETENTION_COUNT}, "
+            "the baseline's LIMIT(5) SCRATCH)"
         ),
     )
     stage_dataset.set_defaults(handler=_stage_dataset)
@@ -792,6 +1371,71 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     apply_credentials.set_defaults(handler=_apply_credentials)
+
+    # WHY : the four commands below share one option set -- --dataset, --source and --encoding
+    #   -- because they are four questions about the same pairing of a dataset and a table, and a
+    #   caller that has just loaded a record verifies it by changing only the verb.
+    # Refactoring Rationale: the selector is spelled --dataset, matching decode-record and
+    #   stage-dataset, after an earlier draft spelled it --record. That draft made --record mean
+    #   two unrelated things depending on the verb: the LAYOUT NAME here, and the one-based
+    #   ORDINAL within an extract in decode-record, which still owns that spelling. An operator
+    #   following the "change only the verb" path above would have had the option rejected as
+    #   unrecognised, which is the precise cost of letting one flag carry two meanings.
+    for name, help_text, description, handler in (
+        (
+            "load-dataset",
+            "bulk-load one decoded dataset into its target table",
+            "Decode one seed extract and COPY it into the table the owning service declares, "
+            "as a single committed unit of work. This is the migrated form of the baseline's "
+            "IDCAMS REPRO load steps.",
+            _load_dataset,
+        ),
+        (
+            "verify-row-counts",
+            "compare a dataset's record count against its target table's row count",
+            "Count the records the source extract holds and the rows the target table holds, "
+            "and report whether they agree. Catches a load that stopped early or ran twice.",
+            _verify_row_counts,
+        ),
+        (
+            "verify-checksum",
+            "compare a digest of the source records against a digest of the loaded rows",
+            "Digest every mapped field of every source record, read the loaded rows back and "
+            "digest them the same way, then compare. Catches a corrupted field where the "
+            "counts agree. No field value is printed.",
+            _verify_checksum,
+        ),
+        (
+            "verify-money-parity",
+            "compare exact money totals between the source extract and the target columns",
+            "Total each signed display field from the source bytes and compare against the "
+            "database's own SUM of the column it loads into. Catches a sign overpunch or a "
+            "decimal point read wrongly, which the other two checks can miss.",
+            _verify_money_parity,
+        ),
+    ):
+        command = subcommands.add_parser(name, help=help_text, description=description)
+        command.add_argument(
+            "--dataset",
+            required=True,
+            help="record-layout identifier; must be one reported by list-datasets",
+        )
+        command.add_argument(
+            "--source",
+            required=True,
+            help="path to the local seed extract to decode",
+        )
+        command.add_argument(
+            "--encoding",
+            required=True,
+            choices=("ascii", "ebcdic"),
+            help=(
+                "seed form of the extract; declared rather than sniffed, because an "
+                "all-ASCII EBCDIC dataset would sniff as text and decode to plausible "
+                "wrong values"
+            ),
+        )
+        command.set_defaults(handler=handler)
 
     return parser
 

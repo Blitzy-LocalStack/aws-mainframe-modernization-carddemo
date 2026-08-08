@@ -1,12 +1,29 @@
 /**
  * Unit tests for this context's service layer, exercised against mocked collaborators.
  *
- * <p><b>Purpose.</b> One class executes here. {@code InquiryMessageListenerTest} covers the asynchronous
- * entry point of this context -- the request/reply exchange transcribed from
- * {@code app/app-vsam-mq/cbl/COACCT01.cbl}, whose fixed reply layout is a wire contract rather than a
- * formatting choice. It asserts that exchange with no database, no container and no queue: every
- * collaborator that reaches outside the process is mocked, so each assertion controls exactly the one
- * decision it is about.</p>
+ * <p><b>Purpose.</b> Two classes execute here, one per outward-facing entry point of this context's
+ * service layer. {@code InquiryMessageListenerTest} covers the asynchronous entry point -- the
+ * request/reply exchange transcribed from {@code app/app-vsam-mq/cbl/COACCT01.cbl}, whose fixed reply
+ * layout is a wire contract rather than a formatting choice. It asserts that exchange with no database,
+ * no container and no queue: every collaborator that reaches outside the process is mocked, so each
+ * assertion controls exactly the one decision it is about. {@code RestReferenceAddressLookupTest}
+ * covers the outbound synchronous adapter -- the account side of the reference context's published
+ * address lookups -- and is the one exception to the mock-everything sentence above.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph previously read "One class executes here", which was true
+ * when it was written and stopped being true when the second class landed. It is corrected rather than
+ * loosened into a countless phrase, because a charter that states a number is the thing that makes an
+ * absent class visible; a charter that says "the classes here" would have absorbed the addition
+ * silently and would absorb the next one too.</p>
+ *
+ * <p>Trade-offs: {@code RestReferenceAddressLookupTest} binds a real loopback HTTP server on an
+ * ephemeral port instead of mocking its transport, so this package is not uniformly mock-only. That is
+ * a consequence of its subject rather than a departure from the placement rule: the class under test IS
+ * the HTTP adapter, its constructor installs its own request factory to carry a connect timeout and a
+ * read timeout, and {@code MockRestServiceServer} works by installing a competing factory on the same
+ * builder -- so the shorter route would have proved something about whichever factory won rather than
+ * about the adapter. The server class ships with the platform, so no dependency is added, and the port
+ * is ephemeral, so parallel execution cannot collide.</p>
  *
  * <p>Assumptions: the authentication of an INTERNAL caller is not asserted here, and the omission is a
  * placement decision rather than a gap. That decision is made by an ordered filter chain --

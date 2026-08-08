@@ -202,17 +202,36 @@
  * subject, and neither belongs anywhere else -- a rendering rule placed in {@code error} would be
  * unavailable to the messaging and batch paths that also emit records.</p>
  *
- * <p>Assumptions: the whole-library arithmetic this charter used to restate -- twenty-one production
- * classes in thirty compilation units -- is a PLAN figure and is stated as such by the {@code money}
- * charter, which records that "every figure above is a TARGET total and none of them is a measurement of
- * what the tree holds". The delivered tree now exceeds that plan, because review remediation added
- * classes the plan never named: an HTML text encoder, an opaque-identifier minter, an internal service
- * token, a keyset cursor token, a message-expiry rule, an inquiry request codec, a record-conflict
- * signal and the two named above. The measured tree holds <strong>thirty-two production classes, ten
- * package descriptors and forty-two compilation units</strong>. Five sibling charters still restate the
- * superseded plan sum; correcting a target figure is not the same act as correcting a false claim about
- * this package's own contents, so only the latter is done here, and the drift in the former is reported
- * rather than edited silently.</p>
+ * <p>Assumptions: the whole-library arithmetic is a MEASUREMENT of this tree and no longer a plan
+ * target. The plan named twenty-one production classes in thirty compilation units; review remediation
+ * added classes it never named -- an HTML text encoder, an opaque-identifier minter, an internal
+ * service token, a keyset cursor token, a message-expiry rule, a messaging correlation identifier, a
+ * masked card number, a sealed selector, an inquiry request codec, a record-conflict signal, a
+ * client-input signal, a field-ordering rule, a security error handler pair and the two named above --
+ * so the delivered tree holds <strong>thirty-five production classes, ten package descriptors and
+ * forty-five compilation units</strong>:
+ *
+ * <pre>
+ * root 1 + money 2 + codec 6 + error 7 + web 3 + security 8 + observability 3 + time 1 + validation 2 + messaging 2 = 35
+ * root 2 + money 3 + codec 7 + error 8 + web 4 + security 9 + observability 4 + time 2 + validation 3 + messaging 3 = 45
+ * </pre>
+ *
+ * <p>This package's own share of that total is:
+ *
+ * <pre>
+ * this package: observability 3 production + 1 charter = 4 compilation units
+ * </pre>
+ *
+ * <p>Refactoring Rationale: this paragraph previously reported that five sibling charters still
+ * restated the superseded plan sum, and left them alone on the ground that correcting a target figure
+ * is a different act from correcting a false claim. That distinction does not survive scrutiny: a
+ * target presented in a section headed "the count canon", with cross-check sums inviting a reader to
+ * re-derive it, is read as a closed inventory, and a closed inventory the tree contradicts is false
+ * however it was arrived at. All ten charters now state the measured figures, this one included, and
+ * its own thirty-two-class measurement above was itself already three classes stale by the time the
+ * remediation finished -- which is the argument for the check rather than for another hand count.
+ * {@code SharedKernelInventoryTest} re-derives every labelled addend, both totals and each charter's
+ * own share from the directory on every build.</p>
  *
  * <p>Assumptions: no package descriptor exists at {@code com} or at {@code com/carddemo}, which is why
  * the descriptor count is ten and not twelve. The Checkstyle module that requires a descriptor fires

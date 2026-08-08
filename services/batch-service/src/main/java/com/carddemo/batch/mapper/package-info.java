@@ -100,25 +100,24 @@
  * the eight in particular. Reflection makes it worse again, because a reflective mapper's field
  * handling is not readable at all from the site that invokes it.</p>
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ * <h2>The roster, and the tree state measured against it</h2>
  *
- * <p>Assumptions: the roster in the next section is this package's <b>target contract</b> as
- * the migration plan assigns it, not an inventory of the directory. Measured at the
- * checkpoint that authored this section, three of the eight mappers have landed --
- * {@code AccountRecordMapper}, {@code CardXrefRecordMapper} and
- * {@code TransactionRecordMapper} -- and the other five are <b>planned</b>, not missing:
+ * <p>Assumptions: the roster in the next section is this package's contract as the migration plan
+ * assigns it and also an inventory of the directory, because all eight mappers have landed:
+ * {@code AccountRecordMapper}, {@code CardXrefRecordMapper}, {@code TransactionRecordMapper},
  * {@code DisclosureGroupRecordMapper}, {@code TransactionCategoryBalanceRecordMapper},
  * {@code DailyTransactionMapper}, {@code TransactionRejectRecordMapper} and
- * {@code ExportRecordMapper}. Each is authored at a later index of the same plan.</p>
+ * {@code ExportRecordMapper}. Nothing in it is planned.</p>
  *
- * <p>Trade-offs: this section duplicates information the roster below already implies,
- * which is a cost worth paying for one reason. The next heading is titled "the two mappers
- * that look missing", and it explains two names a reader might EXPECT and will not find --
- * a genuinely different question from which of the named eight exist yet. Without this
- * section those two questions collapse into one, and a reader who checked the directory
- * against the roster could reasonably conclude that five further mappers had also been
- * ruled out deliberately rather than merely not authored yet. Separating "ruled out" from
- * "not yet written" is the whole point of stating both.</p>
+ * <p>Refactoring Rationale: this section recorded that three of the eight had landed and the other
+ * five were planned, each authored at a later index of the plan. All eight are present, so the
+ * section states the agreement instead. It is kept rather than deleted because the distinction
+ * it draws is still needed by the heading that follows: that heading is titled "the two mappers
+ * that look missing" and explains two names a reader might EXPECT and will not find, which is a
+ * different question from whether a named member exists. With this section gone, a reader who
+ * checked the directory against the roster could read those two absences as an incomplete
+ * package rather than as a deliberate exclusion, and separating "ruled out" from "not yet
+ * written" is the whole point of stating both.</p>
  *
  * <h2>The nine compilation units, and the two mappers that look missing</h2>
  *

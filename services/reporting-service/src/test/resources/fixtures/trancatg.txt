@@ -1,9 +1,9 @@
-010001Regular sales draft purchase settled overnight now    
-010002Regular sales draft purchases                         
-010005Regular cash advance withdrawn                        
-020001Cash payment at the counters                          
-030001Credit to account balance raised by operations now    
-040001Zero dollar authorization hold placed on the cards    
-050001Refund credit posted against the original sales ok    
-060001Fraud reversal entered by the operations teams now    
-070001Sales draft credit adjustment raised by the office    
+010001Regular sales draft purchase settled overnight now0000
+010002Regular sales draft purchases                     0000
+010005Regular cash advance withdrawn                    0000
+020001Cash payment at the counters                      0000
+030001Credit to account balance raised by operations now0000
+040001Zero dollar authorization hold placed on the cards0000
+050001Refund credit posted against the original sales ok0000
+060001Fraud reversal entered by the operations teams now0000
+070001Sales draft credit adjustment raised by the office0000

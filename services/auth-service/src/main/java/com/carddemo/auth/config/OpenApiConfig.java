@@ -2,6 +2,7 @@ package com.carddemo.auth.config;
 
 import io.swagger.v3.oas.models.Components;
 import io.swagger.v3.oas.models.OpenAPI;
+import io.swagger.v3.oas.models.SpecVersion;
 import io.swagger.v3.oas.models.info.Info;
 import io.swagger.v3.oas.models.info.License;
 import io.swagger.v3.oas.models.security.SecurityRequirement;
@@ -109,6 +110,16 @@ public class OpenApiConfig {
      * The build identity is available separately from the framework's own information endpoint.</p>
      */
     private static final String CONTRACT_VERSION = "1.0.0";
+
+    /**
+     * The OpenAPI specification version this document declares, reproduced from the committed
+     * contract so a comparison of the two finds the member equal.
+     *
+     * <p>This is the specification's own version and not the API's; {@link #CONTRACT_VERSION}
+     * carries the latter. It is set explicitly rather than left to the document model's default,
+     * because that default is a 3.0 value -- see the rationale recorded at the assembly site.</p>
+     */
+    private static final String SPEC_VERSION = "3.1.1";
 
     /**
      * The document summary, matching {@code info.summary} of the committed contract.
@@ -240,7 +251,41 @@ public class OpenApiConfig {
      */
     @Bean
     public OpenAPI authServiceOpenApi() {
-        return new OpenAPI()
+        // WHY : Assumptions: the specification version is set on this object in BOTH of the two
+        //       places that carry it -- the constructor's specification flag and the version string
+        //       -- because the document model defaults both to a 3.0 value and this contract is 3.1.
+        //       Two members of this document exist only in 3.1: the summary on the information block
+        //       and the SPDX identifier on the licence. Which of them survive is decided by which
+        //       serialiser the publishing library runs, selected by the springdoc.api-docs.version
+        //       key in application.yml, and NOT by the flag set here; the 3.1 serialiser emits both
+        //       members from a document constructed either way. The two carriers are INDEPENDENT: the
+        //       constructor sets the flag and leaves the string at 3.0.1, so setting the flag alone
+        //       still serves a document declaring 3.0.1 while carrying 3.1-only members and while the
+        //       contract of record declares 3.1.0 -- internally contradictory, and silently so. That
+        //       is why the string is set here as well rather than expected to follow from the flag.
+        //
+        //       Refactoring Rationale: an earlier revision of this comment asserted that the
+        //       library's assembly step overwrites both the flag and the version string, and
+        //       therefore that setting either here would be discarded without complaint. Assembly
+        //       clones this document through an object mapper, and MEASUREMENT of that clone -- the
+        //       case named below -- shows the two carriers behave differently rather than either
+        //       being discarded. The version STRING survives every clone path, so the value set here
+        //       does reach the served document; without it the document is served declaring the
+        //       model's 3.0.1 default. The FLAG survives swagger's own 3.1 mapper and is reset to
+        //       V30 by a plain one, which is exactly why the string is set explicitly instead of
+        //       being left to follow from the flag.
+        //
+        //       Trade-offs: both are set although only one is load-bearing at the served document.
+        //       The flag is what any reader of this bean sees before assembly -- a test comparing it
+        //       to the contract, or a future library path that consults it -- so leaving it at a 3.0
+        //       default while the document carries 3.1-only members would be a contradiction inside
+        //       this object. Setting it also removes the dependence on the configuration key being
+        //       present: transaction-service in this repository pins no version key at all and rests
+        //       entirely on its constructor, which is the shape that survives someone tidying the
+        //       key away. Both facts are asserted by account-service's config/OpenApiDocumentTest.java against the same library, so neither can
+        //       drift back into prose that nothing checks.
+        return new OpenAPI(SpecVersion.V31)
+                .openapi(SPEC_VERSION)
                 .info(contractInfo())
                 .addServersItem(edgeServer())
                 .addSecurityItem(new SecurityRequirement().addList(BEARER_SCHEME_NAME))

@@ -1,7 +1,11 @@
 package com.carddemo.auth.service;
 
+import com.carddemo.auth.dto.SignOnChallenge;
+import com.carddemo.auth.dto.SignOnChallengeRequest;
+import com.carddemo.auth.dto.SignOnOutcome;
 import com.carddemo.auth.dto.SignOnRequest;
 import com.carddemo.auth.dto.SignOnResponse;
+import com.carddemo.auth.dto.TokenRefreshRequest;
 import com.carddemo.auth.repository.UserRepository;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ClientInputException;
@@ -17,15 +21,20 @@ import javax.crypto.spec.SecretKeySpec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataAccessException;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.stereotype.Service;
 import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.services.cognitoidentityprovider.CognitoIdentityProviderClient;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AuthFlowType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AuthenticationResultType;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.ChallengeNameType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.InitiateAuthRequest;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.InitiateAuthResponse;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.InvalidPasswordException;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.NotAuthorizedException;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.RespondToAuthChallengeRequest;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.RespondToAuthChallengeResponse;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.UserNotFoundException;
 
 /**
@@ -159,6 +168,41 @@ public class CognitoIdentityService {
     /** The sentence an unevaluable credential carries, from {@code COSGN00C.cbl} line 254. */
     private static final String MESSAGE_UNABLE_TO_VERIFY = "Unable to verify the User ...";
 
+    /**
+     * The sentence a refused session or refresh token carries.
+     *
+     * <p>Assumptions: this sentence has NO reference counterpart and deliberately reuses none of the
+     * three the reference sign-on writes. The reference had neither a challenge exchange nor a renewal
+     * exchange, so no literal exists for either refusal, and each of its three sentences would be
+     * actively wrong here: {@code 'Wrong Password. Try again ...'} would send a caller to retype a
+     * credential that was in fact accepted, {@code 'User not found. Try again ...'} would report an
+     * existence fact the pool is provisioned not to disclose, and
+     * {@code 'Unable to verify the User ...'} names an unevaluable exchange when this one was evaluated
+     * and refused.
+     *
+     * <p>Assumptions: one sentence covers every reason both exchanges can be refused for -- an expired,
+     * already-used, altered or mismatched session, and an expired, revoked or mismatched refresh token
+     * -- because the remedy is identical in all of them and is the whole actionable content. The
+     * published contract states the same merge for both operations, and distinguishing the reasons
+     * would tell an unauthenticated caller which of them it had.
+     *
+     * <p>Assumptions: the wording satisfies the shared advice's provenance gate -- it ends in an
+     * ellipsis, sits inside the declared message width and holds no long run of digits -- which is what
+     * lets it reach the body rather than being replaced by a generic sentence. It is authored in the
+     * shape the reference literals use so that a body carrying it is indistinguishable in form from one
+     * carrying a transcribed sentence.
+     *
+     * <p>Assumptions: this one is public where the credential sentence beside it is private, and the
+     * asymmetry is a correction rather than an inconsistency. The adapter that renders the credential
+     * refusal re-declares that sentence, and the note beside its copy records that the duplication was
+     * forced by the field's visibility rather than chosen -- the cost being two literals for one
+     * externally observable sentence, kept checkable only by both citing the same reference line. This
+     * sentence has no reference line to cite, so a second copy of it would be checkable against nothing
+     * at all; publishing it instead gives the adapter one value to render and leaves exactly one place
+     * for it to change.
+     */
+    public static final String MESSAGE_SESSION_REFUSED = "Please sign on again ...";
+
     // WHY : Assumptions: the two keys are derived from the baseline's own cursor targets rather than
     //       chosen here. Each failing branch homes the cursor to the field it blames -- USERIDL at
     //       app/cbl/COSGN00C.cbl lines 121, 250 and 255, and PASSWDL at lines 126 and 244 -- so the
@@ -170,6 +214,21 @@ public class CognitoIdentityService {
 
     /** The key a refusal blamed on the credential carries. */
     private static final String FIELD_PASSWORD = "password";
+
+    // WHY : Assumptions: these three keys have no baseline cursor target to derive them from, because
+    //       neither the challenge nor the renewal exchange has a baseline counterpart. They are the
+    //       record component names of com.carddemo.auth.dto.SignOnChallengeRequest and
+    //       com.carddemo.auth.dto.TokenRefreshRequest, which are also the property names the published
+    //       contract declares and the names its 400 descriptions promise, so a client reading an entry
+    //       can bind it to the value it sent.
+    /** The key a refusal blamed on the challenge session carries. */
+    private static final String FIELD_SESSION = "session";
+
+    /** The key a refusal blamed on the proposed permanent credential carries. */
+    private static final String FIELD_NEW_PASSWORD = "newPassword";
+
+    /** The key a refusal blamed on the presented refresh token carries. */
+    private static final String FIELD_REFRESH_TOKEN = "refreshToken";
 
     // WHY : Assumptions: the three parameter names and the algorithm are the provider's published
     //       contract for the user-password authentication flow, not choices. They are named as
@@ -184,8 +243,94 @@ public class CognitoIdentityService {
     /** The provider's parameter name for the confidential-client proof. */
     private static final String AUTH_PARAM_SECRET_HASH = "SECRET_HASH";
 
+    /** The provider's parameter name for the refresh token presented on a renewal. */
+    private static final String AUTH_PARAM_REFRESH_TOKEN = "REFRESH_TOKEN";
+
+    /** The provider's response name for the permanent credential a challenge answer sets. */
+    private static final String CHALLENGE_PARAM_NEW_PASSWORD = "NEW_PASSWORD";
+
     /** The keyed-digest algorithm the confidential-client proof is computed with. */
     private static final String SECRET_HASH_ALGORITHM = "HmacSHA256";
+
+    /**
+     * The longest run of digits a relayed provider sentence may carry before it is discarded.
+     *
+     * <p>Assumptions: thirteen matches the run the shared advice's own provenance gate refuses, and the
+     * number is the same because the reason is the same: thirteen is the shortest primary account number
+     * in use, so a run that long is the shape of one. Choosing a different number here would let a value
+     * through this check that the gate would then refuse, leaving a sentence composed and discarded.
+     */
+    private static final int SENSITIVE_DIGIT_RUN = 13;
+
+    /**
+     * The most characters of a provider sentence that are relayed, before the ellipsis is appended.
+     *
+     * <p>Assumptions: seventy-one is the shared advice's declared message width of seventy-five less the
+     * four characters the appended ellipsis occupies, so a relayed sentence is always exactly at or under
+     * the width the gate admits. The width itself is the reference message field's:
+     * {@code ERRMSGI PIC X(78)} at {@code app/cpy-bms/COSGN00.CPY} line 84 is wider still, so nothing
+     * this produces can overflow the field the reference would have displayed it in.
+     */
+    private static final int MAX_POLICY_REASON_LENGTH = 71;
+
+    /**
+     * The fewest characters a token the pool reports must hold before it is passed on as issued.
+     *
+     * <p>Assumptions: one, because the only question being asked is presence. A token's real length is
+     * the pool's business and is not fixed by any contract this repository owns, so a larger floor here
+     * would refuse a token the pool had legitimately minted. What this constant exists to catch is a
+     * provider answer that carried an authentication result whose token members were absent or empty --
+     * an answer that reads as success and cannot be used as one.
+     */
+    private static final int MINIMUM_TOKEN_LENGTH = 1;
+
+    /**
+     * The fewest seconds of remaining lifetime a reported token set must declare.
+     *
+     * <p>Assumptions: one, matching the minimum the response record's own constraint declares and the
+     * minimum the committed contract publishes for that property. A lifetime of zero or a negative one
+     * describes a token that is already expired, so relaying it would hand a caller a token set it
+     * cannot use for a single request and would send it back to sign on with no explanation.
+     */
+    private static final int MINIMUM_TOKEN_LIFETIME_SECONDS = 1;
+
+    /**
+     * The least time any refusal of a submitted credential takes before it is reported.
+     *
+     * <p>Refactoring Rationale: this exists to close a user-enumeration channel the merged refusal
+     * sentence left open. Both an unknown identifier and a wrong credential are answered with the one
+     * sentence, which removes the channel that told the two apart by WORDING -- but the two paths do
+     * different amounts of work. A locally-unknown identifier is refused after one indexed primary-key
+     * probe and never reaches the pool, while a known identifier with a wrong credential is refused
+     * after a network round trip to the pool. The difference is on the order of a hundred milliseconds
+     * and is measurable from outside, so an unauthenticated caller could still enumerate identifiers by
+     * timing the refusals. Padding every refusal up to one floor makes the two indistinguishable in
+     * duration as well as in wording.
+     *
+     * <p>Assumptions: 750 milliseconds is chosen to sit ABOVE a healthy provider round trip rather than
+     * at a typical one, which is what makes the padding effective on the slow path as well as the fast
+     * one. A floor at or below typical provider latency would leave the pool-refused path exceeding it
+     * and therefore still distinguishable; a much larger floor would hold a request thread for longer
+     * than the enumeration risk warrants. It remains far below the five-second total exchange budget
+     * above, so a refusal cannot outlast the timeout that bounds the exchange it refused.
+     *
+     * <p>Alternatives Considered: relaying every submitted credential to the pool and testing the local
+     * record afterwards, which removes the difference with no padding at all. Rejected because it
+     * presents a caller's credential to a third party for an identifier this context does not own,
+     * which widens the credential's exposure to buy uniformity -- and the ownership check exists
+     * precisely to prevent that relay. Alternatives Considered: padding to a RANDOM duration rather
+     * than to a floor. Rejected because random padding raises the number of samples an attacker needs
+     * without removing the signal, whereas a floor above both paths removes it.
+     *
+     * <p>Trade-offs: the padding holds a request thread that has already finished its work, so a burst
+     * of refused sign-ons occupies threads for longer than the work they perform. That is accepted
+     * because the throttle that bounds such a burst is applied one layer out rather than here: the
+     * edge applies a tighter rate and burst limit to the three unauthenticated routes than to any
+     * other, declared as {@code public_route_throttling_rate_limit} and
+     * {@code public_route_throttling_burst_limit} in {@code infra/modules/api-gateway-http}, so the
+     * number of refusals that can be in flight is capped before it reaches this service.
+     */
+    private static final Duration MINIMUM_REFUSAL_DURATION = Duration.ofMillis(750);
 
     // WHY : Trade-offs: the two bounds below are the whole of this operation's resilience posture, and
     //       the numbers are chosen against what a caller is waiting on rather than against what the
@@ -320,21 +465,36 @@ public class CognitoIdentityService {
      * store for a weaker isolation level to reproduce it -- would import a defect class in exchange
      * for a behaviour no caller depends on.
      *
+     * <p>Refactoring Rationale: the declared return type is the sealed
+     * {@link com.carddemo.auth.dto.SignOnOutcome} rather than the token set alone, and widening it was
+     * the correction that made this operation usable. The published contract declares the success
+     * status as a choice of two shapes discriminated on {@code outcome}, and the narrower signature
+     * could express only the authenticated one -- so a pool answer of {@code NEW_PASSWORD_REQUIRED} had
+     * nowhere to go and was reported as an unevaluable credential. That was not a theoretical branch:
+     * every account the infrastructure provisions is created with a temporary password, a temporary
+     * password always raises that challenge on first use, and no operation existed through which a
+     * permanent one could be set. The first sign-on of every provisioned user therefore answered HTTP
+     * 500. The sealed type keeps the set of shapes closed, so this method still cannot return anything
+     * the contract does not publish.
+     *
      * @param request the submitted identifier and credential, as the unauthenticated sign-on operation
      *     received them; must not be {@code null}
-     * @return the token set the pool issued, carrying the normalised identifier and no authoritative
-     *     user type; never {@code null}
+     * @return either the token set the pool issued, as {@link SignOnResponse} carrying the normalised
+     *     identifier and no authoritative user type, or the challenge the pool raised, as
+     *     {@link SignOnChallenge} carrying the session to answer it with and no token of any kind;
+     *     never {@code null}
      * @throws NullPointerException if {@code request} is {@code null}
      * @throws ClientInputException if the identifier or the credential is absent or blank, carrying the
      *     baseline sentence for the earlier of the two fields and that field's key
      * @throws BadCredentialsException if the pool refused the pair, or if this context holds no record
      *     for the identifier, carrying the baseline refusal sentence and no field key
      * @throws IllegalStateException if the credential could not be evaluated at all -- the pool being
-     *     unreachable or answering a fault, the request proof being rejected, or the pool answering
-     *     with a challenge this operation cannot complete -- carrying the baseline sentence for an
-     *     unevaluable credential and no provider diagnostic
+     *     unreachable or answering a fault, the request proof being rejected, the local store being
+     *     unreadable, the pool answering with a challenge this contract publishes no answer path for,
+     *     or the pool answering with a token set that is incomplete -- carrying the baseline sentence
+     *     for an unevaluable credential and no provider diagnostic
      */
-    public SignOnResponse authenticate(SignOnRequest request) {
+    public SignOnOutcome authenticate(SignOnRequest request) {
 
         Objects.requireNonNull(request, "request");
 
@@ -342,16 +502,191 @@ public class CognitoIdentityService {
 
         String userId = normaliseUserId(request.userId());
 
-        // WHY : Assumptions: the probe stands in for the keyed read at app/cbl/COSGN00C.cbl lines 211
-        //       to 219, which carries no UPDATE option and so is a plain positioned read rather than a
-        //       read for update. Nothing here acquires a lock for the same reason: no row is written.
-        if (!isKnownLocally(userId)) {
-            throw refusedCredential("local-record-absent");
+        // WHY : Refactoring Rationale: the instant is taken before any work so that a refusal can be
+        //       padded to a floor measured from here. Both refusal paths below do different amounts of
+        //       work -- one indexed probe, or one probe plus a network round trip -- and the merged
+        //       refusal sentence removes the wording channel that told them apart while leaving the
+        //       duration channel open. The floor closes it; the constant it pads to records why.
+        long startedAt = System.nanoTime();
+
+        try {
+            // WHY : Assumptions: the probe stands in for the keyed read at app/cbl/COSGN00C.cbl lines
+            //       211 to 219, which carries no UPDATE option and so is a plain positioned read rather
+            //       than a read for update. Nothing here acquires a lock for the same reason: no row is
+            //       written.
+            if (!isKnownLocally(userId)) {
+                throw refusedCredential("local-record-absent");
+            }
+
+            InitiateAuthResponse answer = exchangeCredential(userId, request.password());
+
+            return outcomeFrom(answer, userId);
+
+            // WHY : Assumptions: only the refusal is padded, and the two other outcomes are answered as
+            //       soon as they are known. A success discloses nothing about which identifiers exist
+            //       that the caller did not already know -- it holds the caller's own identifier -- and
+            //       an unevaluable credential is a fault of this deployment rather than a statement
+            //       about the submitted identifier, so neither carries the signal the floor exists to
+            //       suppress. Padding them too would slow every healthy sign-on for nothing.
+        } catch (BadCredentialsException refused) {
+            padTo(startedAt, MINIMUM_REFUSAL_DURATION);
+            throw refused;
         }
+    }
 
-        InitiateAuthResponse answer = exchangeCredential(userId, request.password());
+    /**
+     * Sets the permanent credential a sign-on challenge asked for and returns the token set it unlocks.
+     *
+     * <p>Purpose: this completes the exchange {@link #authenticate} left unfinished when the pool
+     * answered with a challenge. It is the operation the published contract declares as
+     * {@code POST /api/v1/auth/challenge}, and it is published unauthenticated for the same reason
+     * sign-on is: a caller answering a challenge holds no token, that being what the exchange exists to
+     * obtain.
+     *
+     * <p>Assumptions: this method has no reference counterpart, and none of the reference sign-on's
+     * three sentences is reused for its refusals. The reference compared a stored eight-character
+     * credential directly at {@code app/cbl/COSGN00C.cbl} lines 211 to 256 and had no notion of a
+     * credential that must be changed before use. The divergence is registered as
+     * {@code D-PASSWORD-CHALLENGE} in {@code docs/architecture/cobol-to-service-traceability.md}.
+     *
+     * <p>Assumptions: the local existence probe runs here exactly as it does on sign-on, and it is not
+     * redundant just because the caller is holding a session this service issued. A session is minted by
+     * the pool and this context owns its own membership: a row deleted between the sign-on and the
+     * answer must not be able to complete an exchange that ends in a usable token set for a user this
+     * context no longer holds.
+     *
+     * <p>Trade-offs: the answer returns the AUTHENTICATED shape only, never another challenge, so this
+     * exchange cannot loop. The pool issues tokens once the new password is accepted, and a second
+     * challenge would mean a pool configuration this contract publishes no answer path for -- reported
+     * as an unevaluable exchange rather than returned as a challenge a client would have no defined way
+     * to answer. What is given up is that enabling a second factor makes this operation fail rather than
+     * chain; what is bought is that no client is written against a flow that has never been exercised.
+     *
+     * @param request the identifier the challenge was raised for, the session it issued and the
+     *     permanent credential to set; must not be {@code null}
+     * @return the token set the pool issued once the credential was accepted, carrying the normalised
+     *     identifier; never {@code null}
+     * @throws NullPointerException if {@code request} is {@code null}
+     * @throws ClientInputException if a submitted value is absent or blank, or if the pool refused the
+     *     proposed credential under its own password policy, carrying the pool's own reason in the
+     *     latter case rather than a restatement of the policy
+     * @throws SessionRefusedException if the session was expired, already used, altered or issued for a
+     *     different identifier, or if this context holds no record for the identifier, carrying the
+     *     sign-on-again sentence and no field key
+     * @throws IllegalStateException if the exchange could not be evaluated at all -- the pool being
+     *     unreachable or answering a fault, the request proof being rejected, the local store being
+     *     unreadable, the pool raising a further challenge, or the pool answering with a token set that
+     *     is incomplete
+     */
+    public SignOnResponse answerChallenge(SignOnChallengeRequest request) {
 
-        return tokensFrom(answer, userId);
+        Objects.requireNonNull(request, "request");
+
+        requireChallengeFields(request);
+
+        String userId = normaliseUserId(request.userId());
+        long startedAt = System.nanoTime();
+
+        try {
+            if (!isKnownLocally(userId)) {
+                throw refusedSession("local-record-absent");
+            }
+
+            RespondToAuthChallengeResponse answer =
+                    answerNewPasswordChallenge(userId, request.session(), request.newPassword());
+
+            // WHY : Assumptions: a second challenge is treated as unevaluable rather than returned,
+            //       which is the trade-off recorded above. The name is logged so an operator can see
+            //       which pool configuration produced it and is withheld from the caller, who has no
+            //       published way to act on it.
+            if (answer.authenticationResult() == null) {
+                LOG.warn("event=auth.challenge.unevaluable reason=further-challenge challenge={}",
+                        answer.challengeNameAsString());
+                throw unableToVerify("further-challenge-" + answer.challengeNameAsString());
+            }
+
+            return tokensFrom(answer.authenticationResult(), userId);
+
+        } catch (SessionRefusedException refused) {
+            padTo(startedAt, MINIMUM_REFUSAL_DURATION);
+            throw refused;
+        }
+    }
+
+    /**
+     * Exchanges a refresh token for a fresh access token and identity token.
+     *
+     * <p>Purpose: this is the operation the published contract declares as
+     * {@code POST /api/v1/auth/refresh}. It exists so a session outlives one access-token lifetime
+     * without the user re-entering a credential, and it is published unauthenticated because the token
+     * it would carry is the one being renewed -- a caller whose access token has already expired must
+     * still be able to renew.
+     *
+     * <p>Assumptions: the renewed set carries a null renewal token, because the pool does not reissue
+     * one: the caller keeps the token it already holds until that token itself expires. The response
+     * record declares that component nullable for exactly this reason, which is what lets one shape
+     * serve sign-on, challenge and renewal rather than a second nearly identical shape existing for this
+     * path alone. Substituting a placeholder would report a token the caller cannot use.
+     *
+     * <p>Assumptions: the identifier is required on this request even though a refresh token identifies
+     * its own subject to the pool, and the reason is the confidential-client proof rather than
+     * bookkeeping. The pool requires that proof on every flow of a client that has a secret, and the
+     * proof is a keyed digest over the USER NAME and the client identifier -- so without the identifier
+     * this service cannot compute a proof the pool will accept. Requiring it also lets the local
+     * existence probe run, which is what stops a token minted for a user this context has since removed
+     * from being renewed into a fresh one.
+     *
+     * <p>Assumptions: this method has no reference counterpart of any kind. A sign-on under the
+     * transaction monitor lasted as long as the terminal session did, so no reference program, screen
+     * field or literal corresponds to this exchange, and its refusal sentence is authored rather than
+     * transcribed.
+     *
+     * @param request the identifier the token set was issued for and the refresh token to renew it
+     *     with; must not be {@code null}
+     * @return the renewed token set, carrying a new access token and identity token, a null renewal
+     *     token and the normalised identifier; never {@code null}
+     * @throws NullPointerException if {@code request} is {@code null}
+     * @throws ClientInputException if either submitted value is absent or blank
+     * @throws SessionRefusedException if the refresh token was expired, revoked or not issued to the
+     *     identifier supplied, or if this context holds no record for the identifier, carrying the
+     *     sign-on-again sentence and no field key
+     * @throws IllegalStateException if the renewal could not be evaluated at all -- the pool being
+     *     unreachable or answering a fault, the request proof being rejected, the local store being
+     *     unreadable, the pool answering with a challenge, or the pool answering with a token set that
+     *     is incomplete
+     */
+    public SignOnResponse refresh(TokenRefreshRequest request) {
+
+        Objects.requireNonNull(request, "request");
+
+        requireRefreshFields(request);
+
+        String userId = normaliseUserId(request.userId());
+        long startedAt = System.nanoTime();
+
+        try {
+            if (!isKnownLocally(userId)) {
+                throw refusedSession("local-record-absent");
+            }
+
+            InitiateAuthResponse answer = exchangeRefreshToken(userId, request.refreshToken());
+
+            // WHY : Assumptions: a renewal flow has no challenge to raise, so an answer carrying none
+            //       of a token set is a pool fault rather than a step in a flow. It is reported as
+            //       unevaluable, and the null-safe access below is in tokensFrom rather than repeated
+            //       here.
+            if (answer.authenticationResult() == null) {
+                LOG.warn("event=auth.refresh.unevaluable reason=no-authentication-result challenge={}",
+                        answer.challengeNameAsString());
+                throw unableToVerify("refresh-no-result");
+            }
+
+            return tokensFrom(answer.authenticationResult(), userId);
+
+        } catch (SessionRefusedException refused) {
+            padTo(startedAt, MINIMUM_REFUSAL_DURATION);
+            throw refused;
+        }
     }
 
     /**
@@ -477,11 +812,40 @@ public class CognitoIdentityService {
      * call, rather than one declared on the public method; the reason that boundary was chosen is
      * recorded there.
      *
+     * <p>Refactoring Rationale: the probe is wrapped, where it previously was not, and the failure it
+     * catches is not exotic. A data-access failure -- an exhausted connection pool, a connection reset,
+     * a statement timeout, a revoked grant on {@code auth.users} -- is raised by the persistence layer
+     * as an unchecked exception, so an unwrapped probe let it escape this class untranslated. The shared
+     * advice then matched it with its unanticipated-failure handler, which answers 500 with a GENERIC
+     * sentence, because that handler carries a service's own sentence only for the bare illegal-state
+     * type. So the one condition the reference's own catch-all arm exists for -- a store that could not
+     * be read -- was the one condition that could not produce the reference's sentence for it. Catching
+     * it here and raising the unevaluable failure puts it back in the taxonomy the reference declares.
+     *
+     * <p>Assumptions: the caught type is the persistence abstraction's own root rather than a driver
+     * exception or a JPA one, so every failure the repository can raise from a store interaction is
+     * covered by one arm. Spring Data translates driver and provider exceptions into that hierarchy
+     * before a repository method returns, which is exactly why one catch suffices and why naming a
+     * narrower type would leave siblings to escape.
+     *
+     * <p>Assumptions: this is an unevaluable credential and NOT a refusal, and the distinction is what
+     * the caller acts on. The store being unreadable says nothing at all about the submitted identifier
+     * or credential, so answering with the refusal sentence would send a caller to reset a credential
+     * that was never examined -- which is the same reasoning the reference encodes by giving its
+     * {@code WHEN OTHER} arm at {@code app/cbl/COSGN00C.cbl} line 252 a different sentence from its
+     * comparison-failed arm.
+     *
      * @param userId the folded identifier to look for, as the key of {@code auth.users}
      * @return {@code true} when a record exists for the identifier and {@code false} when none does
+     * @throws IllegalStateException if the store could not be read, carrying the baseline sentence for
+     *     an unevaluable credential and no provider diagnostic
      */
     private boolean isKnownLocally(String userId) {
-        return users.existsById(userId);
+        try {
+            return users.existsById(userId);
+        } catch (DataAccessException unreadable) {
+            throw unableToVerify("local-store-" + unreadable.getClass().getSimpleName());
+        }
     }
 
     /**
@@ -620,69 +984,181 @@ public class CognitoIdentityService {
     }
 
     /**
-     * Builds the success body from an accepted exchange, or rejects an answer that carries no tokens.
+     * Decides which of the two published success shapes an accepted sign-on exchange produced.
      *
-     * <p>Assumptions: the pool answers an initial authentication with either an authentication result or
-     * a challenge, never both and never neither, so the absence of a result means a challenge was
-     * returned. The success branch reads the discriminating value from
-     * {@code SignOnResponse.OUTCOME_AUTHENTICATED} rather than retyping it, because a response body's
-     * own constraints are not evaluated on the way out: a drifted literal would ship and the client's
-     * discriminator would then match neither declared shape.
+     * <p>Purpose: the pool answers an initial authentication with either an authentication result or a
+     * challenge, never both and never neither, and the published contract has a shape for each. This
+     * method is the single place that reads which one arrived and returns the corresponding shape.
      *
-     * <p>Trade-offs: a challenge is answered here as an unevaluable credential, and this is the one
-     * place where this method's declared return type is narrower than the operation's published
-     * contract. That contract declares the success status as a choice of two shapes, and routes the
-     * new-credential challenge to the challenge shape precisely so that a seeded user's first sign-on is
-     * not reported as a fault. This method returns {@code SignOnResponse}, whose discriminating
-     * component admits the authenticated value alone, so the challenge shape is unrepresentable in its
-     * signature and cannot be produced from here. The boundary is therefore recorded rather than
-     * papered over: completing a challenge is the separately published challenge operation's
-     * responsibility, and the shape it answers with belongs to a sibling type in
-     * {@code com.carddemo.auth.dto} that this method does not construct. What is accepted in the interim
-     * is that a challenge reports as unevaluable, which is truthful about this method -- it did not
-     * evaluate the credential to a token set -- and which deliberately does not reuse the refusal
-     * sentence, because the credential was in fact accepted and a caller told otherwise would reset a
-     * working credential.
+     * <p>Refactoring Rationale: an earlier form of this logic answered EVERY challenge as an unevaluable
+     * credential, because the method it lived in returned the token set alone and the challenge shape was
+     * unrepresentable in that signature. The consequence was the opposite of theoretical: every account
+     * the infrastructure provisions is created with a temporary password, so the first sign-on of every
+     * user raised {@code NEW_PASSWORD_REQUIRED} and answered HTTP 500, and no operation existed through
+     * which a permanent password could be set. Widening the signature to the sealed outcome type is what
+     * lets the challenge be returned as the contract declares it.
      *
-     * <p>Assumptions: the lifetime the pool reports arrives as a boxed integer and is read through a
-     * null guard, because the response component it feeds is a primitive. An answer that carried tokens
-     * but omitted the lifetime would otherwise fail on unboxing with an exception naming nothing a
-     * reader could act on, where the sentence raised here names the operation that could not complete.
+     * <p>Trade-offs: exactly one challenge is translated into the challenge shape and every other
+     * challenge remains an unevaluable exchange. The published contract admits a single member on its
+     * challenge-name property, so a shape naming any other challenge would be a body no client is written
+     * to read and no operation in this document can answer. What is given up is that enabling a
+     * second-factor configuration on the pool makes sign-on fail rather than chain; what is bought is that
+     * this service never hands a caller a challenge it has no published way to answer. The pool as
+     * provisioned raises no other challenge -- {@code infra/modules/cognito} configures no second factor
+     * -- so the branch is reachable only through a configuration change, which is the moment a contract
+     * revision belongs.
+     *
+     * <p>Assumptions: a challenge that arrives without a session is unevaluable rather than returned,
+     * even though its name is the one this contract answers. The session is the whole means of answering
+     * it -- the answer operation cannot be performed without one -- so a body carrying the name and no
+     * session would tell a caller to do something it has been given no way to do.
      *
      * @param answer the pool's answer to the exchange, carrying either an authentication result or a
-     *     challenge
-     * @param userId the folded identifier the tokens were issued for, echoed onto the response
-     * @return the token set the pool issued, with the authenticated outcome and no user type; never
-     *     {@code null}
-     * @throws IllegalStateException if the answer carries no authentication result, or carries one whose
-     *     lifetime is absent, so no token set can be reported
+     *     challenge; must not be {@code null}
+     * @param userId the folded identifier the exchange was performed for, echoed onto whichever shape is
+     *     returned
+     * @return the token set as {@link SignOnResponse} when the pool issued one, or the challenge as
+     *     {@link SignOnChallenge} when it raised the one this contract publishes an answer path for;
+     *     never {@code null}
+     * @throws IllegalStateException if the pool raised a challenge this contract publishes no answer path
+     *     for, if it raised the published one without a session, or if it answered with a token set that
+     *     is incomplete
      */
-    private static SignOnResponse tokensFrom(InitiateAuthResponse answer, String userId) {
+    private static SignOnOutcome outcomeFrom(InitiateAuthResponse answer, String userId) {
 
         AuthenticationResultType issued = answer.authenticationResult();
 
-        if (issued == null) {
-            // WHY : Assumptions: the challenge name is recorded in the log and withheld from the
-            //       response. An operator needs to know which challenge stalled a sign-on, whereas a
-            //       caller learning it gains a detail about the pool's configuration and nothing it can
-            //       act on through this operation.
-            LOG.warn("event=auth.signon.unevaluable reason=challenge-returned challenge={}",
-                    answer.challengeNameAsString());
-            throw unableToVerify("challenge-" + answer.challengeNameAsString());
+        if (issued != null) {
+            return tokensFrom(issued, userId);
         }
 
-        if (issued.expiresIn() == null) {
-            throw unableToVerify("lifetime-absent");
+        String challengeName = answer.challengeNameAsString();
+
+        // WHY : Assumptions: the comparison is against the enumerated provider value's own string form
+        //       rather than against a literal retyped here, so the name this service tests for cannot
+        //       drift from the name the provider sends. The published contract's single admitted member
+        //       is the same spelling, which SignOnChallenge asserts on its own component.
+        if (ChallengeNameType.NEW_PASSWORD_REQUIRED.toString().equals(challengeName)) {
+
+            // WHY : Assumptions: the identifier echoed onto the challenge is the FOLDED one this method
+            //       was given, not whatever the pool may echo back in its own challenge parameters. The
+            //       answer exchange recomputes the confidential-client proof over the identifier it is
+            //       sent, so returning the folded value is what makes the answer this challenge invites
+            //       computable from the challenge alone.
+            if (answer.session() == null || answer.session().isBlank()) {
+                LOG.warn("event=auth.signon.unevaluable reason=challenge-without-session challenge={}",
+                        challengeName);
+                throw unableToVerify("challenge-without-session");
+            }
+
+            // WHY : Assumptions: the line records that a challenge was raised and for whom, and does NOT
+            //       record the session. Possession of the session plus a new password completes the
+            //       authentication, so a log store holding it would hold half of a credential; the
+            //       identifier is already the row's primary key and is disclosed by every other line
+            //       about this request.
+            LOG.info("event=auth.signon.challenge userId={} challenge={}", userId, challengeName);
+            return SignOnChallenge.newPasswordRequired(answer.session(), userId);
         }
 
-        LOG.info("event=auth.signon.authenticated userId={}", userId);
+        // WHY : Assumptions: the challenge name is recorded in the log and withheld from the response.
+        //       An operator needs to know which challenge stalled a sign-on, whereas a caller learning
+        //       it gains a detail about the pool's configuration and nothing it can act on through this
+        //       operation.
+        LOG.warn("event=auth.signon.unevaluable reason=unpublished-challenge challenge={}",
+                challengeName);
+        throw unableToVerify("challenge-" + challengeName);
+    }
+
+    /**
+     * Builds the token-set body from an authentication result, refusing one that cannot be used.
+     *
+     * <p>Purpose: this is the single place a provider authentication result becomes the published token
+     * set shape, shared by the sign-on, challenge and renewal exchanges so that all three validate what
+     * the pool reported identically.
+     *
+     * <p>Refactoring Rationale: every member is now checked before the body is built, where an earlier
+     * form checked only that the lifetime was present. That was too weak in a way that surfaced at the
+     * caller rather than here. A result whose access token was absent, or empty, or whose token type was
+     * absent, or whose lifetime was zero or negative, was relayed as a 200 SUCCESS carrying a token set
+     * no caller could use: the browser client would store it, send an empty bearer credential on its next
+     * request, be refused by the resource server with a 401 that names no cause, and send the user back
+     * to a sign-on screen that had just told it sign-on succeeded. Refusing it here reports the one
+     * failure that actually occurred -- the pool did not describe the account it had just authenticated
+     * -- in the taxonomy the reference declares for exactly that: a credential that could not be
+     * evaluated.
+     *
+     * <p>Assumptions: every member checked here is one the published contract declares REQUIRED on the
+     * response, and none that the contract declares nullable is checked. The required set is the
+     * outcome, the identifier, the access token, the identity token, the token type and the lifetime;
+     * the renewal token is the one nullable member and is passed through exactly as supplied, including
+     * when the pool supplies none. Checking it would refuse every renewal, since the pool never reissues
+     * one on that flow.
+     *
+     * <p>Assumptions: blankness rather than nullity is the test on each token, because an empty or
+     * whitespace-only token is as unusable as an absent one and a provider stub or a partially populated
+     * response can produce either. This is the same reasoning the request records apply to their own
+     * components, applied to a value arriving from the other direction.
+     *
+     * <p>Assumptions: the discriminating value is read from {@code SignOnResponse.OUTCOME_AUTHENTICATED}
+     * rather than retyped, because a response body's own constraints are not evaluated on the way out: a
+     * drifted literal would ship and the client's discriminator would then match neither declared shape.
+     *
+     * <p>Trade-offs: which member was at fault is recorded in the log and withheld from the caller. An
+     * operator needs it to tell a pool misconfiguration from a client library fault; a caller learns
+     * nothing it can act on from knowing which of six members the pool omitted, and the reference's
+     * corresponding arm carries no diagnostic either.
+     *
+     * @param issued the authentication result the pool reported; must not be {@code null}
+     * @param userId the folded identifier the tokens were issued for, echoed onto the response
+     * @return the token set the pool issued, with the authenticated outcome and no user type; never
+     *     {@code null}
+     * @throws IllegalStateException if any member the contract declares required is absent or blank, or
+     *     if the reported lifetime is below one second, so the reported set cannot be used
+     */
+    private static SignOnResponse tokensFrom(AuthenticationResultType issued, String userId) {
+
+        requireReported("accessToken", issued.accessToken());
+        requireReported("idToken", issued.idToken());
+        requireReported("tokenType", issued.tokenType());
+
+        Integer lifetime = issued.expiresIn();
+        if (lifetime == null) {
+            throw unableToVerify("token-lifetime-absent");
+        }
+        if (lifetime < MINIMUM_TOKEN_LIFETIME_SECONDS) {
+            // WHY : Assumptions: the reported number is included in the internal reason because it is a
+            //       property of the pool's answer rather than of the caller's request, and it is the one
+            //       fact an operator needs to tell a clock-skew fault from a misconfigured lifetime. It
+            //       reaches no response body: the sentence raised below carries no diagnostic.
+            throw unableToVerify("token-lifetime-" + lifetime);
+        }
+
+        LOG.info("event=auth.tokens.issued userId={}", userId);
 
         // WHY : Assumptions: the renewal token is passed through as the pool supplied it, including when
         //       the pool supplied none. The response component is declared nullable for that reason, so
         //       substituting a placeholder would report a token the caller cannot use.
         return new SignOnResponse(SignOnResponse.OUTCOME_AUTHENTICATED, userId,
                 issued.accessToken(), issued.idToken(), issued.refreshToken(),
-                issued.tokenType(), issued.expiresIn());
+                issued.tokenType(), lifetime);
+    }
+
+    /**
+     * Refuses a reported token member that is absent or holds nothing but whitespace.
+     *
+     * <p>Assumptions: the member name is passed in so the internal reason names which member failed,
+     * and it is a fixed literal at each call site rather than a value derived from the provider's
+     * response, so nothing of external provenance reaches the log line through it.
+     *
+     * @param member the contract property name of the member being checked, for the log only
+     * @param reported the value the pool reported, possibly {@code null}
+     * @throws IllegalStateException if the value is {@code null}, empty or entirely whitespace, carrying
+     *     the baseline sentence for an unevaluable credential and no provider diagnostic
+     */
+    private static void requireReported(String member, String reported) {
+        if (reported == null || reported.isBlank() || reported.length() < MINIMUM_TOKEN_LENGTH) {
+            throw unableToVerify("token-" + member + "-absent");
+        }
     }
 
     /**
@@ -765,5 +1241,417 @@ public class CognitoIdentityService {
 
         LOG.error("event=auth.signon.unevaluable reason={}", reason);
         return new IllegalStateException(MESSAGE_UNABLE_TO_VERIFY);
+    }
+
+    /**
+     * Refuses a challenge answer whose identifier, session or proposed credential is absent.
+     *
+     * <p>Assumptions: the chain is ordered and it stops at the first failing value, matching the shape
+     * the sign-on chain takes, even though there is no baseline evaluate construct to transcribe here.
+     * The order is the committed contract's property order for this body -- identifier, session, then new
+     * password -- so a caller submitting an empty body is told about the identifier, which is the value
+     * it can most readily supply.
+     *
+     * <p>Alternatives Considered: leaving this to the bean constraints the request record already
+     * declares, which would remove this method. Rejected for the reason the sign-on chain records: those
+     * constraints guard the transport boundary, and a caller inside the application -- a test asserting
+     * this behaviour directly, or any future in-process caller -- reaches this method without an
+     * argument resolver having run and would otherwise present a blank session to the pool and receive a
+     * refusal naming the wrong cause.
+     *
+     * @param request the submitted answer to check for presence; must not be {@code null}
+     * @throws ClientInputException if any of the three values is absent or blank, carrying that value's
+     *     key and the sentence the request record declares for it
+     */
+    private void requireChallengeFields(SignOnChallengeRequest request) {
+
+        if (isAbsent(request.userId())) {
+            LOG.info("event=auth.challenge.rejected reason=user-id-absent field={}", FIELD_USER_ID);
+            throw new ClientInputException(ApiError.CODE_VALIDATION, FIELD_USER_ID,
+                    MESSAGE_USER_ID_REQUIRED);
+        }
+
+        if (isAbsent(request.session())) {
+            LOG.info("event=auth.challenge.rejected reason=session-absent field={}", FIELD_SESSION);
+            throw new ClientInputException(ApiError.CODE_VALIDATION, FIELD_SESSION,
+                    MESSAGE_SESSION_REFUSED);
+        }
+
+        // WHY : Assumptions: the sentence for an absent new credential is the sign-on password sentence
+        //       reused, and the reuse is deliberate rather than a shortcut. Its literal --
+        //       'Please enter Password ...' at app/cbl/COSGN00C.cbl:125 -- describes exactly this
+        //       condition, a submitted form with no password in it, and transformation rule T8 keeps a
+        //       user-visible string identical wherever the same condition is reported. Authoring a
+        //       second sentence for the same condition would put two spellings of one message in front
+        //       of a user.
+        if (isAbsent(request.newPassword())) {
+            LOG.info("event=auth.challenge.rejected reason=new-credential-absent field={}",
+                    FIELD_NEW_PASSWORD);
+            throw new ClientInputException(ApiError.CODE_VALIDATION, FIELD_NEW_PASSWORD,
+                    MESSAGE_PASSWORD_REQUIRED);
+        }
+    }
+
+    /**
+     * Refuses a renewal whose identifier or refresh token is absent.
+     *
+     * <p>Assumptions: the order is the committed contract's property order for this body, identifier then
+     * token, for the same reason the challenge chain gives: there is no baseline construct to transcribe,
+     * so the contract is the only ordering authority.
+     *
+     * @param request the submitted renewal to check for presence; must not be {@code null}
+     * @throws ClientInputException if either value is absent or blank, carrying that value's key and the
+     *     sentence the request record declares for it
+     */
+    private void requireRefreshFields(TokenRefreshRequest request) {
+
+        if (isAbsent(request.userId())) {
+            LOG.info("event=auth.refresh.rejected reason=user-id-absent field={}", FIELD_USER_ID);
+            throw new ClientInputException(ApiError.CODE_VALIDATION, FIELD_USER_ID,
+                    MESSAGE_USER_ID_REQUIRED);
+        }
+
+        if (isAbsent(request.refreshToken())) {
+            LOG.info("event=auth.refresh.rejected reason=refresh-token-absent field={}",
+                    FIELD_REFRESH_TOKEN);
+            throw new ClientInputException(ApiError.CODE_VALIDATION, FIELD_REFRESH_TOKEN,
+                    MESSAGE_SESSION_REFUSED);
+        }
+    }
+
+    /**
+     * Answers the pool's new-credential challenge and returns whatever the pool answered.
+     *
+     * <p>Assumptions: the challenge answer is a distinct provider operation from the initial
+     * authentication, not a repeat of it with different parameters. It carries the challenge name, the
+     * session the pool issued, and a parameter map holding the user name, the proposed credential and
+     * the confidential-client proof; the proof is recomputed over the same folded identifier, because
+     * the pool verifies it against the user name in the same request.
+     *
+     * <p>Assumptions: the same two time bounds the credential exchange uses are applied here, and for the
+     * same reason -- a person is waiting at a screen, and the bounds are stated on the request rather
+     * than on the shared client so this operation's latency budget is not imposed on the provisioning
+     * calls that legitimately take longer.
+     *
+     * <p>Trade-offs: a credential the pool refuses under its own password policy is reported as a caller
+     * input failure carrying THE POOL'S OWN reason, which is the one place in this class where provider
+     * text reaches a response body. It is admitted deliberately: the policy is configured in the pool and
+     * this contract deliberately holds no second copy of it, so a sentence authored here would either
+     * restate a policy that can change beneath it or tell the caller nothing about why its password was
+     * refused -- leaving it to guess at a rule it cannot read. The exposure is narrow because the type
+     * caught is the pool's password-policy refusal specifically rather than any provider fault, and its
+     * message describes a password rule rather than any internal state.
+     *
+     * @param userId the folded identifier the challenge was raised for
+     * @param session the session value the challenge issued, forwarded verbatim
+     * @param newPassword the proposed permanent credential, forwarded unaltered
+     * @return the pool's answer, carrying either an authentication result or a further challenge; never
+     *     {@code null}
+     * @throws ClientInputException if the pool refused the proposed credential under its password policy
+     * @throws SessionRefusedException if the pool refused the session or the identifier it names
+     * @throws IllegalStateException if the pool could not be reached or answered a fault
+     */
+    private RespondToAuthChallengeResponse answerNewPasswordChallenge(String userId, String session,
+            String newPassword) {
+
+        RespondToAuthChallengeRequest answer = RespondToAuthChallengeRequest.builder()
+                .clientId(clientId)
+                .challengeName(ChallengeNameType.NEW_PASSWORD_REQUIRED)
+                .session(session)
+                // WHY : Assumptions: the proposed credential is placed in the request exactly as
+                //       submitted. The identifier was folded and trimmed because it is a key; a
+                //       credential is stored and later compared byte for byte by the pool, so altering
+                //       it here would set a credential the caller did not type and every later sign-on
+                //       with the value it did type would be refused.
+                .challengeResponses(Map.of(
+                        AUTH_PARAM_USERNAME, userId,
+                        CHALLENGE_PARAM_NEW_PASSWORD, newPassword,
+                        AUTH_PARAM_SECRET_HASH, secretHash(userId)))
+                .overrideConfiguration(override -> override
+                        .apiCallTimeout(TOTAL_EXCHANGE_TIMEOUT)
+                        .apiCallAttemptTimeout(SINGLE_ATTEMPT_TIMEOUT))
+                .build();
+
+        try {
+            return provider.respondToAuthChallenge(answer);
+
+            // WHY : Assumptions: the password-policy refusal is caught FIRST and answered as a caller
+            //       input failure, because it is the one refusal on this path the caller can act on by
+            //       changing what it sent. It is a subtype of the provider fault hierarchy the last arm
+            //       catches, so ordering it above that arm is what makes it reachable.
+        } catch (InvalidPasswordException refusedByPolicy) {
+            LOG.info("event=auth.challenge.rejected reason=password-policy field={}",
+                    FIELD_NEW_PASSWORD);
+            throw new ClientInputException(ApiError.CODE_VALIDATION, FIELD_NEW_PASSWORD,
+                    policyReason(refusedByPolicy));
+
+            // WHY : Assumptions: these two are caught together and answered identically, matching the
+            //       sign-on exchange. An expired, already-used, altered or mismatched session and an
+            //       identifier the pool does not hold all reach one status with one sentence, because
+            //       the remedy is the same in every case and distinguishing them would tell an
+            //       unauthenticated caller which of the four it had.
+        } catch (NotAuthorizedException | UserNotFoundException refused) {
+            throw refusedSession(refused.getClass().getSimpleName());
+
+            // WHY : Assumptions: every remaining provider and transport fault is one class, on the same
+            //       grounds the credential exchange records: the common supertype of the client-side and
+            //       service-side hierarchies covers a refused connection, an exceeded time bound and a
+            //       fault response alike, and the three narrower arms above are subtypes of it and so
+            //       must precede it.
+        } catch (SdkException unavailable) {
+            throw unableToVerify("challenge-provider-" + unavailable.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Renders the pool's own account of a refused password into a sentence that can reach the caller.
+     *
+     * <p>Purpose: the published contract states that a policy refusal carries "the pool's own reason
+     * rather than a restatement of the policy", and this is the one transformation that makes that
+     * possible. The shared advice will only carry a service's sentence onto a response when the sentence
+     * passes its provenance gate -- printable, within the declared message width, ending in an ellipsis
+     * and holding no long run of digits -- and a provider's raw sentence satisfies none of the last three
+     * by construction. Without this it would be replaced by a generic sentence and the contract's promise
+     * would be unkeepable.
+     *
+     * <p>Refactoring Rationale: an earlier form passed the provider's message through unaltered. It
+     * looked correct and could not work: the gate rejected every real provider sentence, so the response
+     * carried the generic validation sentence and the caller learned nothing about why its password was
+     * refused. The defect was invisible in this class -- the message was set correctly -- and only visible
+     * two layers away in the rendered body.
+     *
+     * <p>Assumptions: each of the four transformations answers one clause of that gate, and none is
+     * cosmetic. Non-printable characters are dropped because a value of external provenance entering a
+     * structured response, and the log line beside it, is exactly the injection route the gate refuses
+     * outright. Whitespace runs are collapsed because a provider sentence may carry a newline, which the
+     * gate treats as non-printable. Trailing full stops are removed before the ellipsis is appended so
+     * the result does not read as four dots. And the text is truncated to leave room for the ellipsis,
+     * because the width is the reference message field's own.
+     *
+     * <p>Assumptions: a reason carrying a long run of digits is DISCARDED rather than truncated, and the
+     * authored sentence is used instead. That run is the shape of a primary account number, and the
+     * gate's own refusal of it exists because a message reaching a body is also written to a log; a
+     * provider sentence quoting a submitted value could carry one, and shortening it would not make it
+     * safe.
+     *
+     * <p>Trade-offs: a long provider sentence is cut mid-word, which reads poorly. The alternative --
+     * discarding any sentence too long to carry whole -- was rejected because the leading words of a
+     * policy refusal are the part that names the rule, so a truncated sentence still tells the caller
+     * which requirement it missed while a discarded one tells it nothing.
+     *
+     * @param refusedByPolicy the pool's refusal of the proposed password; must not be {@code null}
+     * @return the pool's reason as a sentence the shared advice will carry, or the authored fallback when
+     *     the pool supplied nothing usable; never {@code null}
+     */
+    private static String policyReason(InvalidPasswordException refusedByPolicy) {
+
+        String reported = refusedByPolicy.awsErrorDetails() == null
+                ? refusedByPolicy.getMessage()
+                : refusedByPolicy.awsErrorDetails().errorMessage();
+
+        if (reported == null) {
+            return MESSAGE_PASSWORD_REQUIRED;
+        }
+
+        StringBuilder printable = new StringBuilder(reported.length());
+        boolean pendingSpace = false;
+        int digitRun = 0;
+        for (int index = 0; index < reported.length(); index++) {
+            char character = reported.charAt(index);
+            if (Character.isWhitespace(character)) {
+                pendingSpace = printable.length() > 0;
+                continue;
+            }
+            if (character < ' ' || character > '~') {
+                continue;
+            }
+            digitRun = character >= '0' && character <= '9' ? digitRun + 1 : 0;
+            if (digitRun >= SENSITIVE_DIGIT_RUN) {
+                return MESSAGE_PASSWORD_REQUIRED;
+            }
+            if (pendingSpace) {
+                printable.append(' ');
+                pendingSpace = false;
+            }
+            printable.append(character);
+        }
+
+        while (printable.length() > 0 && printable.charAt(printable.length() - 1) == '.') {
+            printable.setLength(printable.length() - 1);
+        }
+        while (printable.length() > 0 && printable.charAt(printable.length() - 1) == ' ') {
+            printable.setLength(printable.length() - 1);
+        }
+        if (printable.length() == 0) {
+            return MESSAGE_PASSWORD_REQUIRED;
+        }
+        if (printable.length() > MAX_POLICY_REASON_LENGTH) {
+            printable.setLength(MAX_POLICY_REASON_LENGTH);
+        }
+        return printable + " ...";
+    }
+
+    /**
+     * Presents a refresh token to the pool and returns whatever the pool answered.
+     *
+     * <p>Assumptions: the renewal uses the same provider operation as the initial authentication with a
+     * different flow selector, because that is how the pool models it. The parameter map carries the
+     * refresh token and the confidential-client proof; it carries no user name, because the renewal flow
+     * does not accept one -- the token identifies its own subject. The proof is nonetheless computed over
+     * the submitted identifier, which is the reason this operation requires an identifier at all: the
+     * pool verifies the proof against the user the token belongs to, so a token replayed with a different
+     * identifier produces a proof the pool refuses.
+     *
+     * <p>Assumptions: the same two time bounds are applied for the same reason as on the other two
+     * exchanges. A renewal is on the critical path of a caller mid-session, so an unbounded wait here
+     * would stall a request the user believes is already authenticated.
+     *
+     * @param userId the folded identifier the token set was issued for, used to compute the proof
+     * @param refreshToken the refresh token as submitted, forwarded unaltered
+     * @return the pool's answer, carrying the renewed token set; never {@code null}
+     * @throws SessionRefusedException if the pool refused the token or the identifier it was presented
+     *     against
+     * @throws IllegalStateException if the pool could not be reached or answered a fault
+     */
+    private InitiateAuthResponse exchangeRefreshToken(String userId, String refreshToken) {
+
+        InitiateAuthRequest renewal = InitiateAuthRequest.builder()
+                .authFlow(AuthFlowType.REFRESH_TOKEN_AUTH)
+                .clientId(clientId)
+                .authParameters(Map.of(
+                        AUTH_PARAM_REFRESH_TOKEN, refreshToken,
+                        AUTH_PARAM_SECRET_HASH, secretHash(userId)))
+                .overrideConfiguration(override -> override
+                        .apiCallTimeout(TOTAL_EXCHANGE_TIMEOUT)
+                        .apiCallAttemptTimeout(SINGLE_ATTEMPT_TIMEOUT))
+                .build();
+
+        try {
+            return provider.initiateAuth(renewal);
+
+        } catch (NotAuthorizedException | UserNotFoundException refused) {
+            throw refusedSession(refused.getClass().getSimpleName());
+
+        } catch (SdkException unavailable) {
+            throw unableToVerify("refresh-provider-" + unavailable.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Builds the refusal that answers a session or refresh token the pool would not accept.
+     *
+     * <p>Refactoring Rationale: this is a distinct type from the credential refusal rather than the same
+     * type carrying a different sentence, and the reason is that the adapter renders a FIXED sentence per
+     * type. Rendering whatever message a refusal happened to carry would mean any refusal raised anywhere
+     * -- including one raised by a library -- could put its own text on an unauthenticated 401, which is
+     * the property the adapter's credential handler was written to prevent. A second type keeps that
+     * property while letting the two operations report the two different sentences their contracts
+     * declare: the credential exchange reports the reference's own wording, and these two exchanges,
+     * which have no reference counterpart, report the sign-on-again sentence.
+     *
+     * <p>Assumptions: it extends the credential refusal so that a caller which handles the general case
+     * still catches this one. That containment is truthful -- a refused session IS a refused credential
+     * of a kind -- and it means the adapter's existing handler remains a correct fallback if the narrower
+     * handler is ever removed, rather than the refusal falling through to a 500.
+     *
+     * @param reason the internal cause to record in the log, naming the provider fault or the local
+     *     condition that produced the refusal; never reaches the caller
+     * @return the refusal to throw, carrying the sign-on-again sentence and no field key; never
+     *     {@code null}
+     */
+    private static SessionRefusedException refusedSession(String reason) {
+
+        // WHY : Assumptions: the reason is logged and never rendered, exactly as on the credential
+        //       refusal. The published contract makes the sentence below the entire externally visible
+        //       vocabulary of this status, so a provider fault name reaching a body would be a
+        //       disclosure the contract does not describe.
+        LOG.info("event=auth.session.refused reason={}", reason);
+        return new SessionRefusedException(MESSAGE_SESSION_REFUSED);
+    }
+
+    /**
+     * Holds the calling thread until the given elapsed time has passed since a recorded instant.
+     *
+     * <p>Purpose: this is the mechanism behind the refusal floor. It exists so that two refusal paths
+     * doing different amounts of work take indistinguishable time, which is what closes the timing
+     * channel the merged refusal sentence would otherwise leave open.
+     *
+     * <p>Assumptions: the elapsed time is measured with the monotonic timer rather than with a clock, and
+     * that is not interchangeable here. A wall clock can be stepped backwards by a time-synchronisation
+     * daemon, which would make a measured interval negative and skip the padding entirely at exactly the
+     * moment an attacker's samples are cheapest to take. The monotonic timer cannot move backwards.
+     *
+     * <p>Assumptions: the injected clock this class's siblings use for timestamps is deliberately NOT
+     * used, for the same reason: it answers "what time is it", which is a different question from "how
+     * long has this taken", and this method asks the second.
+     *
+     * <p>Trade-offs: the wait is a sleep on the request thread rather than an asynchronous completion.
+     * An asynchronous form would free the thread, and it is not adopted because it would make this
+     * service's one unauthenticated write path reactive for the sake of a padding interval, changing the
+     * shape of every method on the path. The throughput cost is bounded by the edge throttle recorded on
+     * the floor constant.
+     *
+     * <p>Assumptions: an interrupt does not extend the wait and does not swallow the interruption. The
+     * flag is restored and the method returns, so the refusal the caller is in the middle of raising is
+     * still reported and a shutdown in progress is still observable to whatever manages the thread. The
+     * timing guarantee is weakened only in the moment the thread is being interrupted, which is not a
+     * condition an attacker can induce.
+     *
+     * @param startedAt the monotonic reading taken when the work began, as {@code System.nanoTime()}
+     *     returns it
+     * @param floor the least total elapsed time the operation is to take; a floor already exceeded waits
+     *     not at all
+     */
+    private static void padTo(long startedAt, Duration floor) {
+
+        long remainingNanos = floor.toNanos() - (System.nanoTime() - startedAt);
+        if (remainingNanos <= 0) {
+            return;
+        }
+
+        try {
+            Thread.sleep(Duration.ofNanos(remainingNanos));
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * Reports that a challenge session or a refresh token was not accepted.
+     *
+     * <p>Purpose: this type exists so the adapter can render the sign-on-again sentence for the two
+     * exchanges that have no reference counterpart, while the reference's own refusal wording stays
+     * reserved to the credential exchange it belongs to.
+     *
+     * <p>Assumptions: it is declared here, nested in the service that raises it, following the idiom
+     * {@code com.carddemo.common.web.CursorToken.InvalidCursorException} already establishes in the
+     * shared kernel -- a refusal type belongs with the code that decides the refusal, so the decision and
+     * its name cannot drift apart.
+     *
+     * <p>Assumptions: it carries no field key and no provider detail, because the status it is rendered
+     * as carries neither. Every reason the two exchanges can be refused for reaches this one type, and
+     * the published contract states for both operations that the body names no reason beyond the remedy.
+     */
+    public static final class SessionRefusedException extends BadCredentialsException {
+
+        /**
+         * The serialization version of this refusal.
+         *
+         * <p>Assumptions: declared because the supertype is serializable and a class that inherits
+         * serializability without declaring this constant gets a value derived from its structure, so
+         * adding a field would silently change it. Nothing serializes this type today; the constant
+         * costs one line and removes the question.</p>
+         */
+        private static final long serialVersionUID = 1L;
+
+        /**
+         * Builds the refusal with the sentence the adapter will render.
+         *
+         * @param message the sentence to carry, always {@link #MESSAGE_SESSION_REFUSED} in this service;
+         *     must not be {@code null}
+         */
+        SessionRefusedException(String message) {
+            super(message);
+        }
     }
 }

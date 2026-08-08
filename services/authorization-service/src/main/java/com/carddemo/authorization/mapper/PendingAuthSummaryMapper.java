@@ -413,6 +413,48 @@ public final class PendingAuthSummaryMapper {
             Money declinedAuthAmount) {
 
         /**
+         * Renders the segment for a diagnostic line, omitting every protected member.
+         *
+         * <p>Assumptions: the two identifiers, the four limit and balance amounts and the two
+         * authorization totals are OMITTED rather than abbreviated, which is part one of the rendering
+         * rule in {@code docs/architecture/observability.md} -- no account identifier, no customer
+         * identifier, no monetary amount and no credit limit or balance, in any form. Omission rather
+         * than masking is required because masking has exactly one owner per bounded context and it is
+         * this mapper's projection methods; a second, slightly different abbreviation inside a nested
+         * record would give one value two renderings and make neither authoritative.</p>
+         *
+         * <p>Assumptions: what remains is the authorization status and the five account status codes,
+         * which are bounded status codes and are named by part three of that rule as disclosing
+         * nothing. The five are rendered individually rather than joined, because their POSITION is the
+         * whole of their meaning -- the reference declares them as
+         * {@code PA-ACCOUNT-STATUS OCCURS 5 TIMES} and the target holds them as five discrete columns
+         * precisely so the arity is enforced by the schema, so a joined value would lose which slot a
+         * status came from.</p>
+         *
+         * <p>Trade-offs: the two authorization COUNTS are retained where the two authorization AMOUNTS
+         * are not, and the line between them is attribution rather than sensitivity. A count says how
+         * many authorizations a segment carries and, with no identifier rendered beside it, cannot be
+         * attributed to any cardholder; an amount is a monetary value, which the rule names as a class
+         * regardless of what it can be attributed to. What is given up is that a reader cannot tell
+         * WHICH segment a line describes at all -- that is the cost the rule accepts on purpose, and it
+         * is paid down by the correlation identifier every request-scoped line already carries.</p>
+         *
+         * @return a single-line rendering naming the six status codes and the two counts, and no
+         *     identifier, amount, limit or balance; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "SummarySegment[authStatus=" + this.authStatus
+                    + ", accountStatus1=" + this.accountStatus1
+                    + ", accountStatus2=" + this.accountStatus2
+                    + ", accountStatus3=" + this.accountStatus3
+                    + ", accountStatus4=" + this.accountStatus4
+                    + ", accountStatus5=" + this.accountStatus5
+                    + ", approvedAuthCount=" + this.approvedAuthCount
+                    + ", declinedAuthCount=" + this.declinedAuthCount + "]";
+        }
+
+        /**
          * Reads one account-status slot by its one-based occurrence number.
          *
          * <p>Assumptions: the accessor is one-based because the copybook's own subscript is. Reading
@@ -504,6 +546,33 @@ public final class PendingAuthSummaryMapper {
             String accountStatus,
             String addressLine2,
             String phoneNumber1) {
+
+        /**
+         * Renders the cardholder context for a diagnostic line, omitting everything that identifies a
+         * person.
+         *
+         * <p>Assumptions: the name, both composed address lines and the telephone number are OMITTED.
+         * Every one of the four is personal data about an identifiable individual, and none of them is
+         * among the categories part three of the rendering rule in
+         * {@code docs/architecture/observability.md} allows to remain -- that list is a transaction
+         * identifier, a type or category code, a status code, a date, a version counter and a bounded
+         * response code. This record exists to compose a screen, so its members are precisely the
+         * values a screen shows a cardholder about themselves; none of them belongs in a log store
+         * whose retention outlives the request.</p>
+         *
+         * <p>Assumptions: the account status is the only member retained, and it is a bounded status
+         * code. Rendering nothing at all was the alternative, and it was rejected because a record with
+         * no rendering falls back to the compiler's, which prints every component -- so an override that
+         * keeps one safe member is what actually withholds the other four, whereas leaving the method
+         * off would disclose all five.</p>
+         *
+         * @return a single-line rendering naming the account status alone, with no name, address or
+         *     telephone number in any form; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "CardholderContext[accountStatus=" + this.accountStatus + "]";
+        }
     }
 
     /**
@@ -686,6 +755,72 @@ public final class PendingAuthSummaryMapper {
     }
 
     /**
+     * Encodes a stored summary row back into the segment image an unload writes.
+     *
+     * <p>Purpose: this is the direction {@code cbl/PAUDBUNL.CBL} L227 takes -- {@code MOVE
+     * PENDING-AUTH-SUMMARY TO OPFIL1-REC}, one statement moving the whole hundred-byte root into the
+     * output record -- and the same direction {@code cbl/DBUNLDGS.CBL} L236 takes before its L302 inserts
+     * the identical image into a sequential data set. The relational form of that move is to project the
+     * row's columns back into the intervals the copybook declares, which is what this does.
+     *
+     * <p>Alternatives Considered: having the unload build a {@link SummarySegment} carrier itself and call
+     * {@link #toSegment(SummarySegment)}. Rejected because the projection from row to carrier is
+     * sixteen positional arguments of which twelve are the same two types, so a transposition would
+     * compile and would write the cash limit where the credit limit belongs -- and the unload would then
+     * be the third place in the service that knows this record's shape. Keeping the projection here leaves
+     * exactly one place that maps a summary row onto its segment.
+     *
+     * <p>Trade-offs: this form cannot reproduce a stored image byte for byte where that image carried a
+     * negative packed zero or non-blank padding, for the reasons {@link #toSegment(SummarySegment)}
+     * records. That is accepted for the unload path, which writes a fresh file from the database rather
+     * than reproducing a specific input: nothing downstream compares the unload against an earlier image
+     * of the same row, and the sign-preserving form needs a source image the database does not keep.
+     *
+     * @param summary the stored summary row to encode; must not be {@code null}, and both identifier
+     *     columns must be populated because the schema declares them not null
+     * @return a newly allocated image of exactly the declared segment length
+     * @throws NullPointerException if {@code summary} is {@code null}, or if either identifier is absent
+     * @throws FixedWidthCodec.FieldCodecException if a stored value does not fit its declared interval
+     * @throws PackedDecimalCodec.PackedDecimalException if a stored amount or counter cannot be
+     *     represented in the digits its picture declares
+     */
+    public static byte[] toSegment(PendingAuthSummary summary) {
+        Objects.requireNonNull(summary, "summary must not be null");
+        return toSegment(new SummarySegment(
+                summary.getAccountId(),
+                summary.getCustomerId(),
+                summary.getAuthStatus(),
+                summary.getAccountStatus1(),
+                summary.getAccountStatus2(),
+                summary.getAccountStatus3(),
+                summary.getAccountStatus4(),
+                summary.getAccountStatus5(),
+                moneyOrNull(summary.getCreditLimit()),
+                moneyOrNull(summary.getCashLimit()),
+                moneyOrNull(summary.getCreditBalance()),
+                moneyOrNull(summary.getCashBalance()),
+                summary.getApprovedAuthCount(),
+                summary.getDeclinedAuthCount(),
+                moneyOrNull(summary.getApprovedAuthAmount()),
+                moneyOrNull(summary.getDeclinedAuthAmount())));
+    }
+
+    /**
+     * Wraps a stored amount in the shared fixed-point type, passing an absent one through.
+     *
+     * <p>Assumptions: absence is carried forward rather than replaced with zero HERE, because the encode
+     * path already substitutes an exact zero for an absent amount and does so in one place. Substituting
+     * twice would mean two statements of the same rule with nothing holding them equal.
+     *
+     * @param amount the stored column value, or {@code null} when the column is unset
+     * @return the amount as the shared fixed-point type, or {@code null} when {@code amount} is
+     *     {@code null}
+     */
+    private static Money moneyOrNull(BigDecimal amount) {
+        return amount == null ? null : Money.of(amount);
+    }
+
+    /**
      * Encodes named field values back into one segment image.
      *
      * <p>Assumptions: a field the map omits is restored by the shared codec, which is how a dropped blank
@@ -742,7 +877,7 @@ public final class PendingAuthSummaryMapper {
     }
 
     /**
-     * Decodes a newly created segment into the persistent aggregate, refusing any populated one.
+     * Decodes a stored segment into the persistent aggregate, in whatever state the segment holds.
      *
      * <p>Purpose. This carries the one segment state the aggregate can faithfully represent: the state a
      * root segment is in when it has just been created. {@code cbl/COPAUA0C.cbl} L801 to L806 is that
@@ -751,54 +886,91 @@ public final class PendingAuthSummaryMapper {
      * L811 then copy the account's two limits in, which is what this method reproduces through
      * {@code refreshLimits}.</p>
      *
-     * <p>Alternatives Considered: returning a partially populated aggregate for ANY segment, filling in
-     * the two identifiers and the two limits and quietly discarding the rest. Rejected because the
-     * aggregate exposes no way to set the authorization status, the five status slots, either balance,
-     * either counter or either running total -- deliberately, so that a caller cannot move a counter and
-     * forget the balance that belongs with it. Populating four of sixteen components and returning the
-     * object anyway would discard twelve, and a caller that persisted the result would overwrite a real
-     * balance and a real counter in the database with a constructor's zero. Nothing would raise, and the
-     * row would remain perfectly well-formed, which is precisely the plausible-but-wrong failure class
-     * this whole class is written to prevent. Refusing is louder and cheaper than a silent overwrite.</p>
+     * <p>Refactoring Rationale: this operation now carries EVERY stored state, through
+     * {@link PendingAuthSummary#rehydrated}, and it previously carried exactly one -- the state a root
+     * segment is in immediately after creation. It began by refusing any segment whose status, slots,
+     * balances, counters or totals were populated, and that refusal was correct for the type it had: the
+     * aggregate exposed no way to set those twelve components, so filling in four of sixteen and returning
+     * the object would have let a caller overwrite a real balance and a real counter with a constructor's
+     * zero, well-formed and silent. What made the refusal untenable is that it left no path at all for the
+     * load this deployment is seeded by: the extract carries populated segments, so the load decoded a
+     * legitimate row and was then told the aggregate could not represent it. The resolution is a factory
+     * that accepts and validates all sixteen components rather than a guard that refuses twelve of them,
+     * and with that factory in place the guard has nothing left to protect and is withdrawn.
      *
-     * <p>Trade-offs: the consequence accepted is that this entry point does not serve a bulk load, which
-     * has to reconstitute arbitrary stored states. That path uses {@link #toSummarySegment(byte[])} or
-     * {@link #toSegmentFields(byte[])} instead and reaches the database through the columns those
-     * carriers fill, while the aggregate stays reachable only through the decision operations that own
-     * its invariants. What the split buys is that every mutation of a persisted summary still goes
-     * through the arithmetic the reference program performs, rather than through a mapper that could
-     * assemble a state no sequence of authorizations could produce.</p>
+     * <p>Assumptions: the ONLINE rules are unchanged and remain narrower. A decision still cannot assign a
+     * counter, a balance or a total directly; the only way to move any of them is through
+     * {@link PendingAuthSummary#recordApproved(BigDecimal)} or
+     * {@link PendingAuthSummary#recordDeclined(BigDecimal)}, which move the members that belong together
+     * and refuse a counter leaving its four-digit domain. What this operation does is restate a state that
+     * already exists, which is a different act from producing one.
+     *
+     * <p>Assumptions: absent numeric components become exact zeros and absent character components stay
+     * absent. A blank packed field in the extract means zero -- the reference program zeroes every numeric
+     * field of a new segment, so a zero and a blank are the same claim -- while a blank character slot means
+     * the slot was never filled, and inventing a value for it would assert an account status nobody
+     * recorded. The two substitutions are made by {@link #amountOrZero(Money)} and
+     * {@link #countOrZero(Short)} so the rule has one statement.
      *
      * @param segment the segment image to decode; must not be {@code null} and must be exactly the
      *     declared segment length
-     * @return a summary aggregate carrying the two identifiers and the two mirrored limits
+     * @return a summary aggregate carrying every component the segment holds
      * @throws NullPointerException if {@code segment} is {@code null}, or if the image carries no account
      *     or customer identifier, neither of which a stored row may omit
      * @throws FixedWidthCodec.RecordLengthException if {@code segment} is not exactly the declared
      *     segment length
      * @throws PackedDecimalCodec.PackedDecimalException if a packed field carries a malformed digit or
      *     sign nibble
-     * @throws IllegalArgumentException if the segment carries any balance, counter, total, status
-     *     character or status slot the aggregate cannot represent; the refusal names every such component
-     *     so the caller can see which state was rejected without reading the bytes
+     * @throws IllegalArgumentException if a decoded component falls outside the domain its column
+     *     declares -- an identifier that is not positive, a counter outside the four-digit range, a status
+     *     character wider than its column, or an amount of greater scale than the column stores
      */
     public static PendingAuthSummary toEntity(byte[] segment) {
         SummarySegment decoded = toSummarySegment(segment);
+
+        // WHY : Refactoring Rationale: the representability guard is invoked HERE, and it was not -- the
+        //       operation's own contract and the load-path counterpart's documentation both state that
+        //       this decode refuses a populated segment, and neither was true of the code. Without the
+        //       call, the decision path accepted an extract-shaped segment and assembled the aggregate's
+        //       balances, counters and totals out of received bytes, which is exactly the state no
+        //       sequence of authorizations could have produced. The refusal is what keeps the two decodes
+        //       distinct: fromExtractRecord exists to accept that segment, and this one must not.
         requireAggregateRepresentable(decoded);
 
-        PendingAuthSummary summary = new PendingAuthSummary(
+        // WHY : Assumptions: the two identifiers are null-checked HERE rather than being left to the
+        //       factory, because the message a stored row deserves names the row and not the parameter: a
+        //       segment that omits either is a malformed extract record, whereas a null reaching the
+        //       factory from any other caller is a programming fault. The factory checks them again for
+        //       its own sake.
+        return PendingAuthSummary.rehydrated(
                 Objects.requireNonNull(decoded.accountId(),
                         "the segment carries no account identifier, which a stored row may not omit"),
                 Objects.requireNonNull(decoded.customerId(),
-                        "the segment carries no customer identifier, which a stored row may not omit"));
+                        "the segment carries no customer identifier, which a stored row may not omit"),
+                decoded.authStatus(),
+                decoded.accountStatus1(), decoded.accountStatus2(), decoded.accountStatus3(),
+                decoded.accountStatus4(), decoded.accountStatus5(),
+                amountOrZero(decoded.creditLimit()), amountOrZero(decoded.cashLimit()),
+                amountOrZero(decoded.creditBalance()), amountOrZero(decoded.cashBalance()),
+                countOrZero(decoded.approvedAuthCount()), countOrZero(decoded.declinedAuthCount()),
+                amountOrZero(decoded.approvedAuthAmount()),
+                amountOrZero(decoded.declinedAuthAmount()));
+    }
 
-        // WHY : Assumptions: the two limits are applied through the aggregate's own refresh operation
-        //       rather than at construction, because that is where the reference program applies them --
-        //       cbl/COPAUA0C.cbl L810 and L811 copy them on EVERY authorization and not only when the
-        //       segment is created. Routing through the same operation keeps one code path for a limit
-        //       reaching this segment, whichever direction it arrived from.
-        summary.refreshLimits(amountOrZero(decoded.creditLimit()), amountOrZero(decoded.cashLimit()));
-        return summary;
+    /**
+     * Supplies a counter for the aggregate, substituting zero for an absent one.
+     *
+     * <p>Assumptions: an absent counter is zero rather than a refusal, for the reason recorded on the
+     * operation above -- the reference program zeroes both counters when it creates a segment, so a blank
+     * packed field and a zero are the same state. This differs from {@link #counterOrZero(Short)} only in
+     * its return type: that one supplies an exact decimal for ENCODING a segment, this one supplies the
+     * halfword the column stores.</p>
+     *
+     * @param counter the carrier's counter, or {@code null} when the carrier holds none
+     * @return the counter, or zero when {@code counter} is {@code null}; never {@code null}
+     */
+    private static Short countOrZero(Short counter) {
+        return counter == null ? Short.valueOf((short) 0) : counter;
     }
 
     /**
@@ -981,105 +1153,6 @@ public final class PendingAuthSummaryMapper {
                 selectorOf(row5));
     }
 
-    /**
-     * Refuses a segment whose stored state the persistent aggregate cannot represent.
-     *
-     * <p>Assumptions: the aggregate models the authorization decision lifecycle and exposes no way to
-     * assign a balance, a counter, a total or a status directly, so the only stored state it can
-     * faithfully hold is the one a freshly created segment is in. Every component checked below is one the
-     * aggregate would otherwise drop, and the check is on the value rather than on a flag because a
-     * freshly created segment has a determinate shape: {@code cbl/COPAUA0C.cbl} L801 to L806 zeroes every
-     * numeric field before moving the two identifiers in. A zero counter and an exactly-zero total are
-     * therefore representable; anything else is not.</p>
-     *
-     * <p>Trade-offs: the two limits are deliberately absent from this check even though they are also
-     * populated state. They are the only components the aggregate DOES admit after construction, through
-     * its own refresh operation, so admitting them costs nothing and refusing them would reject the very
-     * segment {@code cbl/COPAUA0C.cbl} L810 to L811 produces one statement later.</p>
-     *
-     * <p><strong>Return value.</strong> This guard returns no value; normal completion means every
-     * component the aggregate cannot carry is at the value a newly created segment holds.</p>
-     *
-     * @param decoded the decoded carrier to inspect; must not be {@code null}
-     * @throws IllegalArgumentException if any inspected component is populated, listing every component
-     *     at fault so the caller sees the whole reason rather than the first one
-     */
-    private static void requireAggregateRepresentable(SummarySegment decoded) {
-        StringBuilder populated = new StringBuilder();
-        appendIfPresent(populated, FIELD_AUTH_STATUS, decoded.authStatus() != null);
-        for (int slot = 1; slot <= ACCOUNT_STATUS_SLOTS; slot++) {
-            appendIfPresent(populated, FIELD_ACCOUNT_STATUS + '(' + slot + ')',
-                    decoded.accountStatusSlot(slot) != null);
-        }
-        appendIfPresent(populated, FIELD_CREDIT_BALANCE, isPopulated(decoded.creditBalance()));
-        appendIfPresent(populated, FIELD_CASH_BALANCE, isPopulated(decoded.cashBalance()));
-        appendIfPresent(populated, FIELD_APPROVED_COUNT, isPopulated(decoded.approvedAuthCount()));
-        appendIfPresent(populated, FIELD_DECLINED_COUNT, isPopulated(decoded.declinedAuthCount()));
-        appendIfPresent(populated, FIELD_APPROVED_AMOUNT, isPopulated(decoded.approvedAuthAmount()));
-        appendIfPresent(populated, FIELD_DECLINED_AMOUNT, isPopulated(decoded.declinedAuthAmount()));
-
-        if (populated.length() > 0) {
-            // WHY : Trade-offs: the refusal names the COMPONENTS and never their values. A balance or a
-            //       count identifies an account's position as surely as the key does, and this message
-            //       reaches a log, so the component names locate the defect without copying account data
-            //       into it. The caller that needs the values already holds the decoded carrier.
-            throw new IllegalArgumentException("this segment carries state the summary aggregate cannot"
-                    + " represent, so it is refused rather than partially applied; use"
-                    + " toSummarySegment or toSegmentFields for a populated segment. Populated"
-                    + " components: " + populated);
-        }
-    }
-
-    /**
-     * Appends a component name to a refusal list when that component is populated.
-     *
-     * <p>Assumptions: the list is built rather than thrown on first sight so one refusal reports every
-     * offending component. A caller handed the first name alone would fix it, retry, and meet the next --
-     * a sequence of identical failures where one message would have shown the whole shape of the
-     * mismatch.</p>
-     *
-     * <p><strong>Return value.</strong> This method returns no value; it appends to the supplied builder
-     * in place.</p>
-     *
-     * @param names the refusal list under construction; must not be {@code null}
-     * @param component the copybook component name to record
-     * @param populated whether that component carries a value the aggregate cannot represent
-     */
-    private static void appendIfPresent(StringBuilder names, String component, boolean populated) {
-        if (populated) {
-            if (names.length() > 0) {
-                names.append(", ");
-            }
-            names.append(component);
-        }
-    }
-
-    /**
-     * Reports whether an amount carries a value the aggregate's constructor would not have produced.
-     *
-     * <p>Assumptions: absent and zero are treated alike, because both are states a newly created segment
-     * legitimately presents -- the reference program zeroes the field and a nullable column may simply be
-     * unset -- and only a non-zero amount is state the aggregate cannot carry forward.</p>
-     *
-     * @param amount the decoded amount, which may be {@code null}
-     * @return {@code true} when the amount is present and not zero
-     */
-    private static boolean isPopulated(Money amount) {
-        return amount != null && !amount.isZero();
-    }
-
-    /**
-     * Reports whether a counter carries a value the aggregate's constructor would not have produced.
-     *
-     * <p>Assumptions: absent and zero are treated alike, for the same reason as the amount above. A newly
-     * created segment's counters are zero, so zero is representable and any other value is not.</p>
-     *
-     * @param counter the decoded counter, which may be {@code null}
-     * @return {@code true} when the counter is present and not zero
-     */
-    private static boolean isPopulated(Short counter) {
-        return counter != null && counter.shortValue() != 0;
-    }
 
     /**
      * Reads one two-character account-status slot out of the array's single decoded interval.
@@ -1270,6 +1343,22 @@ public final class PendingAuthSummaryMapper {
      */
     private static BigDecimal counterOrZero(Short counter) {
         return counter == null ? BigDecimal.ZERO : BigDecimal.valueOf(counter.longValue());
+    }
+
+    /**
+     * Supplies a counter for the stored column, substituting zero for an absent one.
+     *
+     * <p>Assumptions: this is the same substitution {@link #counterOrZero(Short)} makes and differs only
+     * in the type it produces -- a halfword for the mapped {@code SMALLINT} column rather than an exact
+     * decimal for the packed encode. Two methods exist rather than one returning a wider type because
+     * the encode path needs the decimal and the column needs the halfword, and converting at either call
+     * site would put a narrowing cast in the caller.</p>
+     *
+     * @param counter the carrier's counter, or {@code null} when the carrier holds none
+     * @return the counter, or zero when {@code counter} is {@code null}, never {@code null}
+     */
+    private static Short storedCounter(Short counter) {
+        return counter == null ? Short.valueOf((short) 0) : counter;
     }
 
     /**
@@ -1479,5 +1568,214 @@ public final class PendingAuthSummaryMapper {
      */
     private static Money money(BigDecimal amount) {
         return amount == null ? Money.ZERO : Money.ofPicture(amount, MONEY_INTEGER_DIGITS);
+    }
+
+    /**
+     * Refuses a segment whose stored state the persistent aggregate cannot represent.
+     *
+     * <p>Assumptions: the aggregate models the authorization decision lifecycle and exposes no way to
+     * assign a balance, a counter, a total or a status directly, so the only stored state it can
+     * faithfully hold is the one a freshly created segment is in. Every component checked below is one the
+     * aggregate would otherwise drop, and the check is on the value rather than on a flag because a
+     * freshly created segment has a determinate shape: {@code cbl/COPAUA0C.cbl} L801 to L806 zeroes every
+     * numeric field before moving the two identifiers in. A zero counter and an exactly-zero total are
+     * therefore representable; anything else is not.</p>
+     *
+     * <p>Trade-offs: the two limits are deliberately absent from this check even though they are also
+     * populated state. They are the only components the aggregate DOES admit after construction, through
+     * its own refresh operation, so admitting them costs nothing and refusing them would reject the very
+     * segment {@code cbl/COPAUA0C.cbl} L810 to L811 produces one statement later.</p>
+     *
+     * <p><strong>Return value.</strong> This guard returns no value; normal completion means every
+     * component the aggregate cannot carry is at the value a newly created segment holds.</p>
+     *
+     * @param decoded the decoded carrier to inspect; must not be {@code null}
+     * @throws IllegalArgumentException if any inspected component is populated, listing every component
+     *     at fault so the caller sees the whole reason rather than the first one
+     */
+    private static void requireAggregateRepresentable(SummarySegment decoded) {
+        StringBuilder populated = new StringBuilder();
+        appendIfPresent(populated, FIELD_AUTH_STATUS, decoded.authStatus() != null);
+        for (int slot = 1; slot <= ACCOUNT_STATUS_SLOTS; slot++) {
+            appendIfPresent(populated, FIELD_ACCOUNT_STATUS + '(' + slot + ')',
+                    decoded.accountStatusSlot(slot) != null);
+        }
+        appendIfPresent(populated, FIELD_CREDIT_BALANCE, isPopulated(decoded.creditBalance()));
+        appendIfPresent(populated, FIELD_CASH_BALANCE, isPopulated(decoded.cashBalance()));
+        appendIfPresent(populated, FIELD_APPROVED_COUNT, isPopulated(decoded.approvedAuthCount()));
+        appendIfPresent(populated, FIELD_DECLINED_COUNT, isPopulated(decoded.declinedAuthCount()));
+        appendIfPresent(populated, FIELD_APPROVED_AMOUNT, isPopulated(decoded.approvedAuthAmount()));
+        appendIfPresent(populated, FIELD_DECLINED_AMOUNT, isPopulated(decoded.declinedAuthAmount()));
+
+        if (populated.length() > 0) {
+            // WHY : Trade-offs: the refusal names the COMPONENTS and never their values. A balance or a
+            //       count identifies an account's position as surely as the key does, and this message
+            //       reaches a log, so the component names locate the defect without copying account data
+            //       into it. The caller that needs the values already holds the decoded carrier.
+            throw new IllegalArgumentException("this segment carries state the summary aggregate cannot"
+                    + " represent, so it is refused rather than partially applied; use"
+                    + " toSummarySegment or toSegmentFields for a populated segment. Populated"
+                    + " components: " + populated);
+        }
+    }
+
+    /**
+     * Appends a component name to a refusal list when that component is populated.
+     *
+     * <p>Assumptions: the list is built rather than thrown on first sight so one refusal reports every
+     * offending component. A caller handed the first name alone would fix it, retry, and meet the next --
+     * a sequence of identical failures where one message would have shown the whole shape of the
+     * mismatch.</p>
+     *
+     * <p><strong>Return value.</strong> This method returns no value; it appends to the supplied builder
+     * in place.</p>
+     *
+     * @param names the refusal list under construction; must not be {@code null}
+     * @param component the copybook component name to record
+     * @param populated whether that component carries a value the aggregate cannot represent
+     */
+    private static void appendIfPresent(StringBuilder names, String component, boolean populated) {
+        if (populated) {
+            if (names.length() > 0) {
+                names.append(", ");
+            }
+            names.append(component);
+        }
+    }
+
+    /**
+     * Reports whether an amount carries a value the aggregate's constructor would not have produced.
+     *
+     * <p>Assumptions: absent and zero are treated alike, because both are states a newly created segment
+     * legitimately presents -- the reference program zeroes the field and a nullable column may simply be
+     * unset -- and only a non-zero amount is state the aggregate cannot carry forward.</p>
+     *
+     * @param amount the decoded amount, which may be {@code null}
+     * @return {@code true} when the amount is present and not zero
+     */
+    private static boolean isPopulated(Money amount) {
+        return amount != null && !amount.isZero();
+    }
+
+    /**
+     * Reports whether a counter carries a value the aggregate's constructor would not have produced.
+     *
+     * <p>Assumptions: absent and zero are treated alike, for the same reason as the amount above. A newly
+     * created segment's counters are zero, so zero is representable and any other value is not.</p>
+     *
+     * @param counter the decoded counter, which may be {@code null}
+     * @return {@code true} when the counter is present and not zero
+     */
+    private static boolean isPopulated(Short counter) {
+        return counter != null && counter.shortValue() != 0;
+    }
+
+    /**
+     * Decodes one segment image into a fully-populated aggregate, for the bulk-load path.
+     *
+     * <p>Purpose: this is the load-path counterpart of {@link #toEntity(byte[])} and the exact inverse of
+     * {@link #toUnloadRecord(PendingAuthSummary)}. The two decodes differ in what they accept, and the
+     * difference is the whole reason both exist. {@link #toEntity(byte[])} serves the authorization
+     * decision path, whose input is always a segment in the freshly-created shape
+     * {@code cbl/COPAUA0C.cbl} lines 801 to 806 produce, and it REFUSES a populated segment so that
+     * running state cannot be silently dropped. This method serves the segment load, whose input is an
+     * extract of a database that has been running and whose parent records therefore carry the
+     * authorization status, the five status occurrences, both balances and all four counters.</p>
+     *
+     * <p>Refactoring Rationale: the load path was first written against {@link #toEntity(byte[])} and
+     * could not have loaded a real extract at all -- every populated parent would have been refused,
+     * which is a correct refusal from a method whose contract says so and the wrong method to have
+     * called. Adding an accepting decode is preferred to widening the refusing one, because the refusal
+     * is a genuine guard for the decision path and removing it there to serve the load would remove it
+     * from both.</p>
+     *
+     * <p>Assumptions: every component is taken from the decoded carrier and none is defaulted, except
+     * that an absent amount or counter becomes an exact zero -- which is what the encode does in the
+     * other direction and what the reference program means by an unset numeric, so the pair remains an
+     * identity. A status occurrence that is blank in the segment stays absent here rather than becoming
+     * a blank string, because {@code cbl/COPAUS1C.cbl} lines 344 to 349 treat unset as its own state.</p>
+     *
+     * @param segment the hundred-byte parent image; must not be {@code null}
+     * @return the aggregate holding exactly the segment's state, never {@code null}
+     * @throws NullPointerException if {@code segment} is {@code null}, or if it carries neither
+     *     identifier, both of which are declared not null
+     * @throws IllegalArgumentException if {@code segment} is not exactly the declared segment length
+     * @throws FixedWidthCodec.FieldCodecException if a declared interval cannot be decoded
+     * @throws PackedDecimalCodec.PackedDecimalException if a packed amount or counter is malformed
+     */
+    public static PendingAuthSummary fromExtractRecord(byte[] segment) {
+        SummarySegment decoded = toSummarySegment(segment);
+        return PendingAuthSummary.fromExtract(
+                Objects.requireNonNull(decoded.accountId(),
+                        "the segment carries no account identifier, which a stored row may not omit"),
+                Objects.requireNonNull(decoded.customerId(),
+                        "the segment carries no customer identifier, which a stored row may not omit"),
+                decoded.authStatus(),
+                new String[] {
+                    decoded.accountStatus1(), decoded.accountStatus2(), decoded.accountStatus3(),
+                    decoded.accountStatus4(), decoded.accountStatus5(),
+                },
+                amountOrZero(decoded.creditLimit()),
+                amountOrZero(decoded.cashLimit()),
+                amountOrZero(decoded.creditBalance()),
+                amountOrZero(decoded.cashBalance()),
+                storedCounter(decoded.approvedAuthCount()),
+                storedCounter(decoded.declinedAuthCount()),
+                amountOrZero(decoded.approvedAuthAmount()),
+                amountOrZero(decoded.declinedAuthAmount()));
+    }
+
+    /**
+     * Encodes a stored aggregate back into one segment image, for the unload path.
+     *
+     * <p>Purpose: this is the exact inverse of {@link #toEntity(byte[])} and the encode half of the
+     * unload that {@code cbl/PAUDBUNL.CBL} L227 performs with a single
+     * {@code MOVE PENDING-AUTH-SUMMARY TO OPFIL1-REC}. For this segment the unload record and the
+     * segment are the same hundred bytes -- the parent carries no prefix, which is why
+     * {@link #fromUnloadRecord(byte[])} delegates straight to the segment decode -- so one method serves
+     * both.</p>
+     *
+     * <p>Refactoring Rationale: this exists so {@code UnloadService} can hand an entity to the mapper
+     * instead of assembling a {@link SummarySegment} itself. Every offset, width and picture in this
+     * record is declared in this class; a service that built the carrier component by component would be
+     * a second place that had to know the aggregate's shape, and the two would drift the first time a
+     * column was added. The service now knows only that a summary encodes to
+     * {@link #unloadRecordLength()} bytes.</p>
+     *
+     * <p>Trade-offs: the carrier form is used rather than the sign-preserving map form, so the two
+     * differences {@link #toSegment(SummarySegment)} documents apply here as well: a stored negative zero
+     * re-encodes with the positive nibble, and padding re-encodes as blanks. Both are acceptable on the
+     * unload path because its output is a fresh extract rather than a byte-for-byte reproduction of a
+     * specific input image, and because the aggregate holds no member in which either difference could
+     * be preserved. Where byte identity against a particular source image is the requirement, decode
+     * that image and use {@link #toSegment(java.util.Map, byte[])} with the map the decode produced.</p>
+     *
+     * @param summary the stored aggregate to encode; must not be {@code null}, and its account and
+     *     customer identifiers must be present because both columns are declared not null
+     * @return a newly allocated image of exactly {@link #unloadRecordLength()} bytes
+     * @throws NullPointerException if {@code summary} is {@code null}, or if either identifier is absent
+     * @throws FixedWidthCodec.FieldCodecException if a stored value does not fit its declared interval
+     * @throws PackedDecimalCodec.PackedDecimalException if a stored amount or counter cannot be
+     *     represented in the digits its picture declares
+     */
+    public static byte[] toUnloadRecord(PendingAuthSummary summary) {
+        Objects.requireNonNull(summary, "summary must not be null");
+        return toSegment(new SummarySegment(
+                summary.getAccountId(),
+                summary.getCustomerId(),
+                summary.getAuthStatus(),
+                summary.getAccountStatus1(),
+                summary.getAccountStatus2(),
+                summary.getAccountStatus3(),
+                summary.getAccountStatus4(),
+                summary.getAccountStatus5(),
+                money(summary.getCreditLimit()),
+                money(summary.getCashLimit()),
+                money(summary.getCreditBalance()),
+                money(summary.getCashBalance()),
+                summary.getApprovedAuthCount(),
+                summary.getDeclinedAuthCount(),
+                money(summary.getApprovedAuthAmount()),
+                money(summary.getDeclinedAuthAmount())));
     }
 }

@@ -61,7 +61,7 @@
  *       354.</li>
  * </ul>
  *
- * <p>Three further authored classes support those roles without adding one.
+ * <p>Five further authored classes support those roles without adding one.
  * {@code AuthorizationDecisionService} is a collaborator of the listener rather than a
  * ninth role: it is the extracted implementation of {@code COPAUA0C.cbl}'s
  * {@code 6000-MAKE-DECISION} paragraph at lines 657 to 734, holding the complete
@@ -72,6 +72,12 @@
  * and its adapter are the concrete form of the interface boundary described under
  * <em>Bounded-context data</em> below; neither is a ninth target role, because both exist only
  * so the listener can reach data the inventory above already assumes is reachable.
+ * {@code RequestWindowBoundary} and its one implementation {@code ContainerCyclingWindowBoundary} are
+ * the fifth and fourth: the interface is the seam that closes intake once the declared per-run request
+ * limit is reached, and the implementation is the mechanism that acts on it. Neither is a role either,
+ * because the bound they carry belongs to the listener's contract -- it is the migrated form of that
+ * program's own five-hundred-request limit -- and they exist as separate types only because the counting
+ * and the stopping cannot happen on the same thread.
  * Refactoring Rationale: the decision paragraph is extracted rather than inlined into the
  * listener because it is the one part of the consumer that is a pure function of the decoded
  * request and the account state -- every response code and reason literal is carried across
@@ -184,13 +190,15 @@
  * code did something else. The interface now exists, and the substitute query has been removed from
  * {@code PendingAuthDetailRepository} so nothing can reach for it again.</p>
  *
- * <p>Assumptions: the boundary stated above has one designated owner and a prepared gate rather
- * than a gate that already rejects a violation on every build. That owner is
- * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java},
- * authored at a later index of the same plan; its own package charter records that until that class
- * lands no engine enforces layering anywhere in the reactor. The boundary is therefore carried by
- * review here, and the ownership assignment is recorded so the obligation lands on the class named
- * rather than being re-litigated in this package.</p>
+ * <p>Assumptions: the boundary stated above is MECHANICALLY enforced rather than carried by review.
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java}
+ * owns it, and it RUNS IN THIS MODULE: this module declares the shared kernel's test artifact, and the
+ * {@code architecture-rules} Surefire execution in {@code services/pom.xml} scans that artifact and runs
+ * the rules on THIS module's test classpath, so they see {@code com.carddemo.authorization}'s own
+ * classes. An import of another context's domain package, or of a framework type into a domain class, is
+ * therefore a broken build rather than a review comment. The ownership is recorded here so that a rule
+ * about this package's imports is not restated in this package, where it could differ from the one that
+ * actually runs.</p>
  *
  * <h2>Deliberate absences</h2>
  *

@@ -283,6 +283,81 @@ class InternalApiSecurityConfigTest {
     }
 
     /**
+     * Verifies the chain claims only the METHOD each internal operation serves, so that the end-user
+     * operations sharing an address are left to the application chain.
+     *
+     * <p>Purpose: this is the property whose absence made the end-user account update unreachable. The
+     * matcher was composed from paths alone, and a path-only matcher claims every method at that address --
+     * so the PUT that applies an edited account was governed by this chain and demanded the internal read
+     * scope, which no identity-provider token carries. The symptom was a 403 on a route that was correctly
+     * mounted, correctly authorised by the application chain's own rule, and never reached it.</p>
+     *
+     * <p>Assumptions: both halves are asserted for the account address, because the failure is invisible
+     * from either half alone. The GET must still be claimed -- narrowing too far would put the machine read
+     * on the human chain, which requires a group claim the calling service does not have -- and the PUT must
+     * not be.</p>
+     *
+     * <p>Assumptions: the customer probe is asserted for GET and HEAD together. One handler serves both, so
+     * claiming one and not the other would make the two forms of one operation answer differently.</p>
+     */
+    @Test
+    @DisplayName("the chain claims only the method each internal operation serves")
+    void theChainClaimsOnlyTheMethodEachOperationServes() {
+        var matcher = InternalApiSecurityConfig.internalPaths();
+        String account = AccountController.BASE_PATH + "/12345678901";
+        String customer = CustomerController.BASE_PATH + "/987654321";
+        String lookup = CardXrefController.BASE_PATH + CardXrefController.LOOKUP_PATH;
+
+        assertThat(matcher.matches(request(HttpMethod.GET, account)))
+                .as("the machine read is a GET and must stay on this chain")
+                .isTrue();
+        assertThat(matcher.matches(request(HttpMethod.PUT, account)))
+                .as("the end-user edit is a PUT on the SAME address and must fall through to the"
+                        + " application chain, which grants it to either business group")
+                .isFalse();
+        assertThat(matcher.matches(request(HttpMethod.DELETE, account)))
+                .as("no internal operation deletes an account, so the method is not claimed here")
+                .isFalse();
+
+        assertThat(matcher.matches(request(HttpMethod.GET, customer))).isTrue();
+        assertThat(matcher.matches(request(HttpMethod.HEAD, customer)))
+                .as("one handler serves both forms, so both are claimed")
+                .isTrue();
+        assertThat(matcher.matches(request(HttpMethod.PUT, customer))).isFalse();
+
+        assertThat(matcher.matches(request(HttpMethod.POST, lookup))).isTrue();
+        assertThat(matcher.matches(request(HttpMethod.GET, lookup)))
+                .as("the lookup is a POST; a GET to the same address is left to the application chain,"
+                        + " which denies the whole cross-reference subtree rather than authorising it"
+                        + " here and answering with an unsupported method afterwards")
+                .isFalse();
+    }
+
+    /**
+     * Verifies the two end-user operations that hang below the account address are not claimed by this
+     * chain.
+     *
+     * <p>Assumptions: they are asserted explicitly rather than left to the deeper-path case above, because
+     * these two are REAL mounted routes rather than hypothetical ones. A matcher widened to a subtree
+     * pattern would claim both, and the symptom -- an account view that answers 403 to the very user whose
+     * screen it is -- would be attributed to the token or the group long before the chain.</p>
+     */
+    @Test
+    @DisplayName("the end-user routes below the account address stay on the application chain")
+    void theEndUserRoutesBelowTheAccountAddressAreNotClaimed() {
+        var matcher = InternalApiSecurityConfig.internalPaths();
+
+        assertThat(matcher.matches(request(HttpMethod.GET,
+                AccountController.BASE_PATH + "/12345678901/view")))
+                .as("the human account view is an end-user route")
+                .isFalse();
+        assertThat(matcher.matches(request(HttpMethod.GET,
+                AccountController.BASE_PATH + "/12345678901/card-cross-references")))
+                .as("the by-account cross-reference listing is an end-user route")
+                .isFalse();
+    }
+
+    /**
      * Verifies the chain is ordered ahead of the application chain.
      *
      * <p>Assumptions: this is asserted from the annotation rather than from behaviour because the consequence

@@ -15,7 +15,7 @@
 #   layer: app/bms/COSGN00.bms:L26-L28 declares the sign-on screen as
 #   `COSGN0A DFHMDI COLUMN=1, LINE=1, SIZE=(24,80)`, a fixed 24x80 character
 #   map, and app/csd/CARDDEMO.CSD:L378-L379 binds it to a CICS transaction with
-#   `DEFINE TRANSACTION(CC00) ... PROGRAM(COSGN00C)`. The six values below are
+#   `DEFINE TRANSACTION(CC00) ... PROGRAM(COSGN00C)`. The eight values below are
 #   what a caller needs in order to publish a build into that path and to
 #   address it afterwards.
 #
@@ -37,7 +37,7 @@
 #   infra/modules/cloudfront-spa/main.tf instead.
 #
 # Return values:
-#   Six outputs, each of type string, in this order:
+#   Eight outputs, each of type string, in this order:
 #     distribution_id ............ id of the CloudFront distribution, for the
 #                                  cache invalidation that follows a publish.
 #     distribution_arn ........... ARN used to scope the CloudFront KMS
@@ -49,9 +49,24 @@
 #     spa_bucket_arn ............. ARN of that same bucket, the form an IAM
 #                                  policy statement needs to scope a grant to
 #                                  it and to nothing else.
+#     log_bucket_arn ............. ARN of the SSE-S3 encrypted destination the
+#                                  standard-logging-v2 delivery writes to, which
+#                                  the kms module reads as an exact allowed S3
+#                                  encryption context.
+#     log_delivery_source_arn .... ARN of the delivery source for that stream,
+#                                  which the kms key policy scopes
+#                                  log-delivery data-key generation to.
 #     origin_access_control_id ... id of the origin access control the origin
 #                                  bucket's policy is conditioned on.
 #   None is marked `sensitive`; that decision is recorded below this header.
+#
+#   Refactoring Rationale: this list named six outputs and omitted the two log
+#   ARNs, which were added when standard logging v2 replaced the earlier
+#   disabled-logging design. The omission was the more misleading half of the
+#   error: both values are cross-module contracts the kms module reads, so a
+#   reader taking this header as the module's published surface would have
+#   concluded that the key policy scoped itself to a destination this module does
+#   not publish.
 #
 # Errors / failure modes:
 #   No output here can fail on its own. An output block has no validation, no
@@ -92,18 +107,18 @@
 #     consumer rather than a fragment leaning on the comment beside it: that
 #     table is drift-checked in CI, and a description that only makes sense
 #     next to its comment renders as a cell explaining nothing.
-#   - Trade-offs: this contract is deliberately NARROW -- six outputs where
-#     main.tf creates sixteen resources and reads six data sources. The values
+#   - Trade-offs: this contract is deliberately NARROW -- eight outputs where
+#     main.tf creates twenty-one resources and reads five data sources. The values
 #     that are produced and withheld are enumerated at the foot of this file
 #     rather than left to be noticed. What a narrow contract costs is that
 #     a caller wanting something unpublished must change this file and its
 #     README together. What it buys is that every name here has a known
 #     consumer, so none of them pins an implementation detail of main.tf in
 #     place for the benefit of a caller that does not exist.
-#   - Alternatives Considered: one object-typed output carrying all six values,
+#   - Alternatives Considered: one object-typed output carrying all eight values,
 #     which is fewer blocks and a single reference at each call site. Rejected
 #     -- infra/.terraform-docs.yml generates one table row per output, so a
-#     single object would publish one opaque row and hide the five descriptions
+#     single object would publish one opaque row and hide the seven descriptions
 #     the drift check exists to keep honest, and a caller could then no longer
 #     reference one value without destructuring a map whose shape is documented
 #     nowhere.
@@ -114,10 +129,10 @@
 # On `sensitive`: no output below is marked, and that is a decision rather than
 # an omission.
 #
-# Alternatives Considered: marking all six `sensitive = true`, which is the
+# Alternatives Considered: marking all eight `sensitive = true`, which is the
 # defensive default some trees adopt for anything that looks like an
 # identifier. Rejected, on two specific grounds rather than as a preference.
-# First, none of these six values grants access on its own: the origin bucket
+# First, none of these eight values grants access on its own: the origin bucket
 # is private, with this distribution's origin access control as its only reader
 # and a bucket policy that additionally denies any request not made over TLS;
 # the distribution serves nothing but the public static bundle a browser
@@ -340,5 +355,5 @@ output "origin_access_control_id" {
 #
 # No `sensitive` marking on any output:
 #   Recorded above the outputs rather than here, because it is a property of the
-#   six values that ARE published rather than the absence of a seventh.
+#   eight values that ARE published rather than the absence of a ninth.
 # =============================================================================

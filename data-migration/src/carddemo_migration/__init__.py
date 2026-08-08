@@ -23,30 +23,48 @@ Package layout
     ``ebcdic_codec`` (cp037 decode applied per fixed-width field, never per record, so
     sign bytes and packed nibbles are never routed through a text decoder).
 ``carddemo_migration.readers``
-    Twelve fixed-width record readers, one per record layout: the eleven seed datasets
-    (``usrsec``, ``account``, ``card``, ``customer``, ``xref``, ``dalytran``,
-    ``transaction``, ``discgrp``, ``trancatg``, ``trantype``, ``tcatbal``) plus
-    ``export_record``, the packed-decimal export layout that has no seed dataset of its
-    own.
+    The delivered fixed-width record readers, one per record layout: ``account``, ``card``
+    and ``tcatbal``, each of which streams the record in both shipped encodings.
 ``carddemo_migration.loaders``
-    ``aurora`` bulk-loads decoded rows into one owning schema at a time; ``s3_stage``
-    stages dataset generations under the ``dt=``/``gen=`` prefix convention that replaces
-    generation-data-group semantics.
-``carddemo_migration.verify``
-    The three mandatory post-load passes: ``row_counts`` per dataset, ``checksum`` per
-    record, and ``money_parity`` against the source files. A load that reports success
-    without the money-total pass is not evidence of anything, which is why verification is
-    a first-class subpackage rather than an afterthought in a script.
+    ``s3_stage`` stages dataset generations under the ``dt=``/``gen=`` prefix convention
+    that replaces generation-data-group semantics.
 
-Three modules sit at the package root beside this one: ``cli``, which exposes the
-command-line entry points the batch staging step invokes; ``config``, which resolves
-runtime settings when a command runs rather than when a module is imported -- that timing
-is what keeps this package importable with nothing configured; and ``credentials``, the
-database bootstrap step that applies each generated service credential to the login role
-that authenticates with it. That last one runs immediately after
-``sql/V0__schemas_and_roles.sql`` creates the fifteen login roles with no password, and it is the
-delivered mechanism that makes them able to authenticate at all -- so it precedes every
-loader in the batch chain rather than sitting beside them.
+Four modules sit at the package root beside this one. ``cli`` exposes the command-line
+entry points the batch staging step invokes. ``config`` resolves runtime settings when a
+command runs rather than when a module is imported -- that timing is what keeps this
+package importable with nothing configured. ``credentials`` and ``role_credentials`` are
+the database bootstrap step that applies each generated credential to the login role that
+authenticates with it; both run immediately after ``sql/V0__schemas_and_roles.sql`` creates
+the fifteen login roles with no password, and they are the delivered mechanism that makes
+those roles able to authenticate at all -- so they precede every loader in the batch chain
+rather than sitting beside them.
+
+Refactoring Rationale: this layout section described the package's target shape rather than
+its contents, and named members that do not exist -- twelve readers, an ``aurora`` loader,
+and a ``verify`` subpackage holding three post-load passes -- while omitting the
+``role_credentials`` module that does. A package entry point is the one docstring a reader
+consults *instead of* listing the directory, so a target-state inventory here is uniquely
+misleading: an import written against it fails at run time, and an absence stated as a
+delivery hides work that is genuinely outstanding. It is rewritten as a measurement, and
+what is still owed is stated separately below rather than presented as present tense.
+
+Not yet delivered
+-----------------
+The migration plan assigns more to this package than the tree currently holds, and the gap
+is stated here so that no import is written against a member that does not exist:
+
+* **Nine further readers.** ``usrsec``, ``customer``, ``xref``, ``dalytran``,
+  ``transaction``, ``discgrp``, ``trancatg``, ``trantype`` and ``export_record`` -- the
+  last being the packed-decimal export layout that has no seed dataset of its own. The
+  three that exist establish the reader shape the remaining nine follow.
+* **``loaders.aurora``.** The bulk load of decoded rows into one owning schema at a time.
+  ``s3_stage`` is delivered; the database side of the load is not.
+* **``carddemo_migration.verify``.** The three post-load passes -- ``row_counts`` per
+  dataset, ``checksum`` per record and ``money_parity`` against the source files.
+  Assumptions: this absence is the one with the largest consequence, because a load that
+  reports success without the money-total pass is not evidence of anything. Until the
+  subpackage exists, a completed load is an assertion rather than a verified fact, and it
+  must be read that way.
 
 Import and layering contract
 ----------------------------

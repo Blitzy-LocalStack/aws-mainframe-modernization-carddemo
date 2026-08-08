@@ -312,20 +312,34 @@ public record OutboxMessage(
      * same constant the durable row defaults to, so the message and the row cannot disagree about
      * what the bytes are.</p>
      *
+     * <p>Refactoring Rationale: this factory REQUIRES a deadline where the canonical constructor admits
+     * an absent one, and it required nothing. The two rules are deliberately different. A reply produced
+     * by this flow always has one -- the reference descriptor sets a five-second expiry on every reply it
+     * puts, at {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} L750 -- and the target transport
+     * has no per-message time to live, so the instant travelling on the message IS the whole of that
+     * control. A publication built here without it would be published unconditionally however long it
+     * had waited, which is the outcome the deadline exists to prevent, and nothing downstream could tell
+     * the difference between a reply that never expires and one whose deadline was dropped by mistake.
+     * The canonical constructor stays permissive because it also represents a row read BACK from the
+     * schema, where {@code expires_at} is nullable at L1071 of the migration so that a row written by an
+     * extract or by an earlier revision still projects rather than failing to load.</p>
+     *
      * @param replyQueueUrl where the reply is to be sent; must not be {@code null} or blank
      * @param correlationId the identity to echo; may be {@code null}
      * @param orderGroupToken the keyed ordering token; must not be {@code null} or blank
      * @param deduplicationToken the keyed deduplication token; must not be {@code null} or blank
      * @param payload the encoded reply body; must not be {@code null} or blank
-     * @param expiresAt the staleness deadline in coordinated universal time; may be {@code null}
+     * @param expiresAt the staleness deadline in coordinated universal time; must not be {@code null}
      * @return a publication carrying the delimited-text format label, never {@code null}
-     * @throws NullPointerException when a component that must be present is {@code null}
+     * @throws NullPointerException when a component that must be present is {@code null}, the deadline
+     *     included
      * @throws IllegalArgumentException when a component that must be present is blank, or when any
      *     character component is wider than the column that stores it
      */
     public static OutboxMessage csvReply(String replyQueueUrl, String correlationId,
             String orderGroupToken, String deduplicationToken, String payload,
             LocalDateTime expiresAt) {
+        Objects.requireNonNull(expiresAt, "expiresAt must not be null for an authorization reply");
         return new OutboxMessage(replyQueueUrl, correlationId, orderGroupToken, deduplicationToken,
                 payload, AuthReplyOutbox.CONTENT_TYPE_CSV, expiresAt);
     }
