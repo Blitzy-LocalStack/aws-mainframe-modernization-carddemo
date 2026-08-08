@@ -265,49 +265,30 @@
     </dependency>
 
     <!--
-      Refactoring Rationale: both profile overlays beside this module declare a
-      per-environment Parameter Store overlay. application-dev.yml imports
-      optional:aws-parameterstore:/carddemo/[env]/authorization/ with the label
-      defaulted to dev, and application-prod.yml imports the same path defaulted
-      to prod, while this module declared no artifact supplying the client those
-      imports need, and that combination cannot resolve in any environment. The
-      queue starter
-      above brings spring-cloud-aws-autoconfigure onto the classpath, and that
-      artifact registers ParameterStoreConfigDataLocationResolver as a
-      ConfigDataLocationResolver in its META-INF/spring.factories, so a resolver
-      DOES claim the aws-parameterstore prefix and is invoked whenever either
-      profile is active. Without this entry that resolver reaches
-      SsmClient.builder() and the class is absent, so activating either profile
-      ends in NoClassDefFoundError on
-      software/amazon/awssdk/services/ssm/SsmClient. Measured against the built
-      artifact rather than inferred: the fat jar carries
-      spring-cloud-aws-autoconfigure and no ssm module, and resolving either
-      profile through ConfigDataEnvironmentPostProcessor.applyTo failed exactly
-      that way. A classpath absence is total, so no environment variable,
-      credential or parameter path could have made it resolve.
-      Assumptions: the optional: prefix does not cover this case. It suppresses
-      a ConfigDataNotFoundException, raised when a claimed location holds no
-      resource; it does not suppress a resolver that throws while resolving. The
-      marker therefore protects against an empty parameter path and not against
-      a missing client, which is why the dependency rather than the marker is
-      what makes the declared import usable.
-      Alternatives Considered: withdrawing the import from the two overlays
-      instead, which also ends the failure and adds no dependency. Rejected
-      because the sibling application.yml names that overlay as this module's
-      route for Terraform outputs, and because the account and batch contexts
-      (the other two declaring the same import) both declare this same starter.
-      Withdrawing it here would leave one context reading its environment
-      subtree differently from its peers for no stated reason.
-      Refactoring Rationale: with this dependency present there is exactly ONE
-      delivery path for the per-environment subtree, and both profiles now take
-      it. Before this entry the dev overlay declined the import outright and
-      recorded, as its reason, that no artifact here brings the SSM client. That
-      was true then and is not true now, while the prod overlay and this comment
-      each described a different arrangement again. Three descriptions of one
-      mechanism is worse than any one of them being wrong, because a reader
-      cannot tell which is authoritative; the asymmetry is therefore removed
-      rather than re-explained, and dev and prod differ only in the environment
-      label their path defaults to.
+      Assumptions: this module declares the parameter-store starter even though
+      NO document in it claims an aws-parameterstore location. Neither profile
+      overlay imports one, and
+      config/ProfileConfigurationTopologyTest.noDocumentClaimsAParameterStoreLocation
+      asserts that closure. The dependency is here to keep the resolver and its
+      client PAIRED, not to deliver configuration.
+      Refactoring Rationale: the resolver arrives whether or not anything wants
+      it. The queue starter above brings spring-cloud-aws-autoconfigure, whose
+      META-INF/spring.factories registers ParameterStoreConfigDataLocationResolver
+      for the aws-parameterstore prefix across the whole module, so that prefix is
+      claimable at all times and the only open question is what a claim does. With
+      this client present a claim fails as a legible region or credential error
+      naming the provider chain; with it absent the same claim fails as
+      NoClassDefFoundError on software/amazon/awssdk/services/ssm/SsmClient from
+      inside environment preparation, before logging is configured. The optional:
+      marker covers neither, because it excuses a location that is not found
+      rather than a resolver that cannot build itself.
+      Trade-offs: the accepted cost is one declared dependency this module reads
+      nothing through. It is accepted because removing it would leave the resolver
+      registered and unaccompanied, which turns the most likely future edit (a
+      reader adding a shared value under this module's own subtree) from a legible
+      misconfiguration into a class-loading crash. The paired-classpath property
+      is asserted by
+      config/ProfileConfigurationTopologyTest.theParameterStoreClientIsOnTheClasspath.
       Assumptions: no version element appears here because the parent aggregator
       at services/pom.xml imports io.awspring.cloud:spring-cloud-aws-dependencies
       as a bill of materials, so this coordinate is managed exactly as the queue

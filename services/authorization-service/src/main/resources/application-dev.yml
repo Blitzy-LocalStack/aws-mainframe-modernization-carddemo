@@ -29,30 +29,22 @@
 #       variables the ECS task definition sets from Parameter Store and from
 #       Secrets Manager container secrets; none of them is expressible in this
 #       file.
-# WHY : Refactoring Rationale: this profile DECLINED the `spring.config.import`
-#       naming `optional:aws-parameterstore:/carddemo/<environment>/authorization/`
-#       that application.yml anticipates and application-prod.yml carries, and the
-#       reason it recorded was a measured startup failure: this module declared only
-#       spring-cloud-aws-starter-sqs, which brings the config-data resolver that
-#       claims the `aws-parameterstore` prefix while bringing no SSM client for it
-#       to instantiate, and the `optional:` marker does not cover that -- it
-#       suppresses a location that is not found, not a class that is absent. The
-#       observation was correct and the conclusion has expired: the sibling pom.xml
-#       now declares io.awspring.cloud:spring-cloud-aws-starter-parameter-store
-#       precisely so that the resolver has its client, so the import resolves here
-#       exactly as it does in account-service, batch-service and
-#       reporting-service. It is added rather than left out, because leaving it out
-#       kept THREE descriptions of one mechanism in circulation -- this comment, the
-#       prod overlay's, and the POM's -- of which at most one could be right, and a
-#       reader had no way to tell which. dev and prod now differ only in the
-#       environment label the path defaults to.
-# WHY : Assumptions: `optional:` is retained, and the reason is the subtree rather
-#       than the classpath. A development deployment legitimately writes no
-#       parameter under that path at all, because every value this profile needs
-#       already arrives as an environment variable that application.yml's
-#       datasource and identity placeholders bind to; a non-optional import would
-#       then abort a correct deployment over the absence of values it was not
-#       relying on.
+# WHY : Refactoring Rationale: this profile imports ONLY the shared defaults
+#       document. An `optional:aws-parameterstore:/carddemo/<environment>/authorization/`
+#       overlay was considered and is declined, and the reason is measured rather
+#       than stylistic: the sibling pom.xml does declare
+#       io.awspring.cloud:spring-cloud-aws-starter-parameter-store, so a resolver
+#       claims that prefix and builds an SSM client, and that construction resolves
+#       a region through the default provider chain. This module pins no
+#       `spring.cloud.aws.region.static`, so preparing the profile raised
+#       SdkClientException wherever the chain could not answer, and the `optional:`
+#       marker does not suppress it -- that marker excuses a claimed location
+#       holding no resource, not a resolver that throws while building its client.
+# WHY : Assumptions: the prod overlay reaches the same conclusion, so dev and prod
+#       differ only in sizing, verbosity and health detail rather than in where
+#       their configuration comes from. One mechanism is described in one way
+#       across this module: every value arrives as an environment variable the
+#       task definition sets.
 # WHY : Assumptions: `classpath:/carddemo-common-defaults.yml` is named again as the
 #       first entry, matching the prod overlay. It costs one idempotent re-import
 #       and it removes any question of whether the shared console pattern -- which

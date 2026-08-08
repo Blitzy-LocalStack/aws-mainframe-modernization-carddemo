@@ -56,6 +56,29 @@ reconciling a reject stream see which transaction and which merchant a rejection
 concerns without the number or the amount being emitted. Diagnostics never echo record
 content of any kind, sensitive or otherwise.
 
+The two-timestamp asymmetry
+---------------------------
+This record declares two 26-character stamps and they are NOT interchangeable, which is the
+policy this module introduces for the whole reader subpackage. ``DALYTRAN-ORIG-TS`` is
+deterministic business data copied from the input transaction -- every one of the three hundred
+seed records carries the same originating value -- so it is decoded, published and compared like
+any other character field, and it is never blanked, masked or validated against a stamp shape.
+``DALYTRAN-PROC-TS`` is stamped from the run clock by the posting program and is the only
+non-deterministic offset in the record, so it is the field a golden comparison or a checksum
+must leave out of its span.
+
+Which stamp is which is read from the DESCRIPTOR's ``normalize_ts`` mark and is never re-derived
+from a field name written here. The mark is published as :data:`NORMALIZED_TIMESTAMP_FIELD_NAMES`
+and its complement as :data:`DETERMINISTIC_FIELD_NAMES`, and :func:`is_normalized_timestamp_field`
+answers the question for one field straight off the descriptor. ``data-migration/README.md``
+section 10.1 fixes that as the contract for the checksum pass: it excludes the processing
+timestamp from the checksummed span by reading the mark rather than carrying its own list of
+offsets, and it deliberately does not exclude the originating stamp.
+
+A published ``DALYTRAN-PROC-TS`` is also VALIDATED rather than trusted: an unwritten stamp is
+accepted, a well-formed one is accepted, and anything else is refused. See
+:func:`_require_timestamp_shape` for the rule and for why refusing beats blanking.
+
 Design decisions (WHY)
 ----------------------
 Assumptions:
@@ -88,6 +111,7 @@ Trade-offs:
 from __future__ import annotations
 
 import pathlib
+import string
 from collections.abc import Iterable, Iterator, Mapping
 from decimal import Decimal
 from typing import Final
@@ -113,11 +137,14 @@ from carddemo_migration.copybook.zoned import decode_zoned_field
 
 __all__ = [
     "DALYTRAN_LAYOUT",
+    "DETERMINISTIC_FIELD_NAMES",
     "DROPPED_FIELD_NAMES",
     "LOADED_FIELDS",
+    "NORMALIZED_TIMESTAMP_FIELD_NAMES",
     "DecodedDailyTransaction",
     "decode_ascii_daily_transaction",
     "decode_ebcdic_daily_transaction",
+    "is_normalized_timestamp_field",
     "iter_ascii_daily_transactions",
     "iter_ebcdic_daily_transactions",
     "read_ascii_daily_transactions",
@@ -183,6 +210,235 @@ LOADED_FIELDS: Final[tuple[FieldSpec, ...]] = tuple(
 DROPPED_FIELD_NAMES: Final[frozenset[str]] = frozenset(
     field.name for field in DALYTRAN_LAYOUT.fields if _is_padding_field(field)
 )
+
+# WHY : Assumptions: WHICH stamp is non-deterministic is read off the DESCRIPTOR's
+#   `normalize_ts` mark and is never re-derived from a field name written here. The asymmetry is
+#   load-bearing rather than incidental: `DALYTRAN-ORIG-TS` is copied from the input transaction
+#   and does not vary between runs -- all three hundred seed records carry one originating value
+#   -- whereas `DALYTRAN-PROC-TS` is stamped from the run clock by the posting program. A
+#   checksum or a golden comparison must leave the second out of its span and must NOT leave the
+#   first out, and `data-migration/README.md` section 10.1 fixes that as the contract: the pass
+#   reads the mark rather than carrying its own list of offsets. Deriving the same fact twice is
+#   how the two come to disagree, and the disagreement would be silent -- a digest that included
+#   the wall-clock stamp differs between two loads of identical data, which reads as a data
+#   defect rather than as the measurement defect it is.
+# WHY : Trade-offs: both sets are PUBLISHED rather than kept private, and the complement is
+#   published as an ORDERED tuple rather than as a set. `verify.checksum.digest_records` takes
+#   its field names as an explicit ordered sequence precisely because a mapping's iteration order
+#   is a property of how it was built, so handing a caller a set would oblige the caller to
+#   choose an order -- and two callers choosing differently would compute two incomparable
+#   digests of identical data. The order here is the descriptor's declaration order, which is the
+#   record's byte order. Together the two names partition the published fields exactly, so a
+#   caller can assert the split rather than trust it.
+NORMALIZED_TIMESTAMP_FIELD_NAMES: Final[frozenset[str]] = frozenset(
+    field.name for field in LOADED_FIELDS if field.normalize_ts
+)
+DETERMINISTIC_FIELD_NAMES: Final[tuple[str, ...]] = tuple(
+    field.name for field in LOADED_FIELDS if not field.normalize_ts
+)
+
+
+def is_normalized_timestamp_field(field_name: str) -> bool:
+    """Report whether one named field of this record is the wall-clock stamp.
+
+    Purpose
+    -------
+    Answer, for a single field, the question a checksum or a golden comparison has to ask before
+    it includes that field in a compared span: is this value written from the run clock, and
+    therefore expected to differ between two runs over the same data?
+
+    Parameters
+    ----------
+    field_name : str
+        The field name exactly as the copybook spells it.
+
+    Returns
+    -------
+    bool
+        ``True`` when the descriptor marks the field as a run-clock stamp a parity comparison may
+        blank; ``False`` for every field carrying deterministic data, the originating stamp
+        included.
+
+    Raises
+    ------
+    LayoutError
+        If no field of that name is declared by this record. Raised by the descriptor's own
+        lookup.
+    """
+    # WHY : Assumptions: the flag is read off the descriptor for the NAMED field rather than
+    #   tested against the published set, so an unknown or misspelled name RAISES here instead of
+    #   answering `False`. `False` is the answer that means "this field is deterministic", so a
+    #   typo would otherwise place a wall-clock stamp inside a checksummed span, and the digest
+    #   would then differ between two loads of identical data with nothing naming the cause.
+    return DALYTRAN_LAYOUT.field(field_name).normalize_ts
+
+
+# WHY : Assumptions: an unwritten stamp has exactly TWO uniform forms, and this module recognises
+#   the same two the package's timestamp authority does. `copybook.ebcdic_codec.decode_timestamp`
+#   documents both on measured evidence: every one of the three hundred records of
+#   `AWS.M2.CARDDEMO.DALYTRAN.PS` carries a blank `DALYTRAN-PROC-TS`, because the posting run is
+#   what writes that stamp and this extract is its input, and the shipped primer record
+#   `AWS.M2.CARDDEMO.DALYTRAN.PS.INIT` was never written at all, so its stamp spans hold low
+#   values. Recognising only one of the two would refuse a form the baseline itself produces.
+_BLANK: Final[str] = " "
+_LOW_VALUE: Final[str] = "\x00"
+
+# WHY : Assumptions: these are positions WITHIN one decoded stamp and the characters admitted at
+#   them -- not record geometry, of which this module still states none, and the stamp's own width
+#   is taken from its descriptor rather than written here. The rule is transcribed from the
+#   reference harness's shared timestamp test, which admits the union of four separators at these
+#   six positions so that ONE rule covers both dialects CardDemo emits: the
+#   `YYYY-MM-DD HH:MM:SS.ffffff` form the seeds and the posting program write, and the
+#   `YYYY-MM-DD-HH.MM.SS.NNNNNN` form the interest program takes from the current date. Every
+#   other position is a digit. A dialect-specific matcher would have to know which program wrote
+#   the record, which a reader cannot know from the bytes it was handed.
+_TIMESTAMP_SEPARATOR_OFFSETS: Final[frozenset[int]] = frozenset({4, 7, 10, 13, 16, 19})
+_TIMESTAMP_SEPARATOR_CHARACTERS: Final[frozenset[str]] = frozenset("-.: ")
+
+# WHY : Trade-offs: the digit test is this explicit ASCII set rather than the string method the
+#   reference test uses. That method also answers true for a superscript and for the digit forms
+#   of other scripts, so a mis-decoded span could satisfy it while holding characters no
+#   timestamp column can parse. The accepted cost is one more name; what it buys is that the
+#   check means what it says on BOTH paths, including the byte path, where which characters
+#   appear is decided by the code page rather than by anything a caller controls.
+_TIMESTAMP_DIGITS: Final[frozenset[str]] = frozenset(string.digits)
+
+
+def _is_uniformly(value: str, character: str) -> bool:
+    """Report whether every position of a value holds one given character.
+
+    Purpose
+    -------
+    Recognise one of the two uniform forms an unwritten fixed-width stamp takes, as a single test
+    both forms are checked through, so the two cannot be recognised by slightly different rules.
+
+    Parameters
+    ----------
+    value : str
+        The decoded field characters to test.
+    character : str
+        The single character the whole value must consist of.
+
+    Returns
+    -------
+    bool
+        ``True`` when the value is non-empty and every position equals ``character``; ``False``
+        otherwise, an empty value included.
+
+    Raises
+    ------
+    None
+    """
+    # WHY : Assumptions: an EMPTY value must not read as uniform, which is why the emptiness test
+    #   is here rather than left to the generator. A test over no positions is vacuously true, so
+    #   without this an empty span would be accepted as an unwritten stamp -- and an empty span is
+    #   a field that was sliced wrongly, which is the opposite of a stamp nobody has written yet.
+    return bool(value) and all(position == character for position in value)
+
+
+def _is_timestamp_position(offset: int, character: str) -> bool:
+    """Report whether one position of a stamp holds a character its shape admits there.
+
+    Purpose
+    -------
+    Express the timestamp shape as a per-position rule, so the whole-value test reads as the
+    quantifier it is and the two kinds of position are decided in one named place.
+
+    Parameters
+    ----------
+    offset : int
+        The zero-based position WITHIN the stamp, not within the record.
+    character : str
+        The single character at that position.
+
+    Returns
+    -------
+    bool
+        ``True`` when a separator position holds one of the admitted separators, or a
+        non-separator position holds a digit; ``False`` otherwise.
+
+    Raises
+    ------
+    None
+    """
+    if offset in _TIMESTAMP_SEPARATOR_OFFSETS:
+        return character in _TIMESTAMP_SEPARATOR_CHARACTERS
+    return character in _TIMESTAMP_DIGITS
+
+
+def _require_timestamp_shape(value: str, field: FieldSpec) -> str:
+    """Require a run-clock stamp to be either unwritten or a well-formed timestamp.
+
+    Purpose
+    -------
+    Validate the one field of this record whose value a parity comparison is allowed to blank,
+    BEFORE it is published, so that a corrupt stamp is reported rather than carried into a load
+    and then blanked out of the very comparison that would have caught it.
+
+    Assumptions: an unwritten stamp is a LEGITIMATE value and not a decode failure. COBOL leaves
+    a stamp it has not written in the state the record was initialised to, and both states occur
+    in this corpus: all three hundred records of the shipped extract carry a blank
+    ``DALYTRAN-PROC-TS`` because the posting run is what writes it, and the committed reject
+    goldens carry exactly the same blank span. The reference harness records the same assumption
+    at the same field. Treating either uniform form as corrupt would refuse records the baseline
+    considers valid -- in this dataset's case, every one of them.
+
+    Trade-offs: a stamp that is NEITHER unwritten NOR well-formed is refused rather than accepted
+    or quietly blanked. Blanking by position would paper over exactly two faults a financial
+    pipeline must surface: a record whose bytes are corrupt, and a reader whose offsets have
+    moved -- and a moved offset still yields plausible characters, so nothing else would report
+    it. The cost accepted is that a genuinely new timestamp dialect fails loudly here instead of
+    passing through, which is the cheaper of the two failures because it names the field.
+
+    Trade-offs: a span holding a MIXTURE of the two unwritten forms falls through to the same
+    refusal, deliberately. Only a uniform span denotes a stamp nobody has written; a mixture is
+    one partly written or partly overwritten, and no writer in this corpus produces one. The
+    package's timestamp authority refuses that case for the same reason, so accepting it here
+    would make the reader and that codec disagree about what an unwritten stamp is.
+
+    Parameters
+    ----------
+    value : str
+        The decoded characters of the stamp, at the field's full declared width.
+    field : FieldSpec
+        The descriptor for the stamp, supplying its declared width for the check and its geometry
+        for the diagnostic. Nothing about the field is taken from anywhere else.
+
+    Returns
+    -------
+    str
+        ``value`` unchanged. Nothing is normalised, blanked or reformatted here: the mark on the
+        descriptor says which field a COMPARISON may blank, and producing that rendering belongs
+        to the comparison, because a reader that blanked on the way through would leave the parity
+        check unable to show what actually differed.
+
+    Raises
+    ------
+    LayoutError
+        If the value is not the field's declared width, or is neither uniformly unwritten nor a
+        well-formed timestamp in either dialect.
+    """
+    if len(value) == field.length:
+        if _is_uniformly(value, _BLANK) or _is_uniformly(value, _LOW_VALUE):
+            return value
+        if all(_is_timestamp_position(offset, character) for offset, character in enumerate(value)):
+            return value
+
+    # WHY : Trade-offs: the refusal names the field's GEOMETRY and the declared width it failed
+    #   against, and quotes NO part of the value -- not the offending character and not its
+    #   position. `LayoutError` is chosen over the two nearer alternatives for reasons that are
+    #   not stylistic: a record-length error would misdescribe a record of exactly the right width
+    #   whose CONTENT is wrong, and the display-numeric codec's error belongs to a numeric regime
+    #   this character field does not declare, so borrowing it would send a reader looking in the
+    #   wrong codec. It is a `ValueError` either way, which is what the reference harness raises
+    #   for this same fault, so a caller guarding that base type still catches it.
+    raise LayoutError(
+        f"field {field.describe()} of record {DALYTRAN_LAYOUT.name} holds neither a well-formed"
+        f" {field.length}-character timestamp nor a uniformly unwritten span, so either the stamp"
+        " is corrupt or the field offsets have moved; it is refused rather than accepted or"
+        " blanked, because blanking it would remove the evidence from the comparison that would"
+        " otherwise have reported it"
+    )
 
 
 def _field_containing(offset: int) -> FieldSpec | None:
@@ -304,7 +560,8 @@ def _decode_text_field_value(record: str, field: FieldSpec) -> str | Decimal:
     ------
     LayoutError
         If the field declares a storage regime that cannot occur in a character record, which is
-        any computational or mixed-regime area.
+        any computational or mixed-regime area, or if a run-clock stamp holds neither an unwritten
+        span nor a well-formed timestamp.
     ZonedSpanWidthError
         If an unsigned display field's declared span is not available, or the descriptor's display
         geometry is internally inconsistent. Raised by the display codec.
@@ -314,7 +571,15 @@ def _decode_text_field_value(record: str, field: FieldSpec) -> str | Decimal:
         display codec.
     """
     if field.kind is Kind.TEXT:
-        return record[field.start : field.end]
+        characters = record[field.start : field.end]
+        # WHY : Assumptions: the stamp check is driven by the descriptor's `normalize_ts` mark, so
+        #   the ORIGINATING stamp -- which the descriptor does not mark -- passes through as
+        #   ordinary business data while the RUN-CLOCK one is validated. Naming a field here
+        #   instead would restate a fact the descriptor already carries, and the two would then be
+        #   free to disagree with the checksum pass, which reads the same mark.
+        if field.normalize_ts:
+            return _require_timestamp_shape(characters, field)
+        return characters
 
     if field.kind is Kind.UINT:
         # WHY : Trade-offs: the decimal this returns is DISCARDED and the characters are returned
@@ -417,6 +682,60 @@ def _project_decoded_fields(
     return projected
 
 
+def _require_validated_timestamps(values: DecodedDailyTransaction) -> DecodedDailyTransaction:
+    """Apply the run-clock stamp policy to an already projected record.
+
+    Purpose
+    -------
+    Give the byte path the same stamp validation the character path applies field by field, so a
+    corrupt processing timestamp is refused whichever corpus the record arrived in.
+
+    Parameters
+    ----------
+    values : DecodedDailyTransaction
+        One projected record, keyed by field name, as :func:`_project_decoded_fields` returns it.
+        It is a freshly built mapping, so the marked field is rewritten in place rather than the
+        whole record copied.
+
+    Returns
+    -------
+    DecodedDailyTransaction
+        The same mapping, with every run-clock stamp proven to be either unwritten or well formed.
+        No value is altered: the policy validates and returns, it does not normalise.
+
+    Raises
+    ------
+    LayoutError
+        If a marked stamp decoded to a non-character value, or holds neither an unwritten span nor
+        a well-formed timestamp.
+    """
+    # WHY : Alternatives Considered: this is a separate pass over the MARKED fields rather than a
+    #   branch inside the projection loop, and it iterates the published mark rather than every
+    #   field. The projection has one job -- drop the pad and refuse an unpublishable value -- and
+    #   a second condition inside it would run on all thirteen fields to reach the one that needs
+    #   it. Both paths still call ONE policy function, which is what makes it impossible for the
+    #   two encodings to enforce different rules; splitting the POLICY rather than the call site
+    #   is the drift this module exists to avoid.
+    for name in NORMALIZED_TIMESTAMP_FIELD_NAMES:
+        field = DALYTRAN_LAYOUT.field(name)
+        value = values[name]
+
+        # WHY : Trade-offs: a marked field that did not decode to characters is REFUSED rather
+        #   than skipped. A skip would be justified by this record declaring its stamps as
+        #   character data today, which it does -- but the moment a descriptor edit made that
+        #   false, a skip would silently stop validating the one field a comparison is allowed to
+        #   blank, and an unvalidated stamp is exactly what the blanking would then hide. The
+        #   package's timestamp codec refuses a non-character stamp for the same reason.
+        if not isinstance(value, str):
+            raise LayoutError(
+                f"field {field.describe()} of record {DALYTRAN_LAYOUT.name} is marked as a"
+                " run-clock stamp but decoded to a value that is not characters, so its"
+                " descriptor no longer declares the character regime a timestamp is written in"
+            )
+        values[name] = _require_timestamp_shape(value, field)
+    return values
+
+
 def record_key(record: str) -> str:
     """Return the primary key of one character record, sliced by the descriptor.
 
@@ -488,7 +807,8 @@ def decode_ascii_daily_transaction(
         If the record is not the declared width, or holds a character outside the single-byte
         range.
     LayoutError
-        If a declared field's storage regime cannot be decoded from a character record.
+        If a declared field's storage regime cannot be decoded from a character record, or if a
+        run-clock stamp holds neither an unwritten span nor a well-formed timestamp.
     ZonedSpanWidthError
         If an unsigned display field's declared span is not available, or the descriptor's display
         geometry is internally inconsistent. Raised by the display codec.
@@ -545,7 +865,8 @@ def iter_ascii_daily_transactions(
     ------
     LayoutError
         If the source is a byte object, is neither text nor iterable, or produces an element that
-        is not a line, or if a field declares a regime a character record cannot hold.
+        is not a line, or if a field declares a regime a character record cannot hold, or if a
+        run-clock stamp holds neither an unwritten span nor a well-formed timestamp.
     RecordLengthError
         If a line is longer than the declared record width, or a record holds a character outside
         the single-byte range.
@@ -601,7 +922,8 @@ def read_ascii_daily_transactions(path: pathlib.Path) -> Iterator[DecodedDailyTr
         If the path cannot be opened or read.
     LayoutError
         If the file produces an element that is not a line, or a field declares a regime a
-        character record cannot hold.
+        character record cannot hold, or a run-clock stamp holds neither an unwritten span nor a
+        well-formed timestamp.
     RecordLengthError
         If a line is longer than the declared record width, or a record holds a character outside
         the single-byte range.
@@ -671,7 +993,8 @@ def decode_ebcdic_daily_transaction(
         bytes.
     LayoutError
         If a published field decoded to raw bytes, which means the descriptor has acquired a
-        computational or mixed-regime area.
+        computational or mixed-regime area, or if a run-clock stamp holds neither an unwritten span
+        nor a well-formed timestamp.
     ZonedSpanWidthError
         If an unsigned display field's declared span is not available, or the descriptor's display
         geometry is internally inconsistent. Raised by the display codec.
@@ -686,7 +1009,17 @@ def decode_ebcdic_daily_transaction(
     #   low-value padding is ever handed to a character decoder. Decoding a whole record through a
     #   code page is the single most likely mistake on this path and the most damaging: it
     #   succeeds, preserves the declared width, and yields a record that looks almost right.
-    return _project_decoded_fields(decode_record(record, DALYTRAN_LAYOUT))
+    # WHY : Alternatives Considered: the record decoder is called rather than the codec's
+    #   timestamp-aware entry point, which reports an unwritten stamp as an ABSENCE. That absence
+    #   is the right answer for a caller mapping one stamp onto a nullable column, and the wrong
+    #   one here: it has no counterpart on the character path, so the two encodings would publish
+    #   different values for the same bytes and the row-for-row comparison between the corpora --
+    #   the check that proves this reader decodes both alike -- would fail on all three hundred
+    #   records. The stamp is therefore published as its characters on both paths and validated by
+    #   one shared policy, and that codec remains the entry point for a caller that wants an
+    #   absence reported as one.
+    decoded = decode_record(record, DALYTRAN_LAYOUT)
+    return _require_validated_timestamps(_project_decoded_fields(decoded))
 
 
 def iter_ebcdic_daily_transactions(
@@ -724,7 +1057,8 @@ def iter_ebcdic_daily_transactions(
         If a span does not decode to exactly one character per byte.
     LayoutError
         If the source is neither a byte image nor readable nor iterable, produces a piece that is
-        not a byte object, or a published field decoded to raw bytes.
+        not a byte object, or a published field decoded to raw bytes, or a run-clock stamp holds
+        neither an unwritten span nor a well-formed timestamp.
     ZonedSpanWidthError
         If an unsigned display field's declared span is not available, or the descriptor's display
         geometry is internally inconsistent. Raised by the display codec.
@@ -777,7 +1111,8 @@ def read_ebcdic_daily_transactions(path: pathlib.Path) -> Iterator[DecodedDailyT
     EbcdicFieldDecodeError
         If a span does not decode to exactly one character per byte.
     LayoutError
-        If a published field decoded to raw bytes.
+        If a published field decoded to raw bytes, or a run-clock stamp holds neither an unwritten
+        span nor a well-formed timestamp.
     ZonedSpanWidthError
         If an unsigned display field's declared span is not available, or the descriptor's display
         geometry is internally inconsistent. Raised by the display codec.

@@ -64,27 +64,6 @@ spring:
     #       defaults to `dev`, so a task started on this profile with no label set
     #       still reads the subtree belonging to it rather than another
     #       environment's.
-    # WHY : Trade-offs: the shared defaults document is named again as the first
-    #       entry rather than being left to the base document alone. It costs one
-    #       idempotent re-import and it removes any question of whether the shared
-    #       console pattern -- which is what carries the correlation identifier on
-    #       every line -- survives a profile document that declares an import of its
-    #       own, and it removes it in production, the environment where a request
-    #       that cannot be traced across two services costs the most to investigate.
-    # WHY : Assumptions: the import is `optional:`, matching the dev overlay, and the
-    #       reason is the SUBTREE rather than the classpath. The sibling pom.xml
-    #       declares io.awspring.cloud:spring-cloud-aws-starter-parameter-store, so a
-    #       resolver claims this prefix and holds the SSM client it needs; what
-    #       `optional:` covers is a deployment that writes no parameter under the
-    #       path at all, because every value this overlay would supply also arrives
-    #       as an environment variable the task definition sets. Without the marker,
-    #       such a deployment would abort on the empty location rather than start.
-    # WHY : Refactoring Rationale: this note previously stated that the sibling POM
-    #       declares no parameter-store starter. It does declare one, and while that
-    #       sentence stood, this overlay, the dev overlay and the POM each described
-    #       a different mechanism -- so the correction is not cosmetic: the dev
-    #       overlay had declined this import ON that premise, and both overlays now
-    #       take the one path the POM makes resolvable.
     # WHY : Refactoring Rationale: the Parameter Store location this overlay declared has been
     #       withdrawn. The reasoning, measured on this tree, is recorded in full below.
     # WHY : Refactoring Rationale: this overlay carried

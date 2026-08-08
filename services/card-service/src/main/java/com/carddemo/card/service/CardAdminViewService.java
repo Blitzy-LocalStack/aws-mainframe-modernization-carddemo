@@ -83,8 +83,8 @@ public class CardAdminViewService {
      * @return the card's core state plus its full sixteen-digit account number, never {@code null}
      * @throws com.carddemo.common.error.ClientInputException if the selector is not one this service
      *     issued or can no longer be opened
-     * @throws org.springframework.web.server.ResponseStatusException with a not-found status if the
-     *     selector opened cleanly but names no stored row
+     * @throws java.util.NoSuchElementException if the selector opened cleanly but names no stored
+     *     row, which the shared advice renders as HTTP 404
      * @throws NullPointerException if {@code selector} is {@code null}
      */
     @Transactional(readOnly = true)

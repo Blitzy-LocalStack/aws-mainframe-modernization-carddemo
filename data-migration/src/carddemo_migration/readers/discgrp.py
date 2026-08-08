@@ -20,17 +20,61 @@ What this module reads
 The record is ``DIS-GROUP-RECORD`` as declared in ``app/cpy/CVTRA02Y.cpy``, and its byte geometry is
 resolved exclusively through ``DISGROUP_LAYOUT`` in ``carddemo_migration.copybook.layouts``.
 The two shipped corpora are ``app/data/ASCII/discgrp.txt`` and
-``app/data/EBCDIC/AWS.M2.CARDDEMO.DISCGRP.PS``, fifty-one records each. Both are
-REFERENCE-only inputs, opened read-only.
+``app/data/EBCDIC/AWS.M2.CARDDEMO.DISCGRP.PS``. Both are REFERENCE-only inputs, opened
+read-only.
 
-Assumptions: this is the reference the interest calculation reads, so one property of
-the data matters more than any other and is worth stating where a loader will see it.
-The baseline falls back to the group spelled ``DEFAULT`` when an account's own group
-key is not found, so a load that dropped or renamed that row would make every
-fallback lookup miss and every interest run for an unmatched account produce nothing.
-This reader neither enforces nor injects that row -- it decodes what it is given, and
-seeding the row belongs to the reference-data migration -- but a verification pass
-reading this reader's output should assert its presence.
+Fifty-one records is correct, and it is not an off-by-one
+---------------------------------------------------------
+Assumptions: every other base master in this corpus seeds FIFTY rows, and this one seeds
+**fifty-one**. That is a property of the data, not a fence-post error in a reader or a test,
+and both shipped forms say so independently: the ASCII seed is 2601 bytes at 51 rows of 50
+data bytes plus one terminator each (``51 * 51``), and the EBCDIC dataset is 2550 bytes, which
+is ``2550 / 50 = 51`` with remainder zero. The extra row is the mandatory ``DEFAULT``
+disclosure group the interest calculation falls back to. It is spelled out here because the
+plausible-looking "fix" -- rounding the expectation down to fifty to match the siblings -- would
+drop precisely the fallback row and silently disable the default-rate path, and a load of fifty
+rows raises nothing at all.
+
+Alternatives Considered: filtering the ``DEFAULT`` rows out of this reader's output, or
+promoting them ahead of the others so a lookup finds them first, were both evaluated and
+rejected. The fallback is a business rule owned by the reference service and by the batch
+interest calculation -- ``CBACT04C`` reaches for that group's rate when an account's own group
+key misses, on VSAM status 23 -- and encoding it here as well would put one rule in two places
+and let the two drift apart, which is the failure this reader exists to avoid rather than
+introduce. So this module neither enforces, injects, filters nor reorders that row: it decodes
+all fifty-one uniformly and in file order, seeding belongs to the reference-data migration, and
+a verification pass reading this output is the right place to assert the row's presence.
+
+The two corpora are not identical, and this record's divergence decides money
+----------------------------------------------------------------------------
+Assumptions: the ASCII and EBCDIC twins of this dataset agree field for field on fifty of the
+fifty-one records and disagree on exactly ONE field value, and the difference is a property of
+the shipped extracts rather than of this reader. ``data-migration/README.md`` records it in its
+divergence table: at record 34 -- the ``DEFAULT`` group, transaction type ``07``, category
+``0001`` -- ``DIS-INT-RATE`` holds ``00150{`` in the EBCDIC form and ``00000{`` in the ASCII
+one, so this reader faithfully decodes **15.00** from one corpus and **0.00** from the other.
+A reader who expected the two to match exactly would otherwise report this module as broken.
+
+Trade-offs: of the two twin divergences in the whole corpus this is the one that changes money,
+and it is worth stating in the module that owns the record rather than only in a README. Because
+record 34 is the fallback row, an account on the ``DEFAULT`` path accrues 15.00% if the EBCDIC
+extract was loaded and NOTHING AT ALL if the ASCII one was -- on identical inputs, with no error
+raised either way. The sibling account master's divergence, by contrast, is a postal code no
+calculation reads.
+
+**EBCDIC is authoritative wherever both forms exist**, and what settles it is the baseline's own
+load job rather than a preference: ``app/jcl/DISCGRP.jcl`` defines the VSAM cluster and REPROs
+from ``DSN=AWS.M2.CARDDEMO.DISCGRP.PS`` -- the EBCDIC extract -- and no JCL in the repository
+loads the ``.txt`` form at all. So 15.00 is the value the reference system itself puts into the
+file ``CBACT04C`` reads. The ASCII twins are convenience conversions, which is independently
+visible from the conversion artefacts elsewhere in the same tree: one has lost its trailing pad
+and three have acquired carriage returns. Alternatives Considered: reconciling the two by editing
+one file is forbidden outright, because ``app/**`` is REFERENCE-only -- the divergence is
+therefore resolved by the CHOICE OF SOURCE and never by changing a byte of either extract, and it
+is registered as ``D-SEED-ENCODING-AUTHORITY`` in
+``docs/architecture/cobol-to-service-traceability.md``. Neither entry point here privileges an
+encoding on the caller's behalf; selecting the authoritative corpus is the caller's decision, and
+this section is what makes it an informed one.
 
 Decoded shape
 -------------
@@ -70,13 +114,17 @@ Design decisions (WHY)
 ----------------------
 Assumptions:
     **Every offset, length, storage regime and record length is imported, never declared.**
-    This module states no byte position of its own, and in particular states no key width: the
-    16-byte key is read from the descriptor's own ``key_offset`` and ``key_length``. That is
-    the Python analogue of compiling every COBOL program against a single ``cobc -I app/cpy``
-    include path. The consequence of breaking it is specific and undetectable -- a re-declared
-    offset lets this reader and a sibling reading the same bytes drift apart, and a record read
-    one byte out of alignment still decodes to plausible characters, so nothing raises and no
-    test fails.
+    This module states no byte position of its own, and in particular states no key width and
+    no digit count: the composite key is read from the descriptor's own ``key_offset`` and
+    ``key_length``, and the interest rate's scale from its own ``int_digits`` and
+    ``dec_digits``. Writing either figure here would be a SECOND declaration of it, which is
+    the thing this rule exists to prevent rather than a harmless convenience. That is the
+    Python analogue of compiling every COBOL program against a single ``cobc -I app/cpy``
+    include path, and the reference suite's own guide states the same rule for its COBOL unit
+    tests: never duplicate a layout, keep it single-sourced from ``app/cpy/``. The consequence
+    of breaking it is specific and undetectable -- a re-declared offset lets this reader and a
+    sibling reading the same bytes drift apart, and a record read one byte out of alignment
+    still decodes to plausible characters, so nothing raises and no test fails.
 Trade-offs:
     **Records are streamed, never materialised.** Both entry points are generators, so memory is
     constant in the record count. The accepted cost is a single forward pass; what it buys is
@@ -146,9 +194,11 @@ DecodedDisclosureGroup = dict[str, str | Decimal]
 # WHY : Assumptions: the trailing pad is identified by NAME and not by position, and the
 #   convention was measured rather than assumed: across all fourteen registered layouts every
 #   record declares exactly one pad, named either `FILLER` or, where the copybook qualified it,
-#   with that word as its final hyphenated component -- which is exactly this record's case for
-#   the security file and is why a positional rule would have had to special-case it. Testing the
-#   name keeps this module free of any byte position of its own.
+#   with that word as its final hyphenated component. THIS record declares the unqualified form
+#   -- `05 FILLER PIC X(28)` at line 10 of the copybook -- so the suffix arm below is carried for
+#   the sibling records that qualify it rather than for this one, and it is kept instead of
+#   trimmed so every reader applies one identical pad rule. Testing the name keeps this module
+#   free of any byte position of its own, which a positional rule would reintroduce.
 _PAD_FIELD_NAME: Final[str] = "FILLER"
 _PAD_NAME_SUFFIX: Final[str] = f"-{_PAD_FIELD_NAME}"
 
@@ -341,16 +391,32 @@ def _decode_text_field_value(record: str, field: FieldSpec) -> str | Decimal:
         return record[field.start : field.end]
 
     if field.kind is Kind.ZONED:
+        # WHY : Assumptions: the digit counts come from THIS DESCRIPTOR and are never inferred by
+        #   analogy with a sibling reader, and this record is the one place in the subpackage where
+        #   that distinction bites. `DIS-INT-RATE` is `PIC S9(04)V99`, the only four-integer-digit
+        #   zoned field in the corpus, so it occupies SIX bytes -- where every other signed display
+        #   field is `S9(09)V99` at eleven or `S9(10)V99` at twelve. Reading it with a sibling's
+        #   width would slice six bytes as eleven, run past the field into the trailing pad and
+        #   shift every following offset; the layouts module makes the same point at the
+        #   declaration, noting that assuming twelve overruns this 50-byte record. What makes the
+        #   mistake dangerous rather than obvious is that the rate is a SMALL number in a field of
+        #   leading zeroes, so a misaligned read still yields digits and still produces a plausible
+        #   percentage -- nothing raises, and the wrong rate reaches the interest formula.
         # WHY : Alternatives Considered: the FIELD-oriented entry point is called rather than the
         #   span-oriented one, which would have meant slicing here and passing the digit counts and
-        #   the sign flag as three separate arguments. The field-oriented form derives all of them
-        #   from this descriptor and slices by it too, so this module restates no part of the
-        #   geometry. Passing the descriptor also lets that codec name the field in its own
-        #   diagnostics and honour its sensitivity flag.
+        #   the sign flag as three separate arguments -- that is, restating in this module exactly
+        #   the four-and-two the paragraph above insists must come from the descriptor. The
+        #   field-oriented form derives all of them from this descriptor and slices by it too, so
+        #   this module restates no part of the geometry. Passing the descriptor also lets that
+        #   codec name the field in its own diagnostics and honour its sensitivity flag.
         # WHY : Assumptions: the result is an exact decimal at the scale the picture clause
         #   declares and is never converted to a binary floating-point type. A binary float cannot
-        #   represent ten cents exactly, so a total accumulated in one drifts from the total the
-        #   baseline computed, by an amount that grows with the row count.
+        #   represent an exact hundredth, so a total accumulated in one drifts from the total the
+        #   baseline computed, by an amount that grows with the row count. This is the Python leg
+        #   of the migration's fixed-point rule, and it is load-bearing for this field in
+        #   particular: the rate feeds the interest formula whose result the golden masters compare
+        #   to the cent, and `data-migration/sql/verify/money_totals.sql` aggregates the loaded
+        #   rate column, so an inexact decode surfaces as a parity failure rather than as a crash.
         return decode_zoned_field(record, field)
 
     # WHY : Assumptions: every regime this record declares is named explicitly above and anything
@@ -575,12 +641,24 @@ def iter_ascii_disclosure_groups(
     #   here is exactly the drift this dependency edge exists to prevent, and it would be
     #   invisible: two readers stripping terminators slightly differently both return well-formed
     #   records.
+    # WHY : Assumptions: the AT-MOST-ONE-terminator-per-ROW rule matters even though this
+    #   particular seed cannot exercise it. `discgrp.txt` is uniformly bare-newline -- measured at
+    #   zero carriage returns across all fifty-one rows -- but its siblings are not: `tcatbal.txt`
+    #   and `trantype.txt` carry a carriage return on every line EXCEPT a final bare-newline one.
+    #   A whole-file newline mode, or a strip applied per file rather than per row, mis-handles
+    #   precisely that last row, and the delegated per-row rule is what makes every reader in the
+    #   package immune to it rather than only the ones whose corpus happens to be uniform.
     # WHY : Trade-offs: that iterator's tolerance for a SHORT line -- right-padding it
     #   with blanks -- is inherited deliberately. Every row of this dataset's seed is
     #   already full width, so the tolerance never engages here, and overriding it would
     #   fork the contract for one reader.
     records = iter_ascii_text_records(source, DISGROUP_LAYOUT.reclen)
 
+    # WHY : Trade-offs: records are YIELDED one at a time rather than collected, so memory is
+    #   constant in the record count. The cost is a single forward pass -- a caller wanting a
+    #   second reading must re-open the source -- and what it buys is that this reader behaves
+    #   identically on the committed seed and on a production extract many orders larger, so the
+    #   one proven against the seed is the one that runs.
     for number, record in enumerate(records, start=1):
         yield decode_ascii_disclosure_group(record, number=number)
 
@@ -749,12 +827,19 @@ def iter_ebcdic_disclosure_groups(
     #   data -- a low-order digit, a packed nibble pair or a pad byte -- and splitting on it would
     #   produce pieces of wildly differing lengths, most cut through the middle of a field. The
     #   correctness test for this dataset is that its size divides by the declared record length
-    #   with no remainder, which the delegated iterator checks before it yields the first record.
+    #   with no remainder, which the delegated iterator checks before it yields the first record;
+    #   for the committed extract that division is 2550 over 50, giving 51 and remainder zero, so
+    #   it independently corroborates the fifty-one-row count the ASCII seed's byte size implies.
     # WHY : Assumptions: the text form's tolerances must never reach here. Right-padding a short
     #   piece or stripping a trailing byte would turn a genuine length failure into a plausible
     #   record, which is why this path reaches a different entry point of the layouts module and
     #   shares no code with the text one.
     for record in iter_ebcdic_records(source, DISGROUP_LAYOUT):
+        # WHY : Trade-offs: records are yielded one at a time for the same reason the text path
+        #   streams -- constant memory in the record count, at the cost of one forward pass -- so a
+        #   caller can compare the two corpora record by record, which is what surfacing this
+        #   record's one documented rate divergence requires, without either side holding a dataset
+        #   in memory.
         yield decode_ebcdic_disclosure_group(record)
 
 
@@ -796,6 +881,12 @@ def read_ebcdic_disclosure_groups(path: pathlib.Path) -> Iterator[DecodedDisclos
         or a low-order byte that is not a valid sign overpunch in a signed one. Raised by the
         display codec.
     """
+    # WHY : Assumptions: the caller supplies an EXPLICIT file here too, and this is the path where
+    #   the hazard actually lives: `app/data/EBCDIC/` holds a zero-byte `.gitkeep` alongside the
+    #   real extracts, so a directory glob would sweep it in. A zero-byte file is legitimately a
+    #   dataset with NO records rather than an error, so it would not even fail loudly -- it would
+    #   contribute an empty result and leave the reference table short by however many rows the
+    #   real dataset holds, which for this record means losing the DEFAULT fallback group.
     # WHY : Alternatives Considered: the path is handed to the codec rather than opened here and
     #   passed as a stream. The codec validates the file size against the declared record length
     #   BEFORE yielding a first record, so a truncated dataset fails up front instead of part way

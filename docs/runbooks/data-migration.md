@@ -227,6 +227,73 @@ psql -v ON_ERROR_STOP=1 -f data-migration/sql/verify/row_counts.sql
 psql -v ON_ERROR_STOP=1 -f data-migration/sql/verify/money_totals.sql
 ```
 
+## Load Source Records
+
+Each invocation loads **one** dataset into the one schema that owns it, as a
+single committed unit of work. `--dataset` is the record-layout identifier
+`list-datasets` reports; `--encoding` is required and is never inferred.
+
+```bash
+# WHAT: load the five records this package can load, smallest reference data first.
+# WHY : Assumptions: the reference tables are loaded before the account tables
+#       because `reference.transaction_categories` carries a foreign key to
+#       `reference.transaction_types` with ON DELETE RESTRICT, and
+#       `account.card_xref` is what every later lookup joins through. Loading in
+#       this order means a referential failure names the row that is missing
+#       rather than the constraint that noticed.
+# WHY : Trade-offs: `--encoding ascii` is used for these five because the ASCII
+#       tree is the authoritative form for them; the EBCDIC twin is loadable by
+#       naming the other path and encoding, which is why the flag is required
+#       rather than defaulted. A sniffed encoding would read an all-ASCII EBCDIC
+#       extract as text and decode plausible wrong values.
+python -m carddemo_migration.cli load-dataset \
+  --dataset TRANTYPE --source app/data/ASCII/trantype.txt --encoding ascii
+python -m carddemo_migration.cli load-dataset \
+  --dataset TRANCAT  --source app/data/ASCII/trancatg.txt --encoding ascii
+python -m carddemo_migration.cli load-dataset \
+  --dataset DISGROUP --source app/data/ASCII/discgrp.txt  --encoding ascii
+python -m carddemo_migration.cli load-dataset \
+  --dataset XREF     --source app/data/ASCII/cardxref.txt --encoding ascii
+python -m carddemo_migration.cli load-dataset \
+  --dataset ACCOUNT  --source app/data/ASCII/acctdata.txt --encoding ascii
+```
+
+## Run All Three Verification Passes
+
+```bash
+# WHAT: run every pass for every loaded dataset. All three are mandatory.
+# WHY : Assumptions: the three catch different defects and none subsumes another.
+#       Row counts catch a load that stopped early or ran twice; the checksum
+#       catches a corrupted field where the counts agree; money parity catches a
+#       sign overpunch or a misplaced decimal point where both the counts and the
+#       field bytes agree. A load reported as verified on fewer than three is not
+#       verified.
+# WHY : Assumptions: a non-zero exit is the gate. Each pass exits 8 on a
+#       difference and prints the comparison line, so `set -e` stops at the first
+#       failing dataset with the evidence on standard output.
+set -e
+for pair in \
+  "TRANTYPE app/data/ASCII/trantype.txt" \
+  "TRANCAT  app/data/ASCII/trancatg.txt" \
+  "DISGROUP app/data/ASCII/discgrp.txt" \
+  "XREF     app/data/ASCII/cardxref.txt" \
+  "ACCOUNT  app/data/ASCII/acctdata.txt" ; do
+  set -- $pair
+  python -m carddemo_migration.cli verify-row-counts   --dataset "$1" --source "$2" --encoding ascii
+  python -m carddemo_migration.cli verify-checksum     --dataset "$1" --source "$2" --encoding ascii
+  python -m carddemo_migration.cli verify-money-parity --dataset "$1" --source "$2" --encoding ascii
+done
+```
+
+```bash
+# WHAT: the two whole-schema queries, run once after every dataset is loaded.
+# WHY : Assumptions: these cover tables no single dataset load touches -- the
+#       ledger tables the batch jobs populate, and `auth.users` -- so they are the
+#       only check that the database as a whole is in the state a cutover assumes.
+psql -v ON_ERROR_STOP=1 -f data-migration/sql/verify/row_counts.sql
+psql -v ON_ERROR_STOP=1 -f data-migration/sql/verify/money_totals.sql
+```
+
 ## Cutover Gate
 
 Do not switch application traffic based only on schema success. A production

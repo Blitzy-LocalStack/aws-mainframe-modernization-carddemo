@@ -50,11 +50,28 @@ All fourteen are **emitted** in the decoded mapping, because the customer table 
 them, and all fourteen are **redacted** in every diagnostic this module produces.
 Diagnostics never echo record content of any kind, sensitive or otherwise.
 
-Assumptions: nothing is SUPPRESSED here, unlike the card and security readers. Every
-field of this record has a target column, so a reader that withheld one from the
-decoded mapping would make the load incomplete rather than safer -- masking at the
-diagnostic boundary is the correct control, and encryption at rest for the national
-and government identifiers belongs to the loader and the schema.
+Trade-offs: masking is scoped to DIAGNOSTICS and deliberately not to the return path,
+which is the whole of this module's exposure-control design and the one thing a reader
+must not mistake. A diagnostic has to show WHERE two records differ, and it can do that
+from a redaction that preserves each field's width; it does not need the values. A
+decoded record is the opposite case -- the ETL cannot load a column it was never given,
+and the customer table has a column for every field this record declares. The two
+obligations are therefore met at two different boundaries rather than traded against each
+other. What that concedes is that an operator reading a diagnostic cannot see a value and
+must go to the row to see one; what it buys is that this record's national identifier,
+government-issued identifier, date of birth and three name parts never reach a log,
+where a single echoed line would carry a complete identity and could not be un-logged.
+
+Alternatives Considered: withholding the sensitive fields from the decoded mapping
+outright -- the control ``carddemo_migration.readers.card`` applies to the card
+verification value -- was evaluated here and rejected. That reader can suppress, because
+nothing downstream may consume a verification value: it has no target column, so removing
+it costs the load nothing. These fields are not analogous. The national and
+government-issued identifiers have a legitimate downstream consumer in the encrypted
+target columns the schema declares for them, so suppressing them would not harden this
+reader, it would make the load impossible and silently incomplete. Masking at the
+diagnostic boundary is the narrower control that fits: it removes the disclosure without
+removing the data.
 
 Design decisions (WHY)
 ----------------------
@@ -327,6 +344,16 @@ def _decode_text_field_value(record: str, field: FieldSpec) -> str:
         #   as a by-product of having to decode a code page at all; performing it here keeps the
         #   two entry points enforcing ONE contract, so the same defective record cannot decode
         #   differently depending on which corpus it arrived in.
+        # WHY : Assumptions: this branch is the UNSIGNED display path and it is the one the credit
+        #   score arrives on, which matters because that field is the only numeric-looking quantity
+        #   in the record and is easy to mistake for currency. Its picture clause carries neither an
+        #   `S` nor a `V`, so it is neither signed nor scaled, and the target schema types it as a
+        #   bounded small integer rather than a money column. Routing it through the signed-display
+        #   money path instead would attach a two-place scale it never declared and re-present a
+        #   three-digit score as an amount -- a value that still looks plausible in a row and in a
+        #   report, which is exactly why the distinction is drawn at the decode site rather than
+        #   left to a downstream cast. No field of this record is money, so this module reaches the
+        #   money path nowhere at all.
         decode_zoned_field(record, field)
         return record[field.start : field.end]
 

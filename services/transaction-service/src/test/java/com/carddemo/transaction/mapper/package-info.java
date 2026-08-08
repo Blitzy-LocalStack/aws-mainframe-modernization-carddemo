@@ -105,10 +105,10 @@
  *   <li>{@code package-info.java} -- this charter. LANDED.</li>
  *   <li>{@code TransactionMapperTest} -- LANDED. Covers the mapper over the
  *       350-byte transaction record, whose length {@code app/cpy/CVTRA05Y.cpy}
- *       declares at its line 2, across 26 cases.</li>
+ *       declares at its line 2, across 23 cases.</li>
  *   <li>{@code BillPaymentMapperTest} -- LANDED. Covers the bill-payment
  *       conversions, the assembled acknowledgement text and the invariant
- *       members of the appended ledger row, across 19 cases.</li>
+ *       members of the appended ledger row, across 33 cases.</li>
  *   <li>{@code BillPaymentMappingTest} -- LANDED. Covers the conversion that
  *       reports a posted bill payment and the pay-in-full balance semantic it
  *       fixes, across 6 cases.</li>
@@ -125,6 +125,16 @@
  * exists to close, and would not have found the fourth file at all. The counts are
  * stated per member so that a future divergence is arithmetic rather than
  * impression.
+ *
+ * <p>Refactoring Rationale: a count above is a count of DECLARED cases -- methods
+ * annotated as a test or as a parameterised test -- and not of the cases the test
+ * engine reports having executed, which is the larger number a parameterised case
+ * expands into. The metric is named because leaving it implicit is what let two of
+ * these counts drift: a reader re-measuring against a run's reported total would
+ * read an accurate figure as too low, and the next reader counting methods would
+ * put it back. Both figures were re-measured against the directory when the
+ * bill-payment count moved from 19 to 33, the same measurement that resolved the
+ * transaction mapper's stated 26 to its declared 23.
  *
  * <p>Alternatives Considered: withholding this charter until every member of
  * that set exists, which would let the inventory be read as a plain listing and

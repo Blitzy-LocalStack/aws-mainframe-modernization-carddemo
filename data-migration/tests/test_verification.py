@@ -68,9 +68,16 @@ if TYPE_CHECKING:
 _SQL_ROOT = Path(__file__).resolve().parents[1] / "sql" / "verify"
 _SERVICES_ROOT = Path(__file__).resolve().parents[2] / "services"
 
-# Assumptions: the twelve tables the row-count query covers are stated literally so that a
+# Assumptions: the eleven tables the row-count query covers are stated literally so that a
 #   table dropping out of the query is a visible edit here. Reading them back out of the SQL
 #   would make the assertion true of any query, including one covering a single table.
+# WHY : Refactoring Rationale: ledger.transaction_rejects was removed from this tuple. The
+#   row-count pass compares each target table against the record count of the SEED DATASET it
+#   was loaded from, and that table has no seed dataset -- it is written by the posting job at
+#   run time. Counting it produced a row whose expected count could only ever be unknown, so
+#   the report carried a line that no operator could act on. The three us_* lookup tables are
+#   absent from this tuple for the same reason: they are seeded from the condition-name lists
+#   in app/cpy/CSLKPCDY.cpy rather than from any dataset under app/data.
 _COUNTED_TABLES = (
     ("account", "accounts"),
     ("account", "customers"),
@@ -79,7 +86,6 @@ _COUNTED_TABLES = (
     ("ledger", "transactions"),
     ("ledger", "daily_transactions"),
     ("ledger", "transaction_category_balances"),
-    ("ledger", "transaction_rejects"),
     ("reference", "transaction_types"),
     ("reference", "transaction_categories"),
     ("reference", "disclosure_groups"),
@@ -592,7 +598,7 @@ def test_compare_money_totals_reports_agreement(fake_aurora: FakeAuroraDatabase)
 
 @pytest.mark.parametrize(("schema", "table"), _COUNTED_TABLES)
 def test_the_row_count_query_counts_every_migrated_table(schema: str, table: str) -> None:
-    """Count each of the twelve migrated tables, with an exact aggregate and no estimate.
+    """Count each of the eleven seed-loaded tables, with an exact aggregate and no estimate.
 
     Parameters
     ----------
@@ -696,7 +702,7 @@ def test_the_money_totals_query_totals_every_money_column_and_no_other() -> None
 
 
 def test_both_verification_queries_stop_on_the_first_error() -> None:
-    """Set the psql error switch in both queries, so a failed branch cannot be scrolled past.
+    """Stop on the first error in both queries, each by the mechanism its own form allows.
 
     Returns
     -------
@@ -706,12 +712,27 @@ def test_both_verification_queries_stop_on_the_first_error() -> None:
     Raises
     ------
     AssertionError
-        If either file omits the switch.
+        If money_totals.sql omits the switch, or row_counts.sql is not pure SQL.
     """
-    for name in ("row_counts.sql", "money_totals.sql"):
-        sql = _executable_sql(name)
-        # WHY : without this switch psql reports the failing statement and carries on, so a
-        #   verification run against a schema missing one table prints an error among a screen
-        #   of successful counts and exits zero. An operator reading the tail of that output
-        #   would conclude the load verified.
-        assert "\\set ON_ERROR_STOP on" in sql, f"{name} does not stop on error"
+    # WHY : without an error-stop psql reports the failing statement and carries on, so a
+    #   verification run against a schema missing one table prints an error among a screen
+    #   of successful counts and exits zero. An operator reading the tail of that output
+    #   would conclude the load verified. That hazard is real for a file of MANY statements.
+    money = _executable_sql("money_totals.sql")
+    assert "\\set ON_ERROR_STOP on" in money, "money_totals.sql does not stop on error"
+
+    # WHY : Refactoring Rationale: row_counts.sql is asserted PURE rather than asserted to
+    #   carry the same switch, because it was rewritten as a SINGLE statement and the switch
+    #   is both redundant and harmful there. Redundant on two counts: there is no second
+    #   statement for the switch to skip, and docs/runbooks/data-migration.md already invokes
+    #   the file with -v ON_ERROR_STOP=1 on the command line. Harmful because a backslash
+    #   meta-command is psql-only syntax that a driver cursor rejects outright, so keeping it
+    #   would bar the file from the very harness it pairs with -- and pure SQL is the settled
+    #   convention for this directory, recorded at V0__schemas_and_roles.sql L130-L135.
+    counts = _executable_sql("row_counts.sql")
+    assert "\\" not in counts, "row_counts.sql holds a psql meta-command and is not pure SQL"
+    # WHY : one terminating semicolon is the property that makes a driver cursor return the
+    #   whole report. A cursor's execute() exposes only the LAST result set, so a second
+    #   statement here would silently discard the counts of every table but one while the
+    #   harness reported that it had verified the load.
+    assert counts.count(";") == 1, "row_counts.sql is not a single statement"

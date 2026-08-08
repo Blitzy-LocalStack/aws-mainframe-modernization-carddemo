@@ -1687,6 +1687,7 @@ public final class PendingAuthDetailMapper {
                 decodedFrom);
     }
 
+
     /**
      * Projects an entity onto the field map the shared codec encodes, supplying every declared field.
      *

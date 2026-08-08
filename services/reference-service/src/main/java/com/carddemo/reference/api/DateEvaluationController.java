@@ -59,7 +59,7 @@ public class DateEvaluationController {
             @RequestParam(name = PARAM_MASK, required = false) String mask) {
 
         DateConversionRequest request = new DateConversionRequest(date, mask);
-        return this.evaluator.evaluate(validated(request));
+        return this.evaluator.convert(validated(request));
     }
 
     /**

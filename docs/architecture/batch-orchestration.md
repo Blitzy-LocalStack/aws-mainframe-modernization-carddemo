@@ -208,7 +208,7 @@ describe a deployed state machine.
 | 7 | `CombineTransactions` | [`app/jcl/COMBTRAN.jcl`](../../app/jcl/COMBTRAN.jcl) L22–L48 — a DFSORT merge followed by a `REPRO` reload | Container task using SQL ordering |
 | 8 | `GenerateStatements` | [`app/jcl/CREASTMT.JCL`](../../app/jcl/CREASTMT.JCL) L22–L96 driving `CBSTM03A` with its called subprogram `CBSTM03B` | Container task writing plain-text and HTML statements to object storage |
 | 9 | `GenerateReports` | [`app/jcl/TRANREPT.jcl`](../../app/jcl/TRANREPT.jcl) L23–L80 driving `CBTRN03C`, **and** [`app/jcl/PRTCATBL.jcl`](../../app/jcl/PRTCATBL.jcl) L21–L63 | Container task writing the 133-column report to object storage |
-| 10 | `AnalyzeTables` | [`app/jcl/TRANIDX.jcl`](../../app/jcl/TRANIDX.jcl) L22–L54 — `DEFINE ALTERNATEINDEX`, `DEFINE PATH` and `BLDINDEX` | Function running `ANALYZE`; see [Index building is retired](#index-building-is-retired-and-the-index-is-not) |
+| 10 | `AnalyzeTables` | [`app/jcl/TRANIDX.jcl`](../../app/jcl/TRANIDX.jcl) L22–L54 — `DEFINE ALTERNATEINDEX`, `DEFINE PATH` and `BLDINDEX` | Function running `VACUUM ANALYZE`; see [Index building is retired](#index-building-is-retired-and-the-index-is-not) |
 | 11 | `ResumeOnlineWrites` | [`app/jcl/OPENFIL.jcl`](../../app/jcl/OPENFIL.jcl) L22–L30 — the matching `CEMT SET FIL(...) OPE` | Function clearing the read-only flag |
 
 ### Per-state resilience settings
@@ -925,15 +925,25 @@ and is specified in
 `DEFINE PATH` at L42 becomes nothing at all, because a relational index needs no
 separate object to make it readable.
 
-What survives as state 10 is **statistics maintenance** — `ANALYZE` — which is a
-different job with a different purpose: it refreshes the planner's statistics
-after a large batch of writes, and it would be required whether or not the baseline
-had ever had a `BLDINDEX` step. It is `ANALYZE` alone and deliberately **not** the
-usual `VACUUM ANALYZE` pairing: the state runs through the Aurora Data API, which
-wraps a statement in a transaction context, and PostgreSQL refuses `VACUUM` inside
-a transaction. `ANALYZE` on its own refreshes exactly the planner statistics this
-state is responsible for, so nothing the state exists to do is lost. The reason is
-recorded at its point of use in
+What survives as state 10 is **table maintenance** — `VACUUM ANALYZE` — which is a
+different job with a different purpose: it reclaims the dead tuples the chain's write
+states just produced and refreshes the planner's statistics, and it would be required
+whether or not the baseline had ever had a `BLDINDEX` step. `VACUUM ANALYZE` is what
+AAP §0.4.1.7 specifies for this state, and it is what the function issues.
+
+Refactoring Rationale: this paragraph previously claimed the state ran `ANALYZE`
+alone and deliberately **not** the usual pairing, on the ground that the Data API
+wraps a statement in a transaction context and PostgreSQL refuses `VACUUM` inside a
+transaction. That premise is false. `ExecuteStatement` documents that a call omitting
+`transactionId` is not part of a transaction and commits automatically, and the
+maintenance call passes no `transactionId` — only the bootstrap path opens one. The
+same wrong premise had been copied into two ADRs and a module README, so the reclaim
+half of the operation was being skipped in four places for one reason that did not
+hold. Trade-offs: the function still falls back to `ANALYZE` alone if Aurora
+specifically refuses the statement for being inside a transaction block, and logs a
+warning when it does; the guard is narrow, so any other failure fails the state. The
+fallback protects the statistics refresh — the thing this state is accountable for —
+without pretending the reclaim is impossible. It is recorded at its point of use in
 [`infra/lambda/database_admin.py`](../../infra/lambda/database_admin.py).
 Alternatives Considered: state 10 could have been
 dropped entirely on the grounds that the step it replaces is retired. That was

@@ -263,8 +263,8 @@ def _assert_decodes_and_re_encodes(
 def test_the_reference_account_balance_vector_decodes_to_its_documented_value() -> None:
     """Reproduce the first reference doctest vector, the account balance from the shipped seed.
 
-    Takes no parameters and returns no value; a differing value, scale or re-encoded span is
-    reported as an assertion failure.
+    :returns: nothing; a differing value, scale or re-encoded span is reported as an assertion
+        failure.
     """
     # WHY : Alternatives Considered: this span is transcribed from the module docstring of
     #   ``tests/helpers/record_codec.py``, which cites it as the ``CURR-BAL`` field of line 1
@@ -280,8 +280,8 @@ def test_the_reference_account_balance_vector_decodes_to_its_documented_value() 
 def test_the_reference_positive_transaction_amount_vector_carries_its_overpunch_digit() -> None:
     """Reproduce the second reference doctest vector, whose ``G`` overpunch is the digit seven.
 
-    Takes no parameters and returns no value; a differing value, scale or re-encoded span is
-    reported as an assertion failure.
+    :returns: nothing; a differing value, scale or re-encoded span is reported as an assertion
+        failure.
     """
     # WHY : Assumptions: an overpunch is the LOW-ORDER DIGIT carrying a sign and not a
     #   sign-only suffix, which is why ``0000005047G`` is 504.77 and never 50.47. Dropping the
@@ -296,8 +296,8 @@ def test_the_reference_positive_transaction_amount_vector_carries_its_overpunch_
 def test_the_reference_negative_transaction_amount_vector_differs_only_in_its_final_byte() -> None:
     """Reproduce the third reference doctest vector, the same magnitude signed negative by ``J``.
 
-    Takes no parameters and returns no value; a differing value, scale or re-encoded span is
-    reported as an assertion failure.
+    :returns: nothing; a differing value, scale or re-encoded span is reported as an assertion
+        failure.
     """
     # WHY : Assumptions: the reference pairs this span with the positive one deliberately.
     #   ``J`` is index 1 of the negative table where ``G`` is index 7 of the positive one, so
@@ -312,8 +312,7 @@ def test_the_reference_negative_transaction_amount_vector_differs_only_in_its_fi
 def test_the_reference_encode_vectors_reproduce_the_documented_spans() -> None:
     """Reproduce the fourth and fifth reference doctest vectors, both encode directions.
 
-    Takes no parameters and returns no value; a differing span is reported as an assertion
-    failure.
+    :returns: nothing; a differing span is reported as an assertion failure.
     """
     # WHY : Assumptions: the two encode vectors are asserted from a Decimal literal and not
     #   from a value the decoder just produced, because the reference docstring states them as
@@ -521,8 +520,8 @@ def test_the_two_timestamp_fields_hold_their_documented_live_content(
 def test_the_two_overpunch_tables_are_ten_distinct_characters_each() -> None:
     """Assert the structural shape both tables must have for a table lookup to be sound.
 
-    Takes no parameters and returns no value; a table of the wrong length, or one sharing a
-    character with the other, is reported as an assertion failure.
+    :returns: nothing; a table of the wrong length, or one sharing a character with the other, is
+        reported as an assertion failure.
     """
     # WHY : Alternatives Considered: the tables are asserted STRUCTURALLY as well as
     #   entry-by-entry, mirroring the reasoning ``zoned.py`` records for choosing two index
@@ -646,8 +645,8 @@ def test_the_negative_overpunch_table_carries_digits_zero_through_nine(
 def test_the_live_overpunch_union_is_exactly_five_of_the_twenty_bytes() -> None:
     """Pin the measured live union so a later reader cannot mistake it for the whole table.
 
-    Takes no parameters and returns no value; a union that has drifted from the measurement is
-    reported as an assertion failure.
+    :returns: nothing; a union that has drifted from the measurement is reported as an assertion
+        failure.
     """
     # WHY : Assumptions: this figure is a MEASUREMENT of the corpus, taken by reading every
     #   signed span of ``app/data/ASCII/*.txt`` and ``tests/fixtures/**``, and it is asserted
@@ -663,8 +662,8 @@ def test_the_live_overpunch_union_is_exactly_five_of_the_twenty_bytes() -> None:
 def test_a_decoded_amount_keeps_its_declared_scale_rather_than_normalising() -> None:
     """Refuse to let a trailing-zero amount pass a scale assertion as a shorter equal value.
 
-    Takes no parameters and returns no value; a decoded value whose exponent is not the
-    declared scale is reported as an assertion failure.
+    :returns: nothing; a decoded value whose exponent is not the declared scale is reported as an
+        assertion failure.
     """
     # WHY : Assumptions: Decimal("193.00") and Decimal("193") COMPARE EQUAL, so an equality
     #   assertion alone cannot detect a codec that normalised away the declared scale. The two
@@ -708,10 +707,11 @@ def test_every_account_span_round_trips_byte_for_byte(span: str) -> None:
 def test_an_overpunched_negative_zero_re_encodes_as_a_positive_zero() -> None:
     """Document the one accepted non-byte-identical round trip on the ordinary decode pair.
 
-    A ``'}'``-overpunched zero decodes to numeric zero and re-encodes as ``'{'``, so this span
-    -- and only a span whose digits are all zeros -- does not reproduce itself. Takes no
-    parameters and returns no value; a preserved minus sign, or any other span failing to
-    reproduce itself, is reported as an assertion failure.
+    A ``'}'``-overpunched zero decodes to numeric zero and re-encodes as ``'{'``, so this span --
+    and only a span whose digits are all zeros -- does not reproduce itself.
+
+    :returns: nothing; a preserved minus sign, or any other span failing to reproduce itself, is
+        reported as an assertion failure.
     """
     # WHY : Refactoring Rationale: this comment asserted that ":class:`decimal.Decimal` has no
     #   negative zero", and that is FALSE -- measured, not argued: ``Decimal("-0.00")`` has
@@ -767,9 +767,10 @@ def test_an_overpunched_negative_zero_re_encodes_as_a_positive_zero() -> None:
 def test_the_encode_path_refuses_a_binary_floating_point_value() -> None:
     """Refuse a ``float`` outright on encode instead of coercing it, raising :class:`TypeError`.
 
-    Takes no parameters and returns no value; an accepted ``float`` is reported as an assertion
-    failure. The exception class verified is :class:`TypeError`, named here because
-    ``pytest.raises`` captures it inside a context manager where no linter can inspect it.
+    The exception class verified is :class:`TypeError`, named here because ``pytest.raises``
+    captures it inside a context manager where no linter can inspect it.
+
+    :returns: nothing; an accepted ``float`` is reported as an assertion failure.
     """
     # WHY : Alternatives Considered: coercion via ``Decimal(str(value))`` was available and was
     #   rejected. A binary float cannot represent ten cents exactly -- ``0.1`` is stored as a
@@ -795,8 +796,8 @@ def test_the_encode_path_refuses_a_binary_floating_point_value() -> None:
 def test_exact_values_are_accepted_from_every_admitted_type() -> None:
     """Accept :class:`~decimal.Decimal`, :class:`int` and :class:`str` as exact encode inputs.
 
-    Takes no parameters and returns no value; a rejected exact input, or one encoding to a
-    differing span, is reported as an assertion failure.
+    :returns: nothing; a rejected exact input, or one encoding to a differing span, is reported as
+        an assertion failure.
     """
     # WHY : Assumptions: the three admitted types are asserted together with float's refusal
     #   so the contract reads as a whole. Text is admitted because a decimal string is exact,
@@ -866,9 +867,9 @@ def test_an_overpunch_supplied_for_an_unsigned_field_is_refused(final_byte: str)
 def test_a_plain_trailing_digit_supplied_for_a_signed_field_is_refused() -> None:
     """Refuse a signed span ending in a plain digit, raising :class:`ZonedDecimalError`.
 
-    Takes no parameters and returns no value; an accepted plain digit is reported as an
-    assertion failure. The exception class verified is
-    :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
+    The exception class verified is :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
+
+    :returns: nothing; an accepted plain digit is reported as an assertion failure.
     """
     # WHY : Alternatives Considered: treating a plain trailing digit as implicitly positive was
     #   available and was rejected. In a field declared signed it is proof that the producer
@@ -1040,9 +1041,9 @@ def test_a_span_of_the_wrong_width_is_refused(span: str, reason: str) -> None:
 def test_a_non_digit_in_the_digit_body_is_refused() -> None:
     """Refuse a non-ASCII digit inside the body, raising :class:`ZonedDecimalError`.
 
-    Takes no parameters and returns no value; an accepted non-digit is reported as an assertion
-    failure. The exception class verified is
-    :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
+    The exception class verified is :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
+
+    :returns: nothing; an accepted non-digit is reported as an assertion failure.
     """
     # WHY : Assumptions: the body is validated against the ten ASCII digits specifically and
     #   not with ``str.isdigit``, which also accepts the decimal digits of other scripts. Such a
@@ -1082,9 +1083,9 @@ def test_an_unrecognised_final_byte_is_refused(final_byte: str) -> None:
 def test_an_encode_magnitude_wider_than_the_field_is_refused() -> None:
     """Refuse a value needing more digit positions than the display field declares.
 
-    Takes no parameters and returns no value; an accepted over-wide value is reported as an
-    assertion failure. The exception class verified is
-    :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
+    The exception class verified is :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
+
+    :returns: nothing; an accepted over-wide value is reported as an assertion failure.
     """
     # WHY : Assumptions: the alternative to refusing is truncating the high-order digits, which
     #   is the worst available outcome: it returns a field of exactly the declared width holding
@@ -1119,9 +1120,9 @@ def test_encoding_is_lossless_or_throwing_and_never_rounds(value: str) -> None:
 def test_a_negative_value_is_refused_by_an_unsigned_field_on_encode() -> None:
     """Refuse a negative value for an unsigned field, raising :class:`ZonedDecimalError`.
 
-    Takes no parameters and returns no value; an accepted negative value is reported as an
-    assertion failure. The exception class verified is
-    :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
+    The exception class verified is :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
+
+    :returns: nothing; an accepted negative value is reported as an assertion failure.
     """
     # WHY : Assumptions: an unsigned picture clause has nowhere to put a sign, so the only ways
     #   to accept a negative value are to emit its magnitude -- losing the sign entirely -- or
@@ -1134,8 +1135,9 @@ def test_a_negative_value_is_refused_by_an_unsigned_field_on_encode() -> None:
 def test_bytes_are_refused_at_the_display_codec_boundary() -> None:
     """Refuse raw bytes on the display path, raising :class:`TypeError`.
 
-    Takes no parameters and returns no value; accepted bytes are reported as an assertion
-    failure. The exception class verified is :class:`TypeError`.
+    The exception class verified is :class:`TypeError`.
+
+    :returns: nothing; accepted bytes are reported as an assertion failure.
     """
     # WHY : Assumptions: cp037 character conversion belongs exclusively to
     #   ``carddemo_migration.copybook.ebcdic_codec``, and refusing bytes here is what keeps it
@@ -1156,9 +1158,9 @@ def test_bytes_are_refused_at_the_display_codec_boundary() -> None:
 def test_a_non_display_field_is_refused_by_the_field_oriented_entry_point() -> None:
     """Refuse a text or computational field on the display path, raising :class:`ZonedDecimalError`.
 
-    Takes no parameters and returns no value; a decoded non-display field is reported as an
-    assertion failure. The exception class verified is
-    :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
+    The exception class verified is :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
+
+    :returns: nothing; a decoded non-display field is reported as an assertion failure.
     """
     # WHY : Assumptions: only ``ZONED`` and ``UINT`` are display regimes, so a mis-routed field
     #   must be refused before its bytes are read as digits. Both a character field and a packed
@@ -1182,9 +1184,9 @@ def test_a_non_display_field_is_refused_by_the_field_oriented_entry_point() -> N
 def test_a_record_ending_before_the_declared_field_is_refused() -> None:
     """Refuse a record too short to reach the field's end, raising :class:`ZonedSpanWidthError`.
 
-    Takes no parameters and returns no value; an accepted short record is reported as an
-    assertion failure. The exception class verified is
-    :class:`~carddemo_migration.copybook.zoned.ZonedSpanWidthError`.
+    The exception class verified is :class:`~carddemo_migration.copybook.zoned.ZonedSpanWidthError`.
+
+    :returns: nothing; an accepted short record is reported as an assertion failure.
     """
     # WHY : Assumptions: a short record is refused rather than padded, because padding would
     #   supply digits the producer never wrote and the resulting amount would be well formed.
@@ -1197,11 +1199,12 @@ def test_a_record_ending_before_the_declared_field_is_refused() -> None:
 def test_width_is_validated_before_the_digit_body_and_the_final_byte() -> None:
     """Assert width takes precedence when a span is short, malformed and badly signed at once.
 
-    Takes no parameters and returns no value; an exception of the content type rather than the
-    width type is reported as an assertion failure. The exception class verified is
-    :class:`~carddemo_migration.copybook.zoned.ZonedSpanWidthError`, which is the subtype
-    raised in preference to the more general
+    The exception class verified is :class:`~carddemo_migration.copybook.zoned.ZonedSpanWidthError`,
+    which is the subtype raised in preference to the more general
     :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
+
+    :returns: nothing; an exception of the content type rather than the width type is reported as an
+        assertion failure.
     """
     # WHY : Assumptions: the span below carries THREE simultaneous defects -- it is ten
     #   characters where eleven are declared, it holds the letter ``O`` in its digit body, and
@@ -1217,9 +1220,10 @@ def test_width_is_validated_before_the_digit_body_and_the_final_byte() -> None:
 def test_the_digit_body_is_validated_before_the_final_overpunch_byte() -> None:
     """Assert the body is reported before the final byte when both are malformed at declared width.
 
-    Takes no parameters and returns no value; a diagnostic naming the final byte rather than the
-    body is reported as an assertion failure. The exception class verified is
-    :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
+    The exception class verified is :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
+
+    :returns: nothing; a diagnostic naming the final byte rather than the body is reported as an
+        assertion failure.
     """
     # WHY : Assumptions: at the correct width the two remaining defects are ordered body first,
     #   which is asserted through the diagnostic rather than the type because both faults raise
@@ -1236,9 +1240,10 @@ def test_the_digit_body_is_validated_before_the_final_overpunch_byte() -> None:
 def test_the_final_byte_is_validated_before_the_signedness_contract() -> None:
     """Assert an unrecognised final byte is reported ahead of the signedness contract.
 
-    Takes no parameters and returns no value; a diagnostic naming signedness rather than the
-    unrecognised byte is reported as an assertion failure. The exception class verified is
-    :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
+    The exception class verified is :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
+
+    :returns: nothing; a diagnostic naming signedness rather than the unrecognised byte is reported
+        as an assertion failure.
     """
     # WHY : Assumptions: the span below is a well-formed body followed by punctuation, decoded
     #   against a SIGNED contract. Two checks could fire -- the byte is in neither table, and it
@@ -1253,9 +1258,10 @@ def test_the_final_byte_is_validated_before_the_signedness_contract() -> None:
 def test_a_sensitive_display_field_diagnostic_withholds_its_raw_bytes() -> None:
     """Withhold field content from a sensitive display field's diagnostic.
 
-    Takes no parameters and returns no value; a diagnostic echoing the sensitive span, or one
-    omitting the field's geometry, is reported as an assertion failure. The exception class
-    verified is :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
+    The exception class verified is :class:`~carddemo_migration.copybook.zoned.ZonedDecimalError`.
+
+    :returns: nothing; a diagnostic echoing the sensitive span, or one omitting the field's
+        geometry, is reported as an assertion failure.
     """
     # WHY : Trade-offs: a sensitive field's content is withheld COMPLETELY rather than masked to
     #   a last-four suffix the way a record diff renders it. A record diff needs stable width
@@ -1320,9 +1326,9 @@ def test_a_sensitive_display_field_diagnostic_withholds_its_raw_bytes() -> None:
 def test_a_descriptor_whose_width_contradicts_its_geometry_is_refused() -> None:
     """Refuse explicit digit counts that disagree with a descriptor's declared length.
 
-    Takes no parameters and returns no value; an accepted contradiction is reported as an
-    assertion failure. The exception class verified is
-    :class:`~carddemo_migration.copybook.zoned.ZonedSpanWidthError`.
+    The exception class verified is :class:`~carddemo_migration.copybook.zoned.ZonedSpanWidthError`.
+
+    :returns: nothing; an accepted contradiction is reported as an assertion failure.
     """
     # WHY : Assumptions: the descriptor and the explicit digit counts are two statements of one
     #   fact, so the codec cross-checks them instead of trusting whichever arrived last. This is
@@ -1391,8 +1397,7 @@ def test_the_packed_width_ladder_matches_the_declared_corpus(
 def test_a_twelve_digit_packed_money_field_is_seven_bytes_and_not_six() -> None:
     """Guard the twelve-digit rung against the defective six-byte figure for ``PIC S9(10)V99``.
 
-    Takes no parameters and returns no value; a six-byte result is reported as an assertion
-    failure.
+    :returns: nothing; a six-byte result is reported as an assertion failure.
     """
     # WHY : Assumptions: twelve digit positions plus one sign nibble is thirteen nibbles, and
     #   thirteen nibbles occupy the CEILING of thirteen halved, which is seven. The figure is
@@ -1456,8 +1461,8 @@ def test_the_binary_width_step_function_selects_a_halfword_word_or_doubleword(
 def test_the_two_binary_width_boundaries_are_where_the_layout_constants_say() -> None:
     """Tie both binary width transitions to the named layout constants rather than to literals.
 
-    Takes no parameters and returns no value; a boundary that has moved away from its constant
-    is reported as an assertion failure.
+    :returns: nothing; a boundary that has moved away from its constant is reported as an assertion
+        failure.
     """
     # WHY : Assumptions: the transitions are asserted against ``BINARY_HALFWORD_MAX_DIGITS`` and
     #   ``BINARY_FULLWORD_MAX_DIGITS`` so the boundary has one authority. Writing four and nine
@@ -1475,8 +1480,8 @@ def test_the_two_binary_width_boundaries_are_where_the_layout_constants_say() ->
 def test_the_two_named_export_binary_declarations_take_their_documented_widths() -> None:
     """Confirm ``PIC 9(9) COMP`` is four bytes and ``PIC S9(10)V99 COMP`` is eight.
 
-    Takes no parameters and returns no value; a differing width, or a registry descriptor that
-    disagrees with the formula, is reported as an assertion failure.
+    :returns: nothing; a differing width, or a registry descriptor that disagrees with the formula,
+        is reported as an assertion failure.
     """
     # WHY : Assumptions: both figures are load-bearing in the export record.
     #   ``EXPORT-SEQUENCE-NUM`` is ``PIC 9(9) COMP`` at ``app/cpy/CVEXPORT.cpy`` line 16, which
@@ -1599,9 +1604,9 @@ def test_a_non_digit_nibble_in_a_digit_position_is_refused(digit_nibble: int) ->
 def test_the_unsigned_nibble_is_refused_by_a_field_declared_with_a_sign() -> None:
     """Refuse 0x0F on a signed field, raising :class:`PackedDecimalError`.
 
-    Takes no parameters and returns no value; an accepted mismatch is reported as an assertion
-    failure. The exception class verified is
-    :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
+    The exception class verified is :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
+
+    :returns: nothing; an accepted mismatch is reported as an assertion failure.
     """
     # WHY : Alternatives Considered: merely classifying the nibble and returning a sign was
     #   available and was rejected. A mismatch means the descriptor the caller passed and the
@@ -1637,9 +1642,9 @@ def test_a_signed_nibble_is_refused_by_a_field_declared_without_one(signed_nibbl
 def test_a_nonzero_unused_leading_nibble_is_refused() -> None:
     """Refuse a non-zero unused leading nibble on an even-digit packed field.
 
-    Takes no parameters and returns no value; an accepted non-zero pad is reported as an
-    assertion failure. The exception class verified is
-    :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
+    The exception class verified is :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
+
+    :returns: nothing; an accepted non-zero pad is reported as an assertion failure.
     """
     # WHY : Assumptions: checking the pad nibble is the cheapest detector of a displaced read
     #   this codec has, and the consequence of skipping it is measurable rather than theoretical:
@@ -1660,8 +1665,8 @@ def test_a_nonzero_unused_leading_nibble_is_refused() -> None:
 def test_an_odd_digit_packed_field_has_no_pad_nibble_to_check() -> None:
     """Confirm the pad exists only on an even digit count, so neither parity is assumed.
 
-    Takes no parameters and returns no value; a field of the wrong width for its parity is
-    reported as an assertion failure.
+    :returns: nothing; a field of the wrong width for its parity is reported as an assertion
+        failure.
     """
     # WHY : Assumptions: the surplus is ``width * 2 - (digits + 1)`` and is at most one, so it
     #   exists exactly when the digit count is EVEN. Twelve digits occupy seven bytes, fourteen
@@ -1693,10 +1698,11 @@ def test_an_odd_digit_packed_field_has_no_pad_nibble_to_check() -> None:
 def test_a_negatively_signed_packed_zero_re_encodes_with_the_positive_nibble() -> None:
     """Document the packed analogue of the zoned negative-zero carve-out.
 
-    A 0x0D-signed packed zero decodes to numeric zero and re-encodes with 0x0C, so this span --
-    and only a span whose digits are all zeros -- does not reproduce itself. Takes no parameters
-    and returns no value; a preserved negative nibble, or any other span failing to reproduce
-    itself, is reported as an assertion failure.
+    A 0x0D-signed packed zero decodes to numeric zero and re-encodes with 0x0C, so this span -- and
+    only a span whose digits are all zeros -- does not reproduce itself.
+
+    :returns: nothing; a preserved negative nibble, or any other span failing to reproduce itself,
+        is reported as an assertion failure.
     """
     # WHY : Refactoring Rationale: this comment also said ":class:`decimal.Decimal` has no
     #   negative zero", carried over from the zoned test above, and it is false for the same
@@ -1777,8 +1783,8 @@ def test_a_binary_span_round_trips_big_endian_two_s_complement(
 def test_a_scaled_binary_value_moves_its_decimal_point_without_dividing() -> None:
     """Apply the declared scale by exact point movement rather than by an inexact division.
 
-    Takes no parameters and returns no value; a value whose scale was applied by division, or
-    whose exponent differs from the declaration, is reported as an assertion failure.
+    :returns: nothing; a value whose scale was applied by division, or whose exponent differs from
+        the declaration, is reported as an assertion failure.
     """
     # Alternatives Considered: dividing the stored whole number by a power of ten was
     #   available and was rejected. Division introduces an intermediate whose precision depends
@@ -1839,9 +1845,9 @@ def test_the_widest_fitting_binary_values_round_trip_at_every_tier(
 def test_a_binary_value_wider_than_its_declared_digits_is_refused_on_encode() -> None:
     """Refuse a binary value needing more digit positions than the field declares.
 
-    Takes no parameters and returns no value; an accepted over-wide value is reported as an
-    assertion failure. The exception class verified is
-    :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
+    The exception class verified is :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
+
+    :returns: nothing; an accepted over-wide value is reported as an assertion failure.
     """
     # Assumptions: the refusal is driven by the DECLARED DIGIT COUNT and not by whether the
     #   number happens to fit the bytes, and the vector is chosen so that the two rules cannot
@@ -1861,9 +1867,9 @@ def test_a_binary_value_wider_than_its_declared_digits_is_refused_on_encode() ->
 def test_a_binary_span_holding_more_digits_than_declared_is_refused_on_decode() -> None:
     """Refuse a correctly sized span whose stored value overflows the declaration.
 
-    Takes no parameters and returns no value; an accepted over-capacity span is reported as an
-    assertion failure. The exception class verified is
-    :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
+    The exception class verified is :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
+
+    :returns: nothing; an accepted over-capacity span is reported as an assertion failure.
     """
     # Assumptions: the span below is exactly four bytes -- the declared width for nine
     #   digits -- and holds 1000000000, which needs ten. The case exists because it is the one
@@ -1880,9 +1886,11 @@ def test_a_binary_span_holding_more_digits_than_declared_is_refused_on_decode() 
 def test_a_binary_field_is_never_decoded_as_packed_decimal() -> None:
     """Refuse to read a ``COMP`` span through the ``COMP-3`` path, and the reverse.
 
-    Takes no parameters and returns no value; a ``COMP`` span accepted by the packed decoder is
-    reported as an assertion failure. The exception class verified is
+    The exception class verified is
     :class:`~carddemo_migration.copybook.packed.PackedSpanWidthError`.
+
+    :returns: nothing; a ``COMP`` span accepted by the packed decoder is reported as an assertion
+        failure.
     """
     # Assumptions: the token ``COMP-3`` CONTAINS the token ``COMP``, so any dispatch that
     #   matched the shortest usage token would read a seven-byte packed field as an eight-byte
@@ -1911,10 +1919,11 @@ def test_a_binary_field_is_never_decoded_as_packed_decimal() -> None:
 def test_dispatch_is_on_the_declared_kind_and_not_on_a_usage_token() -> None:
     """Confirm the three regimes are distinguished by :class:`Kind` alone in the export record.
 
-    Takes no parameters and returns no value; a descriptor carrying the wrong kind, or a
-    field-oriented decoder accepting a foreign kind, is reported as an assertion failure. The
-    exception class verified for each mis-routing is
+    The exception class verified for each mis-routing is
     :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
+
+    :returns: nothing; a descriptor carrying the wrong kind, or a field-oriented decoder accepting a
+        foreign kind, is reported as an assertion failure.
     """
     # Assumptions: the substring hazard is guarded structurally rather than only by width,
     #   because two fields of the same regime CAN share a width -- the packed balance and the
@@ -1947,8 +1956,8 @@ def test_dispatch_is_on_the_declared_kind_and_not_on_a_usage_token() -> None:
 def test_one_picture_clause_has_three_physical_widths_in_the_export_record() -> None:
     """Decode the same amount through packed, display and binary storage of one picture clause.
 
-    Takes no parameters and returns no value; a differing width, a differing decoded value, or
-    two spans that happen to be equal is reported as an assertion failure.
+    :returns: nothing; a differing width, a differing decoded value, or two spans that happen to be
+        equal is reported as an assertion failure.
     """
     # Assumptions: ``app/cpy/CVEXPORT.cpy`` declares ``PIC S9(10)V99`` three times inside
     #   ONE overlay branch, at lines 50, 51 and 57, and gives it a different storage regime each
@@ -1992,9 +2001,8 @@ def test_one_picture_clause_has_three_physical_widths_in_the_export_record() -> 
 def test_packed_decimal_reaches_persisted_data_only_where_the_corpus_declares_it() -> None:
     """Pin the three record families in which packed decimal reaches persisted target data.
 
-    Takes no parameters and returns no value; a base master that has acquired a packed or binary
-    field, or an authorization segment whose length has drifted, is reported as an assertion
-    failure.
+    :returns: nothing; a base master that has acquired a packed or binary field, or an authorization
+        segment whose length has drifted, is reported as an assertion failure.
     """
     # Assumptions: all money in the eleven base masters is zoned DISPLAY -- searching those
     #   copybooks for ``COMP`` or ``COMP-3`` returns nothing -- so packed decimal reaches
@@ -2065,9 +2073,9 @@ def test_a_binary_span_of_the_wrong_width_is_refused(span_hex: str) -> None:
 def test_a_packed_value_wider_than_its_declared_digits_is_refused_on_encode() -> None:
     """Refuse a packed value needing more digit positions than the field declares.
 
-    Takes no parameters and returns no value; an accepted over-wide value is reported as an
-    assertion failure. The exception class verified is
-    :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
+    The exception class verified is :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
+
+    :returns: nothing; an accepted over-wide value is reported as an assertion failure.
     """
     # Assumptions: the alternative is truncating high-order digits into the declared
     #   nibbles, which returns a span of exactly the right byte count holding a smaller number.
@@ -2103,9 +2111,10 @@ def test_computational_encoding_refuses_fractional_precision_it_cannot_store(
 def test_a_negative_value_is_refused_by_an_unsigned_computational_field() -> None:
     """Refuse a negative value on an unsigned packed or binary field.
 
-    Takes no parameters and returns no value; an accepted negative value is reported as an
-    assertion failure. The exception class verified on both paths is
+    The exception class verified on both paths is
     :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
+
+    :returns: nothing; an accepted negative value is reported as an assertion failure.
     """
     # Assumptions: an unsigned packed field lays down 0x0F, which carries no sign to set,
     #   and an unsigned binary field treats its leading bit as magnitude, so a negative value
@@ -2140,8 +2149,9 @@ def test_computational_encoding_refuses_float_and_bool(bad_value: object) -> Non
 def test_text_is_refused_at_the_computational_codec_boundary() -> None:
     """Refuse a :class:`str` on both computational decode paths, raising :class:`TypeError`.
 
-    Takes no parameters and returns no value; accepted text is reported as an assertion failure.
     The exception class verified on both paths is :class:`TypeError`.
+
+    :returns: nothing; accepted text is reported as an assertion failure.
     """
     # Assumptions: a computational span must stay BYTES, because character interpretation
     #   changes what those bytes MEAN rather than how many of them there are. Every code page
@@ -2161,10 +2171,10 @@ def test_text_is_refused_at_the_computational_codec_boundary() -> None:
 def test_a_sensitive_packed_field_diagnostic_withholds_its_offending_nibble() -> None:
     """Withhold the offending nibble from a sensitive packed field's diagnostic.
 
-    Takes no parameters and returns no value; a diagnostic disclosing the nibble of a sensitive
-    field, or one omitting the field's geometry, is reported as an assertion failure. The
-    exception class verified is
-    :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
+    The exception class verified is :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
+
+    :returns: nothing; a diagnostic disclosing the nibble of a sensitive field, or one omitting the
+        field's geometry, is reported as an assertion failure.
     """
     # Trade-offs: a sensitive computational field discloses no nibble at all, not even in
     #   hexadecimal, and the suppression is NAMED in the message rather than left as a silent
@@ -2202,9 +2212,10 @@ def test_a_sensitive_packed_field_diagnostic_withholds_its_offending_nibble() ->
 def test_a_sensitive_binary_field_diagnostic_withholds_its_content() -> None:
     """Withhold content from a sensitive binary field's diagnostic.
 
-    Takes no parameters and returns no value; a diagnostic disclosing the content of a sensitive
-    binary field is reported as an assertion failure. The exception class verified is
-    :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
+    The exception class verified is :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
+
+    :returns: nothing; a diagnostic disclosing the content of a sensitive binary field is reported
+        as an assertion failure.
     """
     # Assumptions: the card verification value is declared through the sensitive binary
     #   factory and not the plain one, and the distinction is load-bearing rather than cosmetic:
@@ -2230,9 +2241,10 @@ def test_a_sensitive_binary_field_diagnostic_withholds_its_content() -> None:
 def test_a_record_ending_before_a_declared_computational_field_is_refused() -> None:
     """Refuse a record that ends before a declared computational field's end.
 
-    Takes no parameters and returns no value; an accepted short record is reported as an assertion
-    failure. The exception class verified on both paths is
+    The exception class verified on both paths is
     :class:`~carddemo_migration.copybook.packed.PackedSpanWidthError`.
+
+    :returns: nothing; an accepted short record is reported as an assertion failure.
     """
     # Assumptions: a short record is refused rather than zero-extended, because zero-padded
     #   nibbles read as real digits and a zero-padded binary word reads as a smaller number.
@@ -2249,9 +2261,11 @@ def test_a_record_ending_before_a_declared_computational_field_is_refused() -> N
 def test_a_display_field_is_refused_by_the_computational_entry_points() -> None:
     """Refuse a display descriptor on the computational paths, raising :class:`PackedDecimalError`.
 
-    Takes no parameters and returns no value; a display field accepted by a computational decoder
-    is reported as an assertion failure. The exception class verified on both paths is
+    The exception class verified on both paths is
     :class:`~carddemo_migration.copybook.packed.PackedDecimalError`.
+
+    :returns: nothing; a display field accepted by a computational decoder is reported as an
+        assertion failure.
     """
     # Assumptions: this closes the mis-routing loop in the direction opposite to the display
     #   codec's own refusal of a packed field. A zoned field is one printable digit per byte, so

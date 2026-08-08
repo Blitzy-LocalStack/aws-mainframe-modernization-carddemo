@@ -76,9 +76,9 @@ import java.util.Objects;
  * preference but the only mapping that resolves. Three consumers in this module pin the same names
  * independently: {@code com.carddemo.account.mapper.AccountContextMapper} reads
  * {@code getAccountId()} and {@code getCustomerId()} at its L53, and
- * {@code com.carddemo.account.repository.CardXrefRepository} derives two queries from the property
- * names themselves at L48 and L61, so a renamed member there is a startup failure rather than a
- * compile error.</p>
+ * {@code com.carddemo.account.repository.CardXrefRepository} derives three queries from the property
+ * names themselves at L334, L375 and L410 and names two of them again as query parameters at L476 and
+ * L538, so a renamed member there is a startup failure rather than a compile error.</p>
  *
  * <p>Assumptions: neither this type nor that migration creates the {@code account} schema. It is
  * bootstrapped by {@code data-migration/sql/V0__schemas_and_roles.sql}, the single authority for

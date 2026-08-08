@@ -65,15 +65,26 @@
 #     falling back to something locally plausible, because a service that starts
 #     against the wrong database writes authorization decisions into it, and
 #     that is far harder to notice than a service that does not start at all.
-#   Assumptions: no client library reads Parameter Store or Secrets Manager from
-#     this file, and the sibling POM is why. It declares neither the
-#     parameter-store nor the secrets-manager starter, so a non-optional
-#     `aws-parameterstore:` import here would abort startup on a config location
-#     no resolver claims. The framework maps an injected SPRING_DATASOURCE_URL
-#     onto spring.datasource.url by relaxed binding unaided, and the
-#     per-environment Parameter Store overlay is declared as an `optional:`
-#     import in application-dev.yml and application-prod.yml, where the
-#     parameter path can name the environment it belongs to.
+#   Assumptions: no document in this module imports a Parameter Store location,
+#     and neither profile overlay does either -- both import only
+#     `classpath:/carddemo-common-defaults.yml`. Every value this service needs
+#     arrives as an environment variable the task definition sets, and the
+#     framework maps an injected SPRING_DATASOURCE_URL onto
+#     spring.datasource.url by relaxed binding unaided.
+#   Refactoring Rationale: an `optional:aws-parameterstore:` overlay was
+#     available here -- the sibling POM does declare
+#     io.awspring.cloud:spring-cloud-aws-starter-parameter-store, so a resolver
+#     claims that prefix and holds an SSM client -- and it is deliberately not
+#     taken. Building that client resolves a region through the default provider
+#     chain, and this module pins no `spring.cloud.aws.region.static`, so
+#     preparing either profile raised SdkClientException wherever the chain
+#     could not answer; the `optional:` marker does not cover that, because it
+#     excuses a claimed location holding no resource and not a resolver that
+#     throws while constructing its own client. Alternatives Considered: pinning
+#     the region to ${AWS_REGION} the way account-service, batch-service and
+#     reference-service do -- each of those imports the overlay and each pins
+#     the region. Rejected because it would make a service that reads NOTHING
+#     from the subtree depend on one more variable in order to start.
 # =============================================================================
 
 server:

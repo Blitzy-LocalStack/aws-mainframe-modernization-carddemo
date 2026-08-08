@@ -517,7 +517,7 @@ services, repositories and adapters as non-`package-info.java` main-source Java:
 | `transaction-service` | 32 | `V1__ledger.sql`, `V2__ledger_transaction_id_allocator.sql` |
 | `reference-service` | 54 | `V1__reference.sql`, `V2__seed_reference.sql` |
 | `batch-service` | 51 | `V1__batch.sql` |
-| `authorization-service` | 48 | `V1__authorization.sql` |
+| `authorization-service` | 49 | `V1__authorization.sql` |
 | `reporting-service` | 44 | none by design — it owns no table, only read-only views |
 
 *Refactoring Rationale:* this paragraph reported that "only `batch-service` and
@@ -736,10 +736,27 @@ emulating the baseline's two-phase commit. The fourth target table,
 its columns are specified in
 [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md).
 
-**Measured implementation status:** `authorization-service` currently has neither
-a Flyway migration nor non-`package-info.java` main-source Java. None of the four
-tables, the listener, the transactional writer, the publisher or the purge logic is
-therefore delivered by that module yet.
+**Measured implementation status:** `authorization-service` carries
+`V1__authorization.sql`, which creates all four tables, and 49 non-`package-info.java`
+main-source classes — the count tabulated for it earlier in this document. The
+listener, the transactional writer, the outbox publisher and the purge logic are
+delivered as `AuthorizationRequestListener`, `AuthorizationDecisionService`,
+`OutboxPublisher` and `PurgeJob`. The single local transaction those classes commit
+inside is configured by `DataSourceConfig`, which pins the connection `search_path`
+to this schema and carries the rationale for there being no second resource manager.
+
+*Refactoring Rationale:* this paragraph stated that the module had "neither a Flyway
+migration nor non-`package-info.java` main-source Java" and that none of the four
+tables, the listener, the writer, the publisher or the purge logic was "delivered by
+that module yet". Every clause of that was true of the tree it was written against
+and is now false. The correction matters beyond tidiness: the paragraph sat in the
+same document as the measured class-count table above, which records 49 classes for
+this module, so the two passages contradicted each other outright — and a reader
+reaching this section first would have concluded the context was unimplemented and
+gone looking for its logic somewhere else. Named clauses are used in place of the
+original "neither ... nor" because a claim naming the artifacts it depends on fails
+visibly when one is renamed, whereas a blanket denial of existence stays readable
+while being wrong.
 
 > Alternatives Considered: **one schema rather than two, for data that arrived
 > from two stores.** Keeping the pending-authorization data and the fraud data in

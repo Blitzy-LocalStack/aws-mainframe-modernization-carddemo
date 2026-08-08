@@ -13,6 +13,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.carddemo.authorization.domain.AuthReplyOutbox;
 import com.carddemo.authorization.domain.OutboxMessage;
 import com.carddemo.authorization.domain.PendingAuthDetail;
@@ -41,6 +45,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.slf4j.LoggerFactory;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.support.MessageBuilder;
 
@@ -577,6 +582,56 @@ class AuthorizationRequestListenerTest {
         verifyNoInteractions(this.accounts);
         verifyNoInteractions(this.outbox);
         verifyNoInteractions(this.details);
+    }
+
+    /**
+     * A request whose expiry has already passed is dropped and the drop is recorded in the log.
+     *
+     * <p>Assumptions: the LOG record is asserted alongside the drop, and the two together are the
+     * behaviour rather than either one alone. Dropping in silence is the specific failure the expiry
+     * attribute exists to prevent: the target transport carries no per-message deadline of its own, so
+     * this consumer is the only place a stale request is refused, and a refusal nobody can see is
+     * indistinguishable from a request that was never sent. The sibling case above asserts the drop by
+     * the absence of a lookup and a reply, which is silent by construction and would still pass if the
+     * record were removed.</p>
+     *
+     * <p>Assumptions: the appender is attached and detached inside this case rather than in shared
+     * setup, so no other case in this class observes a captured logger. Capturing globally would let a
+     * record emitted by one case be asserted by another.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an expired request is dropped and the drop is recorded in the log")
+    void anExpiredRequestIsDroppedAndLogged() {
+        Logger listenerLogger =
+                (Logger) LoggerFactory.getLogger(AuthorizationRequestListener.class);
+        ListAppender<ILoggingEvent> captured = new ListAppender<>();
+        captured.start();
+        listenerLogger.addAppender(captured);
+        listenerLogger.setLevel(Level.WARN);
+        try {
+            Message<String> message = MessageBuilder
+                    .withPayload(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
+                    .setHeader(AuthorizationRequestListener.HEADER_REPLY_TO, ALLOWED_REPLY_QUEUE)
+                    .setHeader(AuthorizationRequestListener.HEADER_EXPIRES_AT,
+                            String.valueOf(FIXED_INSTANT.minusSeconds(1).toEpochMilli()))
+                    .build();
+
+            this.listener.onRequest(message);
+
+            verifyNoInteractions(this.outbox);
+            assertThat(captured.list)
+                    .as("a stale request that is dropped without a record is indistinguishable "
+                            + "from one that never arrived")
+                    .extracting(ILoggingEvent::getFormattedMessage)
+                    .anySatisfy(recorded -> assertThat(recorded)
+                            .contains("event=auth.request.dropped")
+                            .contains("reason=expired"));
+        } finally {
+            listenerLogger.detachAppender(captured);
+            captured.stop();
+        }
     }
 
     /**
