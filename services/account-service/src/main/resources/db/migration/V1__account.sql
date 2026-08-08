@@ -33,16 +33,16 @@
 --   measures exactly 300 bytes and every record of
 --   app/data/ASCII/custdata.txt exactly 500, across 50 records each.
 --
---   WHY : Assumptions: the cross-reference extract is the one place where the
---   seed file and the cluster disagree, and the difference is padding rather
---   than content. Every record of app/data/ASCII/cardxref.txt measures 36
---   bytes, which is 16 + 9 + 11 -- the three named fields and nothing else --
---   while the cluster declares 50. The 14 bytes between them are the FILLER
---   at app/cpy/CVACT03Y.cpy:8, which the extract simply does not carry. This
---   is recorded because a reader checking 36 against a 50-byte record would
---   otherwise suspect a truncated extract, and because the loader must pad
---   rather than reject: the omission changes no column below, since that
---   FILLER becomes no column in any case.
+-- WHY : Assumptions: the cross-reference extract is the one place where the
+--       seed file and the cluster disagree, and the difference is padding
+--       rather than content. Every record of app/data/ASCII/cardxref.txt
+--       measures 36 bytes, which is 16 + 9 + 11 -- the three named fields
+--       and nothing else -- while the cluster declares 50. The 14 bytes
+--       between them are the FILLER at app/cpy/CVACT03Y.cpy:8, which the
+--       extract does not carry. This is recorded because a reader checking
+--       36 against a 50-byte record would otherwise suspect a truncated
+--       extract, and because the loader must pad rather than reject: the
+--       omission changes no column below, since that FILLER becomes none.
 --
 -- Parameters:
 --   A migration takes no arguments, so its inputs are the Flyway state and
@@ -67,14 +67,14 @@
 --   - A pre-existing schema, owner role and privilege graph, bootstrapped by
 --     data-migration/sql/V0__schemas_and_roles.sql, which is the exclusive
 --     authority for schemas, roles and grants in this system. The schema and
---     owner for this context are established at V0:502-503. Because
+--     its owning role are established together at V0:701. Because
 --     spring.flyway.create-schemas is false in application.yml, this script
 --     may migrate the account schema and may not create it.
---   - The executing role: the schema's owning role, carddemo_account. V0 keys
---     its cross-schema read privileges on that role using ALTER DEFAULT
---     PRIVILEGES at V0:752-753 and V0:872-873, which is what gives the tables
---     created below their batch and reporting read privileges without this
---     file issuing a single GRANT.
+--   - The executing role: Flyway authenticates as carddemo_account_migrator
+--     and issues SET ROLE carddemo_account_owner first, so the owner owns
+--     every object below. That ownership is what carries V0's ALTER DEFAULT
+--     PRIVILEGES clauses at V0:879-882, V0:1115-1116 and V0:1235-1236 onto
+--     these tables, without this file issuing a single GRANT of its own.
 --
 -- Return values:
 --   The schema objects this script leaves behind, and nothing besides.

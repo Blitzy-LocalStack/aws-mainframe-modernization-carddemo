@@ -1,16 +1,16 @@
 //=============================================================================
 // WHY : Assumptions: this descriptor is the one place the rulings below are
-//       recorded, and the six repository interfaces beside it cite it rather
+//       recorded, and the seven repository interfaces beside it cite it rather
 //       than restating them. The questions it settles are the ones each author
 //       would otherwise answer alone -- whether a window is taken by key or by
 //       ordinal, which row's key a page publishes, whether a category code is
-//       character or numeric -- and six independent answers to one question is
+//       character or numeric -- and seven independent answers to one question is
 //       how a package acquires two behaviours.
 // WHY : Alternatives Considered: restating each ruling at every interface that
 //       depends on it, so a reader never has to open a second file. Rejected,
 //       because the rulings are shared and a restated rule drifts: the forward
 //       and backward predicates are deliberately asymmetric, and a paraphrase
-//       that smoothed the asymmetry in one of six files would read as a
+//       that smoothed the asymmetry in one of seven files would read as a
 //       correction rather than as the defect it is. The cost accepted is one
 //       indirection at each interface.
 // WHY : Assumptions: every reference to the baseline below is a PHYSICAL line
@@ -19,7 +19,7 @@
 //       browse rulings, because a citation a reader cannot verify is worse than
 //       no citation at all.
 /**
- * Data access for the reference-data bounded context: six Spring Data JPA repository interfaces over
+ * Data access for the reference-data bounded context: seven Spring Data JPA repository interfaces over
  * the six tables of the PostgreSQL {@code reference} schema, together with the keyset queries that
  * replace the baseline's cursor paging.
  *
@@ -35,7 +35,7 @@
  * to a type in this package is the one this descriptor constrains: how a row is located, and in what
  * order rows are returned.</p>
  *
- * <p>Assumptions: all six types in this package are {@code interface} declarations with no
+ * <p>Assumptions: all seven types in this package are {@code interface} declarations with no
  * implementation authored anywhere, because the persistence provider derives one at run time from the
  * method names and the query annotations. This matters for documentation rather than for behaviour:
  * {@code config/checkstyle/checkstyle.xml} lists {@code INTERFACE_DEF} first among the tokens its
@@ -52,13 +52,20 @@
  * emptiness through {@code NonEmptyAtclauseDescription}, so an invented empty tag would be reported
  * rather than credited.</p>
  *
- * <h2>The six repositories, the entities they read, and their identities</h2>
+ * <h2>The seven repositories, the entities they read, and their identities</h2>
  *
- * <p>Assumptions: all six are landed as compilation units beside this descriptor, one per table the
- * migration creates, so a reader who cannot open one has found a gap rather than the expected state.
- * The closed set is seven compilation units: this descriptor and the six interfaces. The pairing
- * below is settled here and enumerated nowhere else, which is why it is written out in full rather
- * than left to be inferred from a file name.</p>
+ * <p>Assumptions: all seven are landed as compilation units beside this descriptor, so a reader who
+ * cannot open one has found a gap rather than the expected state. The closed set is eight compilation
+ * units: this descriptor and the seven interfaces. The pairing below is settled here and enumerated
+ * nowhere else, which is why it is written out in full rather than left to be inferred from a file
+ * name.</p>
+ *
+ * <p>Assumptions: the mapping is one interface per table for all six tables, and the area-code table
+ * carries a second interface in addition, so seven interfaces address six tables. That is the one
+ * departure from a file-name-shaped reading of this directory, and it is deliberate: the two
+ * interfaces over that table divide by question rather than overlap, one answering which rows to show
+ * and the other whether a code belongs to a named baseline list. Each of the two names the other and
+ * states what it is for, so neither is to be read as a duplicate of the other.</p>
  *
  * <dl>
  *   <dt>{@code TransactionTypeRepository}</dt>
@@ -86,7 +93,19 @@
  *   <dd>Over {@code UsPhoneAreaCode}, table {@code reference.us_phone_area_codes}, identity
  *       {@code String}. Six walks and a keyed finder: three over the whole table and three narrowed
  *       by the classification column, because the baseline holds one broad allow-list and two
- *       sublists of it.</dd>
+ *       sublists of it. This is the listing surface over that table: every method here takes a bound
+ *       and returns rows, and none of them answers a membership question.</dd>
+ *
+ *   <dt>{@code PhoneAreaCodeRepository}</dt>
+ *   <dd>Over the same {@code UsPhoneAreaCode} and the same table, identity {@code String}. The
+ *       membership surface: a classification-scoped existence check, a per-classification census and a
+ *       full ordered enumeration of one classification, with the broad existence check inherited from
+ *       the framework rather than redeclared. Assumptions: the classification-scoped check has to
+ *       exist somewhere, and no method on the listing interface expresses it -- that interface
+ *       declares no existence predicate at all. It is load-bearing rather than a convenience, because
+ *       the only baseline program that copies this allow-list tests one of the three lists and not
+ *       their union, so a broad check standing in for it would accept codes the baseline declines and
+ *       report nothing. That interface documents the arithmetic and cites the program and line.</dd>
  *
  *   <dt>{@code UsStateRepository}</dt>
  *   <dd>Over {@code UsState}, table {@code reference.us_states}, identity {@code String}. Three walks
@@ -460,7 +479,7 @@
  *
  * <p>Assumptions: two Checkstyle modules enforce that, and neither is redundant.
  * {@code JavadocPackage} inspects the file set and requires this file to exist in any directory holding
- * an audited source file -- this directory holds six interfaces, so it fires. {@code
+ * an audited source file -- this directory holds seven interfaces, so it fires. {@code
  * MissingJavadocPackage} inspects the parsed tree and requires this file to carry Javadoc. A descriptor
  * reduced to a bare package statement, or to an ordinary block comment, satisfies the first and fails
  * the second, which is why prose is the deliverable and this file's existence is not. Both run at the

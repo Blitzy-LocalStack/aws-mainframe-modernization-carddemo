@@ -51,6 +51,145 @@ import org.springframework.security.web.access.intercept.RequestAuthorizationCon
  * network position rather than by authority, and neither is a business route -- see
  * {@link #METRIC_SCRAPE_PATH}.</p>
  *
+ * <h2>The sign-on decision this chain deliberately does not reproduce</h2>
+ *
+ * <p>Refactoring Rationale: the baseline admits a caller by comparing two eight-character fields in
+ * clear text. {@code app/cpy/CSUSR01Y.cpy} line 21 declares the stored credential as {@code PIC X(08)}
+ * inside an eighty-character record, and {@code app/cbl/COSGN00C.cbl} line 223 compares it directly
+ * against what the terminal supplied, carrying the outcome forward in the five moves at lines 224 to
+ * 228. The migrated system declines parity at exactly this point: that field is carried forward into no
+ * target schema, no comparison of it happens anywhere, and this class accepts an already-minted token
+ * from the identity provider instead. What was wrong with the old approach, in the specific sense the
+ * project rule asks for, is that a stored credential legible to anyone who can read the record has no
+ * confidentiality property to begin with, so no amount of transport protection placed in front of it
+ * creates one. This is a deliberate, documented behavioural change and the one place in this migration
+ * where parity is explicitly declined rather than preserved. The baseline is reference-only and
+ * continues to behave exactly as it does; the migration adds a path and removes none.</p>
+ *
+ * <p>Refactoring Rationale: the stateless policy installed below replaces continuity the baseline holds
+ * on the server between screen turns. {@code app/cbl/COSGN00C.cbl} is pseudo-conversational -- line 65
+ * declares {@code 01 DFHCOMMAREA.} as the structure handed across the gap, line 80 tests
+ * {@code IF EIBCALEN = 0} to recognise a first entry, and lines 98 to 102 end every turn by returning
+ * that structure to the terminal, naming it on line 100. What was wrong with that arrangement for THIS
+ * target is not its correctness, which is not in question on its own platform, but its placement:
+ * continuity held on the server binds a caller to the instance that served its previous turn, and that
+ * binding is precisely what stops horizontally scaled tasks behind a load balancer from serving any
+ * request interchangeably. Identity moves into the token and selection context into the request path,
+ * which is what makes the stateless policy below a fact about this service rather than a declaration.</p>
+ *
+ * <p>Alternatives Considered: carrying the baseline's turn discriminator forward as a request field, so
+ * that a handler could still tell a first submission from a later one. {@code app/cpy/COCOM01Y.cpy}
+ * line 29 declares {@code CDEMO-PGM-CONTEXT PIC 9(01)} with its two condition names on lines 30 and 31,
+ * and the contrast with lines 27 and 28 is itself the argument: the user-type values there are quoted
+ * character literals, which marks a domain the target still needs, while the context values are bare
+ * numerics, which marks a mechanism of the screen-turn cycle. Rejected because a handler that answers
+ * with a structured per-field error array has no such distinction to draw -- every request arrives
+ * carrying its own complete context -- so the field would have had no reader here and would only have
+ * invited one.</p>
+ *
+ * <h2>The correlation identity: relied on here, registered by the shared kernel</h2>
+ *
+ * <p>Alternatives Considered: three arrangements were available for
+ * {@code com.carddemo.common.web.CorrelationIdFilter} and two of the three are rejected. Declaring a
+ * {@code FilterRegistrationBean} for it in this file would hand this class explicit ordering control,
+ * and it is rejected because the shared kernel already declares one: that kernel's auto-configuration
+ * is named in its {@code META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports}
+ * resource, and a servlet-only nested configuration inside it contributes the registration under the
+ * bean name {@code carddemoCorrelationIdFilterRegistration}. Adding a non-bean instance to this chain
+ * with {@code addFilterBefore} is the second arrangement and is also rejected, because it would cover
+ * only the requests this chain matches -- a container-level error page, and any refusal decided before
+ * the chain is entered, would then carry no correlation identity at all, and those are the failures the
+ * identity is most needed for. Delegating to the shared registration is the third and is the one taken;
+ * the argument that settles it is ownership rather than brevity, because a registration each service
+ * must remember is one a service can omit, and omitting it yields a service that starts and serves
+ * requests while silently emitting no identity on any log line.</p>
+ *
+ * <p>Assumptions: the ordering position relied on is
+ * {@link com.carddemo.common.CardDemoCommonAutoConfiguration#CORRELATION_FILTER_ORDER}, the highest
+ * precedence available, and relying on it is what makes this file's silence correct rather than merely
+ * shorter. Because that position sits ahead of the security filter chain, the identity is already in the
+ * logging context before any security filter runs, so an authentication or authorization refusal decided
+ * below is recorded under the same identity as a request that reached a handler.</p>
+ *
+ * <p>Trade-offs: the one risk this delegation accepts is named here so that a later reader who finds no
+ * registration in this file does not add one. The shared bean withholds itself only for a bean matching
+ * its OWN name, so a registration declared here under any other name would leave that condition
+ * unsatisfied and both would take effect, seating the filter in the chain twice. A sibling context has
+ * already been through precisely that and withdrew its local declaration for this reason. The duplicate
+ * is not destructive, because the filter carries its own once-per-request guard and a second pass
+ * delegates without minting a second identity; what it costs is the property this paragraph defends --
+ * one owner, one ordering position and one file to read.</p>
+ *
+ * <p>Assumptions: the filter's contract is depended on and is never restated here as this class's own
+ * logic. An identity the caller supplies is echoed back unaltered, which
+ * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} line 745 establishes by moving the saved
+ * inbound correlation field straight into the reply descriptor; an identity the caller omits is minted
+ * rather than the request being refused, which the adjacent line 746 establishes by moving the
+ * no-identifier constant into the reply's own identifier field. The width is twenty-four characters,
+ * declared at line 45 of that program as {@code 05 WS-SAVE-CORRELID PIC X(24).} Three widths are
+ * verifiable in that lineage and conflating any two of them would corrupt the contract: twenty
+ * characters is the structured log event key at line 40 of
+ * {@code app/app-authorization-ims-db2-mq/cpy/CCPAUERY.cpy}, which is that copybook's final line;
+ * twenty-four is the correlation identity itself; and forty-eight belongs to the queue NAMES at lines 43
+ * and 44, which describe a destination and are not an identity at all. This class names none of those
+ * three values, and no header name or context key either: each is a named constant on the filter, so one
+ * spelling governs every service and this file cannot introduce a second.</p>
+ *
+ * <p>Assumptions: the identity is withdrawn from the logging context as the response completes, on the
+ * ordinary and the exceptional path alike, and the reason is cross-request contamination rather than
+ * resource economy. A servlet container serves successive unrelated requests on one pooled thread and
+ * the mapped diagnostic context is bound to that thread, so a value left in place would attach itself to
+ * the log lines of a later request that never carried it, corrupting the very record an operator reads
+ * to tell two units of work apart. The key that value occupies is the filter's own
+ * {@code CORRELATION_ID_MDC_KEY} constant, declared at line 227 of
+ * {@code services/common-lib/src/main/java/com/carddemo/common/web/CorrelationIdFilter.java}, and the
+ * removal is performed in that filter's own exit path; this class neither names the key nor repeats the
+ * cleanup.</p>
+ *
+ * <h2>What is resolved elsewhere, and what is deliberately absent</h2>
+ *
+ * <p>Assumptions: nothing this chain depends on is written into it. The issuer location, the two group
+ * names read below and every other deployment-specific value reach the running task from the
+ * infrastructure definitions by way of Parameter Store and Secrets Manager, and those values that are
+ * credentials are generated at provisioning time straight into Secrets Manager rather than authored
+ * anywhere at all. That is what makes the absence of a credential from this source file structural
+ * rather than a matter of review vigilance: there is no step at which one would have been written down
+ * for someone to remember to remove. The shape is visible in this module's own configuration, where the
+ * issuer location is injected from the task environment at line 918 of
+ * {@code src/main/resources/application.yml} and the two group names this class reads are injected the
+ * same way at its lines 1181 and 1182, each carrying a variable reference rather than a value. No issuer
+ * location, pool identifier, region or endpoint appears here in any form. The infrastructure that
+ * supplies them is authored and statically validated in this repository; applying it is an operator
+ * action outside this module.</p>
+ *
+ * <p>Alternatives Considered: adding a retry or circuit-breaker library so that this context could
+ * defend its own outbound calls. Rejected on two independent grounds. The framework release this module
+ * builds against moved retry into its core, so the capability needs no dependency: a configuration class
+ * annotated {@code @EnableResilientMethods} activates it, the attribute bounding an attempt sequence is
+ * {@code maxRetries}, and the total number of attempts is one plus that value. Neither appears in this
+ * class because this class issues no outbound call to bound. A circuit breaker is declined separately:
+ * the only synchronous hops in this tier stay inside the private network behind an internal load
+ * balancer with explicit connect and read timeouts, so a breaker would add a state machine that can
+ * itself fail open or closed without removing any failure this deployment actually has.</p>
+ *
+ * <p>Alternatives Considered: giving this package a batch configuration or a queue-listener
+ * configuration alongside the classes it has. Both are rejected, and this module's dependency set
+ * already records the decision -- neither a batch starter nor a messaging starter is declared in its
+ * {@code pom.xml}, so neither class would compile here. The substantive reason is ownership rather than
+ * absence: this context starts a state-machine execution and returns, while the durable ledger of which
+ * runs and which steps completed belongs to the batch service that owns it. A job repository here would
+ * be a second, competing record of one restart decision, and two answers to "has this step already run"
+ * is a worse position than one answer held in another service.</p>
+ *
+ * <p>Alternatives Considered: the singular or parenthesised spellings of the four rationale labels this
+ * file uses throughout. Rejected in favour of the plural, un-parenthesised, colon-terminated form taken
+ * directly from the project rule, and the choice was settled by measurement rather than preference. A
+ * case-sensitive search of this repository outside its version-control directory returns 3405
+ * occurrences of the plural label across 669 files, against 3830 occurrences of the bare stem across 746
+ * files, and 152 occurrences of the parenthesised singular. The parenthesised spelling survives in
+ * configuration, markup and shell artifacts; this Java tree uses the plural exclusively, and mixing the
+ * two registers inside one file would leave a reader unsure which spelling a search should use.</p>
+ *
  * @see CognitoAccessTokenValidator
  */
 @Configuration(proxyBeanMethods = false)
@@ -64,6 +203,17 @@ public class SecurityConfig {
      * it with no credentials of any kind, so a chain that required one would fail every health check and
      * the task would be replaced continuously while being perfectly healthy. Only the health group is
      * opened; the remaining actuator endpoints stay behind the chain.</p>
+     *
+     * <p>Assumptions: both probes read this path on the SAME port as the business surface, and not on a
+     * separate management port. The container image declares one port, 8080, at
+     * {@code services/reporting-service/Dockerfile} line 169, states at its line 165 that the port
+     * carries the business surface and the actuator together, and points its own health check at this
+     * path on that port at lines 217 to 220; this module's {@code application.yml} binds the application
+     * to the same port at its line 226 and restricts the exposed management set at its line 1028.
+     * Splitting the two onto different ports would let the target group and the container health check
+     * disagree about whether one task is alive, which produces both halves of the wrong outcome -- a
+     * healthy task replaced, and a broken task kept in rotation. Opening the path is a bounded decision
+     * rather than a hole because the endpoint discloses no business data.</p>
      */
     public static final String HEALTH_PATH = "/actuator/health/**";
 
@@ -174,6 +324,20 @@ public class SecurityConfig {
      * {@code hasAnyAuthority(ADMIN, USER)} would. The cost is one indirection for a reader; the gain is
      * that the catch-all -- the rule every route not named above depends on -- is covered by a unit test
      * that needs no container, which is what stops it silently reverting to a weaker condition.</p>
+     *
+     * <p>Assumptions: this rule is expressed in the AUTHORITY register and not the role register, and the
+     * two are not interchangeable. A role predicate matches an authority string bearing the framework's
+     * {@code ROLE_} prefix, which the framework supplies on the predicate side; an authority predicate
+     * matches the string exactly as granted. {@link JwtRoleConverter} is the source of truth for which
+     * register applies: it declares the two names at its lines 250 and 260 with no prefix in either
+     * value, and grants each recognised name verbatim through a plain authority construction at its line
+     * 339. The authority register is therefore the matching one, and this file uses it and only it,
+     * never mixing the two spellings. Choosing the other
+     * register is the kind of error that never announces itself: the class would compile, the context
+     * would start, and every request would be refused with 403 while the token carried exactly the group
+     * the deployment intended, with no exception raised and no line written to say so. The paired unit
+     * test reads {@link #BUSINESS_AUTHORITIES} and exercises this very manager, which is what turns that
+     * silent outcome into a failing assertion.</p>
      *
      * @return the manager that grants only a principal holding one of {@link #BUSINESS_AUTHORITIES},
      *     never {@code null}

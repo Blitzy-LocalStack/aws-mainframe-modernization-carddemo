@@ -1,81 +1,215 @@
 # =============================================================================
-# authorization-service -- development profile.
-#
-#
-# WHY : (1) Assumptions: this profile differs from prod in SIZING, RETENTION and
-#       DIAGNOSTIC VERBOSITY only, never in topology, protocol or security
-#       posture. A profile that turned off TLS or opened an actuator endpoint
-#       "just for dev" would make dev stop being a rehearsal for prod, which is
-#       the only reason to have a dev environment at all.
-#       (2) Assumptions: the environment label read below is CARDDEMO_ENVIRONMENT
-#       and there is no second spelling of it anywhere in this repository. Two
-#       names for one value means a task definition can set one, a metric tag can
-#       read the other, and the mismatch shows up as an empty dashboard rather
-#       than as an error.
+# services/authorization-service/src/main/resources/application-dev.yml
+# -----------------------------------------------------------------------------
+# WHAT: the `dev` profile overlay for authorization-service, the PENDING
+#       AUTHORIZATION bounded context. Every key below is a VALUE override of a
+#       key the base document application.yml already declares, so the key set
+#       here is a strict subset of that document's key set: this profile adds no
+#       key, removes no key and changes no key's shape. It varies connection-pool
+#       SIZING, diagnostic VERBOSITY and health-detail exposure, and it varies
+#       nothing else -- not the listener port, not the transport-security floor,
+#       not the actuator exposure list, not the schema resolution, not the
+#       datasource or identity endpoints, not the queue settings, and not one of
+#       the behavioural contracts transcribed from the REFERENCE-ONLY programs
+#       under app/app-authorization-ims-db2-mq/cbl. Each of those is decided in
+#       exactly one place, and that place is the base document.
+# WHY : Assumptions: the six overrides below trace to exactly two facts about this
+#       environment rather than to six separate preferences. Three of them -- the
+#       two pool sizes and the connection timeout -- descend from one
+#       infrastructure difference between the environments:
+#       infra/envs/dev/terraform.tfvars sets aurora_min_capacity to 0 at L38 so the
+#       cluster pauses while idle, while infra/envs/prod/terraform.tfvars sets it to
+#       2 at L30 so the production cluster never pauses. The other three descend
+#       from who the caller is: in this environment it is a developer exercising a
+#       path by hand, rather than a load-balancer probe or a message arriving at
+#       production rate.
+# WHY : Assumptions: NO endpoint, hostname, queue reference, key identifier,
+#       account identifier, credential or connection string appears here in any
+#       form. Deployment-specific values reach the running service as environment
+#       variables the ECS task definition sets from Parameter Store and from
+#       Secrets Manager container secrets; none of them is expressible in this
+#       file.
+# WHY : Alternatives Considered: adding a `spring.config.import` naming
+#       `optional:aws-parameterstore:/carddemo/<environment>/authorization/`, which
+#       is what application.yml anticipates at L187-L195 and what
+#       application-prod.yml carries. REJECTED HERE ON A MEASURED STARTUP FAILURE,
+#       and the mechanism is worth stating because it is specific to this module.
+#       There are three classes of module in this repository and this one is the
+#       middle class, which is the only class where that import is fatal.
+#       account-service, batch-service and reporting-service declare
+#       spring-cloud-aws-starter-parameter-store, so they get both the resolver for
+#       the prefix and the SSM client it instantiates, and their imports work.
+#       auth-service, card-service and transaction-service carry no
+#       spring-cloud-aws artifact at all, so nothing claims the prefix and an
+#       `optional:` import is simply skipped -- that is the case application.yml's
+#       note describes. This module declares only
+#       spring-cloud-aws-starter-sqs, which brings spring-cloud-aws-autoconfigure
+#       and therefore the resolver, while NO artifact here brings the SSM client.
+#       A resolver claims the location and then cannot load its own client, and the
+#       `optional:` marker does not cover that: it suppresses a location that is
+#       not found, not a class that is absent. Starting this profile with the
+#       import present aborts during environment preparation on the missing client
+#       class, reproducibly, in every one of three runs. reference-service is the
+#       other module in that middle class, and both of its profiles decline the
+#       import too, so this is the shape both queue-only contexts take.
+#       Trade-offs: the accepted cost is that a parameter written under that path
+#       is not read by this profile. Nothing is lost by it: every value the subtree
+#       would carry is already delivered as an environment variable, which is what
+#       application.yml's datasource and identity placeholders bind to. Measured
+#       for the omission as well as the addition -- with the key absent this
+#       profile starts on three runs out of three, and the shared console pattern,
+#       with it the correlation identifier, is still present, because an import is
+#       processed per DOCUMENT and the base document's own import runs regardless
+#       of what a profile document declares.
+# -----------------------------------------------------------------------------
+# Documentation convention: docs/CODE_DOCUMENTATION_STANDARD.md. YAML has no
+# docstring construct, so its YAML section prescribes the two forms used here --
+# this framed file header, and a labelled rationale placed directly above the key
+# it explains -- which is the analogous obligation AAP 0.8.1 states for a
+# language that has none. The four category labels are written in that document's
+# one permitted form: plural, unparenthesised, colon retained, no emphasis
+# markup. What that document supplies is the FORM; the obligation to carry a
+# rationale at all is the second sentence of the validation gate at line 43 of
+# the project's single user-specified rule, Rule 1 "Explainability".
+# Assumptions: nothing mechanical reads this file. The Checker in
+# config/checkstyle/checkstyle.xml is narrowed to fileExtensions="java" at L185,
+# no linter in this repository parses YAML comments, and no workflow step
+# validates them, so review is the only reader these notes have. They are written
+# at the rigour applied where a build would fail without them, because the
+# absence of a gate is not a reason for a reader to be given less.
 # =============================================================================
 
 spring:
-  config:
-    # WHY : (1) Assumptions: the prefix is /carddemo/<environment>/authorization/
-    #       -- the same three-part shape every context uses, so one Terraform
-    #       module writes them all and one IAM policy can grant read on exactly
-    #       one context's subtree.
-    #       (2) Assumptions: the import is `optional:`, so a developer running
-    #       against a local database with no AWS credentials at all still starts.
-    #       Making it mandatory would couple a local run to a cloud account for no
-    #       benefit; the values that genuinely must be present are the
-    #       no-default placeholders in application.yml, which fail loudly on their
-    #       own.
-    #       (3) Trade-offs: this list REPLACES the base document's import rather
-    #       than adding to it, so the shared defaults document is named again here.
-    #       Omitting it would silently drop the shared log pattern in this profile
-    #       and the correlation identifier would vanish from dev logs only.
-    import:
-      - "classpath:/carddemo-common-defaults.yml"
-      - "optional:aws-parameterstore:/carddemo/${CARDDEMO_ENVIRONMENT:dev}/authorization/"
-
   datasource:
     hikari:
-      # WHY : Trade-offs: four connections rather than the base document's ten.
-      #       A dev cluster is sized to scale to zero, so its connection budget is
-      #       small and shared with whatever else a developer has running; four is
-      #       enough for the consumer, the outbox drain and a browser session at
-      #       once. The cost is that a load test against dev will queue on the
-      #       pool, which is the correct place for it to queue.
+      # WHY : Trade-offs: four connections and one idle, against the base
+      #       document's ten and two at L282-L283. Concurrency here is one
+      #       developer or one smoke test, so the extra six would never be claimed;
+      #       and an open connection is what keeps a zero-minimum cluster from
+      #       reaching its auto-pause delay at all, so an idle pool sized for
+      #       production would hold capacity awake to serve nothing. The accepted
+      #       cost is that a load test pointed at dev queues on the pool, which is
+      #       where it should queue rather than on a cluster this profile
+      #       deliberately keeps small. Both keys carry that one decision, so one
+      #       rationale stands above the pair rather than being restated on each --
+      #       two copies of a reason are two places it can be edited apart.
       maximum-pool-size: 4
       minimum-idle: 1
 
-      # WHY : Assumptions: a dev cluster with auto-pause enabled takes roughly
-      #       fifteen seconds to resume, and the base document's ten-second
-      #       connection timeout would fail every first request after a pause.
-      #       Thirty seconds absorbs one resume without turning a genuine outage
-      #       into a long hang.
+      # WHY : (1) Assumptions: this value exists to clear a RESUME, not a slow
+      #       query, and that is the whole reason it differs from production.
+      #       infra/envs/dev/terraform.tfvars sets aurora_min_capacity to 0 at L38,
+      #       which holds the cost of an idle environment at storage alone. A zero
+      #       minimum makes the auto-pause delay mandatory rather than optional --
+      #       infra/modules/aurora-postgresql/variables.tf rejects the combination
+      #       of a zero minimum with no delay at L722-L723 and states the coupling
+      #       at L747 -- and dev sets that delay to 300 seconds at L40. A cluster
+      #       that has paused takes roughly fifteen seconds to serve its first
+      #       connection again, so at the base document's ten seconds (L284) the
+      #       FIRST request after an idle period fails while the cluster is still
+      #       coming back. It fails as a connection timeout, which reads as a
+      #       database outage rather than as a resume, and it then succeeds on a
+      #       retry, so the symptom clears before anyone has looked into it.
+      #       (2) Alternatives Considered: holding the dev minimum above zero, as
+      #       production does at L30 of its tfvars, so the cluster never pauses and
+      #       the base document's ten seconds stays correct everywhere. Rejected on
+      #       the concrete consequence: it bills provisioned capacity around the
+      #       clock for an environment that is idle for most of it, which is the
+      #       one cost this profile's entire sizing set exists to avoid. Paying for
+      #       a permanently warm cluster to spare the first caller fifteen seconds
+      #       inverts what dev is for.
+      #       (3) Trade-offs: the accepted compromise is stated plainly, because
+      #       thirty seconds is not free. A database that is genuinely unreachable
+      #       -- a wrong security group, a revoked credential -- now takes thirty
+      #       seconds to say so instead of ten, so a real fault is slower to
+      #       surface here than in production. application-prod.yml restates ten at
+      #       L45 rather than inheriting it, so raising the value here cannot be
+      #       mistaken for a change that applies to both environments.
       connection-timeout: 30000
 
   jpa:
-    # WHY : Trade-offs: statements are echoed in dev and not in prod. This is the
-    #       one diagnostic that genuinely helps when a keyset predicate returns the
-    #       wrong page, and it is safe here only because the BIND-PARAMETER logger
-    #       stays at WARN below -- the statement text names columns, the parameters
-    #       would name cardholders.
+    # WHY : (1) Trade-offs: statement echo is on here and nowhere else -- the base
+    #       document pins it false at L487 and application-prod.yml restates false
+    #       at L59. It earns its cost in this context specifically: the keys this
+    #       module reads are a nines-complement encoding and a date-and-time pair
+    #       composed into one timestamp, so a wrong value is PLAUSIBLE rather than
+    #       obviously broken. A mis-encoded key selects a neighbouring row instead
+    #       of no row, and a mis-composed timestamp orders a page differently
+    #       rather than failing, so the emitted predicate is the only place either
+    #       shows. The accepted cost is a verbose log, and one further cost worth
+    #       naming: this property writes through the provider's own stdout printer
+    #       rather than the shared console pattern, so a statement line carries no
+    #       correlation identifier and has to be read beside the structured lines
+    #       around it instead of being filtered by identifier.
+    #       (2) Assumptions: what this turns on is statement TEXT, and the bound
+    #       VALUES stay off. The base document pins org.hibernate.orm.jdbc.bind at
+    #       WARN at L670 precisely so no broader level change can lift it, and this
+    #       profile deliberately does not restate that key -- restating a value the
+    #       base already pins would create a second place it could be changed. At
+    #       TRACE that logger writes every bound primary account number into the
+    #       log stream, and a dev database loaded from the baseline extract holds
+    #       the same class of data as production, so "it is only dev" is not an
+    #       argument here. Statement text names columns; it does not name a
+    #       cardholder, and no payload body is logged at any level in this profile.
     show-sql: true
 
 logging:
   level:
-    # WHY : Assumptions: this context's own packages at DEBUG so a dropped stale
-    #       message, a replayed request and a failed publication are all visible
-    #       while the messaging path is being exercised.
-    com.carddemo.authorization: DEBUG
+    # WHY : (1) Trade-offs: DEBUG on this project's package root, where the base
+    #       document holds INFO at L663 and production keeps this context's
+    #       packages at INFO. At DEBUG a dropped stale message, a redelivered
+    #       request and a reply awaiting publication are each visible while the
+    #       messaging path is being exercised by hand; at message rate that same
+    #       polling detail buries the per-message decision lines that are the audit
+    #       trail this context exists to produce, which is why production does not
+    #       carry it.
+    #       (2) Alternatives Considered: naming com.carddemo.authorization and
+    #       com.carddemo.common as two separate loggers, which is the obvious way
+    #       to raise exactly the two packages worth raising. Rejected because the
+    #       base document declares neither of them, so the overlay would stop being
+    #       a value-only override of the base key set, and a third com.carddemo
+    #       package added later would sit at INFO while this block appeared to have
+    #       raised everything. Nothing outside this repository publishes under
+    #       com.carddemo, so the package root raises precisely those two and pulls
+    #       no third-party logger up with it.
+    #       (3) Assumptions: root stays at the base document's WARN at L662. Left
+    #       unstated a reader might assume DEBUG here widened everything; it
+    #       widened one package tree.
+    com.carddemo: DEBUG
 
-    # WHY : Assumptions: the consumer's own container is raised too, because the
-    #       questions that actually arise in dev are about polling and visibility
-    #       rather than about the decision, and the decision is already logged.
-    io.awspring.cloud.sqs: DEBUG
-
-    # WHY : Trade-offs: the bind-parameter logger stays at WARN even here, and
-    #       especially here. At TRACE it writes every bound value, and the values
-    #       are primary account numbers; a dev database seeded from the baseline
-    #       extract holds the same kind of data as prod, so the argument that "it
-    #       is only dev" does not hold. show-sql above gives the statement text,
-    #       which answers the question without the values.
-    org.hibernate.orm.jdbc.bind: WARN
+management:
+  endpoint:
+    health:
+      # WHY : (1) Trade-offs: `when-authorized`, where the base document pins
+      #       `never` at L588 for every environment. The detail payload names this
+      #       module's health contributors and reports the state of each, and that
+      #       is the one answer a developer needs when a task will not turn
+      #       healthy: a paused cluster, a wrong credential and an unreachable
+      #       dependency all present as the same bare DOWN without it, and telling
+      #       them apart otherwise means reading a log stream to answer a question
+      #       the probe response already knows. `when-authorized` is the only value
+      #       that gives that answer to a caller presenting a valid token while
+      #       leaving the UNAUTHENTICATED reply exactly as production sends it --
+      #       SecurityConfig grants /actuator/health/** to permitAll at L263 so the
+      #       load balancer and the container probe can poll it with no
+      #       credentials, and they continue to receive the status word and nothing
+      #       more. The disclosure the base document closes at the edge stays
+      #       closed; what changes is only what an authenticated caller may ask.
+      #       (2) Alternatives Considered: `always`, which the account context's
+      #       dev overlay carries at L252 of its own profile. Rejected on the same
+      #       ground the base document rejects it: on a permitAll path `always`
+      #       answers ANY caller that can reach the port with the dependency list,
+      #       and the dependency this context would enumerate is the database
+      #       holding pending authorizations and fraud marks. Dev is provisioned
+      #       with production's topology by design, so a shape disclosed here is
+      #       the shape production has.
+      #       (3) Assumptions: the `roles` key is left unset because the base
+      #       document declares none and this profile adds no key. Unset, the
+      #       framework treats ANY authenticated caller as authorized, which here
+      #       is any holder of a valid user-pool token rather than an operator
+      #       alone. That is stated rather than glossed, because it is exactly why
+      #       this relaxation belongs in a profile no production task activates:
+      #       application-prod.yml carries no override of this key, so production
+      #       keeps `never` and answers every caller, authenticated or not, with
+      #       the status word.
+      show-details: when-authorized

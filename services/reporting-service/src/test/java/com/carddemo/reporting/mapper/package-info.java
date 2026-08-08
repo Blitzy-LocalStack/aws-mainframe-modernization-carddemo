@@ -1,133 +1,238 @@
 /**
- * Test charter for the byte-exact edit and projection boundary of the reporting bounded context:
- * the tests that hold the mapper package's numeric output to the bytes the reference artifacts
- * declare.
+ * Unit tests for the reporting anti-corruption layer, holding its output to the bytes the reference
+ * artifacts declare.
  *
- * <h2>Purpose</h2>
+ * This is the test-side counterpart of the charter at
+ * {@code services/reporting-service/src/main/java/com/carddemo/reporting/mapper/package-info.java}.
+ * That file is the normative statement of what the production package emits: its declared record
+ * lengths, its display and edit regimes, its seam with the shared codec and its padding
+ * obligations. This charter restates none of that inventory. It states instead what the tests
+ * themselves are, which class owns which contract, and the handful of facts a reader needs before
+ * opening any of them.
  *
- * <p><b>Purpose.</b> This package holds unit tests over the types in
- * {@code com.carddemo.reporting.mapper}. A test here needs no database, no container, no
- * application context and no test double: an edit mask is a pure function from an exact decimal
- * value to a fixed-width string, so every assertion in this package is a function of its own
- * arguments.</p>
+ * The seven test classes the migration plan assigns to this package, and the unit each covers:
  *
- * <p>Assumptions: the sibling charter at
- * {@code services/reporting-service/src/main/java/com/carddemo/reporting/mapper/package-info.java}
- * is the normative statement of what this package tests -- it enumerates the display and edit
- * regimes the production package emits and the declared record lengths those regimes fill. This
- * charter does not restate that inventory, because two copies of a count are two things to keep in
- * step and the production charter is the one the migration plan assigns the contract to. A test
- * here cites it rather than paraphrasing it.</p>
+ * {@code CobolEditMaskTest} covers {@code CobolEditMask}: the edit-mask cases and the coexisting
+ * numeric regimes, including all four zero renderings set out below.
  *
- * <h2>The one obligation every test in this package carries</h2>
+ * {@code ReportBandLayoutsTest} covers {@code ReportBandLayouts}: the seven band descriptors
+ * transcribed from {@code app/cpy/CVTRA07Y.cpy}, every one declaring a 133-byte record length.
  *
- * <p>Assumptions: an edit mask is a byte contract, not a formatting preference, so an expectation
- * in this package is pinned to a declared width or an edit mask read from an immutable reference
- * artifact under {@code app/}, and never to a string chosen because it read well. The report is the
- * worked example: its 133-column line and its {@code -ZZZ,ZZZ,ZZZ.ZZ} and {@code +ZZZ,ZZZ,ZZZ.ZZ}
- * edit masks are declared by the reference program and its copybook, so the width and the polarity
- * of every emitted item are facts to be reproduced rather than choices to be made. A test that
- * asserted a self-chosen literal would pass while the emitted artifact drifted away from the
- * declared record length, which is precisely the failure these assertions exist to prevent.</p>
+ * {@code StatementBandLayoutsTest} covers {@code StatementBandLayouts}: the seventeen
+ * {@code ST-LINE} band descriptors declared at lines 86 to 146 of {@code app/cbl/CBSTM03A.CBL},
+ * every one 80 bytes.
  *
- * <p>Assumptions: the reference implementation under {@code app/} and the functional-parity oracle
- * suite under {@code tests/} are read as evidence and are never modified, re-pinned or regenerated
- * by anything in this package. A test here cites a reference program, copybook or job by path when
- * it needs to ground an expectation, and that citation is the whole extent of the relationship.</p>
+ * {@code TransactionReportMapperTest} covers {@code TransactionReportMapper}: the 133-column report
+ * emission, band by band.
  *
- * <p>Assumptions: money reaches these tests as {@code com.carddemo.common.money.Money} built from
- * exact decimal text, and never from a binary floating point literal. A mask that is correct to the
- * cent cannot be demonstrated by a fixture that was already wrong before the mask saw it, so the
- * fixture construction is part of the contract under test rather than incidental setup.</p>
+ * {@code StatementTextMapperTest} covers {@code StatementTextMapper}: the 80-column plain-text
+ * statement emission, and the immutable prepared-fields record that the HTML mapper shares.
  *
- * <p>Trade-offs: a test here asserts the rendered bytes and deliberately does not assert which
- * component performed any rounding. Rounding belongs to the money type and to the arithmetic that
- * produced the value; a formatter that also rounded would be two contracts in one method, and an
- * expectation that conflated them would keep passing after either half changed. The cost is that a
- * rounding regression is caught by the money tests rather than here; the gain is that a width or
- * polarity failure in this package names the formatter and nothing else.</p>
+ * {@code StatementHtmlMapperTest} covers {@code StatementHtmlMapper}: the 100-column HTML statement
+ * emission and its thirty-four markup fragments.
  *
- * <h2>Two hazards these tests are built to catch</h2>
+ * {@code ReportingDtoMapperTest} covers {@code ReportingDtoMapper}: the JSON boundary.
  *
- * <p>Assumptions: the default locale is hostile territory for a fixed-width numeric contract. A
- * grouping separator and a decimal separator are locale-dependent in most formatting APIs, so a
- * mask that reads correctly on a machine configured one way emits a different byte sequence on a
- * machine configured another way. Every test in this package therefore installs a default locale
- * whose punctuation differs from the expected output before it runs and restores the original
- * afterwards, so a locale-dependent implementation fails here instead of failing in a deployed
- * region. Restoring the previous value is not politeness: the locale is process-global state, and
- * leaving it changed would make an unrelated test in the same reactor fail for a reason nothing in
- * its own source explains.</p>
+ * One further class sits in this package and is listed so that this inventory matches the
+ * directory. {@code ReportingFixtureRecordTest} consumes the committed fixture records, resolving
+ * each from the test classpath and decoding it against the production layout registry. Its subject
+ * is the fixture corpus rather than a mapper contract, which is why it is named apart from the
+ * seven above rather than counted among them.
  *
- * <p>Assumptions: these formatters are reached concurrently in the target, because report and
- * statement generation runs as batch steps over many rows, so a mask holding mutable formatting
- * state between calls would corrupt output only under load and only sometimes. That is the least
- * reproducible failure mode this package could ship, which is why concurrent use is asserted
- * directly rather than left to be inferred from the absence of a field.</p>
+ * The ownership boundary, which is the rule here most easily broken by a well-meant edit: each
+ * byte-exact rule is asserted in exactly one class. Mask semantics belong to
+ * {@code CobolEditMaskTest}. Layout geometry, meaning declared record lengths, field offsets,
+ * widths and the literals a band carries, belongs to {@code ReportBandLayoutsTest} and
+ * {@code StatementBandLayoutsTest}. The placement of an already-formatted value into a band belongs
+ * to the three emitter tests. JSON shape belongs to {@code ReportingDtoMapperTest}. Two owners of
+ * one rule drift apart, and the drift stays invisible until a golden comparison fails, which is
+ * long after the edit that caused it.
  *
- * <h2>Naming, and what a wrong name costs</h2>
+ * Four zero renderings coexist in this module and none substitutes for another:
  *
- * <p>Assumptions: a class in this package is collected by the unit-test runner during the Maven
- * {@code test} phase, which requires its name to begin with {@code Test} or end with {@code Test},
- * {@code Tests} or {@code TestCase}. Neither {@code services/pom.xml} nor
- * {@code services/reporting-service/pom.xml} configures an include pattern for the default test
- * execution, so those default patterns are the whole of the contract; the one include the parent
- * does declare, at {@code services/pom.xml:1047}, narrows a separate {@code architecture-rules}
- * execution to {@code LayeringRulesTest} and does not govern this package. A class whose name ended
- * in {@code IT} would instead be collected at {@code integration-test}, after packaging, and would
- * not run at all in a plain {@code test} invocation -- so a no-container assertion would silently
- * stop being checked in the inner loop while the build still reported success.</p>
+ * Fifteen blanks, the whole item suppressed. This is the report amount, from the
+ * {@code Z}-suppressed 15-byte mask {@code PIC -ZZZ,ZZZ,ZZZ.ZZ} declared at line 30 of
+ * {@code app/cpy/CVTRA07Y.cpy}. Owned by {@code CobolEditMaskTest}.
  *
- * <h2>Parameters, return values and exceptions: declared inapplicable</h2>
+ * Nine blanks, then a period, then two zero digits, then a blank sign position. This is the
+ * statement amount, from {@code PIC Z(9).99-} declared at lines 137 and 142 of
+ * {@code app/cbl/CBSTM03A.CBL}. Thirteen characters. Owned by {@code CobolEditMaskTest}.
  *
- * <p>A package declaration accepts no parameter, yields no value and raises nothing, so this
- * charter carries no parameter, return or exception at-clause, and no authorship, availability or
- * revision at-clause either. The inapplicability is stated rather than left silent because the
- * project's single user-specified rule, Explainability, names a docstring that omits parameters,
- * return values or purpose among its forbidden patterns, and a reader has to be able to tell a
- * declared inapplicability from an oversight. Fabricating the at-clauses would be worse: Javadoc
- * has no parameter, return or exception concept for a package, and the shared rule set audits
- * at-clause bodies for emptiness, so an invented clause would either be discarded or reported. That
- * exemption is this compilation unit's alone and does not travel into the test classes beside it,
- * where a test method and a private helper alike do have parameters, return values and thrown types
- * to document.</p>
+ * Zero-padded integer digits, then a period, then two zero digits, then a blank sign position. This
+ * is the statement balance, from {@code PIC 9(9).99-} declared at line 113 of
+ * {@code app/cbl/CBSTM03A.CBL}. Thirteen characters. Owned by {@code CobolEditMaskTest}.
  *
- * <h2>Why this charter exists, and the form it takes</h2>
+ * The two-decimal-place quoted string form. This is the JSON representation, carried on the wire as
+ * a JSON string and never as a JSON number. Its shape is owned by {@code ReportingDtoMapperTest},
+ * and it is held apart from the three masks in {@code CobolEditMaskTest}.
  *
- * <p>Assumptions: the Explainability rule requires a docstring on every module entry point, and in
- * Java the entry point of a package is its package declaration, which only a
- * {@code package-info.java} can carry, so this file is load-bearing rather than decorative. Two
- * Checkstyle modules enforce that independently and neither is redundant: the file-set check at
- * {@code config/checkstyle/checkstyle.xml:245} inspects the file system and requires this file to
- * exist in any directory holding an audited source file, while the syntax-tree check at
- * {@code config/checkstyle/checkstyle.xml:378} parses the file and requires it to carry Javadoc. A
- * charter reduced to a bare package statement satisfies the first and fails the second, which is
- * why prose is the deliverable and the file's mere existence is not.</p>
+ * The two statement forms differ from each other only in whether a leading zero prints, and both
+ * are the same width, so a mask that emitted the wrong one would still fill its field and would
+ * still misstate every value in the artifact.
  *
- * <p>Assumptions: the gate audits this tree as well as the main tree.
- * {@code services/pom.xml:888} sets {@code includeTestSourceDirectory} for the
- * {@code checkstyle-documentation-gate} execution declared at {@code services/pom.xml:770}, bound
- * to the Maven {@code validate} phase at {@code services/pom.xml:771} with
- * {@code failOnViolation} true at {@code services/pom.xml:860} and {@code violationSeverity} set to
- * warning at {@code services/pom.xml:861}. A test package holding a test class and no charter
- * therefore fails the reactor at {@code validate}, before anything is compiled, rather than passing
- * quietly -- which is how the absence of this file was observed rather than assumed.</p>
+ * {@code FILLER} is handled in opposite ways two files apart, and the two readings must never be
+ * generalised to one another. In the report band descriptors it is real valued content: all
+ * twenty-two {@code FILLER} items declared across lines 4 to 66 of {@code app/cpy/CVTRA07Y.cpy}
+ * carry a {@code VALUE}, and they survive every record in the baseline because line 362 of
+ * {@code app/cbl/CBTRN03C.cbl} re-initialises the band and the {@code INITIALIZE} verb skips
+ * {@code FILLER}, so a joiner written once is never cleared. {@code ReportBandLayoutsTest}
+ * therefore asserts that each one is modelled and seeded. In the JSON DTOs the same construct is
+ * dropped, and the drop is recorded rather than merely performed: {@code ReportingDtoMapperTest}
+ * asserts that no record component is named for filler, padding or a reserved area, and separately
+ * that every dropped field is registered. Input padding on the one side, output literal on the
+ * other.
  *
- * <p>Trade-offs: this file is restricted to printable ASCII, and where a cited source carries a
- * non-breaking hyphen or an em dash it uses an ASCII hyphen-minus or a pair of ASCII hyphens. The
- * reason is concrete rather than aesthetic: {@code tests/README.md} uses the non-breaking hyphen
- * inside the very words a justification label is spelled from, so text copied from there yields a
- * label that looks correct, greps wrong, and silently escapes an audit searching for the canonical
- * spelling. The accepted cost is typographically plainer prose.</p>
+ * Every class in this package carries a {@code Test} suffix, and that is deliberate rather than
+ * incidental. Neither {@code services/pom.xml} nor {@code services/reporting-service/pom.xml}
+ * declares an include pattern for the default test execution, so the resolved unit-test runner's
+ * own defaults govern, and those defaults gather four name shapes only: a {@code Test} prefix, or a
+ * {@code Test}, {@code Tests} or {@code TestCase} suffix. A {@code Spec} suffix matches none of the
+ * four and would be gathered by nothing at all, and a silently uncollected test is worse than no
+ * test because the build still reports success. An {@code IT} suffix is the integration-test
+ * runner's pattern and is gathered after packaging, so it does not belong in a package whose
+ * assertions need no packaged artifact.
  *
- * <p>Assumptions: the four justification labels used here -- {@code Alternatives Considered:},
- * {@code Refactoring Rationale:}, {@code Assumptions:} and {@code Trade-offs:} -- are spelled
- * exactly as {@code docs/CODE_DOCUMENTATION_STANDARD.md} fixes them: plural where the rule writes
- * them plural, unparenthesised, each closed by its own colon, and never wrapped in emphasis markup.
- * The bare form is used throughout this charter and the emphasis form nowhere, because that
- * standard requires that the forms are never mixed inside one file.
- * {@code Refactoring Rationale:} is deliberately unused here, because that label applies when
- * existing code is replaced and the Java in this module replaces nothing: the reference COBOL stays
- * byte-identical and keeps running.</p>
+ * The fixture records these tests read live in the sibling directory
+ * {@code services/reporting-service/src/test/resources/fixtures/}, and no fixture file belongs in
+ * this package. That separation is the one the documentation gate depends on: the shared
+ * suppression charter exempts that resources directory and nothing else on the test side, so a
+ * fixture moved in here would arrive inside an audited Java package and be read as source.
+ *
+ * These are plain JUnit 5 unit tests. No class here starts an application context, a container, a
+ * cloud emulator or a database, and none adds a dependency. An edit mask is a pure function from an
+ * exact decimal value to a fixed-width string and a band descriptor is a declaration, so every
+ * assertion in this package is a function of its own arguments.
+ *
+ * Every assertion traces to a reference artifact cited by path and line. The artifacts read here
+ * are {@code app/cpy/CVTRA07Y.cpy} and {@code app/cpy/CVTRA05Y.cpy}, {@code app/cbl/CBTRN03C.cbl}
+ * and {@code app/cbl/CORPT00C.cbl}, {@code app/cbl/CBSTM03A.CBL} and {@code app/cbl/CBSTM03B.CBL},
+ * {@code app/cpy/COSTM01.CPY}, and the jobs {@code app/jcl/TRANREPT.jcl},
+ * {@code app/jcl/PRTCATBL.jcl} and {@code app/jcl/CREASTMT.JCL}. Filename extension case is part of
+ * each path and is reproduced as the tree carries it. The baseline under {@code app/} is
+ * reference-only: it is read as evidence and is never modified, re-pinned or regenerated by
+ * anything here. Where the target behaves differently, the baseline does one thing, the Java
+ * implements another, and the divergence is documented in
+ * {@code docs/architecture/cobol-to-service-traceability.md}. A test here never presents such a
+ * difference as a repair of the baseline.
+ *
+ * The functional-parity oracle suite under the repository-root {@code tests/} tree is a separate
+ * body of work from this package. That tree is the COBOL three-layer suite which compares the
+ * reference programs against golden masters, and it is not
+ * {@code services/reporting-service/src/test}. Nothing here runs it, extends it or re-pins it.
+ *
+ * Parameters, return values and exceptions or errors: none applies. A package declaration accepts
+ * no argument, yields no value and raises nothing, so this file carries no parameter, return or
+ * exception at-clause, and no authorship, availability or revision at-clause either. The
+ * inapplicability is declared rather than left silent so that a reviewer can tell it from an
+ * omission, because the project's single user-specified rule, Explainability, lists a docstring
+ * that omits parameters or return values among its forbidden patterns. The exemption belongs to
+ * this compilation unit alone and does not travel into the classes beside it, where a test method
+ * and a private helper alike do have arguments and thrown types to document.
  */
 package com.carddemo.reporting.mapper;
+
+// WHAT: places the justification block after the package declaration rather than between it and the
+//       charter above.
+// WHY : Assumptions: MissingJavadocPackage resolves the charter by looking at the comment
+//       immediately preceding the package declaration, so an intervening line comment detaches the
+//       two. This was measured rather than reasoned about: with these comments sitting above the
+//       declaration, `mvn -f services/reporting-service/pom.xml validate` failed with exactly one
+//       finding, MissingJavadocPackage reported against the package declaration line at column 1,
+//       on a file whose very first token is the opening of a Javadoc block. Moving the block below
+//       the declaration keeps every comment adjacent to the declaration it explains, which is what
+//       Rule 1 asks at its line 27, while leaving the charter in the only position the check
+//       accepts. Re-running the same command afterwards reported zero violations.
+// WHAT: records the determination that decided whether this file is required, and the branch it
+//       resolved to.
+// WHY : Assumptions: whether the documentation gate audits this tree at all is a property of the
+//       Maven plugin and not of config/checkstyle/checkstyle.xml, so it cannot be read from the
+//       rule set no matter how carefully that file is studied. Running
+//       `mvn -f services/reporting-service/pom.xml help:effective-pom` and reading the resolved
+//       maven-checkstyle-plugin 3.6.0 execution `checkstyle-documentation-gate` printed the
+//       property includeTestSourceDirectory carrying the value true, alongside failOnViolation true
+//       and violationSeverity warning. The value is declared, so no plugin default applies and none
+//       was assumed. src/test/java is therefore audited, JavadocPackage at line 245 of that rule
+//       set is a file-set check that reports any audited directory holding no package-info.java,
+//       and this file is consequently required at the validate phase before anything compiles.
+// WHAT: states why this file would exist even had that determination gone the other way.
+// WHY : Alternatives Considered: omitting the file whenever the gate does not demand it. Rejected,
+//       because user-specified Rule 1 requires a docstring on every module entry point at
+//       its line 15, and in Java the entry point of a package is its package declaration, which
+//       only a package-info.java can carry; because a test package whose classes hold interlocking
+//       byte-exact contracts is exactly where a reader needs one orientation point; and because the
+//       plugin property is a single line somebody may later flip, at which point a package with no
+//       charter would break the build in a file nobody was watching. Only the enforcement differs
+//       between the two branches, never the correctness of having the file. The class total is
+//       given once in the charter above and is deliberately not repeated here, since a count
+//       restated inside a justification is a third place for it to fall out of step.
+// WHAT: keeps this compilation unit to a documentation block and a package declaration.
+// WHY : Assumptions: a package-info.java is read for package-level Javadoc and annotations and for
+//       nothing else, so a type, a constant, an import or a static block declared here would make
+//       it an ordinary source file that merely happens to be named package-info, and the package
+//       would then have its documentation attached to a class instead of to itself. No
+//       package-level annotation is declared either, because any this module could want would pull
+//       in an import and add a second thing to document for no assertion gained.
+// WHAT: keeps this charter to the tests and leaves the emitted contract to the production charter.
+// WHY : Trade-offs: the production charter beside this one already fixes the emitted contract, so
+//       repeating its record lengths, its regime table or its padding obligations here would create
+//       a second copy of every figure. Two copies of a count are two things to keep in step, and
+//       the one that falls behind is indistinguishable from the one that is right. The accepted
+//       cost is that a reader wanting the emitted contract opens that file; the gain is that no
+//       figure in this module has two homes.
+// WHAT: states the one-owner-per-rule boundary in this file rather than in each class separately.
+// WHY : Alternatives Considered: letting each class assert its own scope in its own header.
+//       Rejected, because a boundary is a statement about the whole set and no single member can
+//       make it: a reader who opens one class sees only what that class covers and cannot tell that
+//       a mask assertion added there duplicates one already made elsewhere. Stating it at package
+//       level puts it where somebody editing a single file in isolation still passes it.
+// WHAT: enumerates the four coexisting zero renderings in one place rather than once per owner.
+// WHY : Assumptions: the four are genuinely different byte sequences for the same value, and three
+//       of them are identical or near-identical in width, so the failure mode is substitution
+//       rather than absence. A substituted zero still fills its field and still satisfies any check
+//       that only measures length, which is why the set is written out together with each owner
+//       named: the comparison a reader has to make is between the four, and a fact split across
+//       four files cannot be compared without opening all four.
+// WHAT: calls out that FILLER is modelled on one side of this package and dropped on the other.
+// WHY : Assumptions: the two readings are opposite rather than merely different, so the natural
+//       generalisation of one FILLER policy for the whole module is wrong in one direction whichever
+//       way it is chosen. On the report side the construct carries a VALUE and is output content
+//       that must be emitted; on the JSON side it is input padding that exists to reach a declared
+//       record length and carries nothing a consumer can use. Stating the inversion is what stops a
+//       shared helper being written across the two, which is the concrete edit this note exists to
+//       prevent.
+// WHAT: declares the parameter, return and exception elements inapplicable in prose rather than as
+//       at-clauses.
+// WHY : Trade-offs: Rule 1 names four docstring elements and its validation gate at line 43 is
+//       conjunctive, so a reviewer auditing against it looks for all four and has to be able to
+//       tell a declared inapplicability from an oversight. Adding an empty at-clause to look
+//       complete would fail the build outright, because NonEmptyAtclauseDescription at line 470 of
+//       the shared rule set rejects an at-clause with no description, and Javadoc has no parameter,
+//       return or exception concept for a package in the first place. Declaring the inapplicability
+//       in the block above costs a sentence and is the only form that both satisfies that gate and
+//       survives it.
+// WHAT: states the collected test-name shapes as the resolved runner documents them rather than as
+//       a stricter rule of thumb.
+// WHY : Assumptions: the default test execution declares no include pattern, so the resolved
+//       maven-surefire-plugin 3.5.6 defaults govern, and that version's own goal descriptor
+//       documents them as `**/Test*.java`, `**/*Test.java`, `**/*Tests.java` and
+//       `**/*TestCase.java`. The tighter claim that only a Test suffix is ever gathered reads as
+//       the safer thing to write and is not true of this runner, and a maintainer who believed it
+//       could rename a working class to fix a problem that never existed. Rule 1 forbids an
+//       unfounded rationale at its line 41, so the four patterns are cited as they were read.
+// WHAT: restricts this file to printable ASCII and to Javadoc carrying no markup element.
+// WHY : Trade-offs: the repository-root tests/README.md spells a justification label with a
+//       non-breaking hyphen at its line 548, so text copied from there yields a label that looks
+//       correct and matches no search for the canonical spelling; every label here is therefore
+//       typed with an ASCII hyphen-minus. Markup is dropped for a second and independent reason:
+//       JavadocParagraph and JavadocStyle are both absent from the shared rule set and no javadoc
+//       goal is bound in this reactor, so no element is required by anything, while an unescaped
+//       angle bracket in a file that is almost entirely prose is a live hazard. The accepted cost
+//       is typographically plainer output.
+// WHAT: names ReportingFixtureRecordTest in the inventory beside the seven the plan assigns here.
+// WHY : Assumptions: the inventory exists so that a reader can navigate this package without
+//       opening its files, which makes it wrong the moment it omits one that is present. The
+//       migration plan assigns seven mapper test classes to this package and that figure is stated
+//       as seven; the eighth class landed beside them and covers a different subject, consuming the
+//       committed fixture records rather than asserting a mapper contract. Listing it under its own
+//       sentence keeps both facts exact instead of collapsing them into one number that matches
+//       neither.

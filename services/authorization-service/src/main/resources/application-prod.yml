@@ -1,77 +1,212 @@
 # =============================================================================
-# authorization-service -- production profile.
+# services/authorization-service/src/main/resources/application-prod.yml
+# -----------------------------------------------------------------------------
+# WHAT: the production profile overlay for the pending-authorization bounded
+#       context. It sets NINE leaf values, and every one of them is a key that
+#       application.yml beside it already declares, so this document introduces
+#       no key absent there. Eight sit on the three axes a profile is permitted
+#       to vary -- connection-pool sizing including the acquisition timeout,
+#       diagnostic verbosity, and actuator health detail breadth. The ninth,
+#       spring.config.import, is not an axis at all: a profile's import list
+#       REPLACES the base document's rather than extending it, so every overlay
+#       has to name the shared defaults document again, and that is argued at
+#       the key itself.
 #
+# WHY : Assumptions: this document differs from application-dev.yml in SIZING,
+#       RETENTION and DIAGNOSTIC VERBOSITY only, never in topology, protocol or
+#       security posture, and it RELAXES NOTHING. The listener port and its TLS
+#       floor, the datasource and the search_path that pins its schema, the
+#       separate migration identity and its role assumption, the resource-server
+#       issuer and the three token checks, the actuator exposure list, and every
+#       messaging value carried across from the baseline consumer are inherited
+#       from the base document unchanged -- so each of them is decided in exactly
+#       one place, and none of them appears below.
 #
-# WHY : (1) Assumptions: this profile differs from dev in SIZING, RETENTION and
-#       DIAGNOSTIC VERBOSITY only. The topology, the TLS floor, the actuator
-#       exposure list and the schema resolution are all inherited unchanged from
-#       the base document, so there is exactly one place each of them is decided.
-#       (2) Assumptions: nothing here re-enables a diagnostic the base document
-#       suppresses. The values that would be tempting to raise during an incident
-#       -- statement echo and parameter binding -- are the two that would write
-#       cardholder data into log storage, which is the one destination the masking
-#       applied at the API edge does not reach.
+# WHY : Trade-offs: FIVE of the nine values repeat what the base document already
+#       says -- the statement echo flag, the two statement loggers, this context's
+#       own log level, and the health detail breadth. The cost is that a reader
+#       meets five keys that change no effective value and has to ask why they are
+#       here, which is answered at each of them. What the repetition buys is that
+#       the base document stays the one a developer edits to make a local run
+#       legible, without such an edit widening the deployed surface in the same
+#       commit. Alternatives Considered: setting only the four values that
+#       genuinely differ from the base and leaving the rest to it. Rejected
+#       because those four are the import list and pool sizing, so the overlay
+#       would then say nothing whatever about the diagnostics that decide whether
+#       cardholder data reaches log storage -- the one question about this profile
+#       worth being able to answer without reading the base document end to end.
+# -----------------------------------------------------------------------------
+# Documentation convention: docs/CODE_DOCUMENTATION_STANDARD.md, whose YAML
+#   section supplies the analogous obligation for a language with no docstring
+#   construct -- a file header, plus a labelled rationale on each non-obvious key
+#   -- and the technical specification states that same obligation at 0.8.1. The
+#   twin WHAT/WHY form is used in this framed header ONLY: the standard permits a
+#   file-header WHAT: and forbids a statement-level one in a configuration file,
+#   so every comment below the header is a bare labelled rationale line instead.
+#   The four category labels appear in the one permitted plural form.
+#
+# WHY : Assumptions: NO MECHANICAL GATE READS THIS FILE. config/checkstyle/
+#       checkstyle.xml narrows its Checker to fileExtensions="java" at L185, and
+#       no linter in this repository parses YAML comments, so no rationale missing
+#       below would fail a build. The discipline is applied at the rigour it is
+#       applied where a build would fail without it, because the sentence this
+#       tree is audited against -- the validation gate at line 43 of the project's
+#       single user-specified rule, Rule 1 "Explainability" -- places the
+#       enforcement in review rather than in tooling.
 # =============================================================================
 
 spring:
   config:
-    # WHY : (1) Assumptions: same three-part prefix as every other context, with
-    #       the environment label supplied by the task definition. The default is
-    #       `prod` here rather than `dev` so that a task started with this profile
-    #       and no label still reads the right subtree.
-    #       (2) Trade-offs: this list REPLACES the base document's import, so the
-    #       shared defaults document is named again. Omitting it would drop the
-    #       shared log pattern in production only, which is the worst place to
-    #       discover it missing.
+    # WHY : Assumptions: the prefix is /carddemo/<environment>/authorization/, the
+    #       same three-part shape every context uses, so one Terraform module
+    #       writes them all and one policy can grant read on exactly one context's
+    #       subtree. The label defaults to `prod` here where the dev overlay
+    #       defaults to `dev`, so a task started on this profile with no label set
+    #       still reads the subtree belonging to it rather than another
+    #       environment's.
+    # WHY : Trade-offs: this list REPLACES the base document's single import
+    #       rather than extending it, which is why the shared defaults document is
+    #       named again as the first entry. Omitting it would drop the shared
+    #       console pattern that carries the correlation identifier, and would drop
+    #       it in production alone -- the environment where a request that cannot
+    #       be traced across two services costs the most to investigate.
+    # WHY : Assumptions: the import is `optional:`, matching the dev overlay. The
+    #       sibling POM declares no parameter-store starter, so no resolver claims
+    #       this location prefix; without `optional:` startup would abort on the
+    #       config location itself rather than on any value being absent, which
+    #       reports the wrong fault, because the values this overlay would supply
+    #       already arrive as environment variables the task definition sets.
     import:
       - "classpath:/carddemo-common-defaults.yml"
       - "optional:aws-parameterstore:/carddemo/${CARDDEMO_ENVIRONMENT:prod}/authorization/"
 
   datasource:
     hikari:
-      # WHY : Trade-offs: twenty connections per task rather than the base
-      #       document's ten. This context holds a row lock while it decides and
-      #       further locks while it drains the outbox, so its connections are held
-      #       longer than a purely request-response context's; twenty gives the
-      #       consumer's concurrency, the drain and the endpoints headroom without
-      #       one task claiming a disproportionate share of the cluster's budget.
+      # WHY : Trade-offs: twenty connections per task against the base document's
+      #       ten and the dev overlay's four. The base sizes ten around
+      #       carddemo.messaging.max-concurrent-messages, which is also ten, and
+      #       each in-flight message holds one connection for the length of its own
+      #       transaction -- so at a full poll batch the outbox drain, the retention
+      #       sweep and the web endpoints are left competing for whatever the
+      #       consumer is not using. Twenty gives those three their own headroom, so
+      #       a full batch no longer turns the drain into a connection-timeout
+      #       failure that presents as database trouble.
+      # WHY : Assumptions: THIS POOL IS PER TASK AND THE LIMIT IT SPENDS AGAINST IS
+      #       PER CLUSTER, so the number that matters is the product rather than the
+      #       value written here. infra/envs/prod/terraform.tfvars sets
+      #       ecs_desired_count = 2, so this context draws at most forty
+      #       connections, and the cluster's ceiling is shared with the seven peer
+      #       contexts and with the batch tasks. Raising this value and raising the
+      #       task count spend the same budget, so the two have to be read together:
+      #       doubling the task count without lowering this number doubles the draw.
       maximum-pool-size: 20
+
+      # WHY : Trade-offs: an idle floor of five, against the base document's two
+      #       and the dev overlay's one, and the floor is worth naming separately
+      #       from the ceiling above it. Establishing a connection here is not a
+      #       bare handshake: the base document sets sslmode to verify-full, so each
+      #       new connection also validates a certificate chain and a hostname.
+      #       Holding five open means a poll batch arriving after a quiet spell
+      #       finds most of what it needs already warm. Alternatives Considered:
+      #       leaving the floor at the base document's two. Rejected on the
+      #       consequence: a full batch of ten messages after an idle spell would
+      #       then open eight connections at once, each paying that validation, and
+      #       the cost lands as a latency spike on the first messages of the batch
+      #       rather than being spread. The accepted cost is that five connections
+      #       per task are held against the cluster's budget while doing nothing.
       minimum-idle: 5
 
-      # WHY : Assumptions: production capacity has a non-zero minimum, so the
-      #       cluster never pauses and the base document's ten-second timeout is
-      #       right. It is restated here so that raising the dev value cannot be
-      #       mistaken for a change that applies everywhere.
-      connection-timeout: 10000
-
-      # WHY : Trade-offs: a fifteen-minute maximum lifetime, shorter than the
-      #       cluster's own idle timeout. Recycling before the server closes a
-      #       connection means the pool retires it on its own terms rather than
-      #       discovering it closed midway through a transaction that had already
-      #       taken a lock.
-      max-lifetime: 900000
+      # WHY : Trade-offs: five seconds, against the dev overlay's thirty and the
+      #       base document's ten. The dev overlay waits thirty because
+      #       infra/envs/dev/terraform.tfvars sets aurora_min_capacity = 0, so that
+      #       cluster pauses and its first connection afterwards absorbs a resume of
+      #       roughly fifteen seconds. infra/envs/prod/terraform.tfvars sets
+      #       aurora_min_capacity = 2, so this cluster never pauses and there is no
+      #       resume to absorb: the condition that earns the long timeout does not
+      #       arise here.
+      # WHY : Alternatives Considered: carrying the dev value everywhere so the two
+      #       profiles read identically. Rejected on the consequence rather than on
+      #       preference. With no pause to wait out, a thirty-second acquisition
+      #       timeout does not tolerate a slow database, it CONCEALS an unhealthy
+      #       one: each request would hold its worker thread for thirty seconds
+      #       waiting on a connection that is not coming, so the service would
+      #       exhaust its threads on waiters before the load balancer's own timeout
+      #       returned anything to a caller, and the health probe would keep
+      #       answering throughout. Five seconds is far above the in-network latency
+      #       of a connection to a writer in an adjacent subnet and far below that
+      #       timeout, so a genuine fault surfaces as a fast failure -- and, for the
+      #       consumer, as a redelivered message the queue retries.
+      connection-timeout: 5000
 
   jpa:
-    # WHY : Assumptions: statements are NOT echoed. The text alone is a
-    #       performance cost at production message rates and offers nothing the
-    #       database's own statement statistics do not, since the questions worth
-    #       asking in production are about plans and waits rather than syntax.
+    # WHY : Trade-offs: the statement echo is OFF, stated explicitly rather than
+    #       left to the base document's value, because the dev overlay sets it true
+    #       and these two files are read as a pair. What the echo emits is not only
+    #       statement text: the parameters this context binds are primary account
+    #       numbers and authorization amounts, and log storage is the one
+    #       destination the mapping controls do not reach -- a primary account
+    #       number is masked to its last four digits in every response and a card
+    #       verification value is returned by no operation at all, so a statement
+    #       logger here would defeat both controls at once. Alternatives Considered:
+    #       omitting the key and inheriting the base value, which is already false.
+    #       Rejected because an inherited default records no intent: it reads as a
+    #       value nobody chose for this profile, and a later change to the base
+    #       would carry production with it unnoticed.
     show-sql: false
 
 logging:
   level:
-    # WHY : Trade-offs: INFO for this context's own packages, not DEBUG. The
-    #       per-message decision lines are the audit trail this context exists to
-    #       produce and they are emitted at INFO; DEBUG would add polling detail at
-    #       message rate, which costs log storage and buries the lines that matter.
-    com.carddemo.authorization: INFO
+    # WHY : Assumptions: this context's own packages at INFO, which is the level
+    #       the consumer's per-message decision lines are emitted at, and those
+    #       lines are the audit trail this context exists to produce. The dev
+    #       overlay raises the same tree to DEBUG to follow polling and visibility;
+    #       that raise is confined to the profile it is written in, because profile
+    #       documents are merged with the base and not with one another, and INFO is
+    #       named here so the level this profile runs at is legible without being
+    #       inferred from an absence.
+    com.carddemo: INFO
 
-    # WHY : Assumptions: the consumer's own container stays at WARN, so a genuine
-    #       visibility or acknowledgement fault is reported and routine polling is
-    #       not.
-    io.awspring.cloud.sqs: WARN
-
-    # WHY : Assumptions: pinned at WARN rather than inherited, so no broader level
-    #       change can raise it. At TRACE this logger writes every bound primary
-    #       account number into log storage.
+    # WHY : Assumptions: both loggers are pinned at WARN rather than left to
+    #       inherit the base document's root, and the pinning is what the two
+    #       values buy. A logger carrying an explicit level does not inherit from
+    #       its parent, so with these two named here a broader raise, such as the
+    #       whole org.hibernate tree taken to DEBUG or TRACE while an incident is
+    #       open, cannot drag either of them up with it. The first is the route to
+    #       statement text, alongside the echo flag above; the second writes every
+    #       bound value, and at TRACE that puts the primary account numbers and
+    #       authorization amounts this context binds into log storage. Turning the
+    #       echo off while leaving these two raisable from elsewhere would make
+    #       "statements are off" true of one mechanism and not of the other.
+    org.hibernate.SQL: WARN
     org.hibernate.orm.jdbc.bind: WARN
+
+management:
+  # WHY : Assumptions: only the health endpoint's detail breadth is set here. The
+  #       exposure list, which decides WHICH endpoints answer at all, is
+  #       deliberately not restated and stays exactly as the base document closes
+  #       it, at health and prometheus -- so /actuator/health itself keeps
+  #       answering. Two probes depend on that: the image's own HEALTHCHECK at
+  #       services/authorization-service/Dockerfile L223-L226, and the load
+  #       balancer's target group. A task whose health path stopped answering would
+  #       be taken out of rotation rather than reported as misconfigured.
+  endpoint:
+    health:
+      # WHY : Trade-offs: never, restating the base document's value at the one
+      #       profile that runs behind the internet-facing edge. The detail payload
+      #       names the datasource and the queues this context depends on and
+      #       reports whether each is reachable, which is a description of the data
+      #       tier; and the path is unauthenticated of necessity, since neither the
+      #       container probe nor the target group can present a token, so whatever
+      #       it returns is readable by anything able to reach the port. Suppressing
+      #       the DETAIL and not the ENDPOINT is the whole of the intent.
+      # WHY : Alternatives Considered: leaving this to the base document alone,
+      #       which settles it once for every environment and which the dev overlay
+      #       beside this one does not vary either. Rejected because the base is the
+      #       document someone edits to make a local run diagnosable, and an edit
+      #       made for that reason would open the payload on the internet-facing
+      #       deployment in the same commit, with nothing in this profile recording
+      #       that the value ever mattered here. The accepted cost is that an
+      #       on-call reader cannot learn which contributor is failing from the
+      #       probe; that is in the metrics path and in the task's own logs, neither
+      #       reachable without a credential.
+      show-details: never

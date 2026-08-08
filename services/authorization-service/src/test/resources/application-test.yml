@@ -2,427 +2,355 @@
 # services/authorization-service/src/test/resources/application-test.yml
 # -----------------------------------------------------------------------------
 # Purpose:
-#   Supplies the Spring `test` profile overlay for authorization-service, the
-#   bounded context that owns the pending-authorization summary and detail
-#   segments, the fraud marking, the FIFO request consumer and the transactional
-#   outbox that closes the baseline's lost-reply window. It keeps the production
-#   datastore, schema, identity and messaging mechanisms while replacing only the
-#   environment-bound values that would make an isolated test context contact
-#   infrastructure, negotiate TLS against a container that serves none, refuse to
-#   build a bean because a deployment-only value is absent, or start polling a
-#   queue the moment a context refreshed.
+#   The Spring `test` profile overlay for authorization-service, the bounded
+#   context that owns the pending-authorization summary and detail segments, the
+#   fraud marking, the FIFO request consumer and the transactional outbox that
+#   closes the baseline's lost-reply window.
 #
-#   Spring's Config Data loader consumes this file whenever profile `test` is
-#   active. Seven Java test classes exist in this module today -- two under
-#   `service`, one under `mapper` and four under `dto` -- and not one of them
-#   loads a Spring context, so nothing reads this file yet; it is authored now
-#   because four of its values are the difference between a suite that can start a
-#   context at all and one that cannot, and two more are the difference between a
-#   suite that asserts something and one that consumes messages.
-#
-#   The file has five blocks. `server` disables the base profile's TLS listener
-#   for a loopback test hop, and `spring`, `management`, `logging` and `carddemo`
-#   supply the environment substitutions that let the Spring context retain
-#   production mechanisms without contacting deployed infrastructure. A closing
-#   register at the foot of the file records the omissions that are deliberate.
-#
-# Parameters:
-#   Each property key is the YAML analogue of a parameter. Every value that
-#   differs from the base profile, and every value restated from it, carries an
-#   adjacent labelled rationale naming the rejected alternative and the concrete
-#   failure that alternative causes. This file consumes no environment variable of
-#   its own: that is the point of it.
-#
-# Return values:
-#   The effective configuration handed to the Spring application context after
-#   this overlay is merged over src/main/resources/application.yml and the
-#   imported carddemo-common-defaults.yml.
-#
-# Exceptions or errors:
-#   A misspelled Spring property is silently ignored. A wrong value can instead
-#   negotiate TLS against a container that serves none, select `public`, contact
-#   AWS, or keep a FIFO consumer polling. FOUR values here are load-bearing in the
-#   opposite direction - they exist so that a bean CAN be built at all rather than
-#   so that a behaviour changes, and without any one of them context refresh aborts
-#   before an assertion runs:
-#     - the stub issuer and the stub app client id, which config/SecurityConfig.java
-#       reads with no default and refuses to accept blank;
-#     - the static region, because the SQS client bean is built as the context is
-#       constructed and cannot be built without one;
-#     - the stub request-queue name, because @SqsListener resolves its queueNames
-#       placeholder when the listener is registered, and the base value is an
-#       environment variable with no fallback.
-#   The adjacent comments identify each failure mode at the value that prevents it.
+#   It narrows the base profile in src/main/resources/application.yml to what a
+#   containerised, offline test run can actually satisfy. It keeps every
+#   production MECHANISM intact -- the same schema, the same migration, the same
+#   fixed-point column types, the same messaging bounds -- and replaces only the
+#   values that bind the service to deployed infrastructure.
 #
 # WHY (non-obvious design decisions):
-#   - Assumptions: user-specified Rule 1 requires Purpose, Parameters, Return
-#     values and Exceptions on a module entry point. YAML has no docstring
-#     construct, so the mapping is: this header states Purpose; property keys are
-#     Parameters; the merged Spring Environment is the Return value; and each
-#     adjacent rationale states the failure raised or silently admitted by a wrong
-#     value. The trivial-accessor relief has no YAML analogue.
-#   - Assumptions: config/checkstyle/checkstyle.xml limits Checkstyle to
-#     fileExtensions="java", and docs/CODE_DOCUMENTATION_STANDARD.md records the
-#     same limit for YAML. This profile is therefore a review gate rather than a
-#     linter gate, which is why every non-obvious value and every deliberate
-#     absence is explained here.
-#   - Assumptions: THREE leaf paths below do not exist in the base profile -
-#     spring.cloud.aws.region.static, spring.cloud.aws.sqs.listener.auto-startup
-#     and logging.level.org.flywaydb. Each is a deliberate addition rather than an
-#     oversight and each records why the base can omit what a test cannot: the base
-#     resolves its region from the task environment, which no build host supplies;
-#     the base WANTS its consumer to start; and the base has no reason to log a
-#     migration whose application a deployment pipeline already gated. The two AWS
-#     paths were verified against the pinned spring-cloud-aws 4.1.0 configuration
-#     metadata rather than assumed, and both are declared in sibling base profiles
-#     under the same namespace - the proof matters because Spring reports no error
-#     for an unknown key, so a misspelling would look identical in a diff. Every
-#     other leaf path below matches the base profile verbatim.
-#   - Trade-offs: the overlay repeats several inherited values so the database,
-#     migration, identity and messaging contracts can be read in one place. The
-#     repeated text adds review surface, but silent inheritance would hide which
-#     schema and which migration a passing integration test actually exercised.
+#   - Assumptions: the comment idiom, the ruled header and the four rationale
+#     labels below follow docs/CODE_DOCUMENTATION_STANDARD.md, section
+#     "Language conventions" -> "YAML" (the folder brief's section 3.4) and
+#     section "The `# WHAT:` / `# WHY :` idiom", together with AAP section 0.8.1.
+#     That standard is the citable convention for YAML because YAML has no
+#     docstring construct, so this file carries its obligation as adjacent
+#     justification above each key rather than as a docstring.
+#   - Assumptions: that same standard records that NO linter runs over YAML in
+#     this repository -- no docstring gate, no schema check. The obligation here
+#     is therefore a REVIEW gate, which is why every value that differs from the
+#     base, and every deliberate omission, is explained in place rather than
+#     left for a reader to infer from a diff.
+#   - Trade-offs: a handful of inherited values are restated rather than
+#     inherited silently -- the two Flyway schema keys, `ddl-auto` and the two
+#     messaging bounds. Restating them adds review surface and a second place to
+#     keep in step. It is accepted because each one is load-bearing for a test
+#     assertion: silent inheritance would leave a reader unable to tell which
+#     schema, which generated DDL and which message bound a passing test
+#     actually exercised.
+#   - Refactoring Rationale: an earlier overlay resolved the same problems by
+#     other means, and three of those means are the reason this one differs.
+#     It defined the schema's owning role and granted it privileges from
+#     `spring.flyway.init-sqls`, duplicating a definition that belongs to exactly
+#     one file and leaving the two free to disagree undetected; it carried a
+#     literal issuer address and a literal signing-key value, so a credential- and
+#     endpoint-shaped literal sat in source control; and it set `ddl-auto` to
+#     `validate`, which emits no DDL and therefore looks equivalent to `none` but
+#     adds a startup comparison that can abort a context on a difference the
+#     migration intends. Each is replaced here by an omission or an empty value,
+#     and each replacement is justified at the key that carries it.
+#   - Assumptions: determinism follows the house practice in tests/README.md --
+#     business dates are injected rather than read from the wall clock, and
+#     timestamps are normalised before comparison. Nothing configured here makes
+#     a test outcome depend on when it runs; the one interval that could,
+#     `outbox-poll-interval-ms`, is widened precisely so no scheduled sweep can
+#     fire inside a test.
+#   - Assumptions: THREE leaf paths here are absent from the base profile --
+#     `spring.cloud.aws.region.static`, `spring.cloud.aws.sqs.listener.auto-startup`
+#     and `logging.level.org.flywaydb`. Each sits under a top-level namespace the
+#     base already declares, and each is justified at its own key. They are
+#     additions rather than overrides because the base can omit what a build host
+#     cannot supply: a deployed task resolves its own region, and it WANTS its
+#     consumer to poll.
+#   - Assumptions: no credential, endpoint, queue reference, issuer, account
+#     identifier or connection string appears anywhere below. A test supplies
+#     those at run time through Testcontainers `@ServiceConnection` or
+#     `@DynamicPropertySource`, which is the structural reason this repository
+#     can hold no secret rather than merely happening to hold none. The closing
+#     register at the foot of this file names every value left out on purpose,
+#     so an absence cannot be mistaken for an oversight.
 # =============================================================================
 
-# WHY : (1) Assumptions: the base profile enables TLS and obtains a PEM
-#       certificate and key from environment values with no fallback. A test that
-#       starts a real listener receives neither value and otherwise fails while
-#       trying to load the unresolved text as key material. Mock MVC tests open no
-#       listener, so this setting is inert for them, and a consumer test opens none
-#       either - this context's inbound work arrives from a queue rather than over
-#       HTTP. (2) Alternatives Considered: committing a throwaway self-signed pair
-#       was rejected because it would add private-key material to this repository
-#       for a loopback hop, and the certificate name would not match localhost in
-#       any case. (3) Trade-offs: a real test listener is therefore cleartext. Both
-#       ends run on the same host, no load balancer terminates the hop, and
-#       deployed TLS remains enabled by the base profile.
+# WHAT: turns off the TLS listener that the base profile enables.
+# WHY : Assumptions: the base obtains its keystore password from
+#       `CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD`, a placeholder carrying NO
+#       default, and its keystore from a path a container entrypoint mints. A
+#       test JVM has neither, so a profile that left the listener enabled would
+#       fail while trying to read unresolved placeholder text as key material --
+#       before any assertion ran. Alternatives Considered: committing a
+#       throwaway keystore. Rejected because it would place private key material
+#       in this repository to serve a loopback hop, and the certificate would not
+#       match the container host name in any case. Trade-offs: a test listener is
+#       therefore cleartext on a loopback interface only; deployed TLS is
+#       untouched, since this override lives in the test profile alone.
 server:
   ssl:
     enabled: false
 
 spring:
+  # WHAT: pins this profile's imported configuration to the shared classpath
+  #       defaults, marked optional, and adds no other source.
+  # WHY : Assumptions: the import set is where a test context would otherwise
+  #       acquire a dependency on deployed infrastructure. application-dev.yml
+  #       and application-prod.yml each add
+  #       `optional:aws-parameterstore:/carddemo/.../authorization/` on top of
+  #       this same classpath entry; this profile deliberately adds NO
+  #       environment-bound source, so no test can reach Parameter Store or
+  #       Secrets Manager, hang against an unreachable metadata endpoint, or
+  #       depend on a parameter tree existing. Declaring the set explicitly is
+  #       what makes that auditable at a glance instead of inferable from which
+  #       profiles are inactive.
+  # WHY : Alternatives Considered: (a) an empty import list, which would also
+  #       add nothing but would drop the shared defaults that supply the
+  #       structured-logging fields and the `carddemo.environment` and
+  #       `carddemo.version` values other keys interpolate -- logging would then
+  #       resolve differently under test than in a deployment; and (b) naming a
+  #       stand-in endpoint so the parameter source still resolves, rejected
+  #       outright because it would put an endpoint in source, which is the one
+  #       thing this file may never do. Trade-offs: `optional:` means a missing
+  #       shared-defaults resource degrades to silence instead of aborting
+  #       context refresh. The cost is that a genuinely absent resource is not
+  #       announced; it is accepted because every key it supplies carries its own
+  #       fallback, so a test still starts with defined behaviour.
+  config:
+    import: "optional:classpath:/carddemo-common-defaults.yml"
+
+  datasource:
+    hikari:
+      # WHAT: replaces the base profile's certificate-verifying TLS requirement
+      #       with an unencrypted connection.
+      # WHY : Assumptions: the base sets `sslmode: verify-full` and points
+      #       `sslrootcert` at a certificate-authority bundle, because a managed
+      #       database endpoint presents a certificate chained to one. A
+      #       Testcontainers PostgreSQL instance serves NO TLS and presents no
+      #       certificate, so `verify-full` fails the handshake and every
+      #       repository test fails at connection time rather than on an
+      #       assertion. Trade-offs: test traffic is unencrypted. It is accepted
+      #       because the endpoint is a container on the loopback interface whose
+      #       lifetime is the test, it holds only fixture rows, and the deployed
+      #       posture is unchanged -- this key is overridden in the test profile
+      #       only. Alternatives Considered: generating a certificate for the
+      #       container and keeping `verify-full`. Rejected because it would add
+      #       key material to the repository and a certificate-generation step to
+      #       every test run, to verify an identity the test itself created.
+      data-source-properties:
+        sslmode: disable
+
+      # WHAT: shrinks the connection pool the base sizes for a serving task.
+      # WHY : Trade-offs: the base sizes for ten concurrent in-flight messages.
+      #       A test drives one thread at a time, so the surplus connections are
+      #       idle sockets a container must accept, and a floor of zero lets the
+      #       pool release them between classes instead of holding them for the
+      #       whole run. Four leaves headroom for a test that opens a second
+      #       connection to assert on schema metadata while its own transaction
+      #       is open -- a pattern the constraint tests use, and one that
+      #       deadlocks against a pool of one.
+      maximum-pool-size: 4
+      minimum-idle: 0
+
+      # WHAT: triples the time a caller waits for a connection from the pool.
+      # WHY : Assumptions: the base value is tuned for an already-warm task
+      #       talking to an already-running database, where a wait that long means
+      #       something is wrong and failing fast is the right answer. The first
+      #       connection of a test run is not that case: it is contending with
+      #       container startup, the migration and, on a build host running
+      #       several modules at once, other containers competing for the same
+      #       cores. At the base value that contention surfaces as a
+      #       connection-timeout failure attributed to whichever test asked
+      #       first, which reads as a database fault rather than as a busy host.
+      #       Trade-offs: a genuinely unreachable database therefore takes three
+      #       times as long to report. Accepted because the failure still arrives
+      #       with the same message, and a flaky pass is far more expensive to
+      #       diagnose than a slow failure. application-dev.yml makes the same
+      #       trade for the same reason.
+      connection-timeout: 30000
+
+  flyway:
+    # WHAT: restates, unchanged, the base profile's migration switch, its
+    #       migration source, its two schema keys and its baselining setting.
+    # WHY : Assumptions: `schemas` and `default-schema` are restated rather than
+    #       inherited because they answer different questions -- which schema
+    #       Flyway manages, and where its history table resolves -- and a value
+    #       corrected in one but missed in the other would place migration state
+    #       in `public` while the tables landed in `authorization`, so a repeated
+    #       run would report the wrong history instead of failing outright.
+    #       Both are BARE identifiers on purpose: Flyway quotes an identifier
+    #       itself, so a value carrying quote characters would name a schema
+    #       whose name contains them. The opposite requirement applies to
+    #       `spring.datasource.hikari.connection-init-sql` in the base profile,
+    #       where the same word is SQL text and MUST stay quoted because
+    #       `authorization` is a reserved word. That pairing is asserted for both
+    #       profiles by config/FlywaySchemaNamingTest, which reads this document
+    #       directly, so a drift here fails a test rather than a deployment.
+    enabled: true
+    locations: classpath:db/migration
+    schemas: authorization
+    default-schema: authorization
+    baseline-on-migrate: false
+
+    # WHAT: lets Flyway create the `authorization` schema, which the base profile
+    #       forbids it from creating.
+    # WHY : Assumptions: this is not a preference, it is the difference between a
+    #       migration that runs and one that cannot. The base pairs
+    #       `create-schemas: false` with a schema-qualified `default-schema`
+    #       because a deployment creates the schema and its owning role ahead of
+    #       any service, in data-migration/sql/V0__schemas_and_roles.sql, and
+    #       db/migration/V1__authorization.sql contains no CREATE SCHEMA of its
+    #       own by design. A freshly started container has no such schema, so
+    #       under the base setting Flyway resolves its history table into a schema
+    #       that does not exist and the FIRST migration fails.
+    # WHY : Alternatives Considered: (A) this key, resolving the fork inside the
+    #       profile -- the resolution is then visible in the one file a reader of
+    #       the test profile opens, at the cost that the test profile no longer
+    #       mirrors the deployed posture in which schema creation is deliberately
+    #       external; or (B) creating the schema during container initialisation
+    #       and leaving `create-schemas: false` -- the deployed posture stays
+    #       byte-identical, but the resolution moves into Java container setup
+    #       where a reader of this profile will not find it, and every test class
+    #       that starts a context must repeat the same initialisation or fail on
+    #       its first migration. (A) is chosen because the thing being traded away
+    #       is a posture this profile already departs from in three other places
+    #       (TLS, connection encryption, role assumption), whereas the thing
+    #       gained is that a reader diagnosing a migration failure finds the cause
+    #       in the file that caused it. What (A) must NOT do is compensate by
+    #       creating the schema's owning role: role and grant definition belongs
+    #       solely to data-migration/sql/V0__schemas_and_roles.sql, and a second
+    #       definition here would drift from it silently.
+    create-schemas: true
+
+    # WHAT: empties the base profile's list of statements run before migration.
+    # WHY : Assumptions: the base runs one statement there to assume the schema's
+    #       owning role, so that objects the migration creates are owned by that
+    #       role and its grants apply to them. That role is created only by
+    #       data-migration/sql/V0__schemas_and_roles.sql, which a unit-test
+    #       container never runs, so the statement fails against a fresh instance
+    #       and takes the whole migration with it. Emptying the list is what
+    #       leaves ownership to the connecting user for the lifetime of the
+    #       container. Alternatives Considered: defining the role here so the
+    #       statement succeeds. Rejected on two independent grounds -- it would
+    #       duplicate a definition this repository assigns to exactly one file, so
+    #       the two could disagree without anything detecting it; and a test
+    #       profile that mints its own privilege structure would assert against a
+    #       privilege model it invented rather than the deployed one, which is
+    #       worse than not asserting at all. Trade-offs: object ownership under
+    #       test therefore differs from a deployment. Accepted because no
+    #       assertion in this module concerns ownership or grants, while every
+    #       assertion concerns the table shapes the migration produces.
+    init-sqls: []
+
+  jpa:
+    hibernate:
+      # WHAT: keeps schema generation switched off, exactly as the base profile
+      #       sets it.
+      # WHY : Assumptions: this value is restated deliberately, because the
+      #       convenient relaxation is the one that would quietly void this
+      #       module's most specific tests. Flyway's V1__authorization.sql is the
+      #       only producer of three objects the repository tests assert against:
+      #       the check constraint `ck_pending_auth_detail_match_status`, which
+      #       admits exactly 'P', 'D', 'E' and 'M'; the check constraint
+      #       `ck_pending_auth_detail_auth_fraud`, which admits 'F', 'R', SQL null
+      #       AND a single blank; and the index `idx_auth_fraud_card_recent` on
+      #       (card_num ASC, auth_ts DESC), whose MIXED direction reproduces the
+      #       reference index order. Alternatives Considered: `create-drop` or
+      #       `update`, either of which would remove the need to migrate at all.
+      #       Rejected because Hibernate generates neither check constraint and
+      #       flattens the index to a single direction, so the assertions written
+      #       to prove those objects exist would run green against a schema that
+      #       does not contain them -- a false pass, which is strictly worse than
+      #       a failure. `validate` is rejected for a nearer miss: it emits no DDL
+      #       and so looks equivalent, but it adds a startup comparison between
+      #       entities and live columns that can abort context refresh on a
+      #       difference the migration intends, converting a schema question into
+      #       a context-startup failure. Trade-offs: every context-loading test
+      #       therefore pays for a migration before its first assertion.
+      ddl-auto: none
+
+    # WHAT: restates the base profile's persistence-context and SQL-echo
+    #       settings.
+    # WHY : Trade-offs: leaving the session open for view rendering is off here as
+    #       it is in the base, so a lazy association touched outside a
+    #       transactional boundary fails in a test the same way it would in a
+    #       deployment, rather than being silently satisfied by an open session and
+    #       failing only once deployed. SQL echo stays off because the assertions
+    #       in this module read schema metadata and constraint names rather than
+    #       statement text, so echoing every statement would bury the one
+    #       diagnostic line a failure prints. application-dev.yml turns it on,
+    #       which is the profile where reading statements is the point.
+    open-in-view: false
+    show-sql: false
+
   cloud:
     aws:
-      # WHY : (1) Assumptions: this path is NOT in the base profile, and the
-      #       asymmetry is the point. The base sets spring.cloud.aws.sqs.enabled to
-      #       true and deliberately supplies neither region nor credentials, because
-      #       a deployed task resolves both from its own environment and its task
-      #       role - which is what keeps a long-lived key out of the image. A build
-      #       host has neither, and a region is required to BUILD the client rather
-      #       than to call it: the client bean is constructed as the context is
-      #       constructed, so with no region the SDK resolution chain reaches
-      #       instance metadata discovery and the context hangs until that request
-      #       times out, then fails. Credentials behave differently and are not
-      #       needed to start, because they are resolved on first call.
-      #       (2) Trade-offs: us-east-1 is a valid SDK region selector, not an
-      #       endpoint, account identifier or credential. No request is sent there
-      #       because listener startup is disabled below and nothing publishes.
       region:
+        # WHAT: names a region for the AWS client builders, which the base
+        #       profile leaves unset.
+        # WHY : Assumptions: this leaf is ABSENT from the base and the asymmetry
+        #       is deliberate. The base enables the queue integration and
+        #       supplies neither region nor credentials, because a deployed task
+        #       resolves both from its own environment and its task role, which is
+        #       what keeps a long-lived credential out of the image. A build host
+        #       supplies neither, and a region is needed to BUILD a client rather
+        #       than to call one: the client bean is constructed while the context
+        #       is, so with no region the resolution chain falls through to
+        #       instance-metadata discovery and the context stalls until that
+        #       attempt times out, then fails. Credentials behave differently and
+        #       are not needed for startup, because they are resolved on first
+        #       call -- which is why none appears here. Trade-offs: a region is a
+        #       client-side selector, not an endpoint, an account identifier or a
+        #       credential, and nothing here sends a request to it: intake is
+        #       disabled immediately below and no test publishes.
         static: us-east-1
 
       sqs:
         listener:
-          # WHY : (1) Assumptions: this path is NOT in the base profile either, and
-          #       for the same kind of reason: the base WANTS its consumer to start,
-          #       because consuming the FIFO request queue is this context's entire
-          #       inbound path. A test must not. service/AuthorizationRequestListener
-          #       carries @SqsListener, so with auto-startup left at its default the
-          #       container starts during context refresh and begins polling the
-          #       queue named below - which does not exist - inside a test.
-          #       (2) Assumptions: false keeps the SQS client, the annotation
-          #       processor and the default container factory in the context, so the
-          #       listener bean is still CONSTRUCTED and its placeholders still
-          #       resolved; only the container does not start. That is what makes
-          #       this the right control: a test still proves the listener is
-          #       wireable.
-          #       (3) Alternatives Considered: setting spring.cloud.aws.sqs.enabled
-          #       to false, which the base declares and could simply be inverted
-          #       here. Rejected because it removes the factory the annotated
-          #       listener requires, so the context shape a consumer test observes
-          #       would differ from the deployed one - the listener would not merely
-          #       be idle, it would be absent.
+          # WHAT: stops the message listener container from starting with the
+          #       application context.
+          # WHY : Assumptions: this leaf is absent from the base for the same
+          #       shape of reason as the region above, inverted -- consuming the
+          #       request queue is this context's entire inbound path, so the base
+          #       WANTS the container to start. A test must not: the listener
+          #       carries an annotation that registers it during context refresh,
+          #       so left at its default it would begin polling a queue reference
+          #       this profile deliberately does not supply, and the resulting
+          #       failures would arrive on a background thread, interleaved with
+          #       unrelated assertions and attributed to whichever test happened
+          #       to be running. Alternatives Considered: pointing the listener at
+          #       an emulated queue so it could start harmlessly. Rejected because
+          #       it would make every test in the module -- including the pure
+          #       codec and mapper tests, which are the majority -- depend on an
+          #       emulator being up. Trade-offs: consumer behaviour is therefore
+          #       proven by driving the listener directly in a unit test rather
+          #       than by letting the container deliver to it.
           auto-startup: false
 
-  # WHY : (1) Alternatives Considered: H2 or another in-process database was
-  #       rejected. V1__authorization.sql uses PostgreSQL DDL whose whole point is
-  #       constraint behaviour: a composite primary key derived from the packed
-  #       composite key in app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy, the
-  #       CHECK constraints transcribed from that copybook's 88-level value sets,
-  #       the five discrete account-status columns that replace
-  #       PA-ACCOUNT-STATUS OCCURS 5 TIMES, and the descending fraud index matching
-  #       XAUTHFRD. A substitute engine parses or enforces those differently, so an
-  #       assertion could pass without testing the deployed dialect.
-  #       (2) Assumptions: spring-boot-testcontainers is absent from this module's
-  #       POM, so @ServiceConnection is not available. Repository and consumer tests
-  #       register the container-generated JDBC URL, user name and credential
-  #       dynamically, and those values take precedence over the unresolved base
-  #       properties, which is why no connection literal appears here.
-  datasource:
-    hikari:
-      # WHY : (1) Assumptions: the quoting is NOT optional and is the reason this
-      #       inherited statement is repeated rather than left to the base.
-      #       `authorization` is a reserved word in PostgreSQL, so an unquoted
-      #       search-path element is a syntax error rather than a silently wrong
-      #       schema - which is the better of the two failures, but only if the
-      #       quoting survives every place the name appears. It appears three times
-      #       in this file, and each occurrence quotes it.
-      #       (2) Trade-offs: the container generates its own URL, so this file
-      #       cannot append a currentSchema parameter to it. PostgreSQL resolves
-      #       search-path names lazily, so the statement succeeds before Flyway
-      #       creates the schema.
-      connection-init-sql: SET search_path TO "authorization"
 
-      data-source-properties:
-        # WHY : (1) Assumptions: the base profile requires verify-full and a CA
-        #       bundle because deployed PostgreSQL serves TLS and its parameter
-        #       group forces it. The stock PostgreSQL Testcontainer starts with TLS
-        #       off, so inheriting that mode rejects every connection with "The
-        #       server does not support SSL" before Flyway can run.
-        #       (2) Alternatives Considered: `prefer` was rejected because it
-        #       changes transport according to how a container image happens to
-        #       start and verifies no identity even when TLS is available, which is
-        #       a worse property than an explicit disable.
-        #       (3) Trade-offs: `disable` makes the loopback database hop cleartext.
-        #       The container holds only test data and is discarded with the run;
-        #       deployed connections keep verify-full from the base profile.
-        sslmode: disable
-
-      # WHY : Trade-offs: four connections with no idle floor replace the deployed
-      #       pool's ten-and-two sizing. A test issues no parallel decision load,
-      #       while reactor test forks can hold several pools against one container,
-      #       so a narrow pool with no floor is what keeps a parallel build inside
-      #       the container's own connection limit. A fifth concurrent borrow waits
-      #       within the inherited connection timeout instead of opening another
-      #       connection.
-      maximum-pool-size: 4
-      minimum-idle: 0
-
-  jpa:
-    hibernate:
-      # WHY : (1) Assumptions: `validate` here, an intentional divergence from the
-      #       base value `none`. Validation checks that the three entity mappings
-      #       agree with the tables V1__authorization.sql produces, which is exactly
-      #       what a migration test should assert and exactly what the base value
-      #       cannot: `none` is right in a deployed task where a pipeline has
-      #       already gated the migration, and would make this profile prove nothing
-      #       about entity drift.
-      #       (2) Assumptions: validation resolves the three unqualified table names
-      #       through the CONNECTION's schema rather than through a Hibernate
-      #       setting, and that is why no default_schema key appears here. None of
-      #       the three entities carries a schema on its @Table, and the base
-      #       declares no hibernate.default_schema; Hibernate takes its default
-      #       schema from the JDBC connection, which for PostgreSQL is the first
-      #       element of the search path pinned above. Adding a default_schema key
-      #       would introduce a second, differently-quoted source for the same name -
-      #       and this schema is a reserved word, so a quoting mismatch between the
-      #       two is a realistic way to get a validation failure that names the
-      #       wrong cause.
-      #       (3) Alternatives Considered: `create`, `create-drop` and `update` were
-      #       rejected because they would substitute Hibernate's inferred schema for
-      #       Flyway's output; a defective migration could then pass against tables
-      #       Hibernate authored, and the constraints Hibernate cannot infer - the
-      #       88-level CHECK sets and the descending fraud index - are precisely the
-      #       ones the migration exists to create.
-      ddl-auto: validate
-
-    # WHY : (1) Assumptions: this repeats the base value so a test cannot depend on
-    #       a persistence session that outlives its transaction. It matters
-    #       particularly here: the decision path commits per message, so a lazily
-    #       resolved association read after that commit would observe a different
-    #       transaction than the one the assertion describes.
-    #       (2) Trade-offs: lazy access outside a transaction fails in the test and
-    #       requires the repository to fetch what its caller needs explicitly. That
-    #       failure is the signal that keeps test and deployed transaction
-    #       boundaries aligned.
-    open-in-view: false
-
-    # WHY : Trade-offs: provider SQL is not written to standard output. That gives
-    #       up the shortest way to inspect a generated statement, but this switch
-    #       bypasses logger levels entirely, so once enabled no level can narrow it,
-    #       and a consumer test over a batch of messages would interleave a
-    #       statement per decision with its assertion output.
-    show-sql: false
-
-  flyway:
-    # WHY : Assumptions: Flyway remains enabled because this context is the
-    #       executable check of V1__authorization.sql. That migration is also the
-    #       artifact that ELIMINATES the baseline's two-phase commit: the pending
-    #       detail segments and the fraud table land in ONE schema, so what was a
-    #       coordinated IMS and Db2 commit becomes a single local transaction.
-    #       Disabling Flyway or narrowing the location would make every constraint
-    #       and index assertion operate on absent or hand-created tables.
-    enabled: true
-    locations: classpath:db/migration
-
-    # WHY : (1) Assumptions: `schemas` names every schema Flyway manages, while
-    #       `default-schema` decides where its history table and unqualified objects
-    #       resolve. Setting only one can place migration state in `public` while
-    #       tables land in the authorization schema, making a repeated run report
-    #       the wrong history.
-    #       (2) Refactoring Rationale: both keys are written BARE, and both are
-    #       copied from the base verbatim -- which is the point of copying them.
-    #       They previously read '"authorization"' on the stated ground that "the
-    #       doubled quoting is required ... the inner double quotes are what stop
-    #       PostgreSQL parsing a reserved word as a keyword". That reasoning
-    #       confused a NAME with SQL TEXT. Flyway takes these values as identifiers
-    #       and applies the database's own quoting when it emits DDL, so a value
-    #       carrying quote characters becomes """authorization""" and
-    #       names a schema whose name literally contains two double quotes. Measured
-    #       against a real PostgreSQL 17 instance holding this schema, the quoted
-    #       form fails with SQLSTATE 3F000, `schema ""authorization"" does not
-    #       exist`, so the failure was neither a syntax error nor a misdirected
-    #       migration but a total refusal to start. The bare form resolves
-    #       "authorization"."flyway_schema_history". The base file's
-    #       connection-init-sql keeps its quotes for the opposite reason: that value
-    #       IS SQL text sent verbatim, and there an unquoted reserved word is a
-    #       syntax error.
-    schemas: authorization
-    default-schema: authorization
-
-    # WHY : (1) Assumptions: the base deliberately sets this false because
-    #       data-migration/sql/V0__schemas_and_roles.sql owns deployed schemas,
-    #       owner roles and grants. A bare PostgreSQL container runs no V0, and V1
-    #       deliberately contains no CREATE SCHEMA, CREATE ROLE or GRANT, so false
-    #       makes the first qualified CREATE TABLE fail on an absent schema. True is
-    #       the sanctioned test substitute for schema existence.
-    #       (2) Trade-offs: the container's connecting role owns the schema and none
-    #       of V0's privilege graph is exercised. Reproducing V0 here was rejected
-    #       because it would duplicate cluster-level DDL into a per-service resource
-    #       and let the copy drift from its authority.
-    create-schemas: true
-
-    # WHY : Assumptions: a container starts empty, so there is no populated schema
-    #       to adopt as a baseline. Enabling baselining could mark an unexpected
-    #       pre-existing schema as migrated and skip V1, leaving the context to fail
-    #       validation against tables Flyway never created.
-    baseline-on-migrate: false
-
-    # Assumptions: `user` and `password` are deliberately ABSENT here while
-    #   application.yml binds both to SPRING_FLYWAY_* with no fallback, and the
-    #   absence resolves rather than conflicts. Boot only reads those two keys
-    #   through PropertiesFlywayConnectionDetails, which
-    #   FlywayAutoConfiguration creates @ConditionalOnMissingBean
-    #   (FlywayConnectionDetails.class). The container below carries
-    #   @ServiceConnection, whose JdbcConnectionDetails is adapted into a
-    #   FlywayConnectionDetails bean by
-    #   JdbcAdaptingFlywayConnectionDetailsFactory -- measured, not assumed: with
-    #   the keys added and no SPRING_FLYWAY_USER in the environment, the context
-    #   reached Flyway and failed on the SQL below rather than on an unresolved
-    #   placeholder. So the container's own generated credential migrates here,
-    #   and no stand-in credential has to be invented for a role this profile
-    #   never creates with a password.
-    #
-    # Refactoring Rationale: `init-sqls` IS restated, and it has to be. The base
-    #   file's single statement is `SET ROLE carddemo_authorization_owner`, naming the
-    #   NOLOGIN role data-migration/sql/V0__schemas_and_roles.sql creates and this
-    #   container has never heard of; left inherited, every test in the four
-    #   *RepositoryIT classes failed context load with
-    #   `role "carddemo_authorization_owner" does not exist`.
-    #
-    # Alternatives Considered: overriding this to an empty list, or to a no-op
-    #   statement, so the ownership split simply does not happen under test.
-    #   Rejected: it would leave the mechanism the deployed configuration depends
-    #   on asserted by nothing, and the mechanism is the whole of the control --
-    #   objects a migration creates must belong to the NOLOGIN owner, because every
-    #   ALTER DEFAULT PRIVILEGES FOR ROLE clause in the bootstrap SQL is keyed on
-    #   the CREATING role and is inert otherwise. The statements below reproduce it
-    #   instead: the role is created if absent, granted CREATE on whichever
-    #   database the container generated, and then assumed -- so Flyway creates the
-    #   schema, the history table and every V1 object as carddemo_authorization_owner,
-    #   exactly as it does in a deployed environment.
-    #
-    # Assumptions: the first statement is idempotent because Flyway runs every
-    #   string here on EACH connection it opens, not once per migration. The role
-    #   test and the grant are both re-runnable, and the grant is issued through
-    #   `format` with `%I` on `current_database()` rather than a literal, because
-    #   Testcontainers generates the database name and no fixed value would match
-    #   it. CREATE on the database is required and is not implied by role
-    #   creation: a fresh role holds only the PUBLIC grants, which are CONNECT and
-    #   TEMPORARY, so without it `CREATE SCHEMA` fails once the SET ROLE takes
-    #   effect.
-    # Trade-offs: the container's user is a superuser and could therefore assume
-    #   this role with no grant at all, which would make the GRANT look
-    #   superfluous. It is kept because the grant is what the OWNER needs to create
-    #   the schema, not what the connecting user needs to become it -- and
-    #   `SET ROLE` drops the superuser attribute for the remainder of the session.
-    init-sqls:
-      - "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'carddemo_authorization_owner') THEN CREATE ROLE carddemo_authorization_owner NOLOGIN; END IF; EXECUTE format('GRANT CREATE ON DATABASE %I TO carddemo_authorization_owner', current_database()); END $$;"
-      - "SET ROLE carddemo_authorization_owner;"
-
-
-  security:
-    oauth2:
-      resourceserver:
-        jwt:
-          # WHY : (1) Assumptions: a value is REQUIRED here rather than optional.
-          #       config/SecurityConfig.java declares an explicit JwtDecoder bean
-          #       and reads this key through @Value, so the framework's conditional
-          #       auto-configuration is not what consumes it: leaving the base
-          #       placeholder unresolved aborts bean creation with "Could not
-          #       resolve placeholder" naming an environment variable no build host
-          #       supplies.
-          #       (2) Assumptions: building the decoder DOES perform a network
-          #       call, and this is verified by running the process rather than by
-          #       reading the API. NimbusJwtDecoder.withIssuerLocation defers
-          #       nothing: build() calls processor(), which calls jwkSource(),
-          #       which invokes the supplier that issues
-          #       GET <issuer>/.well-known/openid-configuration. A context that
-          #       creates the decoder bean therefore attempts that request while it
-          #       refreshes, and against this issuer it fails with
-          #       UnknownHostException naming the host. The `jwk-set-uri` form
-          #       fetches the key set instead, so it is no lazier.
-          #       (3) Trade-offs: the consequence is stated plainly so a test
-          #       author is not surprised by it. This value satisfies
-          #       config/SecurityConfig.java's fallback-free @Value, so every test
-          #       that does NOT load a Spring context runs against the deployed
-          #       property shape; a test that DOES load one must register a
-          #       reachable stub issuer through dynamic properties, exactly as it
-          #       already registers the container-generated datasource triple.
-          #       `.invalid` is kept rather than a plausible hostname because
-          #       RFC 2606 reserves it, so the failure is immediate and local and
-          #       no test can reach a real provider. Controller tests use
-          #       spring-security-test mock JWTs, and common-lib's JwtRoleConverter
-          #       maps cognito:groups to authorities without decoding anything, so
-          #       none of them needs the decoder to answer.
-          #       (4) Trade-offs: this keeps the production filter-chain shape but
-          #       proves no signature validation, because no key material backs the
-          #       stub issuer. Signature verification belongs to an environment test
-          #       with a real identity provider.
-          issuer-uri: https://issuer.invalid/carddemo-authorization-test
-
-# WHY : (1) Assumptions: GET /actuator/health is consumed by both the load balancer
-#       target group and the container HEALTHCHECK, and neither caller can present
-#       a JWT. This overlay keeps it exposed and changes no base path. (2)
-#       Trade-offs: prometheus is dropped from the base pair because no test reads
-#       a metric, and the narrower surface keeps a context test focused while
-#       preserving the unauthenticated health contract deployment requires.
 management:
   endpoints:
     web:
       exposure:
+        # WHAT: narrows the exposed actuator endpoints to the health endpoint
+        #       alone, dropping the metrics endpoint the base also publishes.
+        # WHY : Trade-offs: the base publishes metrics because a deployed task is
+        #       scraped for them. Nothing scrapes a test JVM, and publishing the
+        #       endpoint costs a meter registry populated for every context that
+        #       starts. Health is kept rather than dropped too, because it is the
+        #       endpoint the module Dockerfile's health check and the load-balancer
+        #       target group both probe, so a test that starts a context is the
+        #       only place a change breaking that probe would be caught before a
+        #       deployment.
         include: health
 
-# WHY : (1) Trade-offs: framework narration stays reduced at the base WARN so one
-#       assertion or migration failure remains visible; the project package stays
-#       at INFO so the per-message decision lines this context exists to produce
-#       are observable. (2) Assumptions: org.flywaydb is the THIRD path in this
-#       file that the base profile does not declare, and unlike the other two it is
-#       additive rather than corrective. The base holds the root logger at WARN and
-#       names no Flyway category, so a successful migration logs nothing at all -
-#       which is acceptable in a deployed task whose migration a pipeline gated, and
-#       is not acceptable in the one profile whose whole purpose is to prove that
-#       V1__authorization.sql applied. INFO is the level at which Flyway names the
-#       version it ran. (3) Assumptions: both Hibernate categories stay at WARN,
-#       restating the base rather than inheriting it. The bound values on this
-#       context's statements are card numbers arriving in authorization requests,
-#       so the rationale is data protection and not only signal-to-noise: a test
-#       database seeded from the baseline extract holds the same kind of data as a
-#       deployed one. (4) Assumptions: no SQS listener category is declared. The
-#       root WARN above already governs it, auto-startup means there is no polling
-#       to observe, and a key that changes nothing reads as configuration when it is
-#       not.
 logging:
   level:
+    # WHAT: restates the base profile's log levels and adds the migration logger.
+    # WHY : Assumptions: `org.flywaydb` is the third leaf here that the base does
+    #       not declare, and the reason it can omit it is that a deployment gates
+    #       migration in its own pipeline step, where the outcome is already
+    #       visible. Under test the migration is the step most likely to fail
+    #       first and the one whose failure is least self-explanatory -- a missing
+    #       schema, a statement refused before migration, an out-of-order version
+    #       all surface as a bare context-refresh failure. Raising this one logger
+    #       makes the applied version list part of the failure output, so the
+    #       cause is in the log rather than reconstructed from the effect.
+    #       Trade-offs: the root logger stays quiet and the two Hibernate loggers
+    #       stay quiet, because parameter binding and statement text at a louder
+    #       level would print fixture bytes -- including card numbers -- into
+    #       build output that is routinely attached to a build record.
     root: WARN
     com.carddemo: INFO
     org.flywaydb: INFO
@@ -430,170 +358,125 @@ logging:
     org.hibernate.orm.jdbc.bind: WARN
 
 carddemo:
-  security:
-    jwt:
-      # WHY : (1) Assumptions: a value is REQUIRED here, and it is the second of the
-      #       four load-bearing values in this file. config/SecurityConfig.java reads
-      #       this key through @Value with no default and then refuses a blank one
-      #       outright, because common-lib's CognitoAccessTokenValidator reads blank
-      #       as "skip the client check" - correct only for a caller that pins the
-      #       client through an audience validator instead, which no service here
-      #       does. The base value is an environment placeholder with no fallback, so
-      #       without this line every context-loading test in this module would abort
-      #       before its first assertion.
-      #       (2) Assumptions: this string is NOT a credential and NOT a secret. A
-      #       Cognito app client id is a public identifier that appears in every
-      #       token this service accepts; the value below is additionally fabricated
-      #       and visibly non-production, so it identifies nothing that exists. What
-      #       it buys is that the validator is CONSTRUCTED with a non-blank client
-      #       id, so a test asserting that a token minted for a different client is
-      #       rejected has a client to differ from.
-      #       (3) Trade-offs: repeating the two adjacent claim values rather than
-      #       inheriting them makes the complete accepted-token contract readable in
-      #       one place. The cost is that a deliberate change to either in the base
-      #       document must be mirrored here or the test stops exercising the
-      #       deployed contract - which is precisely the diff a reviewer should be
-      #       made to see.
-      expected-client-id: authorization-test-app-client
-      expected-token-use: access
-      required-scope: aws.cognito.signin.user.admin
-
   messaging:
-    # WHY : (1) Assumptions: a value is REQUIRED here, and it is the fourth
-    #       load-bearing value in this file. service/AuthorizationRequestListener
-    #       declares @SqsListener(queueNames = "${carddemo.messaging.pauth-request-queue}"),
-    #       and that placeholder is resolved when the listener endpoint is
-    #       REGISTERED rather than when a message arrives, so the base's
-    #       fallback-free environment placeholder aborts context refresh even with
-    #       auto-startup false.
-    #       (2) Assumptions: this is a queue NAME, not a URL, ARN, account
-    #       identifier or credential, and it is visibly non-production. The `.fifo`
-    #       suffix is retained deliberately: the deployed queue is FIFO because
-    #       authorizations for one card must be applied in order, and a name without
-    #       the suffix would not be a legal FIFO queue name - so a messaging test
-    #       that did create this queue against an emulator would create the wrong
-    #       KIND of queue and lose the ordering guarantee it was meant to prove.
-    #       (3) Trade-offs: this shared profile names no emulator endpoint and
-    #       supplies no credentials, so it cannot start a messaging integration test
-    #       by itself. Such a test supplies its emulator coordinates dynamically and
-    #       starts the prepared container explicitly, which keeps every other context
-    #       in this module free of an emulator dependency.
-    pauth-request-queue: authorization-test-pauth-request.fifo
+    # WHAT: restates the receive wait the base profile configures, in seconds.
+    # WHY : Assumptions: five SECONDS, and the unit is the whole point of
+    #       restating it. The reference program sets `MOVE 5000 TO
+    #       WS-WAIT-INTERVAL` at app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl
+    #       L242 and passes it as the message-queue wait interval, a field
+    #       expressed in MILLISECONDS -- so the literal 5000 is 5 s, not 5000 s.
+    #       It is carried here as 5 because this key's unit is seconds; a reader
+    #       who took the baseline literal for seconds would configure a wait three
+    #       orders of magnitude too long, and the symptom would be a consumer that
+    #       looks stopped rather than one that is waiting. Trade-offs: an empty
+    #       receive after this wait is normal and not an error, exactly as the
+    #       baseline treats its no-message-available condition, so an idle queue
+    #       produces no failure. Restating the value keeps a test that asserts the
+    #       wait independent of whether the base profile is loaded.
+    poll-timeout-seconds: 5
 
-    # WHY : (1) Trade-offs: one hour rather than the base document's one second, and
-    #       the reason is repetition rather than the first run. service/OutboxPublisher
-    #       carries @Scheduled(fixedDelayString = ...) and config/SqsConfig carries
-    #       @EnableScheduling, and a fixed DELAY schedules its first invocation as
-    #       soon as the scheduler starts - so one drain attempt happens at context
-    #       refresh whatever this value is. That single attempt is harmless: it is
-    #       one query against an empty auth_reply_outbox. What this value prevents is
-    #       the SECOND and every subsequent attempt, which at the base interval would
-    #       interleave a query per second with every assertion in the run and would
-    #       publish rows a test had just inserted before the test could observe them.
-    #       (2) Alternatives Considered: excluding the publisher from the test
-    #       context, or gating it behind a profile condition. Both were rejected
-    #       because they change the context shape rather than the cadence: the outbox
-    #       is the mechanism that closes the baseline's lost-reply window - the
-    #       baseline publishes outside its commit at
-    #       app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl L389 and L753 - so a
-    #       test context without the publisher would prove the wrong system. A test
-    #       that wants a drain calls the publisher directly.
-    #       (3) Assumptions: the remaining carddemo.messaging values - the receive
-    #       wait, the per-poll cap, the concurrency ceiling and the outbox batch size
-    #       - are deliberately NOT restated. Each is a behavioural characteristic
-    #       transcribed from the baseline rather than an environment setting, and all
-    #       four carry their own defaults at the injection site, so a test observes
-    #       the deployed discipline.
+    # WHAT: restates the per-window processing bound the base profile configures.
+    # WHY : Assumptions: 500 is the baseline's DECLARED bound --
+    #       `05 WS-REQSTS-PROCESS-LIMIT PIC S9(4) COMP VALUE 500` at COPAUA0C.cbl
+    #       L40 -- and it is the value a test should assert is configured. The
+    #       baseline's own control flow nevertheless admits 501, and the
+    #       arithmetic is written out here because 500 is the number a reader
+    #       expects and the off-by-one is invisible without it: the counter is
+    #       POST-incremented at L332 (`ADD 1 TO WS-MSG-PROCESSED`, after the
+    #       message has been handled) and then tested with a STRICT greater-than at
+    #       L339 (`IF WS-MSG-PROCESSED > WS-REQSTS-PROCESS-LIMIT`), so counts 1
+    #       through 500 all fail that test and read again, and the loop closes only
+    #       once a 501st has been handled.
+    # WHY : Alternatives Considered: configuring 501 here so the number in the file
+    #       matched the baseline's observed loop exactly. Rejected because the
+    #       extra message is an artifact of the ORDER of increment and comparison
+    #       rather than a rule any part of the baseline states, and because the
+    #       divergence is already registered -- as D-AUTH-REQUEST-WINDOW in
+    #       docs/architecture/cobol-to-service-traceability.md, with matching
+    #       entries in docs/adr/ADR-004-messaging.md and
+    #       docs/architecture/messaging-contracts.md -- so a 501 here would make
+    #       the running system contradict its own register. Trade-offs: the
+    #       declared bound is what this profile enforces, which is why a test whose
+    #       subject is the boundary arithmetic itself must lower this key to a
+    #       small value in its own context rather than read 501 out of this file:
+    #       the key is exposed here so that behaviour follows from configuration,
+    #       and 501 is deliberately not written anywhere as a value.
+    request-process-limit: 500
+
+    # WHAT: widens the outbox drain interval far beyond the base profile's.
+    # WHY : Assumptions: this is a determinism control, not a tuning value, and it
+    #       is the one key here that could otherwise make an outcome depend on
+    #       when a test runs. The base drains the outbox on a short cycle because a
+    #       deployment wants a reply published promptly; under test a scheduled
+    #       drain firing part-way through a case that drives the publisher directly
+    #       would consume the very rows that case is about, and the failure would
+    #       reproduce only under particular timing. Widening the interval past any
+    #       plausible test duration means the scheduled path never races the
+    #       direct one, which is the isolation practice tests/README.md describes.
+    #       This exact value is asserted acceptable by service/OutboxPublisherTest,
+    #       which pins it as an inclusive ceiling so that lowering the publisher's
+    #       accepted range would fail a test rather than silently break this
+    #       profile. Alternatives Considered: disabling the scheduled drain
+    #       outright. Rejected because the publisher's accepted-range validation is
+    #       itself under test, and a disabled scheduler would leave that validation
+    #       unexercised.
     outbox-poll-interval-ms: 3600000
-  internal-identity:
-    # WHY : (1) Assumptions: a value is REQUIRED here because the base document
-    #       declares this key as a fallback-free placeholder and a bean reads it
-    #       through @Value, so a context-loading test in this module would abort on an
-    #       unresolvable placeholder before reaching its first assertion.
-    #       (2) Assumptions: this string is NOT a real credential. It is fabricated,
-    #       visibly non-production and shared with no deployment, and it exists only
-    #       so that a constructed verifier has a key of admissible length to hold.
-    #       Its length is exactly the thirty-two bytes the digest width requires,
-    #       chosen at the minimum rather than above it so that a test which lowers the
-    #       minimum without meaning to stops resolving.
-    #       (3) Trade-offs: because the value is committed, no test that uses it
-    #       proves anything about the confidentiality of the deployed key. What it
-    #       proves is the shape of the boundary: that a token signed with this key
-    #       verifies and that a token signed with any other does not.
-    signing-key: 0123456789abcdef0123456789abcdef
-    token-lifetime-seconds: 60
 
-# Register of deliberate omissions -- each one is a value a reasonable
-# alternative would have set, and each would change what the test profile proves
-# or make it contact infrastructure.
-#
-#   1. No spring.datasource url, username or password.
-#      Assumptions: configuration-property binding leaves an unresolvable
-#      placeholder as literal text rather than raising, so the three base
-#      datasource keys can stay unset in a context that opens no connection. A
-#      repository test registers the container-generated triple dynamically, which
-#      takes precedence. Committing a localhost connection string here was rejected
-#      because a default that resolves is a default that can be run against by
-#      accident.
-#
-#   2. No server.port override.
-#      Assumptions: the base value 8080 is shared with the Dockerfile and the load
-#      balancer contract. Mock MVC and consumer tests bind no listener, while a
-#      real-port test can request a random port from its own test annotation.
-#      Moving the configured port here would change a deployment number without
-#      solving a test constraint.
-#
-#   3. No carddemo.security.cognito group-name override.
-#      Assumptions: the base declares both names with the two defaults
-#      infra/modules/cognito fixes, so they resolve without any environment. They
-#      are also what common-lib's JwtRoleConverter compares against its own
-#      compiled constants, refusing to start on a mismatch, so overriding them here
-#      would test a vocabulary no deployment uses.
-#
-#   4. No spring.cloud.aws.sqs.enabled override.
-#      Assumptions: the base sets it true and this file leaves it true, disabling
-#      only the container's auto-start. The distinction is recorded at that key: the
-#      flag decides whether the factory EXISTS, and removing it would make the
-#      annotated listener absent rather than idle.
-#
-#   5. No spring.batch key.
-#      Assumptions: services/authorization-service/pom.xml declares no
-#      spring-boot-starter-batch. service/PurgeJob is a scheduled expiry of pending
-#      authorizations transcribed from
-#      app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl, not a chunk-oriented job
-#      with a restart requirement, so a job repository here would create batch
-#      tables in a schema this service does not own and would describe a runtime
-#      mechanism the module cannot load.
-#
-#   6. No spring.application.name override.
-#      Assumptions: the inherited authorization-service name is the service identity
-#      used by logging and metrics. Changing it under test would make assertions
-#      observe a service tag and an application identity that no deployed task
-#      carries.
-#
-#   7. No management.metrics.tags key.
-#      Assumptions: common-lib derives the service tag from the inherited
-#      application name and reads environment and version from the imported shared
-#      defaults. Restating tags here would create a second source whose values could
-#      disagree with the meter filter while both configurations remain
-#      syntactically valid.
-#
-#   8. No spring.flyway.clean-disabled override.
-#      Assumptions: the base already keeps destructive clean disabled. A container
-#      is discarded as a whole and no test calls Flyway clean, so changing the
-#      inherited control would add no coverage and could normalize an operation
-#      deployment forbids on the pending-authorization and fraud tables.
-#
-#   9. No password-shaped property and no encryption key.
-#      Assumptions: identity is external and the queue payloads are encrypted in
-#      transit by SSE-KMS at the transport rather than by an application secret, so
-#      there is no key for this profile to stub.
-#
-#  10. No cloud-service endpoint, ARN, account identifier or registry hostname.
-#      Assumptions: the static region, the queue name and the app client id above
-#      are routing and identity selectors, not network locations or credentials, and
-#      the issuer uses the reserved `.invalid` domain so it cannot identify a
-#      reachable provider. Alternatives Considered: naming a LocalStack endpoint in
-#      this shared profile was rejected because it would make every context in this
-#      module depend on an emulator even when no messaging behaviour is under test.
+    # -------------------------------------------------------------------------
+    # WHY : Assumptions: NO per-message expiry key appears above, and the absence
+    #       is a transport fact rather than an omission. The baseline sets
+    #       `MOVE 50 TO MQMD-EXPIRY` at COPAUA0C.cbl L750, and that field is
+    #       expressed in TENTHS OF A SECOND -- so 50 is 5.0 SECONDS, not 50
+    #       seconds and not 50 milliseconds. The target transport has no
+    #       per-message time to live at all: its retention is queue-level and
+    #       applies to every message alike, so there is no key in this namespace
+    #       that could reproduce the field, and inventing one here would create a
+    #       setting nothing reads. The semantic is preserved instead by the
+    #       producer carrying the expiry INSTANT as an `expiresAt` message
+    #       attribute and the consumer dropping and logging a message whose
+    #       instant has passed, with the 5.0 s window held as a parity constant in
+    #       common-lib beside the code that applies it. Trade-offs: enforcement
+    #       moves from the broker to the consumer, so a consumer that skipped the
+    #       check would act on a message the baseline would have discarded --
+    #       which is why the check is asserted in code rather than configured here.
+    # -------------------------------------------------------------------------
+
 # =============================================================================
+# Deliberate omissions
+# -----------------------------------------------------------------------------
+# WHY : Assumptions: the following base-profile keys are left UNSET on purpose,
+#       and the reason is the same for all of them -- each resolves to a
+#       credential, an endpoint or an infrastructure identifier, and a test
+#       obtains those at run time from Testcontainers `@ServiceConnection` or
+#       `@DynamicPropertySource`, never from a committed file. Writing even a
+#       plausible stand-in for any of them would put a credential-shaped or
+#       endpoint-shaped literal into source control, which is the single
+#       prohibition this file exists to respect structurally rather than by
+#       review. They are listed rather than silently absent so that a reader
+#       adding a context-loading test knows exactly which values that test must
+#       supply, and does not conclude the omission was an oversight:
+#         - spring.datasource.url, .username, .password
+#         - spring.flyway.user, .password
+#         - spring.security.oauth2.resourceserver.jwt.issuer-uri
+#         - carddemo.security.jwt.expected-client-id
+#         - carddemo.messaging.pauth-request-queue
+#         - carddemo.messaging.reply-queue-allowlist
+#         - carddemo.messaging.hmac-key
+#         - carddemo.account-context.base-url
+#         - carddemo.internal-identity.signing-key
+# WHY : Assumptions: `spring.flyway.clean-disabled` is also left unset, and it is
+#       the one omission with the opposite motive. The base disables clean
+#       unconditionally, and inheriting that is the intent: a test container is
+#       discarded wholesale at the end of its life, so nothing here needs the
+#       ability to drop a schema, and a profile that re-enabled clean would make
+#       the destructive operation available in the one profile where an accidental
+#       invocation is least likely to be noticed. Trade-offs: a test that wants a
+#       clean database creates a new container instead, which is slower than
+#       cleaning and is the reason the trade is worth naming.
+# WHY : Assumptions: no version of any library appears anywhere in this file.
+#       Flyway, the database driver and the container library are pinned solely in
+#       services/pom.xml and the module's own pom.xml; restating a version here
+#       would create a second source of truth that could drift from the build
+#       without anything detecting it.
+# =============================================================================
+
